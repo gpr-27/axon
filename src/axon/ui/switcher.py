@@ -45,11 +45,22 @@ class DashboardSession:
     total_tokens: int = 0
     message_count: int = 0
 
-def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None) -> list[DashboardSession]:
+def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None, session_dir: Path | None = None) -> list[DashboardSession]:
     """Scan all session JSONL files and subagents to build structured session list."""
-    session_dir = workspace / ".axon" / "sessions"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    files = sorted(session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    axon_pkg_root = Path(__file__).resolve().parents[3]
+    pkg_axon_sessions = axon_pkg_root / ".axon" / "sessions"
+
+    if session_dir is not None:
+        target_session_dir = session_dir
+    elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
+        target_session_dir = workspace.parent / ".global_axon" / "sessions"
+    elif pkg_axon_sessions.exists() or axon_pkg_root.exists():
+        target_session_dir = pkg_axon_sessions
+    else:
+        target_session_dir = Path.home() / ".axon" / "sessions"
+
+    target_session_dir.mkdir(parents=True, exist_ok=True)
+    files = sorted(target_session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     sessions: list[DashboardSession] = []
     target_files = files[:limit] if limit is not None else files

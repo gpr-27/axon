@@ -139,7 +139,7 @@ class SkillManager:
             Skill(
                 name="skill-creator",
                 description="Interactive skill scaffolding wizard for creating custom project and personal skills.",
-                instructions="Guide the user through creating a new custom skill. Prompt for name, description, dynamic context commands, and execution steps, then save the formatted SKILL.md.",
+                instructions="Guide the user through creating a new custom Axon skill. Create the skill at `.axon/skills/<name>/SKILL.md` (for project scope) or `~/.axon/skills/<name>/SKILL.md` (for personal global scope). Include YAML frontmatter with 'name:' and 'description:', followed by clear markdown workflow instructions. Never create or reference `.codex`, `.cursor`, or `openai.yaml`.",
                 path=Path("bundled://skill-creator"),
                 scope="bundled",
             ),
@@ -196,13 +196,57 @@ class SkillManager:
                 if len(parts) >= 3:
                     fm = parts[1]
                     body = parts[2].strip()
-                    for line in fm.splitlines():
-                        if line.startswith("description:"):
-                            desc = line.split(":", 1)[1].strip()
+                    fm_data = self._parse_frontmatter(fm)
+                    name = fm_data.get("name", name) or name
+                    desc = fm_data.get("description", "")
 
             return Skill(name=name, description=desc, instructions=body, path=path, scope=scope)
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_frontmatter(fm_text: str) -> dict[str, str]:
+        """Parse simple YAML frontmatter including multi-line block scalars (>-, |-, >, |)."""
+        result: dict[str, str] = {}
+        lines = fm_text.splitlines()
+        current_key: str | None = None
+        current_value_lines: list[str] = []
+        is_block_scalar = False
+
+        def _flush() -> None:
+            if current_key is not None:
+                joined = " ".join(current_value_lines).strip()
+                # Strip surrounding quotes
+                if len(joined) >= 2 and joined[0] in ("'", '"') and joined[-1] == joined[0]:
+                    joined = joined[1:-1]
+                result[current_key] = joined
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Check if this is a new top-level key (not indented, contains colon)
+            if not line[0:1].isspace() and ":" in stripped:
+                _flush()
+                key, _, val = stripped.partition(":")
+                key = key.strip()
+                val = val.strip()
+                current_key = key
+                current_value_lines = []
+                is_block_scalar = False
+
+                if val in (">-", "|-", ">", "|"):
+                    # Block scalar indicator — value comes on subsequent indented lines
+                    is_block_scalar = True
+                elif val:
+                    current_value_lines.append(val)
+            elif current_key is not None and (is_block_scalar or line[0:1].isspace()):
+                # Continuation line for block scalar or multi-line value
+                current_value_lines.append(stripped)
+
+        _flush()
+        return result
 
     def execute_skill(self, name: str) -> str:
         """Resolve skill, inject dynamic context (!`cmd`), and return ready instructions."""

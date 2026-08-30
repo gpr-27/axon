@@ -27,6 +27,243 @@ from axon.ui.theme import (
     term_width,
 )
 
+# ── LaTeX to Unicode converter ──────────────────────────────────────────────────
+
+# Unicode superscript and subscript digit maps
+_SUPER_DIGITS = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+_SUB_DIGITS = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+_SUPER_LETTERS = {
+    "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ",
+    "h": "ʰ", "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ",
+    "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ", "v": "ᵛ",
+    "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+}
+_SUB_LETTERS = {
+    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ",
+    "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ",
+    "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+}
+
+_GREEK = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π", "rho": "ρ",
+    "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "chi": "χ",
+    "psi": "ψ", "omega": "ω",
+    "Alpha": "Α", "Beta": "Β", "Gamma": "Γ", "Delta": "Δ", "Epsilon": "Ε",
+    "Theta": "Θ", "Lambda": "Λ", "Pi": "Π", "Sigma": "Σ", "Phi": "Φ",
+    "Psi": "Ψ", "Omega": "Ω",
+    "infty": "∞", "partial": "∂", "nabla": "∇", "hbar": "ℏ", "ell": "ℓ",
+}
+
+_SYMBOLS = {
+    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓",
+    "leq": "≤", "geq": "≥", "neq": "≠", "approx": "≈", "equiv": "≡",
+    "propto": "∝", "sim": "∼", "ll": "≪", "gg": "≫",
+    "to": "→", "rightarrow": "→", "Rightarrow": "⇒", "leftarrow": "←",
+    "Leftarrow": "⇐", "leftrightarrow": "↔", "Leftrightarrow": "⇔",
+    "implies": "⟹", "iff": "⟺",
+    "in": "∈", "notin": "∉", "subset": "⊂", "supset": "⊃",
+    "subseteq": "⊆", "supseteq": "⊇", "cup": "∪", "cap": "∩",
+    "emptyset": "∅", "forall": "∀", "exists": "∃",
+    "quad": "  ", "qquad": "    ", ";": " ", ",": " ", ":": " ",
+    "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
+    "star": "⋆", "circ": "∘", "bullet": "•",
+    "sum": "∑", "prod": "∏", "int": "∫",
+    "langle": "⟨", "rangle": "⟩", "lceil": "⌈", "rceil": "⌉",
+    "lfloor": "⌊", "rfloor": "⌋",
+    "%": "%", " ": " ", "#": "#", "&": "&",
+    "text": "",  # handled separately
+    "mathrm": "", "mathbf": "", "mathit": "", "mathcal": "",
+    "left": "", "right": "", "Big": "", "big": "", "bigg": "", "Bigg": "",
+}
+
+
+def _extract_brace_arg(s: str, pos: int) -> tuple[str, int]:
+    """Extract content inside { } starting at pos, handling nested braces."""
+    if pos >= len(s) or s[pos] != "{":
+        # Single character arg (no braces)
+        if pos < len(s):
+            return s[pos], pos + 1
+        return "", pos
+    depth = 0
+    start = pos + 1
+    i = pos
+    while i < len(s):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i], i + 1
+        i += 1
+    return s[start:], len(s)
+
+
+def _to_superscript(text: str) -> str:
+    """Convert text to Unicode superscript characters."""
+    result = []
+    for ch in text:
+        if ch in _SUPER_LETTERS:
+            result.append(_SUPER_LETTERS[ch])
+        else:
+            translated = ch.translate(_SUPER_DIGITS)
+            result.append(translated)
+    return "".join(result)
+
+
+def _to_subscript(text: str) -> str:
+    """Convert text to Unicode subscript characters."""
+    result = []
+    for ch in text:
+        if ch in _SUB_LETTERS:
+            result.append(_SUB_LETTERS[ch])
+        else:
+            translated = ch.translate(_SUB_DIGITS)
+            result.append(translated)
+    return "".join(result)
+
+
+def latex_to_unicode(latex: str) -> str:
+    """Convert a LaTeX math expression to readable Unicode text for terminal display."""
+    s = latex.strip()
+
+    # Pass 1: \frac{a}{b} → (a)/(b) or a/b for simple args
+    def _replace_frac(m: re.Match) -> str:
+        rest = s[m.end():] if m.end() < len(s) else ""
+        # We need to parse the braces from the original string
+        return m.group(0)  # placeholder, handled below
+
+    # Manual \frac parsing (regex can't handle nested braces)
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            # Read command name
+            j = i + 1
+            if s[j] == "\\":  # \\  → newline
+                result.append("\n")
+                i = j + 1
+                continue
+            while j < len(s) and (s[j].isalpha() or s[j] == "@"):
+                j += 1
+            cmd = s[i + 1:j]
+
+            if cmd == "frac":
+                num, j = _extract_brace_arg(s, j)
+                den, j = _extract_brace_arg(s, j)
+                num_u = latex_to_unicode(num)
+                den_u = latex_to_unicode(den)
+                # Simple fractions don't need parens
+                if len(num_u) <= 3 and not any(c in num_u for c in "+-×÷"):
+                    frac_str = f"{num_u}/{den_u}"
+                else:
+                    frac_str = f"({num_u})/({den_u})"
+                result.append(frac_str)
+                i = j
+            elif cmd == "sqrt":
+                # Check for optional [n] root
+                if j < len(s) and s[j] == "[":
+                    k = s.index("]", j)
+                    root_n = s[j + 1:k]
+                    j = k + 1
+                    arg, j = _extract_brace_arg(s, j)
+                    arg_u = latex_to_unicode(arg)
+                    root_sup = _to_superscript(root_n)
+                    result.append(f"{root_sup}√({arg_u})")
+                else:
+                    arg, j = _extract_brace_arg(s, j)
+                    arg_u = latex_to_unicode(arg)
+                    if len(arg_u) <= 2:
+                        result.append(f"√{arg_u}")
+                    else:
+                        result.append(f"√({arg_u})")
+                i = j
+            elif cmd in ("text", "mathrm", "mathbf", "mathit", "mathcal", "operatorname"):
+                arg, j = _extract_brace_arg(s, j)
+                result.append(arg)
+                i = j
+            elif cmd in ("hat", "bar", "vec", "dot", "ddot", "tilde", "overline"):
+                arg, j = _extract_brace_arg(s, j)
+                arg_u = latex_to_unicode(arg)
+                accents = {"hat": "̂", "bar": "̄", "vec": "⃗", "dot": "̇", "ddot": "̈", "tilde": "̃", "overline": "̄"}
+                result.append(f"{arg_u}{accents.get(cmd, '')}")
+                i = j
+            elif cmd in ("left", "right", "Big", "big", "bigg", "Bigg"):
+                # Size modifiers — skip the command, keep the delimiter
+                result.append("")  # ignore sizing
+                i = j
+            elif cmd in _GREEK:
+                result.append(_GREEK[cmd])
+                i = j
+            elif cmd in _SYMBOLS:
+                result.append(_SYMBOLS[cmd])
+                i = j
+            elif cmd == "log":
+                result.append("log")
+                i = j
+            elif cmd == "ln":
+                result.append("ln")
+                i = j
+            elif cmd == "sin":
+                result.append("sin")
+                i = j
+            elif cmd == "cos":
+                result.append("cos")
+                i = j
+            elif cmd == "tan":
+                result.append("tan")
+                i = j
+            elif cmd == "lim":
+                result.append("lim")
+                i = j
+            elif cmd == "max":
+                result.append("max")
+                i = j
+            elif cmd == "min":
+                result.append("min")
+                i = j
+            else:
+                # Unknown command — render as-is without backslash
+                result.append(cmd)
+                i = j
+        elif s[i] == "^":
+            # Superscript
+            arg, j = _extract_brace_arg(s, i + 1)
+            arg_u = latex_to_unicode(arg)
+            result.append(_to_superscript(arg_u))
+            i = j
+        elif s[i] == "_":
+            # Subscript
+            arg, j = _extract_brace_arg(s, i + 1)
+            arg_u = latex_to_unicode(arg)
+            result.append(_to_subscript(arg_u))
+            i = j
+        elif s[i] in ("{" , "}"):
+            # Skip bare braces (grouping)
+            i += 1
+        elif s[i] == "~":
+            result.append(" ")
+            i += 1
+        else:
+            result.append(s[i])
+            i += 1
+
+    return "".join(result)
+
+
+def _render_math_block(latex_lines: list[str]) -> list[str]:
+    """Render a $$ math block as a styled Unicode formula."""
+    joined = " ".join(l.strip() for l in latex_lines if l.strip())
+    rendered = latex_to_unicode(joined)
+    out = []
+    out.append(f"  {DARK_SLATE}┌── {LBLUE}math{DARK_SLATE} {'─' * 40}{RST}")
+    for line in rendered.split("\n"):
+        out.append(f"  {DARK_SLATE}│{RST}  {GOLD}{line}{RST}")
+    out.append(f"  {DARK_SLATE}└──{'─' * 44}{RST}")
+    return out
+
+
 def char_width(ch: str) -> int:
     """Compute terminal cell width for a Unicode character."""
     if unicodedata.east_asian_width(ch) in ("F", "W"):
@@ -56,7 +293,10 @@ def make_clickable(label: str, url_or_path: str) -> str:
     return f"\x1b]8;;{target}\x1b\\{UNDER}{TEAL}{label}{RST}\x1b]8;;\x1b\\"
 
 def _style_inline(s: str) -> str:
-    """Apply inline bold, code, emphasis, and clickable file/url links."""
+    """Apply inline bold, code, emphasis, clickable links, and inline math."""
+    # Inline math: $...$ -> Unicode formula (must run before other inline transforms)
+    s = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", lambda m: f"{GOLD}{latex_to_unicode(m.group(1))}{RST}", s)
+
     # Markdown links: [label](url_or_path) -> OSC 8 clickable link
     s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: make_clickable(m.group(1), m.group(2)), s)
 
@@ -223,6 +463,8 @@ def format_markdown(text: str, max_width: int | None = None) -> str:
     lines = text.splitlines()
     out = []
     in_code_block = False
+    in_math_block = False
+    math_buffer: list[str] = []
     table_buffer: list[str] = []
 
     def flush_table():
@@ -240,6 +482,21 @@ def format_markdown(text: str, max_width: int | None = None) -> str:
             continue
         else:
             flush_table()
+
+        # Display math block: $$ ... $$
+        if stripped == "$$" and not in_code_block:
+            if not in_math_block:
+                in_math_block = True
+                math_buffer = []
+            else:
+                in_math_block = False
+                out.extend(_render_math_block(math_buffer))
+                math_buffer = []
+            continue
+
+        if in_math_block:
+            math_buffer.append(stripped)
+            continue
 
         # Code block fence
         if stripped.startswith("```"):

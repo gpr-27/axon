@@ -14,6 +14,7 @@ TEMPLATES = {
     "workflow": (
         "General Workflow",
         """---
+name: {name}
 description: Custom automated workflow for {name}
 ---
 
@@ -34,6 +35,7 @@ Execute the standard {name} process with precision and validation.
     "tester": (
         "Automated Testing & QA",
         """---
+name: {name}
 description: Automated test execution and QA validation for {name}
 ---
 
@@ -54,6 +56,7 @@ Run unit tests, verify edge cases, and inspect test coverage.
     "reviewer": (
         "Code Review & Security Audit",
         """---
+name: {name}
 description: Static code review and security audit for {name}
 ---
 
@@ -74,6 +77,7 @@ Review modified code for logic errors, type safety, and OWASP vulnerabilities.
     "api": (
         "API Integration & Probing",
         """---
+name: {name}
 description: API integration and schema verification for {name}
 ---
 

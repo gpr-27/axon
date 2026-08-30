@@ -3,7 +3,11 @@ Pytest configuration and shared fixtures for Axon.
 """
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+_here = Path(__file__).parent
+_root = _here.parent
+for p in [str(_root), str(_root / "src"), str(_here)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 import pytest
 from axon.config import Settings
 from axon.tools import create_default_registry

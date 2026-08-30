@@ -1,0 +1,6 @@
+# Development, Testing, and Linting dependencies for Axon
+-r requirements.txt
+pytest>=8.0.0
+pytest-cov>=4.1.0
+ruff>=0.5.0
+mypy>=1.10.0

@@ -26,7 +26,18 @@ class SessionMeta:
 class SessionStore:
     def __init__(self, workspace: Path, session_dir: Path | None = None) -> None:
         self.workspace = workspace
-        self.session_dir = session_dir or (workspace / ".axon" / "sessions")
+        axon_pkg_root = Path(__file__).resolve().parents[3]
+        pkg_axon_sessions = axon_pkg_root / ".axon" / "sessions"
+
+        if session_dir is not None:
+            self.session_dir = session_dir
+        elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
+            self.session_dir = workspace.parent / ".global_axon" / "sessions"
+        elif pkg_axon_sessions.exists() or axon_pkg_root.exists():
+            self.session_dir = pkg_axon_sessions
+        else:
+            self.session_dir = Path.home() / ".axon" / "sessions"
+
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.active_session_id: str = f"session_{int(time.time())}"
         self.active_file: Path = self.session_dir / f"{self.active_session_id}.jsonl"
@@ -172,9 +183,9 @@ class SessionStore:
                             else:
                                 # Estimate usage for legacy sessions
                                 txt_len = len(data.get("text", "")) + len(data.get("thinking", ""))
-                                in_chars = sum(len(str(m.get("content", ""))) for m in conv_messages)
-                                est_in = max(150, in_chars // 4)
-                                est_out = max(25, txt_len // 4)
+                                from axon.agent.state import estimate_content_tokens
+                                est_in = max(150, sum(estimate_content_tokens(m.get("content", "")) for m in conv_messages))
+                                est_out = max(25, int(txt_len / 3.7))
                                 u = Usage(input=est_in, output=est_out)
                                 ledger.record(model, u)
                             conv_messages.append({"role": "assistant", "content": data.get("text", "")})

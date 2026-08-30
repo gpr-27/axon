@@ -33,7 +33,13 @@ Work like an experienced engineer who has just been given commit access to an un
 
 **Format file paths clearly.** When referring to modified or inspected files, format them as backtick code paths (e.g. `src/axon/agent/loop.py`) or standard markdown links `[filename](path)`. The terminal interface automatically converts them into live, clickable hyperlinks so the user can open them directly in their editor.
 
-**Produce clean, production-ready code.** When generating code, always include proper type hints, clear docstrings, idiomatic structure, and handle edge cases thoroughly."""
+**Produce clean, production-ready code.** When generating code, always include proper type hints, clear docstrings, idiomatic structure, and handle edge cases thoroughly.
+
+**Axon Skill and Storage Architecture:**
+- All project and personal customizations use the `.axon` directory hierarchy exclusively.
+- Custom skills must always be placed in `.axon/skills/<skill-name>/SKILL.md` (project-scoped) or `~/.axon/skills/<skill-name>/SKILL.md` (global).
+- Custom memory is stored in `.axon/memory/<slug>.md`.
+- Never create, suggest, or reference external formats like `.codex`, `.cursor`, `openai.yaml`, or third-party assistant names. Axon uses `.axon` exclusively."""
 
 def tool_policy(tools: ToolRegistry) -> str:
     lines = ["## Tool usage rules", ""]
@@ -61,10 +67,15 @@ def env_preamble(settings: Settings) -> str:
     return "\n".join(lines)
 
 def discover_project_context(cwd: Path) -> str:
-    """Search upwards for AGENTS.md or CLAUDE.md."""
+    """Search upwards for AXON.md, AGENTS.md, or CLAUDE.md."""
     curr = cwd.resolve()
+    candidates = (
+        "AXON.md", "axon.md", ".axon/AXON.md", ".axon/axon.md",
+        "AGENTS.md", "agents.md", ".axon/AGENTS.md", ".axon/agents.md",
+        "CLAUDE.md", "claude.md", ".axon/CLAUDE.md", ".axon/claude.md"
+    )
     for parent in [curr] + list(curr.parents):
-        for name in ("AGENTS.md", "CLAUDE.md", ".axon/AGENTS.md"):
+        for name in candidates:
             candidate = parent / name
             if candidate.exists() and candidate.is_file():
                 try:
@@ -73,8 +84,24 @@ def discover_project_context(cwd: Path) -> str:
                     pass
     return ""
 
+def discover_memory_context(workspace: Path) -> str:
+    """Discover active persistent learned items from MemoryStore (both global and project)."""
+    try:
+        from axon.agent.memory import MemoryStore
+        store = MemoryStore(workspace)
+        items = store.list_all()
+        if not items:
+            return ""
+        lines = ["## Persistent Learned Rules & Knowledge:"]
+        for it in items:
+            prefix = "[Global]" if it.scope == "global" else "[Project]"
+            lines.append(f"- **{prefix} {it.title}** ({it.category}): {it.content.strip()}")
+        return "\n".join(lines).strip()
+    except Exception:
+        return ""
+
 def build_system(settings: Settings, tools: ToolRegistry, skills: list[Any] | None = None) -> list[dict[str, Any]]:
-    """Assemble 5-block system prompt with prompt caching marker on last block."""
+    """Assemble system prompt blocks with prompt caching marker on last block."""
     blocks: list[dict[str, Any]] = [
         {"type": "text", "text": IDENTITY},
         {"type": "text", "text": OPERATING_RULES},
@@ -85,6 +112,10 @@ def build_system(settings: Settings, tools: ToolRegistry, skills: list[Any] | No
     project_ctx = discover_project_context(settings.workspace)
     if project_ctx:
         blocks.append({"type": "text", "text": f"## Project Conventions\n\n{project_ctx}"})
+
+    memory_ctx = discover_memory_context(settings.workspace)
+    if memory_ctx:
+        blocks.append({"type": "text", "text": memory_ctx})
 
     if skills:
         skills_summary = ["## Available Skills (Invoke via slash command /<name> or execute when relevant):"]

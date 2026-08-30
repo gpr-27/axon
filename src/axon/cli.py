@@ -140,7 +140,10 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 agent.settings = agent.settings.model_copy(update={"mode": toggled_mode})
                 agent.permissions.settings = agent.settings
             line = line.strip()
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
+            print(f"\n  {SLATE}(Input cleared · Press Ctrl+D or type /exit to quit){RST}\n")
+            continue
+        except EOFError:
             print(f"\n\n  {TEAL}Session closed. Total cost: {GOLD}${agent.ledger.total():.5f}{RST}\n")
             break
 
@@ -173,10 +176,9 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 )
 
                 if selected_target.startswith("__NEW_SESSION__:"):
-                    new_prompt = selected_target.split(":", 1)[1].strip()
-                    new_id = agent.reset_for_new_session()
+                    new_id = selected_target.split(":", 1)[1]
+                    new_prompt = agent.reset_for_new_session(new_id)
                     if new_prompt:
-                        print(f"  {MINT}⚡ Starting fresh session ({new_id}):{RST} {WHITE}{BOLD}{new_prompt}{RST}\n")
                         line = new_prompt
                     else:
                         print(f"  {MINT}⚡ Started fresh session ({new_id}){RST}\n")
@@ -233,42 +235,53 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 print()
             continue
 
-        cmd_res = dispatch_command(line, agent)
-        if cmd_res is not None:
-            if cmd_res.should_exit:
-                print(f"\n  {TEAL}Goodbye! Total cost: {GOLD}${agent.ledger.total():.5f}{RST}\n")
-                break
-            continue
-
-        # Expand @file mentions into prompt context
-        if "@" in line and not line.startswith("/"):
-            import re
-            matches = re.findall(r"@([a-zA-Z0-9_\-\./\\]+)", line)
-            for m in matches:
-                p = agent.settings.workspace / m
-                if p.exists() and p.is_file():
-                    try:
-                        content_snippet = p.read_text(encoding="utf-8", errors="replace")[:4000]
-                        line = line.replace(f"@{m}", f"\n\n[File: {m}]\n```\n{content_snippet}\n```\n")
-                    except Exception:
-                        pass
-
-        # Support multi-question batch queuing separated by ';;'
-        if ";;" in line and not line.startswith("/"):
-            raw_parts = [p.strip() for p in line.split(";;") if p.strip()]
-            if len(raw_parts) > 1:
-                line = raw_parts[0]
-                for extra_q in raw_parts[1:]:
-                    item = agent.message_queue.push(extra_q)
-                print(f"\n  {MINT}✓ Queued {len(raw_parts)-1} follow-up question{'s' if len(raw_parts) > 2 else ''} (Total in queue: {len(agent.message_queue)}){RST}\n")
-
-        # Render user message bubble
-        renderer.render_user_message(line)
-        turn_input = line
-
-        # Execute agent turn cleanly
-        t0 = time.time()
         try:
+            cmd_res = dispatch_command(line, agent)
+            if cmd_res is not None:
+                if cmd_res.should_exit:
+                    print(f"\n  {TEAL}Goodbye! Total cost: {GOLD}${agent.ledger.total():.5f}{RST}\n")
+                    break
+                continue
+
+            # Expand @file mentions into prompt context
+            if "@" in line and not line.startswith("/"):
+                import re
+                matches = re.findall(r"@([a-zA-Z0-9_\-\./\\]+)", line)
+                for m in matches:
+                    p = agent.settings.workspace / m
+                    if p.exists() and p.is_file():
+                        try:
+                            content_snippet = p.read_text(encoding="utf-8", errors="replace")[:4000]
+                            line = line.replace(f"@{m}", f"\n\n[File: {m}]\n```\n{content_snippet}\n```\n")
+                        except Exception:
+                            pass
+
+            # Support multi-question batch queuing separated by ';;'
+            if ";;" in line and not line.startswith("/"):
+                raw_parts = [p.strip() for p in line.split(";;") if p.strip()]
+                if len(raw_parts) > 1:
+                    line = raw_parts[0]
+                    for extra_q in raw_parts[1:]:
+                        item = agent.message_queue.push(extra_q)
+                    print(f"\n  {MINT}✓ Queued {len(raw_parts)-1} follow-up question{'s' if len(raw_parts) > 2 else ''} (Total in queue: {len(agent.message_queue)}){RST}\n")
+
+            # Ingest and compact any attached images
+            from axon.agent.images import compact_image_paths
+            line, attachments = compact_image_paths(line)
+            if attachments:
+                print(f"  {CYAN}🖼️  Attached Image{'s' if len(attachments) != 1 else ''} ({len(attachments)} pending):{RST}")
+                for att in attachments:
+                    kb_size = att.size_bytes / 1024
+                    dim_str = f" · {att.width}x{att.height}" if att.width and att.height else ""
+                    print(f"    {GOLD}• {att.label}{RST} {WHITE}{BOLD}{Path(att.original_path).name}{RST} {SLATE}({kb_size:.1f} KB{dim_str}){RST}")
+                print()
+
+            # Render user message bubble
+            renderer.render_user_message(line)
+            turn_input = line
+
+            # Execute agent turn cleanly
+            t0 = time.time()
             res = agent.run_turn(turn_input)
             elapsed = time.time() - t0
             renderer.turn_footer(
@@ -278,20 +291,15 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 elapsed=elapsed,
                 llm_calls=res.iterations,
             )
-        except KeyboardInterrupt:
-            print(f"\n\n  {TEAL}⏹ Stopped turn by user.{RST}\n")
-        except Exception as e:
-            print(f"\n  ❌ Turn execution error: {e}\n")
 
-        # Auto-process queued messages sequentially
-        while hasattr(agent, "message_queue") and len(agent.message_queue) > 0:
-            nxt = agent.message_queue.pop()
-            if not nxt:
-                break
-            print(f"\n  {CYAN}📥 [Processing Queued #{nxt.id} · {len(agent.message_queue)} remaining]:{RST} {WHITE}{BOLD}{nxt.text}{RST}\n")
-            renderer.render_user_message(nxt.text)
-            t_q0 = time.time()
-            try:
+            # Auto-process queued messages sequentially
+            while hasattr(agent, "message_queue") and len(agent.message_queue) > 0:
+                nxt = agent.message_queue.pop()
+                if not nxt:
+                    break
+                print(f"\n  {CYAN}📥 [Processing Queued #{nxt.id} · {len(agent.message_queue)} remaining]:{RST} {WHITE}{BOLD}{nxt.text}{RST}\n")
+                renderer.render_user_message(nxt.text)
+                t_q0 = time.time()
                 res = agent.run_turn(nxt.text)
                 elapsed = time.time() - t_q0
                 renderer.turn_footer(
@@ -301,12 +309,10 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     elapsed=elapsed,
                     llm_calls=res.iterations,
                 )
-            except KeyboardInterrupt:
-                print(f"\n\n  {TEAL}⏹ Stopped queued turn by user.{RST}\n")
-                break
-            except Exception as e:
-                print(f"\n  ❌ Turn execution error: {e}\n")
-                break
+        except KeyboardInterrupt:
+            print(f"\n\n  {TEAL}⏹ Stopped turn by user.{RST}\n")
+        except Exception as e:
+            print(f"\n  ❌ Turn execution error: {e}\n")
 
     return 0
 

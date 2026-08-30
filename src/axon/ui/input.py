@@ -163,13 +163,34 @@ def read_input(
     buffer: list[str] = []
     cursor_pos = 0
 
-    # Build history from session store + readline
-    history: list[str] = list(_SESSION_HISTORY)
+    # Build history from session store + readline + recent user messages
+    history: list[str] = []
+    for h_item in _SESSION_HISTORY:
+        if h_item and h_item not in history:
+            history.append(h_item)
     num_hist = readline.get_current_history_length()
     for i in range(1, num_hist + 1):
         item = readline.get_history_item(i)
         if item and item not in history:
             history.append(item)
+
+    if len(history) < 15:
+        try:
+            axon_pkg_root = Path(__file__).resolve().parents[3]
+            s_dir = axon_pkg_root / ".axon" / "sessions"
+            if s_dir.exists():
+                latest_sessions = sorted(s_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+                for s_f in latest_sessions:
+                    with open(s_f, "r", encoding="utf-8", errors="ignore") as f:
+                        for line_json in f:
+                            entry = json.loads(line_json)
+                            if entry.get("type") == "user_message":
+                                u_text = entry.get("data", {}).get("content", "")
+                                if isinstance(u_text, str) and u_text.strip() and u_text.strip() not in history:
+                                    history.insert(0, u_text.strip())
+        except Exception:
+            pass
+
     history_idx = len(history)
 
     saved_draft = ""
@@ -260,7 +281,7 @@ def read_input(
         prompt_row_idx = len(frame_lines)
         avail_prompt_w = max(10, tw - len(strip_ansi(p_prefix)) - 4)
         if not buffer:
-            placeholder = f"{DARK_SLATE}Ask anything, use /ask for side Qs, @ to link files, /help...{RST}"
+            placeholder = f"{DARK_SLATE}Ask anything, use / for commands, @ for files, ! for shell...{RST}"
             frame_lines.append(f"  {p_prefix}{placeholder}")
             col_in_disp = 0
         elif is_bash:
@@ -287,7 +308,9 @@ def read_input(
             else:
                 disp_body = buf_str
                 col_in_disp = cursor_pos
-            frame_lines.append(f"  {p_prefix}{WHITE}{BOLD}{disp_body}{RST}")
+            # Highlight [Image #N] badges in bright cyan bold
+            styled_disp = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", disp_body)
+            frame_lines.append(f"  {p_prefix}{WHITE}{BOLD}{styled_disp}{RST}")
 
         # Status row below prompt (strictly fits within terminal width)
         max_status_w = max(20, tw - 4)
@@ -296,19 +319,22 @@ def read_input(
         else:
             agent_hint = f" · {DARK_SLATE}← sessions{RST}"
 
-        left_visible = f"▮ {label_text}{plan_badge}{queue_badge}{agent_hint}"
+        img_matches = re.findall(r"\[Image\s*#\d+\]", buf_str)
+        img_badge = f"  {MINT}{BOLD}📷 {len(img_matches)} image{'s' if len(img_matches) != 1 else ''}{RST}" if img_matches else ""
+
+        left_visible = f"▮ {label_text}{plan_badge}{queue_badge}{img_badge}{agent_hint}"
         left_len = len(strip_ansi(left_visible))
         right_len = len(strip_ansi(right_str))
 
         if left_len + right_len + 4 <= max_status_w:
             pad = max_status_w - left_len - right_len
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{agent_hint}{' ' * pad}{SLATE}{right_str}{RST}"
+            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}{' ' * pad}{SLATE}{right_str}{RST}"
         elif left_len + 14 <= max_status_w:
             short_right = f"○ {effort}"
             pad = max(2, max_status_w - left_len - len(strip_ansi(short_right)))
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{agent_hint}{' ' * pad}{SLATE}{short_right}{RST}"
+            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}{' ' * pad}{SLATE}{short_right}{RST}"
         else:
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{agent_hint}"
+            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}"
 
         frame_lines.append(status_line)
 
@@ -437,11 +463,11 @@ def read_input(
                 sys.stdout.flush()
                 return ("/todos", current_mode if current_mode != mode else None, current_subagent_idx)
 
-            # Ctrl+O (0x0f) -> Toggle verbose output / thinking (/thinking)
+            # Ctrl+O (0x0f) -> Show full verbose output (/output)
             if raw_bytes == b"\x0f":
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-                return ("/thinking", current_mode if current_mode != mode else None, current_subagent_idx)
+                return ("/output", current_mode if current_mode != mode else None, current_subagent_idx)
 
             # Ctrl+Z (0x1a) -> Suspend process cleanly
             if raw_bytes == b"\x1a":
@@ -459,10 +485,10 @@ def read_input(
 
             # Down Arrow -> Navigate command history forward
             if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                if matching_files:
+                if matching_files and file_popup_open and ("@" in buf_str):
                     selected_file_idx = (selected_file_idx + 1) % len(matching_files)
                     draw()
-                elif matching_cmds:
+                elif matching_cmds and cmd_popup_open and buf_str.startswith("/"):
                     selected_cmd_idx = (selected_cmd_idx + 1) % len(matching_cmds)
                     draw()
                 elif history_idx < len(history) - 1:
@@ -479,10 +505,10 @@ def read_input(
 
             # Up Arrow -> Navigate command history backward
             if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                if matching_files:
+                if matching_files and file_popup_open and ("@" in buf_str):
                     selected_file_idx = (selected_file_idx - 1) % len(matching_files)
                     draw()
-                elif matching_cmds:
+                elif matching_cmds and cmd_popup_open and buf_str.startswith("/"):
                     selected_cmd_idx = (selected_cmd_idx - 1) % len(matching_cmds)
                     draw()
                 elif history and history_idx > 0:
@@ -551,18 +577,33 @@ def read_input(
                     draw()
                 continue
 
-            # Ctrl+V (0x16) -> Paste clipboard content / image paths
+            # Ctrl+V (0x16) -> Paste clipboard content / image data instantly (< 40ms)
             if raw_bytes == b"\x16":
                 clip_text = ""
+                # 1. Try to extract image from clipboard instantly with Cocoa helper
                 try:
-                    p = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=1)
-                    if p.returncode == 0:
-                        clip_text = p.stdout
+                    import uuid
+                    img_temp = Path(f"/tmp/axon_clip_{time.time_ns()}_{uuid.uuid4().hex[:6]}.png")
+                    from axon.agent.images import save_clipboard_image, compact_image_paths
+                    if save_clipboard_image(img_temp):
+                        clip_text = f"[Image: {img_temp}] "
                 except Exception:
                     pass
+
+                # 2. Fallback to text clipboard if no binary image
+                if not clip_text:
+                    try:
+                        p = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=0.2)
+                        if p.returncode == 0 and p.stdout:
+                            clip_text = p.stdout
+                    except Exception:
+                        pass
+
                 if clip_text:
+                    from axon.agent.images import compact_image_paths
+                    compacted_clip, _ = compact_image_paths(clip_text)
                     undo_stack.append((list(buffer), cursor_pos))
-                    for ch in clip_text:
+                    for ch in compacted_clip:
                         buffer.insert(cursor_pos, ch)
                         cursor_pos += 1
                     draw()
@@ -693,12 +734,25 @@ def read_input(
                 decoded = raw_bytes.decode("utf-8")
                 if len(decoded) > 3:
                     undo_stack.append((list(buffer), cursor_pos))
+                    from axon.agent.images import compact_image_paths
+                    compacted_decoded, _ = compact_image_paths(decoded)
+                    decoded = compacted_decoded
                 for ch in decoded:
                     if ch in ("\r", "\n"):
                         buffer.insert(cursor_pos, " ")
                     elif ord(ch) >= 32 or ch == "\t":
                         buffer.insert(cursor_pos, ch)
                     cursor_pos += 1
+
+                # Check if buffer now contains an uncompacted image path
+                buf_full = "".join(buffer)
+                if any(ext in buf_full.lower() for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+                    from axon.agent.images import compact_image_paths
+                    comp_buf, _ = compact_image_paths(buf_full)
+                    if comp_buf != buf_full:
+                        buffer = list(comp_buf)
+                        cursor_pos = min(cursor_pos, len(buffer))
+
                 selected_cmd_idx = 0
                 selected_file_idx = 0
                 cmd_popup_open = True

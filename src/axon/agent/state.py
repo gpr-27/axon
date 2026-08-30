@@ -2,12 +2,79 @@
 State management: Conversation, FileState, TodoState.
 """
 from __future__ import annotations
+import base64
 import hashlib
+import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from axon.errors import StaleFileError
-from axon.providers.base import AssistantTurn, ToolResultBlock
+from axon.providers.base import AssistantTurn, TextBlock, ToolResultBlock, ToolUseBlock
+
+def _extract_images_and_text(text: str) -> list[dict[str, Any]] | str:
+    """Detect image filepaths in user prompt and encode them into multimodal content blocks and OCR context."""
+    from axon.agent.images import compact_image_paths
+    clean_text, attachments = compact_image_paths(text)
+
+    if not attachments:
+        return text
+
+    blocks: list[dict[str, Any]] = []
+    ocr_descriptions: list[str] = []
+    for att in attachments:
+        b64 = att.read_base64()
+        if b64:
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.mime_type,
+                    "data": b64,
+                }
+            })
+        dim_str = f" ({att.width}x{att.height})" if att.width and att.height else ""
+        desc = f"• {att.label}: {Path(att.original_path).name}{dim_str}"
+        ocr_t = att.get_ocr_text()
+        if ocr_t:
+            desc += f"\n  Extracted Text / OCR from screenshot:\n  \"\"\"\n  {ocr_t}\n  \"\"\""
+        ocr_descriptions.append(desc)
+
+    context_prefix = f"Attached Image Details ({len(attachments)} item{'s' if len(attachments) != 1 else ''}):\n" + "\n".join(ocr_descriptions)
+
+    if clean_text:
+        full_text = f"{clean_text}\n\n{context_prefix}"
+        blocks.append({"type": "text", "text": full_text})
+    elif not blocks:
+        return text
+    else:
+        blocks.append({"type": "text", "text": f"Analyze attached image:\n\n{context_prefix}"})
+
+    return blocks
+
+def estimate_content_tokens(content: Any) -> int:
+    """Accurately estimate tokens for strings, tool blocks, and multimodal image blocks."""
+    if isinstance(content, str):
+        return max(1, int(len(content) / 3.7))
+    if isinstance(content, list):
+        total = 0
+        for b in content:
+            if isinstance(b, dict):
+                b_type = b.get("type", "")
+                if b_type == "image":
+                    total += 1200
+                elif b_type == "text":
+                    total += max(1, int(len(b.get("text", "")) / 3.7))
+                elif b_type == "tool_use":
+                    total += int(len(str(b.get("input", ""))) / 3.7) + 20
+                elif b_type == "tool_result":
+                    total += int(len(str(b.get("content", ""))) / 3.7) + 10
+                else:
+                    total += max(1, int(len(str(b)) / 3.7))
+            else:
+                total += max(1, int(len(str(b)) / 3.7))
+        return total
+    return max(1, int(len(str(content)) / 3.7))
 
 class Conversation:
     """Encapsulates the provider-encodable message list."""
@@ -15,7 +82,8 @@ class Conversation:
         self.messages: list[dict[str, Any]] = list(messages or [])
 
     def append_user(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": text})
+        processed = _extract_images_and_text(text) if isinstance(text, str) else text
+        self.messages.append({"role": "user", "content": processed})
 
     def append_assistant(self, turn: AssistantTurn) -> None:
         if turn.native is not None:
@@ -25,21 +93,23 @@ class Conversation:
             else:
                 self.messages.append({"role": "assistant", "content": turn.native})
         else:
-            # Build content blocks for synthetic / fake turns
+            # Reconstruct content blocks
             blocks = []
             for b in turn.blocks:
-                if hasattr(b, "text"):
+                if isinstance(b, TextBlock):
                     blocks.append({"type": "text", "text": b.text})
-                elif hasattr(b, "input"):
+                elif isinstance(b, ToolUseBlock):
                     blocks.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
-            self.messages.append({"role": "assistant", "content": blocks or turn.text})
+            self.messages.append({"role": "assistant", "content": blocks})
 
-    def append_tool_results(self, results: list[ToolResultBlock], provider_encoder: Any = None) -> None:
-        """
-        Batch all tool results into one user message (Law 2 / Anthropic)
-        or provider-encoded messages (OpenAI).
-        """
+    def append_tool_results(
+        self,
+        results: list[ToolResultBlock],
+        provider_encoder: Callable[[list[ToolResultBlock]], list[dict[str, Any]]] | None = None,
+    ) -> None:
+        """Law 2: Results MUST be fed back in ONE batch message."""
         if provider_encoder:
+            # Provider-specific encoding (e.g. OpenAI tool message format)
             encoded = provider_encoder(results)
             self.messages.extend(encoded)
         else:
@@ -71,15 +141,8 @@ class Conversation:
             raise ValueError(f"Unpaired tool_use blocks remaining: {pending_ids}")
 
     def token_estimate(self) -> int:
-        """Estimate tokens across conversation."""
-        total_chars = 0
-        for m in self.messages:
-            c = m.get("content", "")
-            if isinstance(c, str):
-                total_chars += len(c)
-            elif isinstance(c, list):
-                total_chars += sum(len(str(b)) for b in c)
-        return int(total_chars / 3.7)
+        """Estimate tokens across conversation, accurately accounting for text and multimodal image blocks."""
+        return sum(estimate_content_tokens(m.get("content", "")) for m in self.messages)
 
 
 class FileState:

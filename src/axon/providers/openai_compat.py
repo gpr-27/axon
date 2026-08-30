@@ -3,9 +3,10 @@ OpenAI-Compatible Provider using raw httpx2 and Stainless fingerprint headers.
 """
 from __future__ import annotations
 import json
-import secrets
-from typing import Any, Iterator
-import httpx2 as httpx
+try:
+    import httpx
+except ImportError:
+    import httpx2 as httpx
 from axon.config import Settings
 from axon.errors import ProviderError
 from axon.providers.base import (
@@ -65,7 +66,7 @@ def sanitize_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, A
         if m.get("content") is None:
             m["content"] = ""
 
-        # Convert Anthropic tool_result blocks in user message to OpenAI tool messages
+        # Convert Anthropic tool_result blocks in user message to OpenAI tool messages, and format multimodal image blocks
         if m.get("role") == "user" and isinstance(m.get("content"), list):
             has_tool_res = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
             if has_tool_res:
@@ -83,6 +84,23 @@ def sanitize_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, A
                         user_texts.append(b.get("text", ""))
                 if user_texts:
                     cleaned.append({"role": "user", "content": "\n".join(user_texts)})
+                continue
+            else:
+                converted_blocks: list[dict[str, Any]] = []
+                for b in m["content"]:
+                    if isinstance(b, dict) and b.get("type") == "image":
+                        src = b.get("source", {})
+                        media_type = src.get("media_type", "image/png")
+                        data_b64 = src.get("data", "")
+                        converted_blocks.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{data_b64}"
+                            }
+                        })
+                    else:
+                        converted_blocks.append(b)
+                cleaned.append({"role": "user", "content": converted_blocks})
                 continue
 
         cleaned.append(m)
@@ -192,125 +210,154 @@ class OpenAICompatProvider:
         stop_reason: StopReason = "end_turn"
         usage = Usage()
 
+        def _parse_stream(resp: httpx.Response) -> Iterator[StreamEvent]:
+            nonlocal full_text, full_reasoning, tool_calls_acc, stop_reason, usage
+            for line in resp.iter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                raw = line[6:].strip()
+                if raw == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(raw)
+                except Exception:
+                    continue
+
+                # Parse Usage
+                if "usage" in chunk and chunk["usage"]:
+                    u = chunk["usage"]
+                    prompt_t = u.get("prompt_tokens", 0) or 0
+                    cache_hit_t = u.get("prompt_cache_hit_tokens", 0) or 0
+                    # DeepSeek/OpenAI report prompt_tokens as uncached-only;
+                    # normalize to total input (cached + uncached) to match Anthropic semantics.
+                    total_input = prompt_t + cache_hit_t
+                    usage = Usage(
+                        input=total_input,
+                        output=u.get("completion_tokens", 0) or 0,
+                        cache_read=cache_hit_t,
+                        reasoning=u.get("completion_tokens_details", {}).get("reasoning_tokens", 0) or 0,
+                    )
+
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta", {})
+
+                # DeepSeek and GLM reasoning chunk
+                reasoning_chunk = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if reasoning_chunk:
+                    full_reasoning += reasoning_chunk
+                    if thinking:
+                        yield ThinkingDelta(text=reasoning_chunk)
+
+                # Regular assistant response text chunk
+                content_chunk = delta.get("content") or ""
+                if content_chunk:
+                    full_text += content_chunk
+                    yield TextDelta(text=content_chunk)
+
+                # Tool call deltas
+                if "tool_calls" in delta:
+                    for tc in delta["tool_calls"]:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": tc.get("id", ""),
+                                "name": tc.get("function", {}).get("name", ""),
+                                "arguments": "",
+                            }
+                        if tc.get("id"):
+                            tool_calls_acc[idx]["id"] = tc["id"]
+                        if tc.get("function", {}).get("name"):
+                            tool_calls_acc[idx]["name"] = tc["function"]["name"]
+                        if tc.get("function", {}).get("arguments"):
+                            frag = tc["function"]["arguments"]
+                            tool_calls_acc[idx]["arguments"] += frag
+                            yield ToolArgsDelta(id=tool_calls_acc[idx]["id"], fragment=frag)
+
+                if choice.get("finish_reason"):
+                    fr = choice["finish_reason"]
+                    if fr in ("tool_calls", "function_call"):
+                        stop_reason = "tool_use"
+                    elif fr == "length":
+                        stop_reason = "max_tokens"
+                    else:
+                        stop_reason = "end_turn"
+
         try:
             with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as resp:
                 if resp.status_code != 200:
                     resp.read()
-                    raise ProviderError(f"HTTP {resp.status_code}: {resp.text}", status=resp.status_code, body=resp.text)
+                    err_text = resp.text
+                    if "does not support image" in err_text.lower() or "invalid_image" in err_text.lower():
+                        # Fallback: Strip image_url blocks and retry with text placeholder
+                        for m in openai_messages:
+                            if isinstance(m.get("content"), list):
+                                text_only = []
+                                for b in m["content"]:
+                                    if isinstance(b, dict) and b.get("type") == "text":
+                                        text_only.append(b.get("text", ""))
+                                    elif isinstance(b, dict) and b.get("type") == "image_url":
+                                        text_only.append("[Attached User Screenshot / Image]")
+                                m["content"] = "\n".join(text_only)
+                        body["messages"] = openai_messages
+                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                            if retry_resp.status_code != 200:
+                                retry_resp.read()
+                                raise ProviderError(f"HTTP {retry_resp.status_code}: {retry_resp.text}", status=retry_resp.status_code, body=retry_resp.text)
+                            yield from _parse_stream(retry_resp)
+                    else:
+                        raise ProviderError(f"HTTP {resp.status_code}: {err_text}", status=resp.status_code, body=err_text)
+                else:
+                    yield from _parse_stream(resp)
 
-                for line in resp.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    raw = line[6:].strip()
-                    if raw == "[DONE]":
-                        break
+            # Assemble blocks
+            blocks: list[Block] = []
+            if full_reasoning:
+                blocks.append(ThinkingBlock(text=full_reasoning))
+            if full_text:
+                blocks.append(TextBlock(text=full_text))
+
+            for idx in sorted(tool_calls_acc.keys()):
+                t_item = tool_calls_acc[idx]
+                parsed_input = {}
+                if t_item["arguments"].strip():
                     try:
-                        chunk = json.loads(raw)
+                        parsed_input = json.loads(t_item["arguments"])
                     except Exception:
-                        continue
+                        parsed_input = {"raw": t_item["arguments"]}
+                blocks.append(ToolUseBlock(id=t_item["id"], name=t_item["name"], input=parsed_input))
+                yield ToolUseComplete(id=t_item["id"])
 
-                    # Parse Usage
-                    if "usage" in chunk and chunk["usage"]:
-                        u = chunk["usage"]
-                        usage = Usage(
-                            input=u.get("prompt_tokens", 0) or 0,
-                            output=u.get("completion_tokens", 0) or 0,
-                            cache_read=u.get("prompt_cache_hit_tokens", 0) or 0,
-                            reasoning=u.get("completion_tokens_details", {}).get("reasoning_tokens", 0) or 0,
-                        )
+            # Build native assistant representation
+            native_dict: dict[str, Any] = {
+                "role": "assistant",
+                "content": full_text or "",
+            }
+            if full_reasoning:
+                native_dict["reasoning_content"] = full_reasoning
 
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    finish = choice.get("finish_reason")
-                    if finish:
-                        if finish == "tool_calls":
-                            stop_reason = "tool_use"
-                        elif finish == "length":
-                            stop_reason = "max_tokens"
-                        else:
-                            stop_reason = "end_turn"
-
-                    delta = choice.get("delta", {})
-
-                    # Reasoning content (thinking)
-                    rc = delta.get("reasoning_content", "")
-                    if rc:
-                        full_reasoning += rc
-                        yield ThinkingDelta(text=rc)
-
-                    # Text content
-                    ct = delta.get("content", "")
-                    if ct:
-                        full_text += ct
-                        yield TextDelta(text=ct)
-
-                    # Tool call deltas
-                    if "tool_calls" in delta and delta["tool_calls"]:
-                        for tc_delta in delta["tool_calls"]:
-                            idx = tc_delta.get("index", 0)
-                            if idx not in tool_calls_acc:
-                                tc_id = tc_delta.get("id") or f"call_{secrets.token_hex(4)}"
-                                fn_name = tc_delta.get("function", {}).get("name", "")
-                                tool_calls_acc[idx] = {
-                                    "id": tc_id,
-                                    "name": fn_name,
-                                    "arguments": "",
-                                }
-                                yield ToolUseStart(id=tc_id, name=fn_name)
-
-                            frag = tc_delta.get("function", {}).get("arguments", "")
-                            if frag:
-                                tool_calls_acc[idx]["arguments"] += frag
-                                yield ToolArgsDelta(id=tool_calls_acc[idx]["id"], fragment=frag)
-
-                # Assemble blocks
-                blocks: list[Block] = []
-                if full_reasoning:
-                    blocks.append(ThinkingBlock(text=full_reasoning))
-                if full_text:
-                    blocks.append(TextBlock(text=full_text))
-
-                for idx in sorted(tool_calls_acc.keys()):
-                    t_item = tool_calls_acc[idx]
-                    parsed_input = {}
-                    if t_item["arguments"].strip():
-                        try:
-                            parsed_input = json.loads(t_item["arguments"])
-                        except Exception:
-                            parsed_input = {"raw": t_item["arguments"]}
-                    blocks.append(ToolUseBlock(id=t_item["id"], name=t_item["name"], input=parsed_input))
-                    yield ToolUseComplete(id=t_item["id"])
-
-                # Build native assistant representation
-                native_dict: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": full_text or "",
-                }
-                if full_reasoning:
-                    native_dict["reasoning_content"] = full_reasoning
-
-                if tool_calls_acc:
-                    native_dict["tool_calls"] = [
-                        {
-                            "id": t_item["id"],
-                            "type": "function",
-                            "function": {
-                                "name": t_item["name"],
-                                "arguments": t_item["arguments"],
-                            }
+            if tool_calls_acc:
+                native_dict["tool_calls"] = [
+                    {
+                        "id": t_item["id"],
+                        "type": "function",
+                        "function": {
+                            "name": t_item["name"],
+                            "arguments": t_item["arguments"],
                         }
-                        for t_item in tool_calls_acc.values()
-                    ]
+                    }
+                    for t_item in tool_calls_acc.values()
+                ]
 
-                self._last_turn = AssistantTurn(
-                    blocks=blocks,
-                    stop_reason=stop_reason,
-                    usage=usage,
-                    native=native_dict,
-                )
-                yield TurnComplete(stop_reason=stop_reason, usage=usage)
+            self._last_turn = AssistantTurn(
+                blocks=blocks,
+                stop_reason=stop_reason,
+                usage=usage,
+                native=native_dict,
+            )
+            yield TurnComplete(stop_reason=stop_reason, usage=usage)
 
         except Exception as e:
             err_str = str(e)

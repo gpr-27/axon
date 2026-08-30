@@ -3,6 +3,8 @@ The ReAct Agent Loop: reason -> act -> observe -> iterate.
 Enforces the 5 Invariants (Pairing, Batching, Verbatim Replay, Errors as Data, Interrupt Safety).
 """
 from __future__ import annotations
+import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -42,6 +44,127 @@ class TurnResult:
     tool_calls_count: int
     usage: Usage
 
+def _sync_project_guide(
+    workspace: Path,
+    model: str = "",
+    effort: str = "",
+    final_text: str = "",
+    tool_count: int = 0,
+) -> None:
+    """Auto-initialize or update axon.md with workspace files, project directives, and recent progress."""
+    axon_md = workspace / "axon.md"
+    ignore_names = {"__pycache__", "node_modules", "venv", ".venv", ".pytest_cache", ".git", ".DS_Store", ".axon"}
+    files = [p.name for p in sorted(workspace.glob("*")) if not p.name.startswith(".") and p.name not in ignore_names]
+
+    from axon.agent.memory import MemoryStore
+    store = MemoryStore(workspace)
+    proj_memories = [m for m in store.list_all() if m.scope == "project"]
+
+    if not axon_md.exists():
+        # Auto-initialize axon.md on startup or first turn
+        content = f"""# Axon Project Guide: {workspace.name}
+
+## 1. Project Overview
+- **Workspace**: `{workspace}`
+- **Active Model**: `{model or 'deepseek-v4-flash'}` (Effort: `{effort or 'quantum'}`)
+
+## 2. Directory Structure & Files
+"""
+        if files:
+            for f in files[:15]:
+                content += f"- `{f}`\n"
+        else:
+            content += "- *(New workspace)*\n"
+
+        content += "\n## 3. Project Directives & Conventions\n"
+        if proj_memories:
+            for it in proj_memories:
+                clean_body = re.sub(r"^#\s+.*?\n+", "", it.content).strip()
+                content += f"- **{it.title}** ({it.category}): {clean_body}\n"
+        else:
+            content += "- Use `/learn <rule>` to record project-specific patterns.\n"
+
+        content += """
+## 4. Current State & Recent Accomplishments
+- Project initialized and connected to Axon coding assistant.
+
+## 5. Next Steps & Milestones
+- [ ] Explore project requirements and structure
+- [ ] Implement core functions and scripts
+- [ ] Add unit tests and verify execution
+"""
+        try:
+            axon_md.write_text(content.strip() + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        return
+
+    # If axon.md already exists, sync it
+    try:
+        content = axon_md.read_text(encoding="utf-8")
+        # 1. Update Directory Structure & Files
+        if files and "## 2. Directory Structure & Files" in content:
+            files_block = "## 2. Directory Structure & Files\n" + "\n".join(f"- `{f}`" for f in files[:15]) + "\n"
+            content = re.sub(r"## 2\. Directory Structure & Files\n.*?(?=\n## |\Z)", files_block, content, flags=re.DOTALL)
+
+        # 2. Update Project Directives
+        if proj_memories and "## 3. Project Directives & Conventions" in content:
+            dir_lines = []
+            for it in proj_memories:
+                clean_body = re.sub(r"^#\s+.*?\n+", "", it.content).strip()
+                dir_lines.append(f"- **{it.title}** ({it.category}): {clean_body}")
+            dir_block = "## 3. Project Directives & Conventions\n" + "\n".join(dir_lines) + "\n"
+            content = re.sub(r"## 3\. Project Directives & Conventions\n.*?(?=\n## |\Z)", dir_block, content, flags=re.DOTALL)
+
+        # 3. Append accomplishments only when tools were actually used (real project work)
+        if tool_count > 0 and final_text.strip() and "## 4. Current State & Recent Accomplishments" in content:
+            # Extract a clean summary sentence, skipping markdown formatting noise
+            skip_prefixes = ("|", "```", "---", "┌", "│", "└", "╭", "╰", "─", "═", "[", "!", ">", "**")
+            candidate_lines = [
+                l.strip().lstrip("- ").lstrip("* ")
+                for l in final_text.splitlines()
+                if l.strip()
+                and not l.strip().startswith(skip_prefixes)
+                and not l.startswith("#")
+                and len(l.strip()) > 20
+            ]
+            if candidate_lines:
+                summary = candidate_lines[0]
+                # Trim to first complete sentence
+                for sep in (".", "!"):
+                    idx = summary.find(sep)
+                    if 15 < idx < 120:
+                        summary = summary[:idx + 1]
+                        break
+                else:
+                    summary = summary[:100].rsplit(" ", 1)[0]
+
+                # Clean up orphaned markdown artifacts (unclosed backticks, brackets)
+                if summary.count("`") % 2 != 0:
+                    summary = summary.rsplit("`", 1)[0].rstrip()
+                if summary.count("[") > summary.count("]"):
+                    summary = summary.rsplit("[", 1)[0].rstrip()
+
+                if len(summary) > 20:
+                    entry = f"- {summary}"
+                    if entry not in content:
+                        section_match = re.search(
+                            r"(## 4\. Current State & Recent Accomplishments\n)(.*?)(?=\n## |\Z)",
+                            content, flags=re.DOTALL,
+                        )
+                        if section_match:
+                            header = section_match.group(1)
+                            body = section_match.group(2)
+                            existing_entries = [l for l in body.strip().splitlines() if l.strip().startswith("- ")]
+                            existing_entries.insert(0, entry)
+                            capped = existing_entries[:6]
+                            new_block = header + "\n".join(capped) + "\n"
+                            content = content[:section_match.start()] + new_block + content[section_match.end():]
+
+        axon_md.write_text(content.strip() + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
 class Agent:
     def __init__(
         self,
@@ -77,6 +200,10 @@ class Agent:
         self.renderer: Any = None
         from axon.agent.subagent import SubagentManager
         self.subagents: SubagentManager = SubagentManager()
+
+        # Ensure project guide exists on startup
+        if not str(settings.workspace).startswith(("/tmp", "/var/folders", "/private/var")):
+            _sync_project_guide(settings.workspace, model=settings.model, effort=settings.effort)
 
     def reset_for_new_session(self, session_id: str | None = None) -> str:
         """Completely refresh and restart everything from zero for a fresh session."""
@@ -149,11 +276,27 @@ class Agent:
                 thinking=self.settings.thinking,
             )
 
-            for event in stream:
-                if self.on_event:
-                    self.on_event(event)
+            try:
+                for event in stream:
+                    if self.on_event:
+                        self.on_event(event)
+                turn = self.provider.finalize()
+            except KeyboardInterrupt:
+                try:
+                    turn = self.provider.finalize()
+                except Exception:
+                    from axon.providers.base import AssistantTurn
+                    turn = AssistantTurn(text="[Turn interrupted by user]", stop_reason="stop")
+                self.conversation.append_assistant(turn)
+                self.session.append_turn(turn)
+                return TurnResult(
+                    final_text=turn.text or "[Turn interrupted by user]",
+                    stop_reason="interrupted",
+                    iterations=iterations,
+                    tool_calls_count=total_tool_calls,
+                    usage=total_usage,
+                )
 
-            turn = self.provider.finalize()
             total_usage = total_usage + turn.usage
             self.ledger.record(self.settings.model, turn.usage)
 
@@ -164,6 +307,14 @@ class Agent:
 
             # 4. Terminate if turn is not requesting tools
             if turn.stop_reason != "tool_use":
+                if not str(self.settings.workspace).startswith(("/tmp", "/var/folders", "/private/var")):
+                    _sync_project_guide(
+                        self.settings.workspace,
+                        model=self.settings.model,
+                        effort=self.settings.effort,
+                        final_text=final_text,
+                        tool_count=total_tool_calls,
+                    )
                 return TurnResult(
                     final_text=final_text,
                     stop_reason=turn.stop_reason,

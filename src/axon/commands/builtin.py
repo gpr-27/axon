@@ -208,7 +208,7 @@ def handle_context(agent: Agent, arg: str) -> CommandResult:
     pct = (total_tokens / ceiling * 100) if ceiling > 0 else 0.0
 
     print(f"\n  {GOLD}{BOLD}=== Active LLM Context Breakdown ==={RST}")
-    print(f"  {TEAL}• System Prompt:{RST}        ~{sys_tokens:,} tokens ({len(system_blocks)} blocks: Identity, Rules, Env, Skills)")
+    print(f"  {TEAL}• System Prompt:{RST}        ~{sys_tokens:,} tokens ({len(system_blocks)} blocks: Identity, Rules, Env, Memory, Skills)")
     print(f"  {TEAL}• Tool Schemas:{RST}         ~{tool_tokens:,} tokens ({len(tool_schemas)} registered tools)")
     print(f"  {TEAL}• Conversation Chat:{RST}    ~{chat_tokens:,} tokens ({len(agent.conversation.messages)} messages)")
     print(f"  {DARK_SLATE}  {'─' * 55}{RST}")
@@ -392,9 +392,9 @@ def handle_history(agent: Agent, arg: str, window_only: bool = False) -> Command
             if len(preview) > 85:
                 preview = preview[:82] + "..."
 
-        chars = len(str(content))
-        toks = chars // 4
-        print(f"  {clr}{BOLD}{i:2d}. [{role:<9}]{RST} {preview} {SLATE}(~{toks} tokens){RST}")
+        from axon.agent.state import estimate_content_tokens
+        toks = estimate_content_tokens(content)
+        print(f"  {clr}{BOLD}{i:2d}. [{role:<9}]{RST} {preview} {SLATE}(~{toks:,} tokens){RST}")
     print()
     return CommandResult(handled=True)
 
@@ -461,6 +461,9 @@ def handle_payload(agent: Agent, arg: str) -> CommandResult:
                         elif b_type == "tool_result":
                             c_prev = str(b.get("content", "")).strip().replace("\n", " ")[:100]
                             print(f"  {DARK_SLATE}│  └─ Result [{b.get('tool_use_id')}]: {c_prev}...{RST}")
+                        elif b_type == "image":
+                            media_t = b.get("source", {}).get("media_type", "image/png")
+                            print(f"  {DARK_SLATE}│  🖼️  Image Attachment: {CYAN}{media_t}{RST} {SLATE}(~1,200 vision tokens){RST}")
                         elif b_type == "text":
                             print(f"  {DARK_SLATE}│  {WHITE}{b.get('text', '')}{RST}")
             else:
@@ -526,13 +529,6 @@ def handle_output(agent: Agent, arg: str) -> CommandResult:
 
     if not out:
         out = get_last_tool_output()
-        if not out:
-            log_file = agent.settings.workspace / ".axon" / "outputs" / "latest_output.log"
-            if log_file.exists():
-                try:
-                    out = log_file.read_text(encoding="utf-8")
-                except Exception:
-                    pass
 
     if out:
         lines = out.splitlines()
@@ -924,42 +920,129 @@ def handle_hooks(agent: Agent, arg: str) -> CommandResult:
 
 def handle_learn(agent: Agent, arg: str) -> CommandResult:
     """Extract and persist learned coding convention, rule, or architectural fact."""
-    from axon.agent.memory import MemoryStore
-    if not arg.strip():
-        print(f"\n  {GOLD}Usage:{RST} /learn <rule, convention, or pattern>\n")
-        print(f"  {DIM}Example: /learn Always run pytest before committing changes{RST}\n")
+    from axon.agent.memory import distill_and_learn
+    arg_clean = arg.strip()
+    if not arg_clean:
+        print(f"\n  {GOLD}Usage:{RST} /learn [--global] <rule, convention, or pattern>\n")
+        print(f"  {DIM}Examples:{RST}")
+        print(f"    • Project-specific : /learn Always run pytest before committing changes")
+        print(f"    • Global (All repos): /learn --global Prefer concise explanations without filler text\n")
         return CommandResult(handled=True)
-    
-    store = MemoryStore(agent.settings.workspace)
-    item = store.learn(arg.strip())
-    print(f"\n  {MINT}✓ Memorized pattern:{RST} {WHITE}{BOLD}{item.title}{RST}")
-    print(f"  {SLATE}Saved to persistent memory:{RST} {DIM}.axon/memory/{item.id}.md{RST}\n")
+
+    scope = "project"
+    text_to_save = arg_clean
+    if arg_clean.startswith("--global "):
+        scope = "global"
+        text_to_save = arg_clean[len("--global "):].strip()
+    elif arg_clean.startswith("global "):
+        scope = "global"
+        text_to_save = arg_clean[len("global "):].strip()
+
+    print(f"\n  {TEAL}🧠 Distilling and indexing memory pattern...{RST}")
+    item = distill_and_learn(agent.provider, text_to_save, agent.settings.workspace, scope=scope)
+    dest_path = f"axon/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
+    scope_badge = f"{GOLD}[Global]{RST}" if scope == "global" else f"{TEAL}[Project]{RST}"
+
+    print(f"  {MINT}✓ Memorized {scope_badge} pattern:{RST} {WHITE}{BOLD}{item.title}{RST} {SLATE}({item.category}){RST}")
+    print(f"  {SLATE}Saved to persistent memory:{RST} {DIM}{dest_path}{RST}\n")
+
+    # Keep axon.md synchronized with new memory
+    if scope == "project":
+        from axon.agent.loop import _sync_project_guide
+        _sync_project_guide(agent.settings.workspace, model=agent.settings.model, effort=agent.settings.effort)
+
     return CommandResult(handled=True)
 
 def handle_memory(agent: Agent, arg: str) -> CommandResult:
-    """Inspect persistent workspace knowledge items and guidelines."""
+    """Inspect persistent workspace and global knowledge items and guidelines."""
     from axon.agent.memory import MemoryStore
     store = MemoryStore(agent.settings.workspace)
     memories = store.list_all()
-    agents_md = agent.settings.workspace / "AGENTS.md"
+    
+    # Check for project convention files
+    conv_file = None
+    for name in ("axon.md", "AXON.md", "AGENTS.md", "CLAUDE.md", ".axon/axon.md", ".axon/AGENTS.md"):
+        candidate = agent.settings.workspace / name
+        if candidate.exists() and candidate.is_file():
+            conv_file = candidate
+            break
 
     print(f"\n{GOLD}{BOLD}=== Axon Memory & Knowledge Items ==={RST}")
-    if agents_md.exists():
-        print(f"\n  {TEAL}📄 Project Conventions (AGENTS.md):{RST}")
-        lines = agents_md.read_text(encoding="utf-8").strip().splitlines()
+    if conv_file:
+        print(f"\n  {TEAL}📄 Project Directives ({conv_file.name}):{RST}")
+        lines = conv_file.read_text(encoding="utf-8").strip().splitlines()
         for l in lines[:8]:
             print(f"    {SLATE}{l}{RST}")
         if len(lines) > 8:
             print(f"    {DIM}... ({len(lines)-8} more lines){RST}")
             
     if memories:
-        print(f"\n  {MINT}🧠 Persistent Learned Items ({len(memories)} items):{RST}")
-        for it in memories[:8]:
-            print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
+        proj_memories = [m for m in memories if m.scope == "project"]
+        glob_memories = [m for m in memories if m.scope == "global"]
+
+        if proj_memories:
+            print(f"\n  {TEAL}📁 Project-Specific Memory ({len(proj_memories)} items · .axon/memory/):{RST}")
+            for it in proj_memories:
+                print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
+
+        if glob_memories:
+            print(f"\n  {GOLD}🌐 Global Universal Memory ({len(glob_memories)} items · axon/.axon/memory/):{RST}")
+            for it in glob_memories:
+                print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
             
-    if not agents_md.exists() and not memories:
+    if not conv_file and not memories:
         print(f"\n  {SLATE}No memory files found. Use /learn <rule> or /init to save knowledge.{RST}")
-    print(f"\n  {DIM}Use /learn <rule> to memorize new project conventions anytime.{RST}\n")
+    print(f"\n  {DIM}Use /learn <rule> for project memory, or /learn --global <rule> for global memory.{RST}\n")
+    return CommandResult(handled=True)
+
+def handle_init(agent: Agent, arg: str) -> CommandResult:
+    """Initialize or update axon.md with project architecture, current state, and next steps."""
+    ws = agent.settings.workspace
+    axon_md = ws / "axon.md"
+
+    # Ignore cache and hidden folders
+    ignore_names = {"__pycache__", "node_modules", "venv", ".venv", ".pytest_cache", ".git", ".DS_Store"}
+    files = [p.name for p in sorted(ws.glob("*")) if not p.name.startswith(".") and p.name not in ignore_names]
+
+    from axon.agent.memory import MemoryStore
+    store = MemoryStore(ws)
+    # Only include project-specific memories, as global memories are already injected universally
+    project_memories = [m for m in store.list_all() if m.scope == "project"]
+
+    content = f"""# Axon Project Guide: {ws.name}
+
+## 1. Project Overview
+- **Workspace**: `{ws}`
+- **Active Model**: `{agent.settings.model}` (Effort: `{agent.settings.effort}`)
+
+## 2. Directory Structure & Files
+"""
+    if files:
+        for f in files[:15]:
+            content += f"- `{f}`\n"
+    else:
+        content += "- *(New empty workspace)*\n"
+
+    content += "\n## 3. Project Directives & Conventions\n"
+    if project_memories:
+        for it in project_memories:
+            content += f"- **{it.title}** ({it.category}): {it.content}\n"
+    else:
+        content += "- No custom project directives yet. Use `/learn <rule>` to record project-specific patterns.\n"
+
+    content += """
+## 4. Current State & Recent Accomplishments
+- Project initialized and connected to Axon coding assistant.
+
+## 5. Next Steps & Milestones
+- [ ] Explore project requirements and structure
+- [ ] Implement core functions and scripts
+- [ ] Add unit tests and verify execution
+"""
+
+    axon_md.write_text(content.strip() + "\n", encoding="utf-8")
+    print(f"\n  {MINT}✓ Initialized project documentation:{RST} {WHITE}{BOLD}axon.md{RST}")
+    print(f"  {SLATE}Axon will automatically read axon.md in every turn for context.{RST}\n")
     return CommandResult(handled=True)
 
 def handle_status(agent: Agent, arg: str) -> CommandResult:
@@ -1052,6 +1135,21 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_help(agent, "")
     if not stripped.startswith("/"):
         return None
+
+    # Check if input is a filesystem path or image path rather than a slash command
+    from pathlib import Path
+    first_token = stripped.split()[0] if stripped.split() else ""
+    first_token_clean = first_token.strip("'\"")
+    common_path_prefixes = ("/var/", "/users/", "/tmp/", "/private/", "/system/", "/opt/", "/etc/", "/volumes/", "/home/", "/dev/")
+    is_path = (
+        first_token.count("/") > 1
+        or any(first_token_clean.lower().startswith(p) for p in common_path_prefixes)
+        or any(first_token_clean.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".py", ".ts", ".js", ".json", ".md", ".txt", ".log", ".pdf", ".html"))
+        or Path(first_token_clean).exists()
+    )
+    if is_path:
+        return None
+
     parts = stripped.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -1076,6 +1174,8 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_hooks(agent, arg)
     elif cmd in ("/memory", "/mem"):
         return handle_memory(agent, arg)
+    elif cmd in ("/init", "/sync"):
+        return handle_init(agent, arg)
     elif cmd in ("/learn", "/remember"):
         return handle_learn(agent, arg)
     elif cmd in ("/status", "/stats"):
@@ -1183,7 +1283,10 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         if arg:
             skill_prompt += f"\n\nAdditional user input: {arg}"
         print(f"\n  {TEAL}⚡ Executing skill /{skill_key}...{RST}\n")
-        res = agent.run_turn(skill_prompt)
+        try:
+            res = agent.run_turn(skill_prompt)
+        except KeyboardInterrupt:
+            print(f"\n  {SLATE}⏹ Skill /{skill_key} stopped by user.{RST}\n")
         return CommandResult(handled=True)
 
     print(f"\n  {ROSE}Unknown command '{cmd}'. Type /help or /skills for options.{RST}\n")

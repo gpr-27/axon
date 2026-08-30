@@ -473,23 +473,22 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         f"{GOLD}!{RST} for {UNDER}shell{RST} mode",
         f"{GOLD}/{RST} for commands",
         f"{GOLD}@{RST} for file paths",
-        f"{GOLD}/ask{RST} or {GOLD}/btw for side question{RST}",
+        f"{GOLD}/btw{RST} for side question",
+        f"{GOLD}?{RST} or {GOLD}/kb{RST} for shortcuts",
     ]
     col2 = [
-        f"{CYAN}double tap esc{RST} to clear input",
-        f"{CYAN}shift + tab{RST} to cycle modes",
+        f"{CYAN}tab{RST} to cycle modes",
+        f"{CYAN}double esc{RST} to clear input",
         f"{CYAN}ctrl + o{RST} for verbose output",
         f"{CYAN}ctrl + t{RST} to toggle tasks",
         f"{CYAN}\\⏎{RST} for newline",
     ]
     col3 = [
-        f"{MINT}ctrl + shift + _{RST} to undo",
-        f"{MINT}ctrl + z{RST} to suspend",
         f"{MINT}ctrl + v{RST} to paste images",
         f"{MINT}opt + p{RST} to switch model",
         f"{MINT}ctrl + s{RST} to stash prompt",
         f"{MINT}ctrl + g{RST} to edit in $EDITOR",
-        f"{TEAL}/kb{RST} for keybindings",
+        f"{MINT}ctrl + z{RST} to suspend",
     ]
 
     max_rows = max(len(col1), len(col2), len(col3))
@@ -498,8 +497,8 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         c1 = col1[r] if r < len(col1) else ""
         c2 = col2[r] if r < len(col2) else ""
         c3 = col3[r] if r < len(col3) else ""
-        pad1 = max(1, 26 - str_width(c1))
-        pad2 = max(1, 38 - str_width(c2))
+        pad1 = max(2, 30 - str_width(c1))
+        pad2 = max(2, 34 - str_width(c2))
         out.append(f"  {c1}{' ' * pad1}{c2}{' ' * pad2}{c3}")
     return "\n".join(out)
 
@@ -666,14 +665,10 @@ def get_last_tool_output() -> str:
 def _save_tool_output(content: str) -> None:
     global _LAST_TOOL_OUTPUT
     _LAST_TOOL_OUTPUT = content
-    try:
-        log_dir = Path.cwd() / ".axon" / "outputs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "latest_output.log").write_text(content, encoding="utf-8")
-    except Exception:
-        pass
 
 class Renderer:
+    _tip_idx: int = 0
+
     def __init__(self, show_thinking: bool = False, collapsible: bool = True) -> None:
         self.show_thinking = show_thinking
         self.collapsible = collapsible
@@ -1120,8 +1115,43 @@ class Renderer:
             f"{WHITE}{in_fmt} in{cache_str}{DARK_SLATE} · "
             f"{WHITE}{out_fmt} out{DARK_SLATE} · "
             f"{GOLD}${cost:.4f}{DARK_SLATE} · "
-            f"{SLATE}{elapsed:.1f}s{RST}\n\n"
+            f"{SLATE}{elapsed:.1f}s{RST}\n"
         )
+        tips = [
+            f"💡 Tip: Use {GOLD}!{SLATE} to execute direct shell commands (e.g. {GOLD}!pytest{SLATE}, {GOLD}!git status{SLATE}, {GOLD}!npm test{SLATE}) instantly",
+            f"💡 Tip: Press {GOLD}Ctrl+V{SLATE} or drag & drop screenshots into terminal to attach images {CYAN}[Image #1]{SLATE} with automatic OCR",
+            f"💡 Tip: Type {GOLD}/model{SLATE} to switch models (e.g. {GOLD}/model deepseek-v4-flash{SLATE} for speed, {GOLD}/model claude-opus-5{SLATE} for vision)",
+            f"💡 Tip: Type {GOLD}/effort{SLATE} to toggle reasoning depth between {CYAN}low{SLATE}, {CYAN}medium{SLATE}, {CYAN}high{SLATE}, and {CYAN}quantum{SLATE}",
+            f"💡 Tip: Press {GOLD}Tab{SLATE} in the prompt bar to switch permission modes ({GOLD}bypass{SLATE} · {MINT}auto-accept{SLATE} · {AMBER}manual{SLATE} · {PURPLE}plan{SLATE})",
+            f"💡 Tip: Press {GOLD}← Left Arrow{SLATE} on an empty prompt to open the interactive Session Switcher dashboard",
+            f"💡 Tip: Type {GOLD}/learn <rule>{SLATE} to save project conventions, or {GOLD}/learn --global <rule>{SLATE} for universal cross-repo memory",
+            f"💡 Tip: Type {GOLD}/memory{SLATE} to inspect, search, and manage persistent learned rules and preferences",
+            f"💡 Tip: Type {GOLD}/research <topic>{SLATE} to run multi-source deep research and generate comparative matrix tables",
+            f"💡 Tip: Type {GOLD}/todo{SLATE} to inspect or manage structured execution checklists with visual progress bars",
+            f"💡 Tip: Type {GOLD}/queue <prompt>{SLATE} or {GOLD}/q <prompt>{SLATE} to enqueue follow-up prompts for autonomous batch execution",
+            f"💡 Tip: Type {GOLD}/review{SLATE} or {GOLD}/review <path>{SLATE} to run automated multi-file code review on logic, security, and performance",
+            f"💡 Tip: Type {GOLD}/diff{SLATE} to view uncommitted working tree git diffs across the entire workspace",
+            f"💡 Tip: Type {GOLD}/rewind{SLATE} to roll back and revert file modifications made during previous agent turns",
+            f"💡 Tip: Type {GOLD}/payload{SLATE} to view active system prompt blocks, ephemeral cache breakpoints, and exact token counts",
+            f"💡 Tip: Type {GOLD}/cost{SLATE} to inspect session token ledger, prompt caching hit ratios, and real-time API billing",
+            f"💡 Tip: Type {GOLD}/compact{SLATE} to manually compact conversation context and free token budget while retaining key facts",
+            f"💡 Tip: Type {GOLD}/window <N>{SLATE} to adjust the sliding context window (e.g. {GOLD}/window 10{SLATE} to retain latest 10 turns)",
+            f"💡 Tip: Type {GOLD}/skills{SLATE} to browse active skills, {GOLD}/skill create <name>{SLATE} to scaffold new skills, or {GOLD}/skill import <url>{SLATE} to install",
+            f"💡 Tip: Type {GOLD}@{SLATE} followed by a filename to fuzzy-search and link project files directly into your prompt",
+            f"💡 Tip: Type {GOLD}/branch{SLATE} to fork the current conversation into an independent parallel exploration branch",
+            f"💡 Tip: Type {GOLD}/resume{SLATE} to resume any historical conversation session from its JSONL transcript",
+            f"💡 Tip: Type {GOLD}/ask <question>{SLATE} to ask a side question in an isolated context without polluting main chat history",
+            f"💡 Tip: Type {GOLD}/subagents{SLATE} to inspect parallel subagent worker execution matrix and isolated transcripts",
+            f"💡 Tip: Type {GOLD}/mcp{SLATE} to inspect Model Context Protocol server connections, schemas, and external tools",
+            f"💡 Tip: Type {GOLD}/hooks{SLATE} to inspect active lifecycle, pre-tool, and post-tool execution hooks",
+            f"💡 Tip: Type {GOLD}/doctor{SLATE} to run local environment diagnostics, proxy endpoint latency tests, and tool checks",
+            f"💡 Tip: Type {GOLD}/init{SLATE} to initialize an {WHITE}AGENTS.md{SLATE} or {WHITE}axon.md{SLATE} conventions guide in the current workspace",
+            f"💡 Tip: Press {GOLD}Ctrl+U{SLATE} to clear the prompt line, and {GOLD}Ctrl+C{SLATE} to cancel a running turn gracefully",
+            f"💡 Tip: Type {GOLD}?{SLATE} or {GOLD}/kb{SLATE} to open the full keyboard shortcuts and commands cheatsheet",
+        ]
+        chosen_tip = tips[Renderer._tip_idx % len(tips)]
+        Renderer._tip_idx += 1
+        sys.stdout.write(f"\n  {SLATE}{chosen_tip}{RST}\n\n")
         sys.stdout.flush()
 
 def render_subagent_dashboard(tasks: list[Any]) -> None:
