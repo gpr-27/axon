@@ -282,8 +282,9 @@ def handle_clear(agent: Agent, arg: str) -> CommandResult:
         sys.stdout.flush()
 
     # 2. Reset conversation messages, ledger, file state, todos, checkpoints, subagents, and queue from zero
+    custom_name = arg.strip() if arg.strip() else None
     if hasattr(agent, "reset_for_new_session"):
-        new_session_id = agent.reset_for_new_session()
+        new_session_id = agent.reset_for_new_session(custom_name)
     else:
         agent.conversation.messages.clear()
         if hasattr(agent, "ledger") and agent.ledger:
@@ -298,7 +299,7 @@ def handle_clear(agent: Agent, arg: str) -> CommandResult:
             agent.message_queue.clear()
         if hasattr(agent, "checkpoints") and agent.checkpoints:
             agent.checkpoints.clear()
-        new_session_id = agent.session.open()
+        new_session_id = agent.session.open(custom_name)
 
     # 3. Display clean startup banner for new session
     from axon.ui.render import Renderer

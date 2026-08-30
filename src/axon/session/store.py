@@ -39,14 +39,18 @@ class SessionStore:
             self.session_dir = Path.home() / ".axon" / "sessions"
 
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.active_session_id: str = f"session_{int(time.time())}"
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.active_session_id: str = f"session_{date_str}"
         self.active_file: Path = self.session_dir / f"{self.active_session_id}.jsonl"
 
     def open(self, session_id: str | None = None) -> str:
         if session_id:
             self.active_session_id = session_id
         else:
-            base_id = f"session_{int(time.time())}"
+            from datetime import datetime
+            date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_id = f"session_{date_str}"
             target_id = base_id
             counter = 1
             while (self.session_dir / f"{target_id}.jsonl").exists() or target_id == getattr(self, "active_session_id", None):

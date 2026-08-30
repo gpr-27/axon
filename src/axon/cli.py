@@ -177,11 +177,19 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 )
 
                 if selected_target.startswith("__NEW_SESSION__:"):
-                    new_id = selected_target.split(":", 1)[1]
-                    new_prompt = agent.reset_for_new_session(new_id)
-                    if new_prompt:
-                        line = new_prompt
+                    prompt_buf = selected_target.split(":", 1)[1].strip()
+                    if prompt_buf:
+                        import re
+                        from datetime import datetime
+                        clean_slug = re.sub(r'[^a-zA-Z0-9_-]+', '_', prompt_buf[:28]).strip('_').lower()
+                        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        sess_name = f"session_{date_str}_{clean_slug}" if clean_slug else f"session_{date_str}"
+                        agent.reset_for_new_session(sess_name)
+                        line = prompt_buf
                     else:
+                        from datetime import datetime
+                        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        new_id = agent.reset_for_new_session(f"session_{date_str}")
                         print(f"  {MINT}⚡ Started fresh session ({new_id}){RST}\n")
                         continue
                 else:
