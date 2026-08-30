@@ -1,0 +1,290 @@
+"""
+Subagent runner for Task tool with isolated context, Claude-style task tracking, and thread-safe dashboard metrics.
+"""
+from __future__ import annotations
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable
+from axon.agent.state import Conversation
+from axon.errors import ToolError
+
+if TYPE_CHECKING:
+    from axon.agent.loop import Agent
+    from axon.providers.base import StreamEvent
+
+@dataclass
+class SubagentTask:
+    id: str
+    index: int
+    title: str
+    prompt: str
+    status: str = "pending"  # pending, running, completed, exhausted, error
+    steps: int = 0
+    max_steps: int = 15
+    start_time: float = 0.0
+    elapsed_s: float = 0.0
+    conversation: Conversation = field(default_factory=Conversation)
+    events: list[StreamEvent] = field(default_factory=list)
+    result_text: str = ""
+    error_msg: str | None = None
+    tokens_consumed: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    live_logs: list[str] = field(default_factory=list)
+
+    def add_log(self, msg: str) -> None:
+        self.live_logs.append(msg)
+        if len(self.live_logs) > 30:
+            self.live_logs.pop(0)
+
+class SubagentManager:
+    """Thread-safe manager for tracking subagents and rendering Claude-style progress."""
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._tasks: list[SubagentTask] = []
+        self._counter: int = 0
+        self.on_update: Callable[[list[SubagentTask]], None] | None = None
+
+    def register(self, prompt: str, max_steps: int = 15) -> SubagentTask:
+        with self._lock:
+            self._counter += 1
+            idx = self._counter
+            # Extract clean title from prompt
+            first_line = prompt.strip().splitlines()[0]
+            clean_title = first_line.strip("#* -:").replace("[Subtask]", "").strip()
+            if len(clean_title) > 42:
+                clean_title = clean_title[:39] + "..."
+            if not clean_title:
+                clean_title = f"Task #{idx}"
+
+            task = SubagentTask(
+                id=f"sub-{idx}",
+                index=idx,
+                title=clean_title,
+                prompt=prompt,
+                status="running",
+                max_steps=max_steps,
+                start_time=time.time(),
+            )
+            self._tasks.append(task)
+            self._notify()
+            return task
+
+    def update_progress(self, task_id: str, steps: int) -> None:
+        with self._lock:
+            for t in self._tasks:
+                if t.id == task_id:
+                    t.steps = steps
+                    t.elapsed_s = max(0.1, time.time() - t.start_time)
+                    break
+            self._notify()
+
+    def complete(self, task_id: str, result_text: str, conversation: Conversation, status: str = "completed", usage: Any = None) -> None:
+        with self._lock:
+            for t in self._tasks:
+                if t.id == task_id:
+                    t.status = status
+                    t.result_text = result_text
+                    t.conversation = conversation
+                    t.elapsed_s = max(0.1, time.time() - t.start_time)
+                    if usage:
+                        t.input_tokens = getattr(usage, "input", 0) or 0
+                        t.output_tokens = getattr(usage, "output", 0) or 0
+                        t.tokens_consumed = t.input_tokens + t.output_tokens
+                    break
+            self._notify()
+
+    def total_tokens(self) -> int:
+        with self._lock:
+            return sum(t.tokens_consumed for t in self._tasks)
+
+    def fail(self, task_id: str, error: str) -> None:
+        with self._lock:
+            for t in self._tasks:
+                if t.id == task_id:
+                    t.status = "error"
+                    t.error_msg = error
+                    t.elapsed_s = max(0.1, time.time() - t.start_time)
+                    break
+            self._notify()
+
+    def _notify(self) -> None:
+        if self.on_update:
+            try:
+                self.on_update(list(self._tasks))
+            except Exception:
+                pass
+
+    def all_tasks(self) -> list[SubagentTask]:
+        with self._lock:
+            return list(self._tasks)
+
+    def get_task(self, query: str) -> SubagentTask | None:
+        with self._lock:
+            q = str(query).strip().lower()
+            for t in self._tasks:
+                if t.id == q or str(t.index) == q or t.title.lower().startswith(q):
+                    return t
+            return None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._tasks.clear()
+            self._counter = 0
+
+def run_subagent(
+    prompt: str,
+    parent: Agent,
+    max_iterations: int = 15,
+) -> str:
+    """
+    Spawns an isolated sub-agent loop.
+    Excludes Task tool to enforce depth cap 1.
+    All events and conversations are isolated in SubagentTask to prevent stdout interleaving.
+    """
+    if not hasattr(parent, "subagents") or parent.subagents is None:
+        parent.subagents = SubagentManager()
+
+    task = parent.subagents.register(prompt, max_steps=max_iterations)
+
+    # Isolated event handler for this subagent (powers live monitor while preventing stdout collision)
+    def sub_on_event(event: StreamEvent) -> None:
+        task.events.append(event)
+        from axon.providers.base import LLMCallStart, ThinkingDelta, ToolExecutionStart, ToolExecutionResult, TextDelta
+        if isinstance(event, LLMCallStart):
+            parent.subagents.update_progress(task.id, event.iteration)
+            task.add_log(f"⚡ Step {event.iteration} LLM call...")
+        elif isinstance(event, ToolExecutionStart):
+            arg_str = str(event.input)
+            if len(arg_str) > 50:
+                arg_str = arg_str[:47] + "..."
+            task.add_log(f"⏺ {event.name}({arg_str})")
+        elif isinstance(event, ToolExecutionResult):
+            st = "Error" if event.is_error else "Result"
+            c_str = str(event.content).strip().replace("\n", " ")
+            if len(c_str) > 55:
+                c_str = c_str[:52] + "..."
+            task.add_log(f"  └─ {st}: {c_str}")
+        elif isinstance(event, ThinkingDelta):
+            th = (getattr(event, "text", "") or getattr(event, "delta", "")).strip()
+            if th and len(th) > 10:
+                task.add_log(f"✻ Thinking: {th[:55]}...")
+        elif isinstance(event, TextDelta):
+            txt = getattr(event, "text", "").strip()
+            if txt and len(txt) > 15:
+                task.add_log(f"✍️ Generating: {txt[:55]}...")
+
+    sub_registry = parent.registry.subset(
+        names=[t.name for t in parent.registry.all_tools() if t.name != "Task"],
+        readonly_only=True,
+    )
+
+    from axon.agent.loop import Agent
+    sub_agent = Agent(
+        provider=parent.provider,
+        tools=sub_registry,
+        permissions=parent.permissions,
+        context=parent.context,
+        session=parent.session,
+        ledger=parent.ledger,
+        settings=parent.settings.model_copy(update={"max_iterations": max_iterations}),
+        on_event=sub_on_event,
+    )
+
+    try:
+        sub_prompt = (
+            f"[Subagent Research Task]: {prompt}\n\n"
+            "Format your final findings cleanly and neatly for terminal viewing:\n"
+            "• Executive Summary: 1-2 concise sentences answering the request.\n"
+            "• Key Findings: Bullet points with bold titles, exact file paths, lines, and metrics.\n"
+            "• Structured Data: Use clean Markdown tables (| Item | Details |) when comparing multiple items or components.\n"
+            "• Conclusion: Clear outcome, PASS/FAIL status, or recommended next steps."
+        )
+        result = sub_agent.run_turn(sub_prompt)
+        final_text = result.final_text
+        sub_usage = result.usage
+        tokens_total = (sub_usage.input or 0) + (sub_usage.output or 0)
+        if not final_text:
+            if result.iterations >= max_iterations:
+                parent.subagents.complete(task.id, "[Exhausted iteration ceiling]", sub_agent.conversation, status="exhausted", usage=sub_usage)
+                return f"[Subagent #{task.index} ({task.title}) | {tokens_total:,} tokens]: reached maximum iteration ceiling ({max_iterations} steps) without concluding."
+            else:
+                parent.subagents.complete(task.id, "No text output", sub_agent.conversation, status="completed", usage=sub_usage)
+                return f"[Subagent #{task.index} ({task.title}) | {tokens_total:,} tokens]: completed ({result.iterations} steps) with no text output."
+
+        parent.subagents.complete(task.id, final_text, sub_agent.conversation, status="completed", usage=sub_usage)
+        return f"[Subagent #{task.index} Result ({task.title}) | {tokens_total:,} tokens (in: {sub_usage.input:,} · out: {sub_usage.output:,})]:\n{final_text}"
+    except Exception as e:
+        parent.subagents.fail(task.id, str(e))
+        return f"[Subagent #{task.index} failed: {e}]"
+
+def sync_subagents_for_session(agent: Agent) -> None:
+    """Ensure agent.subagents contains only the subagent tasks belonging to the active session."""
+    if not hasattr(agent, "subagents") or agent.subagents is None:
+        agent.subagents = SubagentManager()
+        return
+    agent.subagents.clear()
+    if not hasattr(agent, "conversation") or not agent.conversation.messages:
+        return
+
+    from axon.providers.base import ToolUseBlock, ToolResultBlock
+    task_idx = 0
+    for m in agent.conversation.messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "assistant" and isinstance(content, list):
+            for blk in content:
+                is_task = False
+                inp = {}
+                tu_id = None
+                if isinstance(blk, dict):
+                    if blk.get("type") == "tool_use" and blk.get("name") == "Task":
+                        is_task = True
+                        inp = blk.get("input", {})
+                        tu_id = blk.get("id")
+                elif isinstance(blk, ToolUseBlock) or type(blk).__name__ == "ToolUseBlock":
+                    if getattr(blk, "name", "") == "Task":
+                        is_task = True
+                        inp = getattr(blk, "input", {})
+                        tu_id = getattr(blk, "id", None)
+
+                if is_task:
+                    task_idx += 1
+                    prompt_txt = inp.get("prompt") or inp.get("subtask") or f"Subtask {task_idx}"
+                    task = agent.subagents.register(prompt_txt)
+                    task.status = "completed"
+                    if tu_id:
+                        for m2 in agent.conversation.messages:
+                            if m2.get("role") == "user" and isinstance(m2.get("content"), list):
+                                for res_blk in m2["content"]:
+                                    res_match = False
+                                    res_content = ""
+                                    if isinstance(res_blk, dict):
+                                        if res_blk.get("tool_use_id") == tu_id:
+                                            res_match = True
+                                            res_content = res_blk.get("content", "")
+                                    elif isinstance(res_blk, ToolResultBlock) or type(res_blk).__name__ == "ToolResultBlock":
+                                        if getattr(res_blk, "tool_use_id", None) == tu_id:
+                                            res_match = True
+                                            res_content = getattr(res_blk, "content", "")
+
+                                    if res_match:
+                                        task.result_text = res_content
+                                        from axon.agent.state import Conversation
+                                        sub_file = getattr(agent, "session", None) and (agent.session.session_dir / f"{agent.session.active_session_id}_sub_{task_idx}.jsonl")
+                                        if sub_file and sub_file.exists():
+                                            try:
+                                                task.conversation = agent.session.read_conversation(f"{agent.session.active_session_id}_sub_{task_idx}")
+                                            except Exception:
+                                                task.conversation = Conversation([
+                                                    {"role": "user", "content": prompt_txt},
+                                                    {"role": "assistant", "content": task.result_text},
+                                                ])
+                                        else:
+                                            task.conversation = Conversation([
+                                                {"role": "user", "content": prompt_txt},
+                                                {"role": "assistant", "content": task.result_text},
+                                            ])
+                                        break
+

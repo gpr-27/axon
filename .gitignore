@@ -1,0 +1,8 @@
+.env
+.axon/
+sessions/
+__pycache__/
+*.pyc
+*.egg-info/
+.coverage
+.pytest_cache/
