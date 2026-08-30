@@ -99,6 +99,24 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
     # Metrics summary for header
     tot_tok = (getattr(ledger, "total_input_tokens", 0) or 0) + (getattr(ledger, "total_output_tokens", 0) or 0) if ledger else 0
     cost_val = float(getattr(ledger, "total_cost", 0.0) or 0.0) if ledger else 0.0
+
+    if ledger is not None and tot_tok == 0 and len(msgs) > 0:
+        from axon.agent.state import estimate_content_tokens
+        est_in = 0
+        est_out = 0
+        for m in msgs:
+            c = m.get("content", "")
+            r = m.get("role")
+            if r == "user":
+                est_in += estimate_content_tokens(c)
+            elif r == "assistant":
+                est_out += estimate_content_tokens(c)
+        if est_in > 0 or est_out > 0:
+            from axon.providers.base import Usage
+            ledger.record("claude-opus-5", Usage(input=max(100, est_in), output=max(20, est_out)))
+            tot_tok = ledger.total_input_tokens + ledger.total_output_tokens
+            cost_val = float(ledger.total_cost)
+
     hdr_metrics = f" · {tot_tok:,} tokens · ${cost_val:.5f}" if ledger and tot_tok > 0 else ""
 
     print(f"\n  {DARK_SLATE}╭── {TEAL}📂 Restored Chat Session:{RST} {BOLD}{WHITE}{session_id}{RST} {SLATE}({len(msgs)} messages{hdr_metrics}){DARK_SLATE} {'─' * max(2, width - len(session_id) - len(hdr_metrics) - 45)}╮{RST}\n")

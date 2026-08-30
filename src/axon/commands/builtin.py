@@ -219,31 +219,54 @@ def handle_context(agent: Agent, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 def handle_cost(agent: Agent, arg: str) -> CommandResult:
-    if hasattr(agent, "session") and hasattr(agent.session, "load_ledger"):
-        fresh_ledger = agent.session.load_ledger(agent.session.active_session_id, agent.settings.model)
-        # If conversation is empty, ledger must be empty; otherwise sync with disk
-        if not agent.conversation.messages:
-            agent.ledger = fresh_ledger
-        elif len(fresh_ledger.turn_costs) > 0:
-            agent.ledger = fresh_ledger
+    from decimal import Decimal
+    curr_id = agent.session.active_session_id
+    parent_id = curr_id.rsplit("_sub_", 1)[0] if "_sub_" in curr_id else curr_id
+    model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
 
-    session_rendered = agent.ledger.render(agent.settings.model)
-    print(f"\n{session_rendered}\n")
+    if "_sub_" in curr_id:
+        sub_part = curr_id.split("_sub_")[-1]
+        sub_ledger = agent.session.load_ledger(curr_id, model_name) if hasattr(agent, "session") else agent.ledger
+        print(f"\n{GOLD}{BOLD}=== Subagent #{sub_part} Cost & Token Ledger ==={RST}")
+        print(f"\n{sub_ledger.render(model_name)}\n")
+    else:
+        main_ledger = agent.session.load_ledger(parent_id, model_name) if hasattr(agent, "session") else agent.ledger
+        print(f"\n{GOLD}{BOLD}=== Main Agent Cost & Token Ledger ==={RST}")
+        print(f"\n{main_ledger.render(model_name)}\n")
 
-    if hasattr(agent, "subagents") and agent.subagents:
-        tasks = agent.subagents.all_tasks()
-        if tasks:
-            tot_sub_tok = sum(getattr(t, "tokens_consumed", 0) for t in tasks)
-            if tot_sub_tok > 0:
-                print(f"  {CYAN}🤖 Subagents Consumed      : {WHITE}{tot_sub_tok:,} tokens{SLATE} across {len(tasks)} tasks{RST}")
+        if hasattr(agent, "subagents") and agent.subagents:
+            tasks = agent.subagents.all_tasks()
+            if tasks:
+                print(f"  {CYAN}🤖 Subagent Cost Breakdown:{RST}")
+                tot_sub_tok = 0
+                tot_sub_cost = Decimal("0.0")
                 for t in tasks:
-                    if getattr(t, "tokens_consumed", 0) > 0:
-                        print(f"     {SLATE}└─ Subagent #{t.index} ({t.title[:24]}): {WHITE}{t.tokens_consumed:,} tokens{SLATE} (in: {t.input_tokens:,} · out: {t.output_tokens:,}){RST}")
-                print()
+                    sub_f = f"{parent_id}_sub_{t.index}"
+                    sub_l = agent.session.load_ledger(sub_f, model_name) if hasattr(agent, "session") else None
+                    if sub_l and (sub_l.total_input_tokens + sub_l.total_output_tokens > 0):
+                        sub_tok = sub_l.total_input_tokens + sub_l.total_output_tokens
+                        sub_c = sub_l.total_cost
+                        in_t = sub_l.total_input_tokens
+                        out_t = sub_l.total_output_tokens
+                    else:
+                        sub_tok = getattr(t, "tokens_consumed", 0) or (getattr(t, "input_tokens", 0) + getattr(t, "output_tokens", 0))
+                        in_t = getattr(t, "input_tokens", 0)
+                        out_t = getattr(t, "output_tokens", 0)
+                        from axon.providers.registry import PRICING
+                        p = PRICING.get(model_name, {"input": 3.0, "output": 15.0})
+                        sub_c = (Decimal(str(in_t)) / Decimal("1000000")) * Decimal(str(p.get("input", 3.0))) + (Decimal(str(out_t)) / Decimal("1000000")) * Decimal(str(p.get("output", 15.0)))
+
+                    tot_sub_tok += sub_tok
+                    tot_sub_cost += sub_c
+                    print(f"     {SLATE}└─ Subagent #{t.index} ({t.title[:24]}): {WHITE}{sub_tok:,} tokens{SLATE} (in: {in_t:,} · out: {out_t:,}) · {GOLD}${float(sub_c):.5f}{RST}")
+
+                combined_tokens = (main_ledger.total_input_tokens + main_ledger.total_output_tokens) + tot_sub_tok
+                combined_cost = main_ledger.total_cost + tot_sub_cost
+                print(f"\n  {GOLD}{BOLD}🌟 Combined Session Total (Main + Subagents): {WHITE}{combined_tokens:,} tokens · ${float(combined_cost):.5f}{RST}\n")
 
     try:
         if hasattr(agent, "session") and hasattr(agent.session, "load_workspace_ledger"):
-            ws_ledger = agent.session.load_workspace_ledger(agent.settings.model)
+            ws_ledger = agent.session.load_workspace_ledger(model_name)
             total_toks = ws_ledger.total_input_tokens + ws_ledger.total_output_tokens
             if ws_ledger.total() > agent.ledger.total() or total_toks > (agent.ledger.total_input_tokens + agent.ledger.total_output_tokens):
                 print(f"  {SLATE}Workspace Lifetime Total : {GOLD}${ws_ledger.total():.5f}{SLATE} ({total_toks:,} tokens recorded){RST}\n")
@@ -625,7 +648,7 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
         # Open subagent as an independent chat session
         agent.session.open(target_sub_id)
         from axon.agent.state import Conversation
-        from axon.providers.base import AssistantTurn, TextBlock
+        from axon.providers.base import AssistantTurn, TextBlock, Usage
         from axon.session.ledger import Ledger
         target_file = agent.session.session_dir / f"{target_sub_id}.jsonl"
         if target_file.exists():
@@ -638,16 +661,33 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
                 if r == "user":
                     agent.session.append_user(c if isinstance(c, str) else str(c))
                 elif r == "assistant":
-                    agent.session.append_turn(AssistantTurn(blocks=[TextBlock(text=c if isinstance(c, str) else str(c))], stop_reason="end_turn"))
+                    agent.session.append_turn(AssistantTurn(
+                        blocks=[TextBlock(text=c if isinstance(c, str) else str(c))],
+                        stop_reason="end_turn",
+                        usage=Usage(input=tgt.input_tokens, output=tgt.output_tokens)
+                    ))
         else:
             agent.conversation = Conversation([
                 {"role": "user", "content": tgt.prompt},
                 {"role": "assistant", "content": tgt.result_text or "Subagent completed task."},
             ])
             agent.session.append_user(tgt.prompt)
-            agent.session.append_turn(AssistantTurn(blocks=[TextBlock(text=tgt.result_text or "Subagent completed task.")], stop_reason="end_turn"))
+            agent.session.append_turn(AssistantTurn(
+                blocks=[TextBlock(text=tgt.result_text or "Subagent completed task.")],
+                stop_reason="end_turn",
+                usage=Usage(input=tgt.input_tokens, output=tgt.output_tokens)
+            ))
 
-        agent.ledger = Ledger()
+        model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
+        try:
+            agent.ledger = agent.session.load_ledger(target_sub_id, model_name)
+            if (agent.ledger.total_input_tokens + agent.ledger.total_output_tokens == 0) and (tgt.input_tokens > 0 or tgt.output_tokens > 0):
+                agent.ledger.record(model_name, Usage(input=tgt.input_tokens, output=tgt.output_tokens))
+        except Exception:
+            agent.ledger = Ledger()
+            if tgt.input_tokens > 0 or tgt.output_tokens > 0:
+                agent.ledger.record(model_name, Usage(input=tgt.input_tokens, output=tgt.output_tokens))
+
         if hasattr(agent, "subagents"):
             agent.subagents.clear()
 
@@ -698,7 +738,19 @@ def handle_main(agent: Agent, arg: str) -> CommandResult:
             agent.conversation = agent.session.load(parent_id)
             model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
             try:
+                # Main calculation is performed completely and separately, and combined total includes subagent costs
                 agent.ledger = agent.session.load_ledger(parent_id, model_name)
+                s_dir = getattr(agent.session, "session_dir", None)
+                if s_dir and s_dir.exists():
+                    for sub_file in sorted(s_dir.glob(f"{parent_id}_sub_*.jsonl")):
+                        sub_l = agent.session.load_ledger(sub_file.stem, model_name)
+                        agent.ledger.total_input_tokens += sub_l.total_input_tokens
+                        agent.ledger.total_output_tokens += sub_l.total_output_tokens
+                        agent.ledger.total_cache_read_tokens += sub_l.total_cache_read_tokens
+                        agent.ledger.total_cache_write_tokens += sub_l.total_cache_write_tokens
+                        agent.ledger.total_reasoning_tokens += sub_l.total_reasoning_tokens
+                        agent.ledger.total_cost += sub_l.total_cost
+                        agent.ledger.turn_costs.extend(sub_l.turn_costs)
             except Exception:
                 from axon.session.ledger import Ledger
                 agent.ledger = Ledger()

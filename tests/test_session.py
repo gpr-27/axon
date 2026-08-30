@@ -324,6 +324,94 @@ def test_openai_tool_calls_subagent_sync_and_disk_discovery(workspace: Path):
     assert mock_agent.session.active_session_id == "sess_openai_multi"
     assert len(mock_agent.subagents.all_tasks()) == 2
 
+def test_subagent_separate_and_combined_cost_accounting(workspace: Path):
+    from unittest.mock import MagicMock
+    from axon.agent.state import Conversation
+    from axon.agent.subagent import sync_subagents_for_session
+    from axon.commands.builtin import handle_cost, handle_main, handle_subagents
+    from axon.providers.base import AssistantTurn, TextBlock, ToolResultBlock, ToolUseBlock, Usage
+    from axon.session.store import SessionStore
+
+    store = SessionStore(workspace=workspace)
+    parent_sess = "sess_cost_demo"
+    store.open(parent_sess)
+    store.append_user("Optimize database performance")
+
+    # Main agent turn with 2 subtasks
+    turn_main = AssistantTurn(
+        blocks=[
+            ToolUseBlock(id="tu_1", name="Task", input={"prompt": "Profile slow queries"}),
+            ToolUseBlock(id="tu_2", name="Task", input={"prompt": "Analyze table locks"}),
+        ],
+        usage=Usage(input=5000, output=200),
+    )
+    store.append_turn(turn_main)
+    store.append_results([
+        ToolResultBlock(tool_use_id="tu_1", content="Found 3 unindexed queries"),
+        ToolResultBlock(tool_use_id="tu_2", content="Zero deadlocks observed"),
+    ])
+
+    # Record independent subagent 1 session
+    store.open(f"{parent_sess}_sub_1")
+    store.append_user("[Subagent Research Task]: Profile slow queries")
+    store.append_turn(AssistantTurn(
+        blocks=[TextBlock(text="Found 3 unindexed queries")],
+        usage=Usage(input=14000, output=500),
+    ))
+
+    # Record independent subagent 2 session
+    store.open(f"{parent_sess}_sub_2")
+    store.append_user("[Subagent Research Task]: Analyze table locks")
+    store.append_turn(AssistantTurn(
+        blocks=[TextBlock(text="Zero deadlocks observed")],
+        usage=Usage(input=21000, output=600),
+    ))
+
+    # Reopen parent session
+    store.open(parent_sess)
+    mock_agent = MagicMock()
+    mock_agent.session = store
+    mock_agent.settings.model = "claude-opus-5"
+    mock_agent.conversation = store.load(parent_sess)
+
+    # Sync subagents
+    sync_subagents_for_session(mock_agent)
+    tasks = mock_agent.subagents.all_tasks()
+    assert len(tasks) == 2
+    assert tasks[0].input_tokens == 14000
+    assert tasks[0].output_tokens == 500
+    assert tasks[1].input_tokens == 21000
+    assert tasks[1].output_tokens == 600
+
+    # 1. Switch to Subagent 1: should show Subagent 1's isolated usage (14,500 tokens)
+    res1 = handle_subagents(mock_agent, "1")
+    assert res1.handled is True
+    assert mock_agent.session.active_session_id == f"{parent_sess}_sub_1"
+    assert mock_agent.ledger.total_input_tokens == 14000
+    assert mock_agent.ledger.total_output_tokens == 500
+    assert float(mock_agent.ledger.total_cost) > 0.0
+
+    # 2. Switch to Subagent 2: should show Subagent 2's isolated usage (21,600 tokens)
+    res2 = handle_subagents(mock_agent, "2")
+    assert res2.handled is True
+    assert mock_agent.session.active_session_id == f"{parent_sess}_sub_2"
+    assert mock_agent.ledger.total_input_tokens == 21000
+    assert mock_agent.ledger.total_output_tokens == 600
+    assert float(mock_agent.ledger.total_cost) > 0.0
+
+    # 3. Return to Main: combined ledger includes Main (5,200) + Sub1 (14,500) + Sub2 (21,600) = 41,300 tokens
+    res_m = handle_main(mock_agent, "")
+    assert res_m.handled is True
+    assert mock_agent.session.active_session_id == parent_sess
+    total_tokens = mock_agent.ledger.total_input_tokens + mock_agent.ledger.total_output_tokens
+    assert total_tokens == (5000 + 200) + (14000 + 500) + (21000 + 600)
+    assert float(mock_agent.ledger.total_cost) > 0.0
+
+    # 4. Running handle_cost outputs main + subagent breakdown + combined total
+    res_cost = handle_cost(mock_agent, "")
+    assert res_cost.handled is True
+
+
 
 
 

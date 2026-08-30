@@ -211,6 +211,14 @@ def run_subagent(
         final_text = result.final_text
         sub_usage = result.usage
         tokens_total = (sub_usage.input or 0) + (sub_usage.output or 0)
+
+        # Record subagent tokens and cost into parent ledger so Main session total includes all subagents
+        if hasattr(parent, "ledger") and parent.ledger is not None:
+            try:
+                parent.ledger.record(parent.settings.model, sub_usage)
+            except Exception:
+                pass
+
         if not final_text:
             if result.iterations >= max_iterations:
                 parent.subagents.complete(task.id, "[Exhausted iteration ceiling]", sub_agent.conversation, status="exhausted", usage=sub_usage)
@@ -363,4 +371,24 @@ def sync_subagents_for_session(agent: Agent) -> None:
                 task.conversation = sub_conv
             except Exception:
                 pass
+
+    # 3. Synchronize token counts and costs for each task
+    model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
+    for t in agent.subagents.all_tasks():
+        sub_stem = f"{parent_sess_id}_sub_{t.index}"
+        if getattr(agent, "session", None) and hasattr(agent.session, "load_ledger"):
+            try:
+                sub_l = agent.session.load_ledger(sub_stem, model_name)
+                if sub_l.total_input_tokens + sub_l.total_output_tokens > 0:
+                    t.input_tokens = sub_l.total_input_tokens
+                    t.output_tokens = sub_l.total_output_tokens
+                    t.tokens_consumed = t.input_tokens + t.output_tokens
+            except Exception:
+                pass
+        if getattr(t, "tokens_consumed", 0) == 0 and t.result_text:
+            m_tok = re.search(r"(\d[\d,]*)\s*tokens\s*\(in:\s*(\d[\d,]*)\s*·\s*out:\s*(\d[\d,]*)\)", t.result_text)
+            if m_tok:
+                t.tokens_consumed = int(m_tok.group(1).replace(",", ""))
+                t.input_tokens = int(m_tok.group(2).replace(",", ""))
+                t.output_tokens = int(m_tok.group(3).replace(",", ""))
 
