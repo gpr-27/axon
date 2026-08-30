@@ -142,14 +142,16 @@ class Settings(BaseSettings):
         merged.update(clean_overrides)
 
         settings = cls(**merged)
-        if not settings.api_key.get_secret_value():
+        val = settings.api_key.get_secret_value()
+        invalid_placeholders = {"", "your_api_key_here", "your-api-key-here", "sk-placeholder", "replace_me"}
+        if not val or val in invalid_placeholders:
             # Check if set in os.environ
             env_key = os.environ.get("AXON_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-            if env_key:
+            if env_key and env_key not in invalid_placeholders:
                 settings = settings.model_copy(update={"api_key": SecretStr(env_key)})
             else:
                 raise ConfigError(
-                    "Missing AXON_API_KEY. Please set AXON_API_KEY in your .env file or export it in your environment."
+                    "Missing or placeholder AXON_API_KEY. Please set your API key in your .env file or environment."
                 )
 
         return settings
