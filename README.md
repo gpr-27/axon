@@ -105,28 +105,32 @@ axon
 
 ### 🩺 Verifying Model Connectivity (`check_models.py`)
 
-You can test and verify connectivity and response latency across all 5 supported models (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`) using the included diagnostic script:
+You can test and verify connectivity and response latency across all 5 supported models (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`) using the included diagnostic script (runs 2 verification rounds and exits):
 
 ```bash
-# Run a quick one-shot validation across all models:
-python3 check_models.py --once
-
-# Or run continuous health monitoring:
+# Run 2 validation rounds across all models:
 python3 check_models.py
 ```
 
 **Sample Output:**
 ```
-⚡ Testing connectivity for 5 models (Single validation pass · Base: https://agentrouter.org)...
+⚡ Testing connectivity for 5 models (2 rounds · Base: https://agentrouter.org)...
 
-=== Model Connectivity Results ===
-deepseek-v4-flash    | ● WORKING |    482 ms | OK (DeepSeek V4 Flash)
-gpt-5.6-sol          | ● WORKING |    620 ms | OK (GPT-5.6 Sol)
-glm-5.3              | ● WORKING |    540 ms | OK (GLM-5.3)
-claude-opus-5        | ● WORKING |    710 ms | OK (Claude Opus 5)
-claude-opus-4-8      | ● WORKING |    695 ms | OK (Claude Opus 4.8)
+--- [Round #1 of 2] 16:53:01 ---
+deepseek-v4-flash    | ● WORKING |   1279 ms | OK
+gpt-5.6-sol          | ● WORKING |   5251 ms | OK. I'm ChatGPT.
+glm-5.3              | ● WORKING |   1803 ms | OK
+claude-opus-5        | ● WORKING |   2026 ms | OK
+claude-opus-4-8      | ● WORKING |   1772 ms | OK. I'm Claude, made by Anthropic.
 
-✓ Model verification complete.
+--- [Round #2 of 2] 16:53:18 ---
+deepseek-v4-flash    | ● WORKING |   1280 ms | OK
+gpt-5.6-sol          | ● WORKING |   6013 ms | OK — I'm ChatGPT.
+glm-5.3              | ● WORKING |   1994 ms | OK
+claude-opus-5        | ● WORKING |   1897 ms | OK
+claude-opus-4-8      | ● WORKING |   1727 ms | OK. I'm Claude, made by Anthropic.
+
+✓ Model verification complete (2 rounds finished).
 ```
 
 ---

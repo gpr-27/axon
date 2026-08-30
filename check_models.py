@@ -37,6 +37,10 @@ HEADERS = {
     "authorization": f"Bearer {API_KEY}",
     "content-type": "application/json",
     "user-agent": "Anthropic/Python 1.0.0",
+    "x-stainless-lang": "python",
+    "x-stainless-os": "MacOS",
+    "x-stainless-arch": "arm64",
+    "x-stainless-runtime": "CPython",
 }
 
 anthropic_client = Anthropic(auth_token=API_KEY, base_url=BASE_URL, timeout=TIMEOUT)
@@ -73,24 +77,30 @@ def test_model(model: str) -> tuple[bool, float, str]:
 
 
 def main():
-    once = "--once" in sys.argv or "-1" in sys.argv
     if API_KEY == "sk-placeholder" or not API_KEY:
-        print("\033[93m⚠️ Warning: No AXON_API_KEY found in environment or .env file.\033[0m")
-        print("Please configure your API key in .env or export AXON_API_KEY before running.\n")
+        print("\033[93m⚠️ Warning: No AXON_API_KEY found in environment or .env file.\033[0m", flush=True)
+        print("Please configure your API key in .env or export AXON_API_KEY before running.\n", flush=True)
 
-    mode_text = "Single validation pass" if once else "Continuous test"
-    print(f"⚡ Testing connectivity for {len(MODELS)} models ({mode_text} · Base: {BASE_URL})...\n")
+    max_rounds = 2
+    for arg in sys.argv[1:]:
+        if arg in ("--continuous", "-c"):
+            max_rounds = 0
+        elif arg.isdigit():
+            max_rounds = int(arg)
+
+    rounds_label = "2 rounds" if max_rounds == 2 else (f"{max_rounds} rounds" if max_rounds > 0 else "Continuous")
+    print(f"⚡ Testing connectivity for {len(MODELS)} models ({rounds_label} · Base: {BASE_URL})...\n", flush=True)
     round_num = 1
     while True:
-        header = f"--- [Round #{round_num}] {time.strftime('%H:%M:%S')} ---" if not once else "=== Model Connectivity Results ==="
-        print(header)
+        round_header = f"--- [Round #{round_num} of {max_rounds}] {time.strftime('%H:%M:%S')} ---" if max_rounds > 0 else f"--- [Round #{round_num}] {time.strftime('%H:%M:%S')} ---"
+        print(round_header, flush=True)
         for model in MODELS:
             ok, lat, info = test_model(model)
             status = "\033[92m● WORKING\033[0m" if ok else "\033[91m✖ FAILED \033[0m"
-            print(f"{model:<20} | {status} | {lat:>6.0f} ms | {info}")
+            print(f"{model:<20} | {status} | {lat:>6.0f} ms | {info}", flush=True)
         
-        if once:
-            print("\n✓ Model verification complete.")
+        if max_rounds > 0 and round_num >= max_rounds:
+            print("\n✓ Model verification complete (2 rounds finished).", flush=True)
             break
         round_num += 1
         time.sleep(INTERVAL_SECONDS)
