@@ -261,6 +261,70 @@ def test_handle_main_and_nested_subagents(workspace: Path):
     assert mock_agent.session.active_session_id == "parent_sess_200"
     assert len(mock_agent.conversation.messages) > 0
 
+    # Verify both subagents are preserved and discoverable after returning to main
+    assert len(mock_agent.subagents.all_tasks()) == 2
+    assert mock_agent.subagents.all_tasks()[0].index == 1
+    assert mock_agent.subagents.all_tasks()[1].index == 2
+
+def test_openai_tool_calls_subagent_sync_and_disk_discovery(workspace: Path):
+    from unittest.mock import MagicMock
+    from axon.agent.state import Conversation
+    from axon.agent.subagent import sync_subagents_for_session
+    from axon.commands.builtin import handle_main, handle_subagents
+    from axon.providers.base import ToolResultBlock
+    from axon.session.store import SessionStore
+
+    store = SessionStore(workspace=workspace)
+    store.open("sess_openai_multi")
+    store.append_user("Run multi-agent exploration")
+
+    # Native OpenAI tool call format in conversation messages
+    turn_native = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_sub1",
+                "type": "function",
+                "function": {"name": "Task", "arguments": '{"prompt": "Audit database indexes"}'},
+            },
+            {
+                "id": "call_sub2",
+                "type": "function",
+                "function": {"name": "Task", "arguments": '{"prompt": "Inspect connection pool"}'},
+            },
+        ],
+    }
+    store.append("assistant_turn", {"native": turn_native, "tool_uses": [], "text": ""})
+    store.append_results([
+        ToolResultBlock(tool_use_id="call_sub1", content="3 unused indexes found"),
+        ToolResultBlock(tool_use_id="call_sub2", content="Pool size optimal"),
+    ])
+    mock_agent = MagicMock()
+    mock_agent.session = store
+    mock_agent.conversation = store.load("sess_openai_multi")
+
+    # Sync subagents from OpenAI conversation structure
+    sync_subagents_for_session(mock_agent)
+    tasks = mock_agent.subagents.all_tasks()
+    assert len(tasks) == 2
+    assert tasks[0].index == 1
+    assert "Audit database indexes" in tasks[0].prompt
+    assert tasks[1].index == 2
+    assert "Inspect connection pool" in tasks[1].prompt
+
+    # Open subagent 1, then subagent 2, then /main
+    handle_subagents(mock_agent, "1")
+    assert mock_agent.session.active_session_id == "sess_openai_multi_sub_1"
+
+    handle_subagents(mock_agent, "2")
+    assert mock_agent.session.active_session_id == "sess_openai_multi_sub_2"
+
+    handle_main(mock_agent, "")
+    assert mock_agent.session.active_session_id == "sess_openai_multi"
+    assert len(mock_agent.subagents.all_tasks()) == 2
+
+
 
 
 

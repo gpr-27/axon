@@ -555,45 +555,25 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
     curr_id = agent.session.active_session_id
     parent_id = curr_id.rsplit("_sub_", 1)[0] if "_sub_" in curr_id else curr_id
 
-    # If in subagent session and no local subagents, load parent subagents
-    from axon.agent.subagent import sync_subagents_for_session
+    from axon.agent.subagent import sync_subagents_for_session, SubagentManager
+    if not isinstance(getattr(agent, "subagents", None), SubagentManager):
+        agent.subagents = SubagentManager()
+
     if "_sub_" in curr_id:
         try:
             parent_conv = agent.session.read_conversation(parent_id)
-            from axon.agent.subagent import SubagentManager
-            parent_subagents = SubagentManager()
-            for m in parent_conv.messages:
-                role = m.get("role")
-                content = m.get("content")
-                if role == "assistant" and isinstance(content, list):
-                    for blk in content:
-                        if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Task":
-                            inp = blk.get("input", {})
-                            prompt_txt = inp.get("prompt") or inp.get("subtask") or "Subtask"
-                            task = parent_subagents.register(prompt_txt)
-                            task.status = "completed"
-                            tu_id = blk.get("id")
-                            if tu_id:
-                                for m2 in parent_conv.messages:
-                                    if m2.get("role") == "user" and isinstance(m2.get("content"), list):
-                                        for res_blk in m2["content"]:
-                                            if isinstance(res_blk, dict) and res_blk.get("type") == "tool_result" and res_blk.get("tool_use_id") == tu_id:
-                                                task.result_text = res_blk.get("content", "")
-                                                from axon.agent.state import Conversation
-                                                task.conversation = Conversation([
-                                                    {"role": "user", "content": prompt_txt},
-                                                    {"role": "assistant", "content": task.result_text},
-                                                ])
-                                                break
-            tasks = parent_subagents.all_tasks()
+            class ParentProxy:
+                def __init__(self, conv: Any, sess: Any) -> None:
+                    self.conversation = conv
+                    self.session = sess
+                    self.subagents = SubagentManager()
+            proxy = ParentProxy(parent_conv, agent.session)
+            sync_subagents_for_session(proxy)  # type: ignore
+            tasks = proxy.subagents.all_tasks()
         except Exception:
             tasks = []
     else:
-        from axon.agent.subagent import SubagentManager
-        if not isinstance(getattr(agent, "subagents", None), SubagentManager):
-            agent.subagents = SubagentManager()
-            sync_subagents_for_session(agent)
-        elif not agent.subagents.all_tasks():
+        if not agent.subagents.all_tasks():
             sync_subagents_for_session(agent)
         tasks = agent.subagents.all_tasks()
 

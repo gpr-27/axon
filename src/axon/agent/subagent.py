@@ -181,12 +181,18 @@ def run_subagent(
     )
 
     from axon.agent.loop import Agent
+    from axon.session.store import SessionStore
+    parent_sess_id = parent.session.active_session_id.rsplit("_sub_", 1)[0]
+    sub_sess_id = f"{parent_sess_id}_sub_{task.index}"
+    sub_store = SessionStore(parent.session.workspace, session_dir=parent.session.session_dir)
+    sub_store.open(sub_sess_id)
+
     sub_agent = Agent(
         provider=parent.provider,
         tools=sub_registry,
         permissions=parent.permissions,
         context=parent.context,
-        session=parent.session,
+        session=sub_store,
         ledger=parent.ledger,
         settings=parent.settings.model_copy(update={"max_iterations": max_iterations}),
         on_event=sub_on_event,
@@ -220,71 +226,141 @@ def run_subagent(
         return f"[Subagent #{task.index} failed: {e}]"
 
 def sync_subagents_for_session(agent: Agent) -> None:
-    """Ensure agent.subagents contains only the subagent tasks belonging to the active session."""
-    if not hasattr(agent, "subagents") or agent.subagents is None:
+    """Ensure agent.subagents contains all subagent tasks belonging to the active session."""
+    import json
+    import re
+    from axon.agent.subagent import SubagentManager
+    if not hasattr(agent, "subagents") or agent.subagents is None or not isinstance(agent.subagents, SubagentManager):
         agent.subagents = SubagentManager()
-        return
-    agent.subagents.clear()
-    if not hasattr(agent, "conversation") or not agent.conversation.messages:
-        return
+    else:
+        agent.subagents.clear()
+    parent_sess_id = agent.session.active_session_id.rsplit("_sub_", 1)[0]
+    seen_indices: set[int] = set()
 
-    from axon.providers.base import ToolUseBlock, ToolResultBlock
-    task_idx = 0
-    for m in agent.conversation.messages:
-        role = m.get("role")
-        content = m.get("content")
-        if role == "assistant" and isinstance(content, list):
-            for blk in content:
-                is_task = False
-                inp = {}
-                tu_id = None
-                if isinstance(blk, dict):
-                    if blk.get("type") == "tool_use" and blk.get("name") == "Task":
-                        is_task = True
-                        inp = blk.get("input", {})
-                        tu_id = blk.get("id")
-                elif isinstance(blk, ToolUseBlock) or type(blk).__name__ == "ToolUseBlock":
-                    if getattr(blk, "name", "") == "Task":
-                        is_task = True
-                        inp = getattr(blk, "input", {})
-                        tu_id = getattr(blk, "id", None)
+    # 1. Parse Task tool calls from conversation messages (Anthropic + OpenAI formats)
+    if hasattr(agent, "conversation") and agent.conversation.messages:
+        from axon.providers.base import ToolUseBlock, ToolResultBlock
+        task_idx = 0
+        for m in agent.conversation.messages:
+            role = m.get("role")
+            content = m.get("content")
+            task_calls: list[tuple[str, dict[str, Any]]] = []  # (tool_use_id, input_dict)
 
-                if is_task:
-                    task_idx += 1
-                    prompt_txt = inp.get("prompt") or inp.get("subtask") or f"Subtask {task_idx}"
-                    task = agent.subagents.register(prompt_txt)
-                    task.status = "completed"
-                    if tu_id:
-                        for m2 in agent.conversation.messages:
-                            if m2.get("role") == "user" and isinstance(m2.get("content"), list):
-                                for res_blk in m2["content"]:
-                                    res_match = False
-                                    res_content = ""
-                                    if isinstance(res_blk, dict):
-                                        if res_blk.get("tool_use_id") == tu_id:
-                                            res_match = True
-                                            res_content = res_blk.get("content", "")
-                                    elif isinstance(res_blk, ToolResultBlock) or type(res_blk).__name__ == "ToolResultBlock":
-                                        if getattr(res_blk, "tool_use_id", None) == tu_id:
-                                            res_match = True
-                                            res_content = getattr(res_blk, "content", "")
+            # Anthropic style: list of blocks in content
+            if role == "assistant" and isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Task":
+                        task_calls.append((blk.get("id") or "", blk.get("input", {})))
+                    elif isinstance(blk, ToolUseBlock) or type(blk).__name__ == "ToolUseBlock":
+                        if getattr(blk, "name", "") == "Task":
+                            task_calls.append((getattr(blk, "id", "") or "", getattr(blk, "input", {})))
 
-                                    if res_match:
-                                        task.result_text = res_content
-                                        from axon.agent.state import Conversation
-                                        sub_file = getattr(agent, "session", None) and (agent.session.session_dir / f"{agent.session.active_session_id}_sub_{task_idx}.jsonl")
-                                        if sub_file and sub_file.exists():
-                                            try:
-                                                task.conversation = agent.session.read_conversation(f"{agent.session.active_session_id}_sub_{task_idx}")
-                                            except Exception:
-                                                task.conversation = Conversation([
-                                                    {"role": "user", "content": prompt_txt},
-                                                    {"role": "assistant", "content": task.result_text},
-                                                ])
-                                        else:
+            # OpenAI style: tool_calls array in message
+            if role == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    fn_name = ""
+                    fn_args = {}
+                    if isinstance(tc, dict):
+                        fn_obj = tc.get("function", {})
+                        fn_name = fn_obj.get("name", "")
+                        raw_args = fn_obj.get("arguments", {})
+                        if isinstance(raw_args, str):
+                            try:
+                                fn_args = json.loads(raw_args)
+                            except Exception:
+                                fn_args = {"prompt": raw_args}
+                        elif isinstance(raw_args, dict):
+                            fn_args = raw_args
+                        tc_id = tc.get("id", "")
+                    else:
+                        fn_name = getattr(getattr(tc, "function", None), "name", "")
+                        raw_args = getattr(getattr(tc, "function", None), "arguments", {})
+                        if isinstance(raw_args, str):
+                            try:
+                                fn_args = json.loads(raw_args)
+                            except Exception:
+                                fn_args = {"prompt": raw_args}
+                        elif isinstance(raw_args, dict):
+                            fn_args = raw_args
+                        tc_id = getattr(tc, "id", "")
+                    if fn_name == "Task":
+                        task_calls.append((tc_id, fn_args))
+
+            for tu_id, inp in task_calls:
+                task_idx += 1
+                seen_indices.add(task_idx)
+                prompt_txt = inp.get("prompt") or inp.get("subtask") or f"Subtask {task_idx}"
+                task = agent.subagents.register(prompt_txt)
+                task.status = "completed"
+                if tu_id:
+                    for m2 in agent.conversation.messages:
+                        m2_content = m2.get("content")
+                        if m2.get("role") == "user" and isinstance(m2_content, list):
+                            for res_blk in m2_content:
+                                res_match = False
+                                res_content = ""
+                                if isinstance(res_blk, dict):
+                                    if res_blk.get("tool_use_id") == tu_id:
+                                        res_match = True
+                                        res_content = res_blk.get("content", "")
+                                elif isinstance(res_blk, ToolResultBlock) or type(res_blk).__name__ == "ToolResultBlock":
+                                    if getattr(res_blk, "tool_use_id", None) == tu_id:
+                                        res_match = True
+                                        res_content = getattr(res_blk, "content", "")
+
+                                if res_match:
+                                    task.result_text = res_content
+                                    from axon.agent.state import Conversation
+                                    sub_file = getattr(agent, "session", None) and (agent.session.session_dir / f"{parent_sess_id}_sub_{task_idx}.jsonl")
+                                    if sub_file and sub_file.exists():
+                                        try:
+                                            task.conversation = agent.session.read_conversation(f"{parent_sess_id}_sub_{task_idx}")
+                                        except Exception:
                                             task.conversation = Conversation([
                                                 {"role": "user", "content": prompt_txt},
                                                 {"role": "assistant", "content": task.result_text},
                                             ])
-                                        break
+                                    else:
+                                        task.conversation = Conversation([
+                                            {"role": "user", "content": prompt_txt},
+                                            {"role": "assistant", "content": task.result_text},
+                                        ])
+                                    break
+
+    # 2. Discover any additional subagent session files on disk (_sub_*.jsonl)
+    s_dir = getattr(agent, "session", None) and getattr(agent.session, "session_dir", None)
+    if s_dir and s_dir.exists():
+        pattern = f"{parent_sess_id}_sub_*.jsonl"
+        for sub_path in sorted(s_dir.glob(pattern)):
+            stem = sub_path.stem
+            m_idx = re.search(r"_sub_(\d+)$", stem)
+            if not m_idx:
+                continue
+            f_idx = int(m_idx.group(1))
+            if f_idx in seen_indices:
+                continue
+            seen_indices.add(f_idx)
+            try:
+                sub_conv = agent.session.read_conversation(stem)
+                p_text = ""
+                r_text = ""
+                for sm in sub_conv.messages:
+                    if sm.get("role") == "user" and not p_text:
+                        p_text = sm.get("content", "")
+                        if isinstance(p_text, list):
+                            p_text = "".join(str(x) for x in p_text)
+                    elif sm.get("role") == "assistant":
+                        c = sm.get("content", "")
+                        if isinstance(c, str) and c:
+                            r_text = c
+                if not p_text:
+                    p_text = f"Subagent Task #{f_idx}"
+                task = agent.subagents.register(p_text)
+                task.index = f_idx
+                task.id = f"sub-{f_idx}"
+                task.status = "completed"
+                task.result_text = r_text
+                task.conversation = sub_conv
+            except Exception:
+                pass
 

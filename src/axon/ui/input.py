@@ -485,31 +485,35 @@ def read_input(
 
             # Down Arrow -> Navigate command history forward
             if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                if matching_files and file_popup_open and ("@" in buf_str):
+                if matching_files and file_popup_open and ("@" in buf_str) and history_idx == len(history):
                     selected_file_idx = (selected_file_idx + 1) % len(matching_files)
                     draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith("/"):
-                    selected_cmd_idx = (selected_cmd_idx + 1) % len(matching_cmds)
+                elif matching_cmds and cmd_popup_open and buf_str.startswith("/") and history_idx == len(history) and len(matching_cmds) > 1 and selected_cmd_idx < len(matching_cmds) - 1:
+                    selected_cmd_idx = selected_cmd_idx + 1
                     draw()
                 elif history_idx < len(history) - 1:
                     history_idx += 1
                     buffer = list(history[history_idx])
                     cursor_pos = len(buffer)
+                    cmd_popup_open = False
+                    file_popup_open = False
                     draw()
                 elif history_idx == len(history) - 1:
                     history_idx = len(history)
                     buffer = list(saved_draft)
                     cursor_pos = len(buffer)
+                    cmd_popup_open = True
+                    file_popup_open = True
                     draw()
                 continue
 
             # Up Arrow -> Navigate command history backward
             if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                if matching_files and file_popup_open and ("@" in buf_str):
+                if matching_files and file_popup_open and ("@" in buf_str) and history_idx == len(history):
                     selected_file_idx = (selected_file_idx - 1) % len(matching_files)
                     draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith("/"):
-                    selected_cmd_idx = (selected_cmd_idx - 1) % len(matching_cmds)
+                elif matching_cmds and cmd_popup_open and buf_str.startswith("/") and history_idx == len(history) and len(matching_cmds) > 1 and selected_cmd_idx > 0:
+                    selected_cmd_idx = selected_cmd_idx - 1
                     draw()
                 elif history and history_idx > 0:
                     if history_idx == len(history):
@@ -517,6 +521,8 @@ def read_input(
                     history_idx -= 1
                     buffer = list(history[history_idx])
                     cursor_pos = len(buffer)
+                    cmd_popup_open = False
+                    file_popup_open = False
                     draw()
                 continue
 
@@ -693,6 +699,7 @@ def read_input(
                 if cursor_pos > 0:
                     buffer.pop(cursor_pos - 1)
                     cursor_pos -= 1
+                    history_idx = len(history)
                     selected_cmd_idx = 0
                     selected_file_idx = 0
                     cmd_popup_open = True
@@ -743,6 +750,9 @@ def read_input(
                     elif ord(ch) >= 32 or ch == "\t":
                         buffer.insert(cursor_pos, ch)
                     cursor_pos += 1
+                history_idx = len(history)
+                cmd_popup_open = True
+                file_popup_open = True
 
                 # Check if buffer now contains an uncompacted image path
                 buf_full = "".join(buffer)
