@@ -39,24 +39,24 @@ class SessionStore:
             self.session_dir = Path.home() / ".axon" / "sessions"
 
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        from datetime import datetime
-        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.active_session_id: str = f"session_{date_str}"
+        self.active_session_id: str = self._generate_session_id()
         self.active_file: Path = self.session_dir / f"{self.active_session_id}.jsonl"
+
+    def _generate_session_id(self) -> str:
+        """Generate automatic session ID in the format: session_date_project_root_unique_code."""
+        from datetime import datetime
+        import uuid
+        import re
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ws_name = re.sub(r'[^a-zA-Z0-9_-]+', '_', self.workspace.name).strip('_') or "workspace"
+        unique_code = uuid.uuid4().hex[:6]
+        return f"session_{date_str}_{ws_name}_{unique_code}"
 
     def open(self, session_id: str | None = None) -> str:
         if session_id:
             self.active_session_id = session_id
         else:
-            from datetime import datetime
-            date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_id = f"session_{date_str}"
-            target_id = base_id
-            counter = 1
-            while (self.session_dir / f"{target_id}.jsonl").exists() or target_id == getattr(self, "active_session_id", None):
-                target_id = f"{base_id}_{counter}"
-                counter += 1
-            self.active_session_id = target_id
+            self.active_session_id = self._generate_session_id()
         self.active_file = self.session_dir / f"{self.active_session_id}.jsonl"
         return self.active_session_id
 
