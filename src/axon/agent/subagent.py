@@ -175,9 +175,10 @@ def run_subagent(
             if txt and len(txt) > 15:
                 task.add_log(f"✍️ Generating: {txt[:55]}...")
 
+    is_plan_mode = getattr(parent.settings, "mode", "default") == "plan"
     sub_registry = parent.registry.subset(
         names=[t.name for t in parent.registry.all_tools() if t.name != "Task"],
-        readonly_only=True,
+        readonly_only=is_plan_mode,
     )
 
     from axon.agent.loop import Agent
@@ -200,12 +201,14 @@ def run_subagent(
 
     try:
         sub_prompt = (
-            f"[Subagent Research Task]: {prompt}\n\n"
-            "Format your final findings cleanly and neatly for terminal viewing:\n"
-            "• Executive Summary: 1-2 concise sentences answering the request.\n"
-            "• Key Findings: Bullet points with bold titles, exact file paths, lines, and metrics.\n"
-            "• Structured Data: Use clean Markdown tables (| Item | Details |) when comparing multiple items or components.\n"
-            "• Conclusion: Clear outcome, PASS/FAIL status, or recommended next steps."
+            f"[Subagent Task #{task.index}]: {prompt}\n\n"
+            "Guidelines:\n"
+            "• You have full access to workspace tools (Write, Edit, MultiEdit, Patch, Bash, Ls, Grep, etc.). Perform any requested actions, file modifications, or commands directly.\n"
+            "• Format your final findings/summary cleanly and neatly for terminal viewing:\n"
+            "  - Executive Summary: 1-2 concise sentences of what was accomplished.\n"
+            "  - Key Actions & Findings: Bullet points with bold titles, exact file paths, lines, and metrics.\n"
+            "  - Structured Data: Use clean Markdown tables (| Item | Details |) when comparing multiple items or components.\n"
+            "  - Conclusion: Clear outcome, PASS/FAIL status, or recommended next steps."
         )
         result = sub_agent.run_turn(sub_prompt)
         final_text = result.final_text

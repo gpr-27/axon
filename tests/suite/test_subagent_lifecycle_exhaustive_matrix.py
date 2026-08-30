@@ -107,3 +107,39 @@ def test_sync_subagents_for_session_multiple_sessions(workspace: Path):
     ])
     sync_subagents_for_session(agent)
     assert len(agent.subagents.all_tasks()) == 0
+
+def test_subagent_tool_registry_provisioning():
+    from axon.tools.registry import create_default_registry
+    from axon.config import Settings
+
+    parent_registry = create_default_registry()
+    all_names = {t.name for t in parent_registry.all_tools()}
+    assert "Write" in all_names
+    assert "Edit" in all_names
+    assert "Bash" in all_names
+    assert "Task" in all_names
+
+    # In default/acceptEdits/bypass mode: subagents get all tools except recursive 'Task'
+    sub_reg_normal = parent_registry.subset(
+        names=[t.name for t in parent_registry.all_tools() if t.name != "Task"],
+        readonly_only=False,
+    )
+    sub_names = {t.name for t in sub_reg_normal.all_tools()}
+    assert "Task" not in sub_names
+    assert "Write" in sub_names
+    assert "Edit" in sub_names
+    assert "Bash" in sub_names
+    assert "Read" in sub_names
+
+    # In plan mode: subagents must be strictly readonly
+    sub_reg_plan = parent_registry.subset(
+        names=[t.name for t in parent_registry.all_tools() if t.name != "Task"],
+        readonly_only=True,
+    )
+    plan_names = {t.name for t in sub_reg_plan.all_tools()}
+    assert "Task" not in plan_names
+    assert "Write" not in plan_names
+    assert "Edit" not in plan_names
+    assert "Bash" not in plan_names
+    assert "Read" in plan_names
+
