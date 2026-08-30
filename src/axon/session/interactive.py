@@ -6,6 +6,7 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from axon.session.store import SessionStore
+from axon.ui.markdown import format_markdown
 from axon.ui.picker import pick
 from axon.ui.theme import (
     BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, LBLUE, MINT, RST, ROSE, SLATE, TEAL, WHITE, term_width,

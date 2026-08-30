@@ -181,15 +181,6 @@ def handle_mode(agent: Agent, arg: str) -> CommandResult:
         print(f"\n  {TEAL}✓ Switched permission mode to {BOLD}{chosen}{RST}\n")
     return CommandResult(handled=True)
 
-def handle_tools(agent: Agent, arg: str) -> CommandResult:
-    print(f"\n{GOLD}{BOLD}=== Registered Tools ({len(agent.registry.all_tools())}) ==={RST}")
-    for t in agent.registry.all_tools():
-        perm = f"{SLATE}[{t.default_permission}]{RST}"
-        ro = f"{TEAL}[readonly]{RST}" if t.readonly else ""
-        print(f"  {BOLD}{t.name:<14}{RST} {perm} {ro}\n    {SLATE}{t.description.splitlines()[0]}{RST}")
-    print()
-    return CommandResult(handled=True)
-
 def handle_context(agent: Agent, arg: str) -> CommandResult:
     from axon.agent.prompt import build_system
     system_blocks = build_system(agent.settings, agent.registry, list(agent.skills.skills.values()))
@@ -1292,21 +1283,10 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         else:
             print(f"\n  {SLATE}No file modifications to rewind.{RST}\n")
         return CommandResult(handled=True)
-    elif cmd == "/init":
-        agents_file = agent.settings.workspace / "AGENTS.md"
-        if agents_file.exists():
-            print(f"\n  {SLATE}AGENTS.md already exists in {agent.settings.workspace}.{RST}\n")
-        else:
-            sample_content = f"# {agent.settings.workspace.name} Guidelines\n\n## Build & Test Commands\n- Build: `pytest`\n- Style: Strict typing with Python 3.11+\n\n## Project Architecture\n- Source: `src/`\n- Tests: `tests/`\n"
-            agents_file.write_text(sample_content, encoding="utf-8")
-            print(f"\n  {TEAL}✓ Initialized {BOLD}AGENTS.md{RST}{TEAL} in project root.{RST}\n")
-        return CommandResult(handled=True)
     elif cmd == "/doctor":
         return handle_doctor(agent, arg)
     elif cmd == "/export":
         return handle_export(agent, arg)
-    elif cmd in ("/tools", "/tool"):
-        return handle_tools(agent, arg)
 
     # Check for custom / bundled skills (e.g. /debug, /verify, /code-review, or custom user skills)
     skill_key = cmd.lstrip("/")

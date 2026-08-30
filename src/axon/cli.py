@@ -23,6 +23,7 @@ from axon.ui.approve import ask_approval
 from axon.ui.input import read_input
 from axon.ui.live_turn import run_interactive_turn
 from axon.ui.render import Renderer
+from axon.ui.markdown import format_markdown
 from axon.commands.builtin import dispatch_command
 from axon.ui.theme import (
     BOLD, CYAN, DARK_SLATE, DIM, GOLD, LBLUE, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE,

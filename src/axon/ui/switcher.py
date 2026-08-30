@@ -60,7 +60,9 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
         target_session_dir = Path.home() / ".axon" / "sessions"
 
     target_session_dir.mkdir(parents=True, exist_ok=True)
-    files = sorted(target_session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    all_files = sorted(target_session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Exclude sub-agent sessions (_sub_*) — they are only viewable via /subagents
+    files = [f for f in all_files if "_sub_" not in f.stem]
 
     sessions: list[DashboardSession] = []
     target_files = files[:limit] if limit is not None else files

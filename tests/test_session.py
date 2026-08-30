@@ -411,6 +411,40 @@ def test_subagent_separate_and_combined_cost_accounting(workspace: Path):
     res_cost = handle_cost(mock_agent, "")
     assert res_cost.handled is True
 
+def test_dashboard_and_store_filter_out_subagent_sessions(tmp_path: Path) -> None:
+    """Verify that sub-agent session files (_sub_*) are excluded from dashboard and list_recent."""
+    from axon.session.store import SessionStore
+    from axon.ui.switcher import load_dashboard_sessions
+
+    s_dir = tmp_path / "sessions"
+    s_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create main sessions
+    (s_dir / "session_1001.jsonl").write_text('{"type": "user_message", "data": {"content": "Main task 1"}}\n')
+    (s_dir / "session_1002.jsonl").write_text('{"type": "user_message", "data": {"content": "Main task 2"}}\n')
+    # Create subagent sessions
+    (s_dir / "session_1001_sub_1.jsonl").write_text('{"type": "user_message", "data": {"content": "Sub task 1"}}\n')
+    (s_dir / "session_1001_sub_2.jsonl").write_text('{"type": "user_message", "data": {"content": "Sub task 2"}}\n')
+    (s_dir / "session_1002_sub_1.jsonl").write_text('{"type": "user_message", "data": {"content": "Sub task 3"}}\n')
+
+    # 1. SessionStore list_recent should only return the 2 main sessions
+    store = SessionStore(workspace=tmp_path, session_dir=s_dir)
+    recent = store.list_recent()
+    recent_ids = [m.session_id for m in recent]
+    assert len(recent_ids) == 2
+    assert "session_1001" in recent_ids
+    assert "session_1002" in recent_ids
+    assert not any("_sub_" in sid for sid in recent_ids)
+
+    # 2. load_dashboard_sessions should only return the 2 main sessions
+    dash_sessions = load_dashboard_sessions(tmp_path, "session_1001", session_dir=s_dir)
+    dash_ids = [s.id for s in dash_sessions]
+    assert len(dash_ids) == 2
+    assert "session_1001" in dash_ids
+    assert "session_1002" in dash_ids
+    assert not any("_sub_" in sid for sid in dash_ids)
+
+
 
 
 

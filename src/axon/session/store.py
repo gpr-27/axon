@@ -211,7 +211,9 @@ class SessionStore:
         return total_ledger
 
     def list_recent(self, limit: int | None = None) -> list[SessionMeta]:
-        files = sorted(self.session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        all_files = sorted(self.session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Exclude sub-agent sessions (_sub_*) — only visible via /subagents
+        files = [f for f in all_files if "_sub_" not in f.stem]
         items: list[SessionMeta] = []
         target_files = files[:limit] if limit is not None else files
         for f in target_files:
