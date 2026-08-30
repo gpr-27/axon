@@ -259,8 +259,9 @@ def handle_cost(agent: Agent, arg: str) -> CommandResult:
         if hasattr(agent, "session") and hasattr(agent.session, "load_workspace_ledger"):
             ws_ledger = agent.session.load_workspace_ledger(model_name)
             total_toks = ws_ledger.total_input_tokens + ws_ledger.total_output_tokens
-            if ws_ledger.total() > agent.ledger.total() or total_toks > (agent.ledger.total_input_tokens + agent.ledger.total_output_tokens):
-                print(f"  {SLATE}Workspace Lifetime Total : {GOLD}${ws_ledger.total():.5f}{SLATE} ({total_toks:,} tokens recorded){RST}\n")
+            chats_cnt = getattr(ws_ledger, "chat_count", 0)
+            chat_label = f" across {chats_cnt} chat{'s' if chats_cnt != 1 else ''}" if chats_cnt > 0 else ""
+            print(f"  {SLATE}Workspace Lifetime Total : {GOLD}${ws_ledger.total():.5f}{SLATE} ({total_toks:,} tokens recorded{chat_label}){RST}\n")
     except Exception:
         pass
     return CommandResult(handled=True)

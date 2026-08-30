@@ -444,6 +444,46 @@ def test_dashboard_and_store_filter_out_subagent_sessions(tmp_path: Path) -> Non
     assert "session_1002" in dash_ids
     assert not any("_sub_" in sid for sid in dash_ids)
 
+def test_workspace_lifetime_ledger_incorporates_subagents_and_counts_normal_chats(tmp_path: Path) -> None:
+    """Verify that load_workspace_ledger incorporates subagent tokens/costs and counts only normal chats."""
+    from axon.session.store import SessionStore
+
+    s_dir = tmp_path / "sessions"
+    s_dir.mkdir(parents=True, exist_ok=True)
+
+    # Chat 1: Main agent (1,000 in, 100 out) + Subagent 1 (2,000 in, 200 out)
+    f1 = s_dir / "session_1.jsonl"
+    f1.write_text(
+        '{"type": "user_message", "data": {"content": "Task 1"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Done", "usage": {"input": 1000, "output": 100}}}\n'
+    )
+    f1_sub = s_dir / "session_1_sub_1.jsonl"
+    f1_sub.write_text(
+        '{"type": "user_message", "data": {"content": "Sub 1"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Sub done", "usage": {"input": 2000, "output": 200}}}\n'
+    )
+
+    # Chat 2: Main agent only (3,000 in, 300 out)
+    f2 = s_dir / "session_2.jsonl"
+    f2.write_text(
+        '{"type": "user_message", "data": {"content": "Task 2"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Done 2", "usage": {"input": 3000, "output": 300}}}\n'
+    )
+
+    store = SessionStore(workspace=tmp_path, session_dir=s_dir)
+    ws_ledger = store.load_workspace_ledger("claude-opus-5")
+
+    # Chat count should equal normal chats (2), not including subagents
+    assert ws_ledger.chat_count == 2
+
+    # Total tokens = Chat 1 (1100) + Sub 1 (2200) + Chat 2 (3300) = 6600
+    expected_input = 1000 + 2000 + 3000
+    expected_output = 100 + 200 + 300
+    assert ws_ledger.total_input_tokens == expected_input
+    assert ws_ledger.total_output_tokens == expected_output
+    assert float(ws_ledger.total_cost) > 0.0
+
+
 
 
 

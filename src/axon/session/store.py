@@ -196,11 +196,15 @@ class SessionStore:
         return ledger
 
     def load_workspace_ledger(self, model: str) -> Ledger:
-        """Reconstruct cumulative ledger across all historical workspace sessions."""
+        """Reconstruct cumulative ledger across all historical workspace sessions (incorporating subagent costs into normal chats)."""
         total_ledger = Ledger()
-        files = sorted(self.session_dir.glob("*.jsonl"))
-        for f in files:
-            s_ledger = self.load_ledger(f.stem, model)
+        all_files = sorted(self.session_dir.glob("*.jsonl"))
+        main_files = [f for f in all_files if "_sub_" not in f.stem]
+        total_ledger.chat_count = len(main_files)
+
+        for f in main_files:
+            main_stem = f.stem
+            s_ledger = self.load_ledger(main_stem, model)
             total_ledger.total_input_tokens += s_ledger.total_input_tokens
             total_ledger.total_output_tokens += s_ledger.total_output_tokens
             total_ledger.total_cache_read_tokens += s_ledger.total_cache_read_tokens
@@ -208,6 +212,18 @@ class SessionStore:
             total_ledger.total_reasoning_tokens += s_ledger.total_reasoning_tokens
             total_ledger.total_cost += s_ledger.total_cost
             total_ledger.turn_costs.extend(s_ledger.turn_costs)
+
+            # Include any subagents belonging to this main chat
+            for sub_file in sorted(self.session_dir.glob(f"{main_stem}_sub_*.jsonl")):
+                sub_l = self.load_ledger(sub_file.stem, model)
+                total_ledger.total_input_tokens += sub_l.total_input_tokens
+                total_ledger.total_output_tokens += sub_l.total_output_tokens
+                total_ledger.total_cache_read_tokens += sub_l.total_cache_read_tokens
+                total_ledger.total_cache_write_tokens += sub_l.total_cache_write_tokens
+                total_ledger.total_reasoning_tokens += sub_l.total_reasoning_tokens
+                total_ledger.total_cost += sub_l.total_cost
+                total_ledger.turn_costs.extend(sub_l.turn_costs)
+
         return total_ledger
 
     def list_recent(self, limit: int | None = None) -> list[SessionMeta]:

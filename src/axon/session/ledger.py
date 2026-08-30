@@ -15,6 +15,7 @@ class Ledger:
         self.total_reasoning_tokens: int = 0
         self.total_cost: Decimal = Decimal("0.0")
         self.turn_costs: list[Decimal] = []
+        self.chat_count: int = 0
 
     def clear(self) -> None:
         self.total_input_tokens = 0
@@ -24,6 +25,7 @@ class Ledger:
         self.total_reasoning_tokens = 0
         self.total_cost = Decimal("0.0")
         self.turn_costs.clear()
+        self.chat_count = 0
 
     def record(self, model: str, usage: Usage, *, tag: str = "main") -> Decimal:
         pricing = PRICING.get(model, {"input": 3.0, "output": 15.0, "cache_read": 0.6})
