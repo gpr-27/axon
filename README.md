@@ -103,6 +103,34 @@ axon
 
 ---
 
+### 🩺 Verifying Model Connectivity (`check_models.py`)
+
+You can test and verify connectivity and response latency across all 5 supported models (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`) using the included diagnostic script:
+
+```bash
+# Run a quick one-shot validation across all models:
+python3 check_models.py --once
+
+# Or run continuous health monitoring:
+python3 check_models.py
+```
+
+**Sample Output:**
+```
+⚡ Testing connectivity for 5 models (Single validation pass · Base: https://agentrouter.org)...
+
+=== Model Connectivity Results ===
+deepseek-v4-flash    | ● WORKING |    482 ms | OK (DeepSeek V4 Flash)
+gpt-5.6-sol          | ● WORKING |    620 ms | OK (GPT-5.6 Sol)
+glm-5.3              | ● WORKING |    540 ms | OK (GLM-5.3)
+claude-opus-5        | ● WORKING |    710 ms | OK (Claude Opus 5)
+claude-opus-4-8      | ● WORKING |    695 ms | OK (Claude Opus 4.8)
+
+✓ Model verification complete.
+```
+
+---
+
 ## 🧠 How Axon Works (System Overview)
 
 Axon operates as an autonomous, multi-turn **ReAct (Reasoning + Action)** agent loop with built-in subagent fan-out, persistent session memory, and atomic tool safety invariants:
