@@ -44,7 +44,7 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 | `/context` | View active context budget, token breakdown, and compaction limit |
 | `/compact` | Compact conversation history while preserving key context |
 | `/window [turns]` | Adjust sliding context window size (e.g. `/window 10` or `/window 0` for all) |
-| `/cost` | View session billing ledger, token counts, and prompt cache hits |
+| `/cost` | View session billing ledger, token counts, and real-time cost |
 | `/payload [full]` | Inspect exact prompt payload and tool results sent to model |
 
 ### 📜 History & File Revisions
@@ -438,8 +438,7 @@ def handle_payload(agent: Agent, arg: str) -> CommandResult:
     print(f"\n  {TEAL}{BOLD}┌── [1] SYSTEM PROMPT ({len(system_blocks)} blocks · ~{sys_tokens:,} tokens) {'─' * 28}{RST}")
     for idx, b in enumerate(system_blocks, 1):
         txt = str(b.get("text", "")).strip()
-        has_cache = f" {MINT}[cache_control: ephemeral]{RST}" if "cache_control" in b else ""
-        print(f"  {DARK_SLATE}│ Block {idx}{has_cache}:{RST}")
+        print(f"  {DARK_SLATE}│ Block {idx}:{RST}")
         lines = txt.splitlines()
         if is_full or is_sys or len(lines) <= 6:
             for l in lines:
@@ -468,70 +467,81 @@ def handle_payload(agent: Agent, arg: str) -> CommandResult:
         for i, m in enumerate(msgs, 1):
             role = m.get("role", "unknown").upper()
             clr = TEAL if role == "USER" else (GOLD if role == "ASSISTANT" else LBLUE)
-            content = m.get("content", "")
-            print(f"  {DARK_SLATE}│{RST} {clr}{BOLD}[Msg {i}] {role}{RST}")
+            print(f"\n  {DARK_SLATE}├──{RST} {clr}{BOLD}[{i}] {role}:{RST}")
+            content = m.get("content")
             if isinstance(content, list):
-                for b in content:
-                    if isinstance(b, dict):
-                        b_type = b.get("type", "")
-                        if b_type == "tool_use":
-                            print(f"  {DARK_SLATE}│  ⏺ ToolUse: {b.get('name')}({b.get('input')}){RST}")
+                for block in content:
+                    if isinstance(block, dict):
+                        b_type = block.get("type", "")
+                        if b_type == "text":
+                            t_lines = str(block.get("text", "")).splitlines()
+                            for l in (t_lines if is_full else t_lines[:6]):
+                                print(f"  {DARK_SLATE}│{RST} {WHITE}{l}{RST}")
+                            if not is_full and len(t_lines) > 6:
+                                print(f"  {DARK_SLATE}│{RST} {SLATE}... ({len(t_lines) - 6} lines hidden) ...{RST}")
+                        elif b_type == "tool_use":
+                            print(f"  {DARK_SLATE}│{RST} {GOLD}🛠️  Tool Use: {block.get('name')}({block.get('input')}){RST}")
                         elif b_type == "tool_result":
-                            c_prev = str(b.get("content", "")).strip().replace("\n", " ")[:100]
-                            print(f"  {DARK_SLATE}│  └─ Result [{b.get('tool_use_id')}]: {c_prev}...{RST}")
-                        elif b_type == "image":
-                            media_t = b.get("source", {}).get("media_type", "image/png")
-                            print(f"  {DARK_SLATE}│  🖼️  Image Attachment: {CYAN}{media_t}{RST} {SLATE}(~1,200 vision tokens){RST}")
-                        elif b_type == "text":
-                            print(f"  {DARK_SLATE}│  {WHITE}{b.get('text', '')}{RST}")
-            else:
-                txt = str(content)
-                lines = txt.splitlines()
-                if is_full or len(lines) <= 8:
-                    for l in lines:
-                        print(f"  {DARK_SLATE}│  {WHITE}{l}{RST}")
-                else:
-                    for l in lines[:4]:
-                        print(f"  {DARK_SLATE}│  {WHITE}{l}{RST}")
-                    print(f"  {DARK_SLATE}│  {SLATE}... ({len(lines)-6} lines hidden · type '/payload full') ...{RST}")
-                    for l in lines[-2:]:
-                        print(f"  {DARK_SLATE}│  {WHITE}{l}{RST}")
-    print(f"  {GOLD}{BOLD}└──{'─' * 70}{RST}")
-    print(f"\n{GOLD}{'═' * 76}{RST}\n")
+                            res_txt = str(block.get("content", ""))
+                            r_lines = res_txt.splitlines()
+                            print(f"  {DARK_SLATE}│{RST} {CYAN}✓ Tool Result [{block.get('tool_use_id')}]:{RST}")
+                            for l in (r_lines if is_full else r_lines[:4]):
+                                print(f"  {DARK_SLATE}│{RST}   {SLATE}{l}{RST}")
+                            if not is_full and len(r_lines) > 4:
+                                print(f"  {DARK_SLATE}│{RST}   {SLATE}... ({len(r_lines) - 4} lines hidden) ...{RST}")
+            elif isinstance(content, str):
+                c_lines = content.splitlines()
+                for l in (c_lines if is_full else c_lines[:6]):
+                    print(f"  {DARK_SLATE}│{RST} {WHITE}{l}{RST}")
+                if not is_full and len(c_lines) > 6:
+                    print(f"  {DARK_SLATE}│{RST} {SLATE}... ({len(c_lines) - 6} lines hidden) ...{RST}")
+
+    print(f"  {GOLD}{BOLD}└──{'─' * 70}{RST}\n")
     return CommandResult(handled=True)
 
-def handle_breakdown(agent: Agent, arg: str) -> CommandResult:
-    """Displays comprehensive breakdown of exact prompt components, previous messages, last input, and token totals matching the turn footer."""
-    import json
+def handle_breakdown(agent: Agent, arg: str = "") -> CommandResult:
+    """Detailed visual breakdown of active input payload and token reconciliation."""
     from axon.agent.prompt import build_system
-    from axon.agent.state import estimate_content_tokens
+    import json
     from axon.ui.theme import (
-        BOLD, CYAN, DARK_SLATE, DIM, GOLD, LBLUE, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE, term_width,
+        BOLD, CYAN, DARK_SLATE, GOLD, LBLUE, MINT, PURPLE, RST, SLATE, TEAL, WHITE, term_width,
     )
 
-    # 1. System Prompt Breakdown
     system_blocks = build_system(agent.settings, agent.registry, list(agent.skills.skills.values()))
-    sys_text = "".join(str(b.get("text", "")) for b in system_blocks)
-    sys_tokens = max(1, int(len(sys_text) / 3.7))
-
-    # 2. Tool Definitions Breakdown
     tool_schemas = agent.registry.schemas(
         provider_style="anthropic" if agent.provider.name == "anthropic" else "openai"
     )
+
+    sys_text = "".join(str(b.get("text", "")) for b in system_blocks)
+    sys_tokens = max(1, int(len(sys_text) / 3.7))
     tool_json = json.dumps(tool_schemas, separators=(",", ":"))
     tool_tokens = max(1, int(len(tool_json) / 4.0))
 
-    # 3. Conversation Messages
-    msgs = agent.conversation.messages
-    total_msgs = len(msgs)
+    messages = agent.conversation.messages
+    total_msgs = len(messages)
 
-    prev_msgs = msgs[:-1] if total_msgs > 0 else []
-    last_msg = msgs[-1] if total_msgs > 0 else None
+    if total_msgs > 0:
+        prev_msgs = messages[:-1]
+        last_msg = messages[-1]
+    else:
+        prev_msgs = []
+        last_msg = None
+
+    def estimate_content_tokens(content: Any) -> int:
+        if isinstance(content, str):
+            return max(1, int(len(content) / 3.7))
+        elif isinstance(content, list):
+            tot = 0
+            for b in content:
+                if isinstance(b, dict):
+                    txt = str(b.get("text") or b.get("content") or b.get("input") or "")
+                    tot += max(1, int(len(txt) / 3.7))
+            return max(1, tot)
+        return 1
 
     prev_tokens = sum(estimate_content_tokens(m.get("content", "")) for m in prev_msgs)
     last_tokens = estimate_content_tokens(last_msg.get("content", "")) if last_msg else 0
     conv_tokens = prev_tokens + last_tokens
-
     total_payload_tokens = sys_tokens + tool_tokens + conv_tokens
 
     # Check if last turn API usage is recorded in ledger
@@ -541,9 +551,7 @@ def handle_breakdown(agent: Agent, arg: str) -> CommandResult:
 
     print(f"\n{GOLD}{BOLD}=== Active Input Payload Breakdown & Token Matching ==={RST}")
     if last_usage and last_usage.input > 0:
-        pct = min(100.0, (last_usage.cache_read / last_usage.input * 100))
-        cache_str = f" ({last_usage.input/1000:.1f}k in · {pct:.0f}% cached)" if last_usage.cache_read > 0 else f" ({last_usage.input/1000:.1f}k in)"
-        print(f"  {SLATE}Model:{RST} {WHITE}{agent.settings.model}{RST}  {SLATE}|  API Ingested:{RST} {GOLD}{last_usage.input:,} tokens{cache_str}{RST}\n")
+        print(f"  {SLATE}Model:{RST} {WHITE}{agent.settings.model}{RST}  {SLATE}|  API Ingested:{RST} {GOLD}{last_usage.input:,} tokens{RST}\n")
     else:
         print(f"  {SLATE}Model:{RST} {WHITE}{agent.settings.model}{RST}  {SLATE}|  Total Payload Ingested:{RST} {GOLD}~{total_payload_tokens:,} tokens{RST}\n")
 
@@ -553,8 +561,7 @@ def handle_breakdown(agent: Agent, arg: str) -> CommandResult:
         txt = str(b.get("text", "")).strip()
         b_tok = max(1, int(len(txt) / 3.7))
         first_l = txt.splitlines()[0][:50] if txt else "System Block"
-        has_cache = f" {MINT}[cache_control: ephemeral]{RST}" if "cache_control" in b else ""
-        print(f"  {TEAL}│{RST}  {CYAN}Block {idx}:{RST} {WHITE}{first_l}...{RST} {SLATE}(~{b_tok:,} toks){RST}{has_cache}")
+        print(f"  {TEAL}│{RST}  {CYAN}Block {idx}:{RST} {WHITE}{first_l}...{RST} {SLATE}(~{b_tok:,} toks){RST}")
     print(f"  {TEAL}{BOLD}└──{'─' * max(2, width - 6)}┘{RST}\n")
 
     # [2] Tool Definitions Section
@@ -615,9 +622,7 @@ def handle_breakdown(agent: Agent, arg: str) -> CommandResult:
     print(f"  {GOLD}│{RST}  {DARK_SLATE}{'─' * max(2, width - 8)}{RST}")
     print(f"  {GOLD}│{RST}  • Estimated Input Total : {WHITE}{BOLD}~{total_payload_tokens:,} tokens (~{in_fmt} in){RST}")
     if last_usage and last_usage.input > 0:
-        pct = min(100.0, (last_usage.cache_read / last_usage.input * 100))
-        cache_sub = f" ({last_usage.input/1000:.1f}k in · {pct:.0f}% cached)" if last_usage.cache_read > 0 else f" ({last_usage.input/1000:.1f}k in)"
-        print(f"  {GOLD}│{RST}  {MINT}{BOLD}• Last API Billed Input : {WHITE}{BOLD}{last_usage.input:,} tokens{cache_sub}{RST} {MINT}✓ Ground Truth Match{RST}")
+        print(f"  {GOLD}│{RST}  {MINT}{BOLD}• Last API Billed Input : {WHITE}{BOLD}{last_usage.input:,} tokens{RST} {MINT}✓ Ground Truth Match{RST}")
     else:
         print(f"  {GOLD}│{RST}  {SLATE}Matches in-flight estimation (`~{in_fmt} in`) and turn footer token metrics.{RST}")
     print(f"  {GOLD}{BOLD}└──{'─' * max(2, width - 6)}┘{RST}\n")

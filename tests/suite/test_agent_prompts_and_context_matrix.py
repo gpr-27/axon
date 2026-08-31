@@ -21,7 +21,6 @@ def test_system_prompt_structure_across_modes(workspace: Path, mode: str):
     assert blocks[0]["text"] == IDENTITY
     assert blocks[1]["text"] == OPERATING_RULES
     assert f"Permission mode: {mode}" in blocks[3]["text"]
-    assert blocks[-1].get("cache_control") == {"type": "ephemeral"}
 
 def test_system_prompt_with_skills_and_append(workspace: Path):
     settings = Settings(workspace=workspace, append_system_prompt="Custom system directive")

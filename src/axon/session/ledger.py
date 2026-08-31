@@ -70,18 +70,9 @@ class Ledger:
 
     def render(self, model: str) -> str:
         tot_tok = self.total_input_tokens + self.total_output_tokens
-        tot_prompt = self.total_input_tokens
-        cache_pct = (
-            min(100.0, (self.total_cache_read_tokens / max(1, tot_prompt) * 100))
-            if tot_prompt > 0 else 0.0
-        )
-        counterfactual = self.uncached_counterfactual(model)
-        savings = max(Decimal("0.0"), counterfactual - self.total_cost)
-
         return (
             f"=== Cost & Token Ledger ===\n"
-            f"Total Cost      : ${self.total_cost:.5f} (Saved ${savings:.5f} via prompt caching)\n"
+            f"Total Cost      : ${self.total_cost:.5f}\n"
             f"Total Tokens    : {tot_tok:,} (In: {self.total_input_tokens:,}, Out: {self.total_output_tokens:,})\n"
-            f"Cache Read Toks : {self.total_cache_read_tokens:,} ({cache_pct:.1f}% hit ratio)\n"
             f"Turns Recorded  : {len(self.turn_costs)}"
         )

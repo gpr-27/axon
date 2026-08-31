@@ -126,6 +126,4 @@ def build_system(settings: Settings, tools: ToolRegistry, skills: list[Any] | No
     if settings.append_system_prompt:
         blocks.append({"type": "text", "text": settings.append_system_prompt})
 
-    # Attach ephemeral cache breakpoint to the last block (Rung 0 prompt caching)
-    blocks[-1]["cache_control"] = {"type": "ephemeral"}
     return blocks

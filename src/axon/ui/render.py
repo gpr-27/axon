@@ -1097,11 +1097,8 @@ class Renderer:
     def turn_footer(self, tool_count: int, usage: Any, cost: float, elapsed: float, llm_calls: int = 1) -> None:
         in_t = usage.input
         out_t = usage.output
-        cache_t = usage.cache_read
-        pct = min(100.0, (cache_t / in_t * 100)) if in_t > 0 else 0.0
         now_str = datetime.now().strftime("%-I:%M %p")
         verb = "Worked" if tool_count > 0 else "Thought"
-        cache_str = f" ({pct:.0f}% cached)" if cache_t > 0 else ""
 
         in_fmt = f"{in_t/1000:.1f}k" if in_t >= 1000 else f"{in_t}"
         out_fmt = f"{out_t/1000:.1f}k" if out_t >= 1000 else f"{out_t}"
@@ -1112,7 +1109,7 @@ class Renderer:
         sys.stdout.write(
             f"  {DARK_SLATE}└─ {CYAN}{llm_str}{DARK_SLATE} · "
             f"{MINT}{tool_str}{DARK_SLATE} · "
-            f"{WHITE}{in_fmt} in{cache_str}{DARK_SLATE} · "
+            f"{WHITE}{in_fmt} in{DARK_SLATE} · "
             f"{WHITE}{out_fmt} out{DARK_SLATE} · "
             f"{GOLD}${cost:.4f}{DARK_SLATE} · "
             f"{SLATE}{elapsed:.1f}s{RST}\n"
@@ -1132,8 +1129,8 @@ class Renderer:
             f"💡 Tip: Type {GOLD}/review{SLATE} or {GOLD}/review <path>{SLATE} to run automated multi-file code review on logic, security, and performance",
             f"💡 Tip: Type {GOLD}/diff{SLATE} to view uncommitted working tree git diffs across the entire workspace",
             f"💡 Tip: Type {GOLD}/rewind{SLATE} to roll back and revert file modifications made during previous agent turns",
-            f"💡 Tip: Type {GOLD}/payload{SLATE} to view active system prompt blocks, ephemeral cache breakpoints, and exact token counts",
-            f"💡 Tip: Type {GOLD}/cost{SLATE} to inspect session token ledger, prompt caching hit ratios, and real-time API billing",
+            f"💡 Tip: Type {GOLD}/payload{SLATE} to view active system prompt blocks and exact token counts",
+            f"💡 Tip: Type {GOLD}/cost{SLATE} to inspect session token ledger, token usage, and real-time API billing",
             f"💡 Tip: Type {GOLD}/compact{SLATE} to manually compact conversation context and free token budget while retaining key facts",
             f"💡 Tip: Type {GOLD}/window <N>{SLATE} to adjust the sliding context window (e.g. {GOLD}/window 10{SLATE} to retain latest 10 turns)",
             f"💡 Tip: Type {GOLD}/skills{SLATE} to browse active skills, {GOLD}/skill create <name>{SLATE} to scaffold new skills, or {GOLD}/skill import <url>{SLATE} to install",

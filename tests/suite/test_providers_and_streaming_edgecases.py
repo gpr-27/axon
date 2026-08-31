@@ -89,7 +89,7 @@ def test_usage_prompt_caching_normalization():
     assert usage.cache_read == 6600
     assert (usage.cache_read / usage.input * 100) > 96.0
 
-def test_turn_footer_cache_pct_rendered():
+def test_turn_footer_tokens_rendered():
     import io, sys
     from axon.ui.render import Renderer
     r = Renderer()
@@ -103,7 +103,7 @@ def test_turn_footer_cache_pct_rendered():
         sys.stdout = old_stdout
     out = buf.getvalue()
     assert "6.8k in" in out
-    assert "97% cached" in out
+    assert "cached" not in out
     assert "52 out" in out
 
 def test_handle_breakdown_command(workspace):

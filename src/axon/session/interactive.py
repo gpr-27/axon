@@ -170,15 +170,13 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
     if ledger is not None:
         in_tok = getattr(ledger, "total_input_tokens", 0) or 0
         out_tok = getattr(ledger, "total_output_tokens", 0) or 0
-        cache_tok = getattr(ledger, "total_cache_read_tokens", 0) or 0
         reason_tok = getattr(ledger, "total_reasoning_tokens", 0) or 0
-        cache_info = f" · cache: {cache_tok:,}" if cache_tok > 0 else ""
         reason_info = f" · reasoning: {reason_tok:,}" if reason_tok > 0 else ""
         
         print(
             f"  {DARK_SLATE}├── {TEAL}{BOLD}📊 Restored Session Usage:{RST} "
             f"{WHITE}{BOLD}{tot_tok:,}{RST} {SLATE}tokens{RST} "
-            f"{SLATE}(in: {in_tok:,} · out: {out_tok:,}{cache_info}{reason_info}){RST} "
+            f"{SLATE}(in: {in_tok:,} · out: {out_tok:,}{reason_info}){RST} "
             f"{DARK_SLATE}·{RST} {GOLD}{BOLD}Total Cost: ${cost_val:.5f}{RST}"
         )
 
