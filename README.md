@@ -12,8 +12,7 @@ Terminal-Native Agentic Coding Assistant
 
 [![PyPI Version](https://img.shields.io/pypi/v/axon-gpr.svg)](https://pypi.org/project/axon-gpr/)
 [![Tests](https://img.shields.io/badge/tests-528%20passed-brightgreen.svg)](tests/)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](pyproject.toml)
-
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](pyproject.toml)
 [![Architecture](https://img.shields.io/badge/architecture-ReAct%20Loop%20%2B%20Subagents-orange.svg)](docs/01-ARCHITECTURE.md)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
@@ -23,160 +22,110 @@ Terminal-Native Agentic Coding Assistant
 
 ---
 
-## 📦 Installation & Setup (Cross-Platform)
+## ⚡ Quick Start (Windows, macOS & Linux)
 
-Axon runs seamlessly on **Windows (Command Prompt, PowerShell, Git Bash)**, **macOS**, and **Linux**.
+No virtual environment setup or complex configuration is required. Install globally once, and run anywhere:
 
-### Option A: 1-Click Automated Setup (Recommended)
+### Step 1: Install Axon
+```bash
+pip install axon-gpr
+```
 
-Choose your platform for an automated, zero-interruption setup that automatically configures your virtual environment, installs dependencies, and prepares configuration:
+### Step 2: Launch in Any Project Folder
+```bash
+axon
+```
 
-<table>
-<tr>
-<th>Platform</th>
-<th>1-Click Setup Command</th>
-<th>Description</th>
-</tr>
-<tr>
-<td><b>Windows (CMD / Double-click)</b></td>
-<td>
+> [!TIP]
+> **First-Time Setup**: When you launch `axon` for the first time, it will automatically ask for your `AXON_API_KEY`, save it permanently to `~/.axon/.env` (or `%USERPROFILE%\.axon\.env` on Windows), and immediately start. You only have to enter your key once!
 
+---
+
+## 💻 Platform-Specific Setup Guide
+
+Axon is engineered to run seamlessly across all operating systems without platform-specific friction:
+
+### 🪟 For Windows Users (Command Prompt & PowerShell)
+
+* **No Bash or WSL Required**: Axon automatically detects and utilizes **PowerShell** (`powershell.exe`) or **Command Prompt** (`cmd.exe`) if Git Bash is not installed.
+* **Native Key Handling & Colors**: Windows ANSI colors and arrow-key menus work out of the box using Windows standard library `msvcrt`.
+
+#### Method 1: Global Pip Install (Recommended)
 ```cmd
-install.bat
+pip install axon-gpr
+axon
 ```
-</td>
-<td>Automatically verifies Python, creates <code>.venv</code>, installs requirements, and sets up <code>~/.axon</code>.</td>
-</tr>
-<tr>
-<td><b>Windows (PowerShell)</b></td>
-<td>
+*(If Python's Scripts folder is not in your PATH, you can also run: `python -m axon`)*
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+#### Method 2: 1-Click Scripts (When Cloned from Source)
+* **Command Prompt / File Explorer**: Double-click or run `install.bat`
+* **PowerShell**: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
+* **Direct Auto-Installer**: `python axon_run.py` *(Automatically downloads any missing packages and launches Axon)*
+
+---
+
+### 🍎 For macOS & Linux Users (Terminal, Zsh, Bash)
+
+* **Native POSIX Integration**: Uses native Unix shells, signal handling, and terminal raw modes.
+
+#### Method 1: Global Pip Install (Recommended)
+```bash
+pip install axon-gpr
+axon
 ```
-</td>
-<td>Native PowerShell script that sets up the environment without execution policy restrictions.</td>
-</tr>
-<tr>
-<td><b>macOS / Linux / WSL</b></td>
-<td>
 
+#### Method 2: 1-Click Setup (When Cloned from Source)
 ```bash
 chmod +x install.sh && ./install.sh
 ```
-</td>
-<td>Automated shell setup for Unix terminals, Zsh, and Git Bash.</td>
-</tr>
-<tr>
-<td><b>Universal (Any OS)</b></td>
-<td>
-
-```bash
-python setup_env.py
-```
-</td>
-<td>Pure Python setup script that works identically across all operating systems.</td>
-</tr>
-</table>
-
-> [!TIP]
-> **Zero-Interruption Launcher**: You can also directly run `python axon_run.py` on any OS. It will automatically detect if dependencies are missing, install them on the fly, and boot Axon immediately!
+*(Or directly run: `python3 axon_run.py`)*
 
 ---
 
-### Option B: Manual Setup via Pip
+## 🔑 Environment & API Key Configuration
 
-If you prefer setting up manually or installing directly from PyPI:
+Axon requires only a single environment variable (`AXON_API_KEY`) to authenticate. All other settings (default model, base URL, effort tier, and token budgets) work automatically out of the box.
 
-#### 1. On Windows (PowerShell or Command Prompt):
-```powershell
-# 1. Create and activate virtual environment
-python -m venv .venv
-.\.venv\Scripts\activate
+### Option 1: Interactive First-Run (Easiest)
+Simply run `axon` in your terminal. If no key is found, Axon will prompt you to enter it and will save it permanently in your user profile.
 
-# 2. Install dependencies & Axon package
-pip install -r requirements.txt -e .
-```
+### Option 2: Permanent Global Config
+Save your key directly into the global Axon configuration directory:
 
-#### 2. On macOS / Linux:
+* **Windows (PowerShell)**:
+  ```powershell
+  New-Item -ItemType Directory -Force -Path "$HOME\.axon"
+  Set-Content -Path "$HOME\.axon\.env" -Value 'AXON_API_KEY="your_api_key_here"'
+  ```
+* **Windows (Command Prompt)**:
+  ```cmd
+  if not exist "%USERPROFILE%\.axon" mkdir "%USERPROFILE%\.axon"
+  echo AXON_API_KEY="your_api_key_here" > "%USERPROFILE%\.axon\.env"
+  ```
+* **macOS & Linux**:
+  ```bash
+  mkdir -p ~/.axon
+  echo 'AXON_API_KEY="your_api_key_here"' > ~/.axon/.env
+  ```
+
+### Option 3: Local Project `.env`
+Copy `.env.example` to `.env` in the root of any repository:
 ```bash
-# 1. Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 2. Install dependencies & Axon package
-pip install -r requirements.txt -e .
-```
-
-*(Or install directly from PyPI: `pip install axon-gpr`)*
-
----
-
-## 🔑 Environment Configuration
-
-Axon requires only a single environment variable (`AXON_API_KEY`) to authenticate. All other settings (default model, base URL, effort tier, and budgets) work automatically out of the box.
-
-### Method 1: Permanent Global Setup (Recommended)
-
-Save your key to the global Axon directory (`~/.axon/.env` on macOS/Linux or `%USERPROFILE%\.axon\.env` on Windows). This is set once and works permanently across all terminal windows, IDEs, and project folders.
-
-**On Windows (PowerShell):**
-```powershell
-New-Item -ItemType Directory -Force -Path "$HOME\.axon"
-Set-Content -Path "$HOME\.axon\.env" -Value 'AXON_API_KEY="your_api_key_here"'
-```
-
-**On Windows (Command Prompt):**
-```cmd
-if not exist "%USERPROFILE%\.axon" mkdir "%USERPROFILE%\.axon"
-echo AXON_API_KEY="your_api_key_here" > "%USERPROFILE%\.axon\.env"
-```
-
-**On macOS & Linux:**
-```bash
-mkdir -p ~/.axon
-echo 'AXON_API_KEY="your_api_key_here"' > ~/.axon/.env
+cp .env.example .env    # On Windows CMD: copy .env.example .env
 ```
 
 ---
 
-### Method 2: Project `.env` File
+## 🚀 How to Use Axon
 
-Copy `.env.example` to `.env` in your project root and add your API key:
-```bash
-# macOS / Linux / Git Bash
-cp .env.example .env
-
-# Windows Command Prompt
-copy .env.example .env
-
-# Windows PowerShell
-Copy-Item .env.example .env
-```
-
----
-
-### Method 3: Temporary Session Export (Quick Test)
-
-Export your key for the active terminal session:
-
-* **Windows PowerShell**: `$env:AXON_API_KEY="your_api_key_here"`
-* **Windows CMD**: `set AXON_API_KEY="your_api_key_here"`
-* **macOS / Linux**: `export AXON_API_KEY="your_api_key_here"`
-
----
-
-## 🚀 Quick Start
-
-Launch Axon anywhere in your workspace:
+Once installed, navigate to any codebase or repository on your computer and launch Axon:
 
 ```bash
-# 1. Start interactive terminal assistant
+# 1. Start interactive coding session
 axon
-# (or: python axon_run.py)
 
-# 2. Run a one-shot query or direct instruction
-axon -p "Analyze this codebase and write unit tests for edge cases"
+# 2. Run a one-shot instruction or query
+axon -p "Review this repository and write unit tests for edge cases"
 
 # 3. Resume your latest conversation
 axon --continue
@@ -185,12 +134,11 @@ axon --continue
 axon --model claude-opus-5
 ```
 
-
 ---
 
-## 🧠 What is Axon? (Complete Project Overview)
+## 🧠 What is Axon? (Complete Architectural Overview)
 
-Axon is engineered to provide an autonomous, developer-first coding agent inside your terminal without third-party agent framework bloat:
+Axon is engineered from first principles in pure Python to provide a full-featured, developer-first coding agent inside your terminal without third-party framework bloat:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -222,16 +170,16 @@ Axon is engineered to provide an autonomous, developer-first coding agent inside
 
 ### Key Architectural Pillars
 
-1. **⚡ Native ReAct Loop with Thinking Traces**:
-   Built from first principles with zero dependencies on LangChain or CrewAI. Streams real-time reasoning tokens, self-corrects on tool failures, and manages structured multi-turn context.
+1. **⚡ Native ReAct Loop with Real-Time Thinking Traces**:
+   Built with zero dependencies on LangChain or CrewAI. Streams reasoning tokens live, self-corrects on tool execution errors, and manages structured multi-turn conversation context.
 
 2. **🔒 6-Law Security & Permission Matrix**:
-   Enforces strict safety boundaries. Tools are classified into read-only, workspace mutation, external shell, and privileged execution. Instantly toggle between `default`, `acceptEdits`, `plan`, and `bypass` modes with `Tab`.
+   Enforces strict boundaries. Tools are partitioned into read-only, workspace mutation, external shell, and privileged execution tiers. Instantly toggle between `default` (ask), `acceptEdits`, `plan` (read-only), and `bypass` modes with `Tab`.
 
 3. **⏪ Atomic File Checkpoints & Undo (`/rewind`)**:
-   Every file edit takes an in-memory SHA256 snapshot before touching disk. If a patch fails or tests break, rollback your workspace instantly.
+   Every file edit takes an in-memory SHA256 snapshot before touching disk. If a patch fails or tests break, roll back your workspace modifications instantly.
 
-4. **👥 Concurrent Subagents (`Task` Tool)**:
+4. **👥 Concurrent Subagents (`Task` Tool & Subagent Monitor)**:
    Axon can spawn isolated subagent workers to research documentation, run background tasks, or explore repositories concurrently without polluting the main conversation context.
 
 5. **💰 Prompt Cache & Exact Token Cost Ledger**:
@@ -241,10 +189,10 @@ Axon is engineered to provide an autonomous, developer-first coding agent inside
 
 ## 📂 Zero-Pollution Global Storage (`~/.axon/`)
 
-To keep your repositories and workspaces 100% clean, Axon isolates all state and history in your home directory:
+To keep your project workspaces 100% clean, Axon isolates all state and history in your user home directory:
 
 ```
-~/.axon/
+~/.axon/ (or %USERPROFILE%\.axon\ on Windows)
 ├── config.toml       # Global defaults (default model, effort tier, permissions)
 ├── .env              # Global API credentials
 ├── sessions/         # Append-only JSONL transcripts, cost ledgers, and switcher data
@@ -252,7 +200,7 @@ To keep your repositories and workspaces 100% clean, Axon isolates all state and
 ├── skills/           # Custom reusable workflows (from /skill create or /skill install)
 ├── research/         # Full deep-research markdown briefs
 ├── images/           # Multimodal image ingestion cache & vision attachments
-└── bin/              # Precompiled native helpers (e.g., instant macOS clipboard paste)
+└── bin/              # Precompiled native helpers
 ```
 
 ---
@@ -294,10 +242,10 @@ To keep your repositories and workspaces 100% clean, Axon isolates all state and
 Test and benchmark live connectivity and latency across all supported model endpoints:
 
 ```bash
-python3 check_models.py
+python check_models.py
 ```
 
-```
+```text
 ⚡ Testing connectivity for 5 models (2 rounds · Base: https://agentrouter.org)...
 
 --- [Round #1 of 2] 16:53:01 ---
@@ -317,13 +265,12 @@ claude-opus-4-8      | ● WORKING |   1772 ms | OK. I'm Claude, made by Anthrop
 Axon is backed by a comprehensive suite of **528 automated unit and integration tests** covering all security jails, permission matrices, session ledgers, cross-platform tools, and UI rendering:
 
 ```bash
-uv run pytest
+pytest
 ```
 
-```
+```text
 ============================= 528 passed in 5.1s ==============================
 ```
-
 
 ---
 
