@@ -47,15 +47,10 @@ class DashboardSession:
 
 def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None, session_dir: Path | None = None) -> list[DashboardSession]:
     """Scan all session JSONL files and subagents to build structured session list."""
-    axon_pkg_root = Path(__file__).resolve().parents[3]
-    pkg_axon_sessions = axon_pkg_root / ".axon" / "sessions"
-
     if session_dir is not None:
         target_session_dir = session_dir
     elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
         target_session_dir = workspace.parent / ".global_axon" / "sessions"
-    elif pkg_axon_sessions.exists() or axon_pkg_root.exists():
-        target_session_dir = pkg_axon_sessions
     else:
         target_session_dir = Path.home() / ".axon" / "sessions"
 

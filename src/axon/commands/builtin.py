@@ -1091,7 +1091,7 @@ def handle_learn(agent: Agent, arg: str) -> CommandResult:
 
     print(f"\n  {TEAL}🧠 Distilling and indexing memory pattern...{RST}")
     item = distill_and_learn(agent.provider, text_to_save, agent.settings.workspace, scope=scope)
-    dest_path = f"axon/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
+    dest_path = f"~/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
     scope_badge = f"{GOLD}[Global]{RST}" if scope == "global" else f"{TEAL}[Project]{RST}"
 
     print(f"  {MINT}✓ Memorized {scope_badge} pattern:{RST} {WHITE}{BOLD}{item.title}{RST} {SLATE}({item.category}){RST}")
@@ -1137,7 +1137,7 @@ def handle_memory(agent: Agent, arg: str) -> CommandResult:
                 print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
 
         if glob_memories:
-            print(f"\n  {GOLD}🌐 Global Universal Memory ({len(glob_memories)} items · axon/.axon/memory/):{RST}")
+            print(f"\n  {GOLD}🌐 Global Universal Memory ({len(glob_memories)} items · ~/.axon/memory/):{RST}")
             for it in glob_memories:
                 print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
             

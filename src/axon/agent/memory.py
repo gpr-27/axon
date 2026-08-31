@@ -54,17 +54,11 @@ class MemoryStore:
         self.workspace = workspace
         self.project_memory_dir = workspace / ".axon" / "memory"
 
-        # Package-level global memory inside axon/.axon/memory
-        axon_pkg_root = Path(__file__).resolve().parents[3]
-        pkg_axon_memory = axon_pkg_root / ".axon" / "memory"
-
         # In test environments (tmp/var), isolate global directory to prevent test pollution
         if global_dir is not None:
             self.global_memory_dir = global_dir
         elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
             self.global_memory_dir = workspace.parent / ".global_axon" / "memory"
-        elif pkg_axon_memory.exists() or axon_pkg_root.exists():
-            self.global_memory_dir = pkg_axon_memory
         else:
             self.global_memory_dir = Path.home() / ".axon" / "memory"
 

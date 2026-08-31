@@ -1,12 +1,32 @@
-# Axon System & Project Conventions
+# Axon Project Guide: axon
 
-Welcome to **Axon**, the terminal-native agentic coding assistant.
+## 1. Project Overview
+- **Workspace**: `/Users/gpr/Documents/axon`
+- **Active Model**: `deepseek-v4-flash` (Effort: `quantum`)
 
-## Core Directives for Axon
-1. **Search Before Reading**: Always locate relevant symbols and files using `Grep`, `Glob`, or `CodeSymbols` rather than reading files speculatively.
-2. **Surgical Edits**: Use `Edit` or `MultiEdit` for precise targeted modifications. Preserve existing code structure and whitespace.
-3. **Read-Before-Edit Safety**: Files must be read in the current session before editing to ensure `(mtime_ns, sha256)` freshness.
-4. **Verification**: Always run test suites (e.g. `pytest tests`) to confirm code changes pass without regressions.
-5. **Path Jail**: Never attempt to access or modify system roots (`/etc`, `/System`) or user credentials (`~/.ssh`, `~/.aws`).
-6. **Isolated Subagents**: For complex exploration, use the `Task` tool to spawn subagents so intermediate reasoning remains isolated.
-7. **Task Checklist**: Maintain visibility for multi-step goals using `TodoWrite`.
+## 2. Directory Structure & Files
+- `README.md`
+- `axon.md`
+- `axon_run.py`
+- `check_models.py`
+- `dist`
+- `docs`
+- `install.sh`
+- `pyproject.toml`
+- `requirements-dev.txt`
+- `requirements.txt`
+- `scratch`
+- `src`
+- `tests`
+- `uv.lock`
+
+## 3. Project Directives & Conventions
+- Use `/learn <rule>` to record project-specific patterns.
+
+## 4. Current State & Recent Accomplishments
+- Project initialized and connected to Axon coding assistant.
+
+## 5. Next Steps & Milestones
+- [ ] Explore project requirements and structure
+- [ ] Implement core functions and scripts
+- [ ] Add unit tests and verify execution

@@ -93,13 +93,26 @@ class GrepTool(Tool):
 
         # Try ripgrep first if installed
         try:
-            cmd = ["rg", "-n", "--max-count=100", "--heading", "--no-config"]
+            cmd = ["rg", "-n", "--max-count=100", "--no-heading", "--no-config"]
             if glob_filter:
                 cmd.extend(["-g", glob_filter])
-            cmd.extend([pattern, str(target)])
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0 and res.stdout.strip():
-                return res.stdout.strip()
+            cmd.append(pattern)
+            try:
+                rel_target = target.relative_to(ctx.workspace).as_posix()
+                if rel_target and rel_target != ".":
+                    cmd.append(rel_target)
+            except ValueError:
+                cmd.append(str(target))
+
+            res = subprocess.run(cmd, cwd=str(ctx.workspace), capture_output=True, text=True)
+            if res.returncode == 0:
+                if res.stdout.strip():
+                    return res.stdout.strip()
+            elif res.returncode == 1:
+                return f"No matches found for pattern '{pattern}'."
+            elif res.returncode == 2:
+                err_msg = res.stderr.strip() or f"ripgrep error for pattern '{pattern}'"
+                raise ToolError(f"Invalid regular expression '{pattern}': {err_msg}")
         except FileNotFoundError:
             pass
 

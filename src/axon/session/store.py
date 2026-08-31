@@ -26,15 +26,10 @@ class SessionMeta:
 class SessionStore:
     def __init__(self, workspace: Path, session_dir: Path | None = None) -> None:
         self.workspace = workspace
-        axon_pkg_root = Path(__file__).resolve().parents[3]
-        pkg_axon_sessions = axon_pkg_root / ".axon" / "sessions"
-
         if session_dir is not None:
             self.session_dir = session_dir
         elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
             self.session_dir = workspace.parent / ".global_axon" / "sessions"
-        elif pkg_axon_sessions.exists() or axon_pkg_root.exists():
-            self.session_dir = pkg_axon_sessions
         else:
             self.session_dir = Path.home() / ".axon" / "sessions"
 

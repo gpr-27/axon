@@ -177,8 +177,7 @@ def read_input(
 
     if len(history) < 15:
         try:
-            axon_pkg_root = Path(__file__).resolve().parents[3]
-            s_dir = axon_pkg_root / ".axon" / "sessions"
+            s_dir = Path.home() / ".axon" / "sessions"
             if s_dir.exists():
                 latest_sessions = sorted(s_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
                 for s_f in latest_sessions:

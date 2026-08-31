@@ -123,11 +123,7 @@ end try'''
 
 def get_images_cache_dir() -> Path:
     """Return the persistent image cache directory."""
-    testing_axon = Path("/Users/gpr/Documents/Testing/axon/.axon/images")
-    if testing_axon.parent.exists():
-        d = testing_axon
-    else:
-        d = Path.home() / ".axon" / "images"
+    d = Path.home() / ".axon" / "images"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

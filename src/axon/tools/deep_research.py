@@ -126,12 +126,7 @@ class DeepResearchTool(Tool):
 
         saved_path_str = ""
         if save_report:
-            axon_pkg_root = Path(__file__).resolve().parents[3]
-            pkg_axon = axon_pkg_root / ".axon"
-            if pkg_axon.exists() or axon_pkg_root.exists():
-                out_dir = pkg_axon / "research"
-            else:
-                out_dir = Path.home() / ".axon" / "research"
+            out_dir = Path.home() / ".axon" / "research"
             out_dir.mkdir(parents=True, exist_ok=True)
             report_file = out_dir / f"{slug}.md"
             report_file.write_text(full_report, encoding="utf-8")
