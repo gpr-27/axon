@@ -1021,25 +1021,9 @@ def handle_plan(agent: Agent, arg: str) -> CommandResult:
     return handle_todos(agent, arg)
 
 def handle_mcp(agent: Agent, arg: str) -> CommandResult:
-    """Inspect MCP server connections, tools, and configurations."""
-    import json
-    mcp_config = agent.settings.workspace / ".axon" / "mcp.json"
-    print(f"\n{GOLD}{BOLD}=== Model Context Protocol (MCP) Manager ==={RST}")
-    if mcp_config.exists():
-        try:
-            data = json.loads(mcp_config.read_text(encoding="utf-8"))
-            servers = data.get("mcpServers", {})
-            print(f"  Config: {WHITE}{mcp_config}{RST} ({len(servers)} servers configured)\n")
-            for name, s_cfg in servers.items():
-                cmd = s_cfg.get("command", "n/a")
-                args = " ".join(s_cfg.get("args", []))
-                print(f"  • {TEAL}{BOLD}{name}{RST}: {WHITE}{cmd} {args}{RST}")
-        except Exception as e:
-            print(f"  {ROSE}Error reading {mcp_config}: {e}{RST}")
-    else:
-        print(f"  {SLATE}No local MCP config found at .axon/mcp.json.{RST}")
-        print(f"  {DIM}Axon connects to standard stdio and SSE Model Context Protocol servers.{RST}")
-    print(f"\n  {DIM}Type /mcp to check status or configure new MCP servers.{RST}\n")
+    """Inspect and manage MCP server connections, tools, and configurations."""
+    from axon.mcp.interactive import handle_mcp_interactive
+    handle_mcp_interactive(agent, arg)
     return CommandResult(handled=True)
 
 def handle_plugin(agent: Agent, arg: str) -> CommandResult:
