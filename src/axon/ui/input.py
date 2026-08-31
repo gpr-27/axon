@@ -115,6 +115,7 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/main", "core", "Sessions & Root", "Switch back to the Main Agent / parent chart session", False),
     ("/root", "core", "Sessions & Root", "Alias for /main to return to root chart session", False),
     ("/sessions", "core", "Sessions & Root", "Axon session matrix timeline dashboard", False),
+    ("/rename", "core", "Sessions & Root", "Rename the active session with custom title", True),
     ("/resume", "core", "Sessions & Root", "Resume previous session from transcript", True),
     ("/branch", "core", "Sessions & Root", "Fork current conversation into an independent branch", True),
     ("/tools", "core", "Sessions & Root", "List all 24 active agent tools, schemas, and permissions", False),

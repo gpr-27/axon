@@ -72,6 +72,7 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 | Command / Shortcut | Description |
 |---|---|
 | `/sessions` / `←` | Axon session timeline dashboard |
+| `/rename <title>` | Rename the active session |
 | `/resume [id]` | Resume previous session from transcript |
 | `/branch [name]` | Fork current conversation into an independent branch |
 | `/tools` | List all 24 active agent tools, schemas, and permissions |
@@ -1398,6 +1399,13 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return CommandResult(handled=True)
     elif cmd in ("/sessions", "/session"):
         handle_sessions_list(agent.session)
+        return CommandResult(handled=True)
+    elif cmd in ("/rename", "/name", "/title"):
+        if not arg.strip():
+            print(f"\n  {SLATE}Usage: /rename <new session title>{RST}\n")
+            return CommandResult(handled=True)
+        new_t = agent.session.rename_session(arg.strip())
+        print(f"\n  {MINT}✓ Renamed active session to: {BOLD}{new_t}{RST}\n")
         return CommandResult(handled=True)
     elif cmd == "/resume":
         handle_resume(agent, arg)

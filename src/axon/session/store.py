@@ -94,6 +94,23 @@ class SessionStore:
         ]
         self.append("tool_results", res_data)
 
+    def rename_session(self, new_title: str, session_id: str | None = None) -> str:
+        """Persist a custom session title to the append-only log."""
+        clean_title = new_title.strip()[:64]
+        sid = session_id or self.active_session_id
+        target = self.session_dir / f"{sid}.jsonl"
+        entry = {
+            "type": "session_rename",
+            "timestamp": time.time(),
+            "data": {"title": clean_title},
+        }
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return clean_title
+
+
     def read_conversation(self, session_id: str) -> Conversation:
         """Reconstruct Conversation from append-only transcript without changing active session."""
         target = self.session_dir / f"{session_id}.jsonl"
@@ -235,7 +252,8 @@ class SessionStore:
             sid = f.stem
             mtime = f.stat().st_mtime
             count = 0
-            first_prompt = "New Session"
+            first_prompt = ""
+            custom_title: str | None = None
             total_tokens = 0
             try:
                 with open(f, "r", encoding="utf-8", errors="ignore") as s_file:
@@ -246,7 +264,11 @@ class SessionStore:
                         try:
                             entry = json.loads(l)
                             t = entry.get("type")
-                            if first_prompt == "New Session" and t == "user_message":
+                            if t == "session_rename":
+                                r_title = entry.get("data", {}).get("title")
+                                if r_title:
+                                    custom_title = r_title.strip()
+                            elif not first_prompt and t == "user_message":
                                 txt = entry.get("data", {}).get("content", "")
                                 if txt and isinstance(txt, str):
                                     first_prompt = txt.splitlines()[0].strip()[:48]
@@ -263,6 +285,12 @@ class SessionStore:
                             pass
             except Exception:
                 pass
+
+            display_title = custom_title or first_prompt
+            if not display_title:
+                from datetime import datetime
+                display_title = f"New Session ({datetime.fromtimestamp(mtime).strftime('%I:%M %p')})"
+
             items.append(
                 SessionMeta(
                     session_id=sid,
@@ -270,11 +298,12 @@ class SessionStore:
                     model="unknown",
                     message_count=count,
                     path=f,
-                    first_prompt=first_prompt,
+                    first_prompt=display_title,
                     total_tokens=total_tokens,
                 )
             )
         return items
+
 
     def latest(self) -> str | None:
         files = sorted(self.session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)

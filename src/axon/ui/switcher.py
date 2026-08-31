@@ -41,6 +41,34 @@ def format_time_ago(ts: float) -> str:
     else:
         return f"{int(diff // 86400)}d"
 
+def categorize_session_time(ts: float) -> str:
+    """Group timestamps into Today, Yesterday, Previous 7 Days, and Older."""
+    from datetime import datetime
+    now = time.time()
+    dt_now = datetime.fromtimestamp(now)
+    dt_ts = datetime.fromtimestamp(ts)
+    diff_days = (dt_now.date() - dt_ts.date()).days
+    if diff_days <= 0:
+        return "Today"
+    elif diff_days == 1:
+        return "Yesterday"
+    elif 2 <= diff_days <= 7:
+        return "Previous 7 Days"
+    else:
+        return "Older"
+
+def _clean_session_topic(text: str) -> str:
+    """Extract clean, human-friendly topic string from prompt text."""
+    import re
+    t = re.sub(r'```[\s\S]*?```', '', text)
+    t = re.sub(r'`[^`]*`', '', t)
+    t = re.sub(r'[*_#~>]', '', t)
+    t = re.sub(r'^[!\/@\-\*\d\.\s]+', '', t).strip()
+    t = " ".join(t.split())
+    if not t:
+        return ""
+    return t[0].upper() + t[1:]
+
 @dataclass
 class DashboardSession:
     id: str
@@ -55,6 +83,7 @@ class DashboardSession:
 
 def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None, session_dir: Path | None = None) -> list[DashboardSession]:
     """Scan all session JSONL files and subagents to build structured session list."""
+    from datetime import datetime
     if session_dir is not None:
         target_session_dir = session_dir
     elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
@@ -75,6 +104,7 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
         is_curr = (sid == active_id)
         mtime = f.stat().st_mtime
         title = ""
+        custom_title: str | None = None
         last_msg = ""
         user_prompts: list[str] = []
         assistant_texts: list[str] = []
@@ -91,7 +121,11 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
                         entry = json.loads(line)
                         t = entry.get("type")
                         data = entry.get("data", {})
-                        if t == "user_message":
+                        if t == "session_rename":
+                            r_title = data.get("title")
+                            if r_title:
+                                custom_title = r_title.strip()
+                        elif t == "user_message":
                             txt = data.get("content", "")
                             if isinstance(txt, str) and txt.strip():
                                 user_prompts.append(txt.strip())
@@ -114,21 +148,24 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
         except Exception:
             pass
 
-        # Generate intelligent, meaningful title
-        if user_prompts:
+        # Generate intelligent, meaningful topic title
+        if custom_title:
+            title = custom_title[:28]
+        elif user_prompts:
             # Pick first substantial user prompt
             for p in user_prompts:
-                p_clean = p.splitlines()[0].strip()
+                p_clean = _clean_session_topic(p)
                 if len(p_clean) > 3 and p_clean.lower() not in ("hi", "hello", "hey", "test"):
-                    title = p_clean[:32]
+                    title = p_clean[:28]
                     break
             if not title:
-                title = user_prompts[0].splitlines()[0].strip()[:32]
+                title = _clean_session_topic(user_prompts[0])[:28]
         elif assistant_texts:
-            title = assistant_texts[0].splitlines()[0].strip()[:32]
+            title = _clean_session_topic(assistant_texts[0])[:28]
 
         if not title:
-            title = sid
+            dt = datetime.fromtimestamp(mtime)
+            title = f"New Session ({dt.strftime('%I:%M %p').lstrip('0')})"
 
         if is_curr and not last_msg:
             last_msg = "Active workspace session"
@@ -153,6 +190,7 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
         )
 
     return sessions
+
 
 def run_session_dashboard(agent: Agent) -> str | None:
     """
@@ -241,29 +279,42 @@ def run_session_dashboard(agent: Agent) -> str | None:
         lines_out.append(f"  {TEAL}▲{CYAN}█{MINT}▲  {BOLD}{WHITE}Previous Chats{RST} {SLATE}· {len(flat_list)} chats · ↑/↓ navigate · Enter open · Esc return{RST}")
         lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
 
-        # Render scrollable list of all previous chats
+        # Render scrollable list of all previous chats with categorized time headers
         max_visible = 12
         start_v = max(0, min(selected_idx - max_visible // 2, max(0, len(flat_list) - max_visible)))
         end_v = min(len(flat_list), start_v + max_visible)
 
+        current_category: str | None = None
+
         for idx in range(start_v, end_v):
             s = flat_list[idx]
+            cat = categorize_session_time(s.updated_at)
+            if cat != current_category:
+                current_category = cat
+                lines_out.append(f"  {GOLD}{BOLD}{cat}{RST}")
+
             is_sel = (idx == selected_idx)
             cursor_mark = f"{MINT}▶{RST}" if is_sel else " "
-            clean_title = " ".join(s.title.split())[:22]
+            clean_title = " ".join(s.title.split())[:24]
 
             if s.is_current:
                 star = f"{MINT}●{RST}"
-                t_str = f"{MINT}{BOLD}{clean_title:<22}{RST}" if not is_sel else f"{MINT}{BOLD}{UNDER}{clean_title:<22}{RST}"
+                t_str = f"{MINT}{BOLD}{clean_title:<24}{RST}" if not is_sel else f"{MINT}{BOLD}{UNDER}{clean_title:<24}{RST}"
             else:
-                star = f"{GOLD}✱{RST}"
-                t_str = f"{WHITE}{clean_title:<22}{RST}" if not is_sel else f"{WHITE}{BOLD}{UNDER}{clean_title:<22}{RST}"
+                star = f"{SLATE}✱{RST}"
+                t_str = f"{WHITE}{clean_title:<24}{RST}" if not is_sel else f"{WHITE}{BOLD}{UNDER}{clean_title:<24}{RST}"
 
-            tok_part = f" ({s.total_tokens:,} tok)" if s.total_tokens > 0 else ""
+            if s.total_tokens >= 1000:
+                tok_part = f" ({s.total_tokens / 1000:.1f}k tok)"
+            elif s.total_tokens > 0:
+                tok_part = f" ({s.total_tokens} tok)"
+            else:
+                tok_part = ""
+
             time_str = f"current · {format_time_ago(s.updated_at)}{tok_part}" if s.is_current else f"{format_time_ago(s.updated_at)}{tok_part}"
-            max_msg = max(8, width - 38 - len(strip_ansi(time_str)))
+            max_msg = max(8, width - 40 - len(strip_ansi(time_str)))
             msg_preview = " ".join(s.last_message.split())[:max_msg]
-            pad = max(2, width - 30 - len(msg_preview) - len(strip_ansi(time_str)))
+            pad = max(2, width - 32 - len(msg_preview) - len(strip_ansi(time_str)))
 
             if is_sel:
                 line_str = f"  {cursor_mark} {star} {t_str} {SLATE}{msg_preview}{' ' * pad}{SLATE}{time_str}{RST}"
@@ -285,6 +336,7 @@ def run_session_dashboard(agent: Agent) -> str | None:
         else:
             t_new = f"{CYAN}{BOLD}➕ Start a new chat{RST}" if is_new_sel else f"{SLATE}➕ Start a new chat{RST}"
             desc_new = f"{DARK_SLATE}↵ Open fresh session{RST}"
+
 
         pad_new = max(2, width - len(strip_ansi(t_new)) - len(strip_ansi(desc_new)) - 6)
         if is_new_sel:
