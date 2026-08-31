@@ -244,6 +244,8 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     break
                 continue
 
+            display_line = line
+
             # Expand @file mentions into prompt context
             if "@" in line and not line.startswith("/"):
                 import re
@@ -277,21 +279,24 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     print(f"    {GOLD}• {att.label}{RST} {WHITE}{BOLD}{Path(att.original_path).name}{RST} {SLATE}({kb_size:.1f} KB{dim_str}){RST}")
                 print()
 
-            # Render user message bubble
-            renderer.render_user_message(line)
+            # Render clean user message bubble (without expanded context dump)
+            renderer.render_user_message(display_line)
             turn_input = line
 
             # Execute agent turn cleanly
             t0 = time.time()
-            res = agent.run_turn(turn_input)
-            elapsed = time.time() - t0
-            renderer.turn_footer(
-                tool_count=res.tool_calls_count,
-                usage=res.usage,
-                cost=float(agent.ledger.total()),
-                elapsed=elapsed,
-                llm_calls=res.iterations,
-            )
+            try:
+                res = agent.run_turn(turn_input)
+                elapsed = time.time() - t0
+                renderer.turn_footer(
+                    tool_count=res.tool_calls_count,
+                    usage=res.usage,
+                    cost=float(agent.ledger.total()),
+                    elapsed=elapsed,
+                    llm_calls=res.iterations,
+                )
+            except Exception as e:
+                print(f"\n  {ROSE}❌ Error during execution: {e}{RST}\n")
 
             # Auto-process queued messages sequentially
             while hasattr(agent, "message_queue") and len(agent.message_queue) > 0:

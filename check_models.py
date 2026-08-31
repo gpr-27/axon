@@ -31,7 +31,7 @@ MODELS = ["deepseek-v4-flash", "gpt-5.6-sol", "glm-5.3", "claude-opus-5", "claud
 
 PROMPT = "Say 'OK' and state your model name."
 INTERVAL_SECONDS = 5
-TIMEOUT = 10.0
+TIMEOUT = 20.0
 
 HEADERS = {
     "authorization": f"Bearer {API_KEY}",
@@ -67,13 +67,15 @@ def test_model(model: str) -> tuple[bool, float, str]:
             elapsed = (time.time() - t0) * 1000
             if r.status_code == 200:
                 msg = r.json().get("choices", [{}])[0].get("message", {})
-                reply = msg.get("content") or msg.get("reasoning_content") or "OK"
-                return True, elapsed, reply.strip().replace("\n", " ")[:60]
+                reply = (msg.get("content") or "").strip()
+                if not reply:
+                    reply = "OK"
+                return True, elapsed, reply.replace("\n", " ")[:40]
             else:
                 err = r.json().get("error", {}).get("message", f"HTTP {r.status_code}")
-                return False, elapsed, err[:60]
+                return False, elapsed, str(err)[:40]
     except Exception as e:
-        return False, (time.time() - t0) * 1000, str(e)[:60]
+        return False, (time.time() - t0) * 1000, str(e)[:40]
 
 
 def main():
