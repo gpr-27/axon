@@ -1,7 +1,8 @@
 [project]
 name = "axon-gpr"
-version = "0.27.5"
+version = "0.27.6"
 description = "A terminal-native agentic coding assistant."
+
 
 readme = "README.md"
 requires-python = ">=3.10"
