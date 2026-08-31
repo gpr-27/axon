@@ -7,12 +7,20 @@ import json
 import os
 import signal
 import sys
-import termios
 import time
-import tty
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ModuleNotFoundError:
+    termios = None  # type: ignore
+    tty = None      # type: ignore
+    _HAS_TERMIOS = False
+
 from axon.ui.theme import (
     BOLD, CYAN, DARK_SLATE, DIM, GOLD, MINT, RST, ROSE, SLATE, TEAL, UNDER, WHITE,
     strip_ansi, term_width,
@@ -209,6 +217,9 @@ def run_session_dashboard(agent: Agent) -> str | None:
 
     rendered_lines = 0
 
+    if not sys.stdin.isatty() or not _HAS_TERMIOS or termios is None:
+        return None
+
     fd = sys.stdin.fileno()
     old_attr = termios.tcgetattr(fd)
 
@@ -216,6 +227,7 @@ def run_session_dashboard(agent: Agent) -> str | None:
     if sys.stdin.isatty():
         sys.stdout.write("\033[3J\033[H\033[2J")
         sys.stdout.flush()
+
 
     def draw(initial: bool = False):
         nonlocal rendered_lines
@@ -448,8 +460,13 @@ def run_session_dashboard(agent: Agent) -> str | None:
                 pass
 
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+        if termios is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+            except Exception:
+                pass
         if rendered_lines > 0:
+
             # Cleanly clear the dashboard lines so the terminal is crisp
             sys.stdout.write(f"\033[{rendered_lines}A\r")
             for _ in range(rendered_lines):

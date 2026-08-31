@@ -152,9 +152,33 @@ class Settings(BaseSettings):
             env_key = os.environ.get("AXON_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
             if env_key and env_key not in invalid_placeholders:
                 settings = settings.model_copy(update={"api_key": SecretStr(env_key)})
+            elif sys.stdin.isatty():
+                from axon.ui.theme import BOLD, GOLD, MINT, RST, SLATE, WHITE
+                print(f"\n  {GOLD}▲█▲ Axon First-Time Setup{RST}")
+                print(f"  {SLATE}No API key found in environment or .env file.{RST}")
+                try:
+                    entered_key = input(f"  {BOLD}{WHITE}Enter your AXON_API_KEY (or Enter to exit): {RST}").strip()
+                except Exception:
+                    entered_key = ""
+                if entered_key and entered_key not in invalid_placeholders:
+                    global_axon = Path.home() / ".axon"
+                    global_axon.mkdir(parents=True, exist_ok=True)
+                    env_file = global_axon / ".env"
+                    try:
+                        with open(env_file, "a", encoding="utf-8") as f_env:
+                            f_env.write(f'\nAXON_API_KEY="{entered_key}"\n')
+                        print(f"  {MINT}✓ Saved key permanently to {env_file}{RST}\n")
+                    except Exception:
+                        pass
+                    settings = settings.model_copy(update={"api_key": SecretStr(entered_key)})
+                else:
+                    raise ConfigError(
+                        "Missing AXON_API_KEY. Set your API key in ~/.axon/.env, .env, or via environment variable."
+                    )
             else:
                 raise ConfigError(
                     "Missing or placeholder AXON_API_KEY. Please set your API key in your .env file or environment."
                 )
 
         return settings
+

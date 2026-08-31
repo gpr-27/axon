@@ -330,12 +330,16 @@ def main(argv: list[str] | None = None) -> int:
     stdin_content = ""
     if not sys.stdin.isatty():
         try:
-            import select
-            r, _, _ = select.select([sys.stdin], [], [], 0.0)
-            if r:
+            if sys.platform == "win32":
                 stdin_content = sys.stdin.read().strip()
+            else:
+                import select
+                r, _, _ = select.select([sys.stdin], [], [], 0.0)
+                if r:
+                    stdin_content = sys.stdin.read().strip()
         except Exception:
             pass
+
 
     prompt = args.prompt
     if stdin_content:

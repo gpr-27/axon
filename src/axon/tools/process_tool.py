@@ -51,14 +51,30 @@ class ProcessTool(Tool):
                     return "No listening TCP ports found."
                 except Exception as e:
                     return f"Port inspection failed: {e}"
-            return "lsof command not available for port inspection."
+            elif shutil.which("netstat"):
+                try:
+                    cmd = ["netstat", "-ano"] if sys.platform == "win32" else ["netstat", "-tuln"]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    out = res.stdout.strip()
+                    if out:
+                        lines = [l for l in out.splitlines() if "LISTEN" in l.upper() or "LISTENING" in l.upper()]
+                        return "Listening Network Ports:\n" + ("\n".join(lines[:30]) if lines else out[:1500])
+                    return "No listening ports found."
+                except Exception as e:
+                    return f"Port inspection via netstat failed: {e}"
+            return "Neither lsof nor netstat is available for port inspection."
 
         elif action in ("list", "find"):
             try:
-                # ps aux formatted
-                cmd = ["ps", "-eo", "pid,%cpu,%mem,stat,time,command"]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                lines = res.stdout.strip().splitlines()
+                if shutil.which("ps"):
+                    cmd = ["ps", "-eo", "pid,%cpu,%mem,stat,time,command"]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    lines = res.stdout.strip().splitlines()
+                elif sys.platform == "win32" and shutil.which("tasklist"):
+                    res = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=10)
+                    lines = res.stdout.strip().splitlines()
+                else:
+                    return "Process listing utility ('ps' or 'tasklist') not available."
 
                 header = lines[0] if lines else ""
                 data_lines = lines[1:] if len(lines) > 1 else []
@@ -75,3 +91,4 @@ class ProcessTool(Tool):
 
         else:
             raise ToolError(f"Unknown action '{action}'. Use 'list', 'ports', or 'find'.")
+

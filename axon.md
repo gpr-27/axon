@@ -11,13 +11,15 @@
 - `check_models.py`
 - `dist`
 - `docs`
+- `install.bat`
+- `install.ps1`
 - `install.sh`
 - `pyproject.toml`
 - `requirements-dev.txt`
 - `requirements.txt`
+- `setup_env.py`
 - `src`
 - `tests`
-- `uv.lock`
 
 ## 3. Project Directives & Conventions
 - Use `/learn <rule>` to record project-specific patterns.

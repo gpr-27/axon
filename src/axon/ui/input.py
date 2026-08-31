@@ -4,14 +4,26 @@ SIGWINCH auto-resize, history, and interactive scrollable slash-command autocomp
 """
 from __future__ import annotations
 import os
-import readline
 import signal
 import subprocess
 import sys
-import termios
 import time
-import tty
 from typing import Any
+
+try:
+    import readline
+except ModuleNotFoundError:
+    readline = None  # type: ignore
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ModuleNotFoundError:
+    termios = None  # type: ignore
+    tty = None      # type: ignore
+    _HAS_TERMIOS = False
+
 from axon.ui.theme import (
     AMBER,
     BOLD,
@@ -142,7 +154,7 @@ def read_input(
     and interactive scrollable slash-command autocomplete menu.
     Returns (user_text, new_mode_if_toggled, 0).
     """
-    if not sys.stdin.isatty():
+    if not sys.stdin.isatty() or not _HAS_TERMIOS:
         width = max(40, term_width() - 4)
         label_text, mode_color = _get_mode_info(mode)
         plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
@@ -156,7 +168,10 @@ def read_input(
         sys.stdout.write(f"  {DARK_SLATE}{'─' * width}{RST}\n")
         sys.stdout.flush()
         p_tag = f"  {CYAN}[{subagent_label}]{RST} {BOLD}{WHITE}›{RST} " if subagent_label else f"  {BOLD}{WHITE}›{RST} "
-        line = input(p_tag)
+        try:
+            line = input(p_tag)
+        except EOFError:
+            return ("/exit", None, 0)
         return (line.strip(), None, 0)
 
     current_mode = mode
@@ -169,11 +184,16 @@ def read_input(
     for h_item in _SESSION_HISTORY:
         if h_item and h_item not in history:
             history.append(h_item)
-    num_hist = readline.get_current_history_length()
-    for i in range(1, num_hist + 1):
-        item = readline.get_history_item(i)
-        if item and item not in history:
-            history.append(item)
+    if readline is not None:
+        try:
+            num_hist = readline.get_current_history_length()
+            for i in range(1, num_hist + 1):
+                item = readline.get_history_item(i)
+                if item and item not in history:
+                    history.append(item)
+        except Exception:
+            pass
+
 
     if len(history) < 15:
         try:
@@ -412,9 +432,11 @@ def read_input(
         except Exception:
             pass
     try:
-        orig_sigwinch = signal.signal(signal.SIGWINCH, handle_sigwinch)
+        sigwinch = getattr(signal, "SIGWINCH", None)
+        orig_sigwinch = signal.signal(sigwinch, handle_sigwinch) if sigwinch is not None else None
     except Exception:
         orig_sigwinch = None
+
 
     last_esc_time = 0.0
     stashed_prompt = ""
@@ -471,11 +493,13 @@ def read_input(
 
             # Ctrl+Z (0x1a) -> Suspend process cleanly
             if raw_bytes == b"\x1a":
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                os.kill(os.getpid(), signal.SIGTSTP)
-                tty.setcbreak(fd)
-                draw()
+                if termios is not None and hasattr(signal, "SIGTSTP"):
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+                    os.kill(os.getpid(), signal.SIGTSTP)
+                    tty.setcbreak(fd)
+                    draw()
                 continue
+
 
             # Opt+P / Alt+P (b"\x1bp", b"\xcf\x80") -> Switch model
             if raw_bytes in (b"\x1bp", b"\xcf\x80"):
@@ -567,7 +591,8 @@ def read_input(
                     tf.write("".join(buffer))
                     tf_path = tf.name
                 try:
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+                    if termios is not None:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
                     subprocess.call([editor, tf_path])
                     with open(tf_path, "r", encoding="utf-8") as tf_read:
                         new_text = tf_read.read()
@@ -579,9 +604,11 @@ def read_input(
                         os.remove(tf_path)
                     except Exception:
                         pass
-                    tty.setcbreak(fd)
+                    if tty is not None:
+                        tty.setcbreak(fd)
                     draw()
                 continue
+
 
             # Ctrl+V (0x16) -> Paste clipboard content / image data instantly (< 40ms)
             if raw_bytes == b"\x16":
@@ -773,21 +800,27 @@ def read_input(
 
     finally:
         sys.stdout.write("\033[?25h")
-        if orig_sigwinch is not None:
+        if orig_sigwinch is not None and hasattr(signal, "SIGWINCH"):
             try:
                 signal.signal(signal.SIGWINCH, orig_sigwinch)
             except Exception:
                 pass
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+        if termios is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+            except Exception:
+                pass
 
     line = "".join(buffer).strip()
     if line:
         if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != line:
             _SESSION_HISTORY.append(line)
-        try:
-            readline.add_history(line)
-        except Exception:
-            pass
+        if readline is not None:
+            try:
+                readline.add_history(line)
+            except Exception:
+                pass
 
     toggled_mode = current_mode if current_mode != mode else None
     return (line, toggled_mode, current_subagent_idx)
+

@@ -3,6 +3,15 @@ ANSI styling and color constants for Axon terminal rendering.
 """
 import os
 import re
+import sys
+
+# Enable ANSI escape processing on Windows 10/11 CMD and PowerShell
+if os.name == "nt":
+    try:
+        os.system("")
+    except Exception:
+        pass
+
 
 RST    = "\033[0m"
 BOLD   = "\033[1m"

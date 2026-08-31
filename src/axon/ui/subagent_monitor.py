@@ -7,10 +7,18 @@ from __future__ import annotations
 import os
 import select
 import sys
-import termios
 import time
-import tty
 from typing import Any
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ModuleNotFoundError:
+    termios = None  # type: ignore
+    tty = None      # type: ignore
+    _HAS_TERMIOS = False
+
 from axon.ui.theme import (
     AMBER,
     BOLD,
@@ -37,7 +45,9 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
     Allows user to switch live views between Main [0] and Subagents [1..N] via keys,
     and provides a responsive live input bar at the bottom to execute /ask, /btw, or queue prompts.
     """
-    if not sys.stdin.isatty():
+    if not sys.stdin.isatty() or not _HAS_TERMIOS or termios is None or tty is None:
+        while any(not fut.done() for fut in future_map):
+            time.sleep(0.1)
         return
 
     fd = sys.stdin.fileno()
@@ -54,7 +64,12 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
             total_tasks = len(tasks)
 
             # Check if keyboard input is available without blocking
-            r, _, _ = select.select([sys.stdin], [], [], 0.08)
+            try:
+                r, _, _ = select.select([sys.stdin], [], [], 0.08)
+            except Exception:
+                r = []
+                time.sleep(0.08)
+
             if r:
                 raw_bytes = os.read(fd, 1024)
                 if not raw_bytes:
@@ -301,8 +316,13 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
         sys.stdout.write("\033[?25h")
         sys.stdout.flush()
         last_rendered_lines = 0
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+        if termios is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+            except Exception:
+                pass
         if input_buf and agent and hasattr(agent, "message_queue"):
             rem = "".join(input_buf).strip()
             if rem:
                 agent.message_queue.push(rem)
+

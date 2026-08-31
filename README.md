@@ -11,8 +11,9 @@ Terminal-Native Agentic Coding Assistant
 ```
 
 [![PyPI Version](https://img.shields.io/pypi/v/axon-gpr.svg)](https://pypi.org/project/axon-gpr/)
-[![Tests](https://img.shields.io/badge/tests-522%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-528%20passed-brightgreen.svg)](tests/)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](pyproject.toml)
+
 [![Architecture](https://img.shields.io/badge/architecture-ReAct%20Loop%20%2B%20Subagents-orange.svg)](docs/01-ARCHITECTURE.md)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
@@ -22,15 +23,92 @@ Terminal-Native Agentic Coding Assistant
 
 ---
 
-## 📦 Installation
+## 📦 Installation & Setup (Cross-Platform)
 
-Install Axon directly from PyPI:
+Axon runs seamlessly on **Windows (Command Prompt, PowerShell, Git Bash)**, **macOS**, and **Linux**.
+
+### Option A: 1-Click Automated Setup (Recommended)
+
+Choose your platform for an automated, zero-interruption setup that automatically configures your virtual environment, installs dependencies, and prepares configuration:
+
+<table>
+<tr>
+<th>Platform</th>
+<th>1-Click Setup Command</th>
+<th>Description</th>
+</tr>
+<tr>
+<td><b>Windows (CMD / Double-click)</b></td>
+<td>
+
+```cmd
+install.bat
+```
+</td>
+<td>Automatically verifies Python, creates <code>.venv</code>, installs requirements, and sets up <code>~/.axon</code>.</td>
+</tr>
+<tr>
+<td><b>Windows (PowerShell)</b></td>
+<td>
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+</td>
+<td>Native PowerShell script that sets up the environment without execution policy restrictions.</td>
+</tr>
+<tr>
+<td><b>macOS / Linux / WSL</b></td>
+<td>
 
 ```bash
-pip install axon-gpr
+chmod +x install.sh && ./install.sh
+```
+</td>
+<td>Automated shell setup for Unix terminals, Zsh, and Git Bash.</td>
+</tr>
+<tr>
+<td><b>Universal (Any OS)</b></td>
+<td>
+
+```bash
+python setup_env.py
+```
+</td>
+<td>Pure Python setup script that works identically across all operating systems.</td>
+</tr>
+</table>
+
+> [!TIP]
+> **Zero-Interruption Launcher**: You can also directly run `python axon_run.py` on any OS. It will automatically detect if dependencies are missing, install them on the fly, and boot Axon immediately!
+
+---
+
+### Option B: Manual Setup via Pip
+
+If you prefer setting up manually or installing directly from PyPI:
+
+#### 1. On Windows (PowerShell or Command Prompt):
+```powershell
+# 1. Create and activate virtual environment
+python -m venv .venv
+.\.venv\Scripts\activate
+
+# 2. Install dependencies & Axon package
+pip install -r requirements.txt -e .
 ```
 
-*(To upgrade an existing installation at any time: `pip install --upgrade axon-gpr`)*
+#### 2. On macOS / Linux:
+```bash
+# 1. Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 2. Install dependencies & Axon package
+pip install -r requirements.txt -e .
+```
+
+*(Or install directly from PyPI: `pip install axon-gpr`)*
 
 ---
 
@@ -38,40 +116,64 @@ pip install axon-gpr
 
 Axon requires only a single environment variable (`AXON_API_KEY`) to authenticate. All other settings (default model, base URL, effort tier, and budgets) work automatically out of the box.
 
-### Option 1: Permanent Global Setup (Recommended)
+### Method 1: Permanent Global Setup (Recommended)
 
-Save your key to the global Axon directory (`~/.axon/.env`). This is set once and works permanently across all terminal windows, IDEs, and project folders.
+Save your key to the global Axon directory (`~/.axon/.env` on macOS/Linux or `%USERPROFILE%\.axon\.env` on Windows). This is set once and works permanently across all terminal windows, IDEs, and project folders.
 
+**On Windows (PowerShell):**
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.axon"
+Set-Content -Path "$HOME\.axon\.env" -Value 'AXON_API_KEY="your_api_key_here"'
+```
+
+**On Windows (Command Prompt):**
+```cmd
+if not exist "%USERPROFILE%\.axon" mkdir "%USERPROFILE%\.axon"
+echo AXON_API_KEY="your_api_key_here" > "%USERPROFILE%\.axon\.env"
+```
+
+**On macOS & Linux:**
 ```bash
 mkdir -p ~/.axon
 echo 'AXON_API_KEY="your_api_key_here"' > ~/.axon/.env
 ```
 
-* **Pros**: Permanent. Never disappears after closing your terminal or rebooting your computer.
-* **Cons**: None.
+---
+
+### Method 2: Project `.env` File
+
+Copy `.env.example` to `.env` in your project root and add your API key:
+```bash
+# macOS / Linux / Git Bash
+cp .env.example .env
+
+# Windows Command Prompt
+copy .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
+```
 
 ---
 
-### Option 2: Temporary Session Export (Quick Test)
+### Method 3: Temporary Session Export (Quick Test)
 
-Export your key directly in your current terminal session:
+Export your key for the active terminal session:
 
-```bash
-export AXON_API_KEY="your_api_key_here"
-```
-
-* **Pros**: Instant one-liner for a quick trial run.
-* **Cons**: **Temporary**. Vanishes the moment you close the terminal tab or start a new shell session.
+* **Windows PowerShell**: `$env:AXON_API_KEY="your_api_key_here"`
+* **Windows CMD**: `set AXON_API_KEY="your_api_key_here"`
+* **macOS / Linux**: `export AXON_API_KEY="your_api_key_here"`
 
 ---
 
 ## 🚀 Quick Start
 
-Launch Axon anywhere on your system:
+Launch Axon anywhere in your workspace:
 
 ```bash
 # 1. Start interactive terminal assistant
 axon
+# (or: python axon_run.py)
 
 # 2. Run a one-shot query or direct instruction
 axon -p "Analyze this codebase and write unit tests for edge cases"
@@ -82,6 +184,7 @@ axon --continue
 # 4. Launch with a specific model override
 axon --model claude-opus-5
 ```
+
 
 ---
 
@@ -211,15 +314,16 @@ claude-opus-4-8      | ● WORKING |   1772 ms | OK. I'm Claude, made by Anthrop
 
 ## 🧪 Test Suite
 
-Axon is backed by a comprehensive suite of **522 automated unit and integration tests** covering all security jails, permission matrices, session ledgers, tools, and UI rendering:
+Axon is backed by a comprehensive suite of **528 automated unit and integration tests** covering all security jails, permission matrices, session ledgers, cross-platform tools, and UI rendering:
 
 ```bash
 uv run pytest
 ```
 
 ```
-============================= 522 passed in 4.8s ==============================
+============================= 528 passed in 5.1s ==============================
 ```
+
 
 ---
 
