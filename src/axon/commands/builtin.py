@@ -42,6 +42,7 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 |---|---|
 | `/breakdown` | Full prompt breakdown (system, tools, previous history, last message) & token match |
 | `/context` | View active context budget, token breakdown, and compaction limit |
+| `/provider` or `/connect` | Connect a provider (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI, Gemini, Groq) |
 | `/compact` | Compact conversation history while preserving key context |
 | `/window [turns]` | Adjust sliding context window size (e.g. `/window 10` or `/window 0` for all) |
 | `/cost` | View session billing ledger, token counts, and real-time cost |
@@ -1396,6 +1397,10 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
             agent.renderer.show_thinking = new_val
         state_str = f"{TEAL}ON (Streaming thoughts + live summary){RST}" if new_val else f"{SLATE}OFF (Summary-only mode){RST}"
         print(f"\n  {PURPLE}✻ Thinking display is now {state_str}\n")
+        return CommandResult(handled=True)
+    elif cmd in ("/provider", "/providers", "/connect"):
+        from axon.ui.provider_picker import run_provider_picker
+        run_provider_picker(agent)
         return CommandResult(handled=True)
     elif cmd in ("/sessions", "/session"):
         handle_sessions_list(agent.session)

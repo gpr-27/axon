@@ -135,7 +135,10 @@ class Settings(BaseSettings):
                                 k, v = line.split("=", 1)
                                 k = k.strip()
                                 v = v.strip().strip("'\"")
-                                if (k.startswith("AXON_") or k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")) and k not in os.environ:
+                                if (k.startswith("AXON_") or k in (
+                                    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+                                    "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY"
+                                )) and k not in os.environ:
                                     os.environ[k] = v
                 except Exception:
                     pass
@@ -147,17 +150,35 @@ class Settings(BaseSettings):
         settings = cls(**merged)
         val = settings.api_key.get_secret_value()
         invalid_placeholders = {"", "your_api_key_here", "your-api-key-here", "sk-placeholder", "replace_me"}
+        
+        # Localhost / Ollama / LM Studio providers require zero API keys
+        base_lower = settings.base_url.lower()
+        if "localhost" in base_lower or "127.0.0.1" in base_lower or "0.0.0.0" in base_lower:
+            if not val or val in invalid_placeholders:
+                settings = settings.model_copy(update={"api_key": SecretStr("local")})
+                return settings
+
         if not val or val in invalid_placeholders:
-            # Check if set in os.environ
-            env_key = os.environ.get("AXON_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-            if env_key and env_key not in invalid_placeholders:
+            # Check if set in os.environ across all provider keys
+            candidate_keys = (
+                "AXON_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY"
+            )
+            env_key = None
+            for ck in candidate_keys:
+                candidate_val = os.environ.get(ck)
+                if candidate_val and candidate_val not in invalid_placeholders:
+                    env_key = candidate_val
+                    break
+
+            if env_key:
                 settings = settings.model_copy(update={"api_key": SecretStr(env_key)})
             elif sys.stdin.isatty():
                 from axon.ui.theme import BOLD, GOLD, MINT, RST, SLATE, WHITE
-                print(f"\n  {GOLD}▲█▲ Axon First-Time Setup{RST}")
-                print(f"  {SLATE}No API key found in environment or .env file.{RST}")
+                print(f"\n  {GOLD}▲█▲ Axon Provider Setup{RST}")
+                print(f"  {SLATE}No API key found for {settings.base_url}.{RST}")
                 try:
-                    entered_key = input(f"  {BOLD}{WHITE}Enter your AXON_API_KEY (or Enter to exit): {RST}").strip()
+                    entered_key = input(f"  {BOLD}{WHITE}Enter your API key (or Enter to exit): {RST}").strip()
                 except Exception:
                     entered_key = ""
                 if entered_key and entered_key not in invalid_placeholders:
@@ -173,12 +194,13 @@ class Settings(BaseSettings):
                     settings = settings.model_copy(update={"api_key": SecretStr(entered_key)})
                 else:
                     raise ConfigError(
-                        "Missing AXON_API_KEY. Set your API key in ~/.axon/.env, .env, or via environment variable."
+                        "Missing API key. Set your API key in ~/.axon/.env, .env, or run /provider to choose a local or cloud engine."
                     )
             else:
                 raise ConfigError(
-                    "Missing or placeholder AXON_API_KEY. Please set your API key in your .env file or environment."
+                    "Missing or placeholder API key. Please set your API key in your .env file or environment."
                 )
 
         return settings
+
 

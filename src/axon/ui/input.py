@@ -78,6 +78,8 @@ def safe_ansi_truncate(text: str, max_w: int) -> str:
 ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     # ⚙️ Core Configuration & Models
     ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek, GLM)", True),
+    ("/provider", "core", "Core & Models", "Connect local or cloud engine (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI)", False),
+    ("/connect", "core", "Core & Models", "Alias for /provider connector dashboard", False),
     ("/effort", "core", "Core & Models", "Adjust neural reasoning tier (reflex, balanced, synapse, quantum)", True),
     ("/config", "core", "Core & Models", "View and adjust runtime configuration parameters", True),
     ("/status", "core", "Core & Models", "View comprehensive live system and agent status", False),
