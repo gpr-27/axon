@@ -1,10 +1,11 @@
 """
 Interactive arrow key menu selector.
-Cross-platform support for macOS, Linux, and Windows.
+Cross-platform support for macOS, Linux, and Windows with 100% flicker-free line management.
 """
 from __future__ import annotations
+import os
 import sys
-from axon.ui.theme import BOLD, DIM, GOLD, RST, SLATE, TEAL
+from axon.ui.theme import BOLD, DARK_SLATE, DIM, GOLD, MINT, RST, SLATE, TEAL, WHITE, strip_ansi, term_width
 
 try:
     import termios
@@ -23,36 +24,13 @@ except ModuleNotFoundError:
     _HAS_MSVCRT = False
 
 
-def _getch() -> str:
-    if _HAS_TERMIOS and termios is not None and tty is not None and sys.stdin.isatty():
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        return ch
-    elif _HAS_MSVCRT and msvcrt is not None:
-        try:
-            b = msvcrt.getch()
-            return b.decode("utf-8", errors="ignore")
-        except Exception:
-            return ""
-    else:
-        try:
-            return sys.stdin.read(1)
-        except Exception:
-            return ""
-
-
 def pick(options: list[str], title: str = "Select Option", current: str | None = None) -> str | None:
     if not options:
         return None
     if not sys.stdin.isatty():
         return current or options[0]
 
-    idx = options.index(current) if current in options else 0
+    idx = options.index(current) if (current and current in options) else 0
     n = len(options)
 
     # If neither termios nor msvcrt is available, use numbered fallback
@@ -72,51 +50,147 @@ def pick(options: list[str], title: str = "Select Option", current: str | None =
             pass
         return current or options[0]
 
-    rendered = [False]
+    # POSIX (macOS & Linux) clean cbreak loop
+    if _HAS_TERMIOS and termios is not None and tty is not None:
+        fd = sys.stdin.fileno()
+        old_attr = termios.tcgetattr(fd)
+        rendered_lines_count = 0
 
-    def render() -> None:
-        if rendered[0]:
-            sys.stdout.write(f"\033[{n + 3}A\033[J")
-        sys.stdout.write(f"\n  {GOLD}{BOLD}{title}  {DIM}(↑ ↓ Navigate · Enter Select · Esc Cancel){RST}\n\n")
-        for i, opt in enumerate(options):
-            if i == idx:
-                sys.stdout.write(f"  {TEAL}{BOLD}▶ {opt}{RST}\n")
-            else:
-                sys.stdout.write(f"    {SLATE}{opt}{RST}\n")
-        sys.stdout.flush()
-        rendered[0] = True
+        def render_posix() -> None:
+            nonlocal rendered_lines_count
+            tw = term_width()
+            max_opt_len = max(20, tw - 8)
 
-    render()
+            lines: list[str] = []
+            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}(↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
+            lines.append("")
 
-    while True:
-        ch = _getch()
-        if ch in ("\r", "\n"):
-            sys.stdout.write("\n")
-            return options[idx]
-        # Windows extended keys: \x00 or \xe0 prefix
-        if _HAS_MSVCRT and ch in ("\x00", "\xe0"):
-            ext = _getch()
-            if ext == "H":  # Up arrow
-                idx = (idx - 1) % n
-                render()
-            elif ext == "P":  # Down arrow
-                idx = (idx + 1) % n
-                render()
-            continue
-        if ch == "\x1b":
-            nxt = _getch()
-            if nxt == "[":
-                arrow = _getch()
-                if arrow == "A":
-                    idx = (idx - 1) % n
-                    render()
-                if arrow == "B":
+            for i, opt in enumerate(options):
+                # Clean option text to single line and truncate to prevent terminal wrapping
+                opt_clean = " ".join(opt.split())
+                if len(opt_clean) > max_opt_len:
+                    opt_clean = opt_clean[:max_opt_len - 3] + "..."
+
+                if i == idx:
+                    lines.append(f"  {MINT}{BOLD}▶ {WHITE}{opt_clean}{RST}")
+                else:
+                    lines.append(f"    {SLATE}{opt_clean}{RST}")
+
+            # Clear previously rendered lines cleanly
+            if rendered_lines_count > 0:
+                sys.stdout.write(f"\033[{rendered_lines_count}A\r")
+                for _ in range(rendered_lines_count):
+                    sys.stdout.write("\033[2K\n")
+                sys.stdout.write(f"\033[{rendered_lines_count}A\r")
+
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            rendered_lines_count = len(lines)
+
+        try:
+            tty.setcbreak(fd)
+            render_posix()
+
+            while True:
+                raw_bytes = os.read(fd, 1024)
+                if not raw_bytes:
+                    break
+
+                # Enter -> Select
+                if raw_bytes in (b"\r", b"\n", b"\r\n"):
+                    return options[idx]
+
+                # Esc / Ctrl+C / q -> Cancel
+                if raw_bytes in (b"\x1b", b"\x03", b"q", b"Q"):
+                    return None
+
+                # Down Arrow
+                if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
                     idx = (idx + 1) % n
-                    render()
-            else:
-                sys.stdout.write("\n")
-                return None
-        if ch in ("q", "Q"):
-            sys.stdout.write("\n")
-            return None
+                    render_posix()
+                    continue
 
+                # Up Arrow
+                if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
+                    idx = (idx - 1) % n
+                    render_posix()
+                    continue
+
+                # Home / Top
+                if raw_bytes.startswith((b"\x1b[H", b"\x1b[1~")):
+                    idx = 0
+                    render_posix()
+                    continue
+
+                # End / Bottom
+                if raw_bytes.startswith((b"\x1b[F", b"\x1b[4~")):
+                    idx = n - 1
+                    render_posix()
+                    continue
+
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+            except Exception:
+                pass
+
+    # Windows (msvcrt)
+    elif _HAS_MSVCRT and msvcrt is not None:
+        rendered_lines_count = 0
+
+        def render_win() -> None:
+            nonlocal rendered_lines_count
+            tw = term_width()
+            max_opt_len = max(20, tw - 8)
+
+            lines: list[str] = []
+            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}(↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
+            lines.append("")
+
+            for i, opt in enumerate(options):
+                opt_clean = " ".join(opt.split())
+                if len(opt_clean) > max_opt_len:
+                    opt_clean = opt_clean[:max_opt_len - 3] + "..."
+
+                if i == idx:
+                    lines.append(f"  {MINT}{BOLD}▶ {WHITE}{opt_clean}{RST}")
+                else:
+                    lines.append(f"    {SLATE}{opt_clean}{RST}")
+
+            if rendered_lines_count > 0:
+                sys.stdout.write(f"\033[{rendered_lines_count}A\r")
+                for _ in range(rendered_lines_count):
+                    sys.stdout.write("\033[2K\n")
+                sys.stdout.write(f"\033[{rendered_lines_count}A\r")
+
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            rendered_lines_count = len(lines)
+
+        render_win()
+        while True:
+            try:
+                ch = msvcrt.getch()
+            except Exception:
+                return options[idx]
+
+            if ch in (b"\r", b"\n"):
+                return options[idx]
+            if ch in (b"\x1b", b"\x03", b"q", b"Q"):
+                return None
+            if ch in (b"\x00", b"\xe0"):
+                ext = msvcrt.getch()
+                if ext == b"H":  # Up arrow
+                    idx = (idx - 1) % n
+                    render_win()
+                elif ext == b"P":  # Down arrow
+                    idx = (idx + 1) % n
+                    render_win()
+                elif ext == b"G":  # Home
+                    idx = 0
+                    render_win()
+                elif ext == b"O":  # End
+                    idx = n - 1
+                    render_win()
+
+    return options[idx]
