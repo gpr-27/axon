@@ -1,6 +1,6 @@
 [project]
 name = "axon-gpr"
-version = "0.27.6"
+version = "0.27.7"
 description = "A terminal-native agentic coding assistant."
 
 

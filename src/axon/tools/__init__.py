@@ -22,14 +22,19 @@ from axon.tools.env_tool import EnvTool
 from axon.tools.diff_tool import DiffTool
 from axon.tools.deep_research import DeepResearchTool
 from axon.tools.table_search import TableSearchTool
+from axon.tools.code_graph import GoToDefinitionTool, FindReferencesTool
+from axon.tools.semantic_search import SemanticSearchTool
+from axon.tools.ui_diff import UiPreviewTool
+from axon.tools.notebook import NotebookEditTool
 
 def create_default_registry() -> ToolRegistry:
-    """Create a ToolRegistry loaded with all 24 standard Axon tools."""
+    """Create a ToolRegistry loaded with all standard Axon tools."""
     return ToolRegistry([
         ReadTool(),
         WriteTool(),
         EditTool(),
         MultiEditTool(),
+        NotebookEditTool(),
         BashTool(),
         GlobTool(),
         GrepTool(),
@@ -47,6 +52,10 @@ def create_default_registry() -> ToolRegistry:
         DiffTool(),
         DeepResearchTool(),
         TableSearchTool(),
+        GoToDefinitionTool(),
+        FindReferencesTool(),
+        SemanticSearchTool(),
+        UiPreviewTool(),
         TaskTool(),
         ExitPlanModeTool(),
         DoctorTool(),

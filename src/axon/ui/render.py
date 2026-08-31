@@ -397,7 +397,7 @@ def render_queue_box(queue: Any, max_width: int = 88) -> str:
     """Render pending message queue with ids and removal hints."""
     items = getattr(queue, "items", [])
     if not items:
-        return f"  {SLATE}📥 Message queue is empty. Use /queue <prompt> to add prompts.{RST}"
+        return f"  {SLATE}📥 Message queue is empty. Use /q <prompt> to add prompts.{RST}"
 
     title = f"📥 Message Queue ({len(items)} pending)"
     border_w = max(10, max_width - str_width(title) - 8)
@@ -1125,7 +1125,7 @@ class Renderer:
             f"💡 Tip: Type {GOLD}/memory{SLATE} to inspect, search, and manage persistent learned rules and preferences",
             f"💡 Tip: Type {GOLD}/research <topic>{SLATE} to run multi-source deep research and generate comparative matrix tables",
             f"💡 Tip: Type {GOLD}/todo{SLATE} to inspect or manage structured execution checklists with visual progress bars",
-            f"💡 Tip: Type {GOLD}/queue <prompt>{SLATE} or {GOLD}/q <prompt>{SLATE} to enqueue follow-up prompts for autonomous batch execution",
+            f"💡 Tip: Type {GOLD}/q <prompt>{SLATE} to enqueue follow-up prompts for autonomous batch execution",
             f"💡 Tip: Type {GOLD}/review{SLATE} or {GOLD}/review <path>{SLATE} to run automated multi-file code review on logic, security, and performance",
             f"💡 Tip: Type {GOLD}/diff{SLATE} to view uncommitted working tree git diffs across the entire workspace",
             f"💡 Tip: Type {GOLD}/rewind{SLATE} to roll back and revert file modifications made during previous agent turns",

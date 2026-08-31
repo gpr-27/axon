@@ -82,10 +82,10 @@ def run_print_mode(agent: Agent, prompt: str, fmt: str, renderer: Renderer | Non
                 usage=result.usage,
                 cost=float(agent.ledger.total()),
                 elapsed=elapsed,
+                llm_calls=result.iterations,
             )
         else:
-            rendered = format_markdown(result.final_text)
-            print(rendered)
+            print(f"\n{result.final_text}\n")
 
     return 0 if result.stop_reason == "end_turn" else 1
 
@@ -94,7 +94,6 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
     if sys.stdin.isatty():
         sys.stdout.write("\033[2J\033[H\n")
         sys.stdout.flush()
-
     renderer.print_banner(
         version="GPR_27",
         model=agent.settings.model,
@@ -279,14 +278,15 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     print(f"    {GOLD}• {att.label}{RST} {WHITE}{BOLD}{Path(att.original_path).name}{RST} {SLATE}({kb_size:.1f} KB{dim_str}){RST}")
                 print()
 
-            # Render clean user message bubble (without expanded context dump)
-            renderer.render_user_message(display_line)
             turn_input = line
 
-            # Execute agent turn cleanly
+            from axon.ui.in_flight import InFlightInputListener
+
+            # Execute agent turn cleanly with live in-flight queuing
             t0 = time.time()
             try:
-                res = agent.run_turn(turn_input)
+                with InFlightInputListener(agent):
+                    res = agent.run_turn(turn_input)
                 elapsed = time.time() - t0
                 renderer.turn_footer(
                     tool_count=res.tool_calls_count,
@@ -304,17 +304,20 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 if not nxt:
                     break
                 print(f"\n  {CYAN}📥 [Processing Queued #{nxt.id} · {len(agent.message_queue)} remaining]:{RST} {WHITE}{BOLD}{nxt.text}{RST}\n")
-                renderer.render_user_message(nxt.text)
                 t_q0 = time.time()
-                res = agent.run_turn(nxt.text)
-                elapsed = time.time() - t_q0
-                renderer.turn_footer(
-                    tool_count=res.tool_calls_count,
-                    usage=res.usage,
-                    cost=float(agent.ledger.total()),
-                    elapsed=elapsed,
-                    llm_calls=res.iterations,
-                )
+                try:
+                    with InFlightInputListener(agent):
+                        res = agent.run_turn(nxt.text)
+                    elapsed = time.time() - t_q0
+                    renderer.turn_footer(
+                        tool_count=res.tool_calls_count,
+                        usage=res.usage,
+                        cost=float(agent.ledger.total()),
+                        elapsed=elapsed,
+                        llm_calls=res.iterations,
+                    )
+                except Exception as e:
+                    print(f"\n  {ROSE}❌ Error during execution: {e}{RST}\n")
         except KeyboardInterrupt:
             print(f"\n\n  {TEAL}⏹ Stopped turn by user.{RST}\n")
         except Exception as e:
@@ -359,6 +362,20 @@ def main(argv: list[str] | None = None) -> int:
     # Initialize subsystems
     provider = provider_for(settings.model, settings)
     tools = create_default_registry()
+
+    # Connect to configured MCP servers and register their tools
+    try:
+        from axon.mcp.bridge import initialize_mcp_bridge, shutdown_mcp_bridge
+        mcp_tools = initialize_mcp_bridge(settings.workspace)
+        for mcp_tool in mcp_tools:
+            tools.register(mcp_tool)
+        if mcp_tools:
+            print(f"  {TEAL}⚡ MCP Bridge: {len(mcp_tools)} tool(s) loaded from live servers{RST}")
+        import atexit
+        atexit.register(shutdown_mcp_bridge)
+    except Exception:
+        pass  # MCP bridge is optional; don't block startup
+
     permissions = PermissionEngine(settings)
     context = ContextManager(settings)
     session = SessionStore(workspace=settings.workspace)

@@ -45,6 +45,7 @@ def tool_policy(tools: ToolRegistry) -> str:
     lines = ["## Tool usage rules", ""]
     lines.append("**Search before reading.** Use Grep or Glob to locate relevant code. Do not read files speculatively to find something — search for it.")
     lines.append("**Batch independent calls.** When you need several files or several searches and none depends on another's result, request them in a single turn. They execute in parallel.")
+    lines.append("**Invoke tools directly.** When the user asks you to create, write, edit, read files, or run shell commands/tests, you MUST invoke the corresponding tool (e.g. Write, Read, Edit, Bash) rather than only writing code in conversational markdown text.")
     lines.append("")
     lines.append("## Available Tools:")
     for t in tools.all_tools():

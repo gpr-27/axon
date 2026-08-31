@@ -68,7 +68,7 @@ def provider_for(model: str, settings: Settings) -> Provider:
     return OpenAICompatProvider(settings)
 
 def known_models() -> list[str]:
-    models = list(PRICING.keys())
+    models: list[str] = []
     for p in PROVIDER_PRESETS:
         for m in p.models:
             if m not in models:

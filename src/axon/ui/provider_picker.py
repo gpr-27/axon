@@ -212,40 +212,101 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
     api_key_str = "local"
     if preset.requires_key:
         existing_key = None
-        if preset.env_var:
-            existing_key = os.environ.get(preset.env_var)
+        target_var = preset.env_var or "AXON_API_KEY"
+
+        # Check process environment
+        if os.environ.get(target_var):
+            existing_key = os.environ.get(target_var)
+
+        # Check ~/.axon/.env
         if not existing_key:
+            env_file = Path.home() / ".axon" / ".env"
+            if env_file.exists():
+                try:
+                    for line in env_file.read_text(encoding="utf-8").splitlines():
+                        if "=" in line and line.strip().startswith(target_var):
+                            existing_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+                except Exception:
+                    pass
+
+        # Fallback to AXON_API_KEY only for AgentRouter
+        if not existing_key and preset.id == "agentrouter":
             existing_key = os.environ.get("AXON_API_KEY")
 
         if existing_key and existing_key not in ("", "local"):
-            print(f"  {MINT}✓ Found existing API key in environment ({preset.env_var or 'AXON_API_KEY'}){RST}")
+            print(f"  {MINT}✓ Found existing API key in environment ({target_var}){RST}")
             api_key_str = existing_key
         else:
             try:
-                entered = input(f"  {BOLD}{WHITE}Enter your API key for {preset.name}: {RST}").strip()
+                entered = input(f"  {BOLD}{WHITE}Enter your API key for {preset.name} ({target_var}): {RST}").strip()
             except (KeyboardInterrupt, EOFError):
                 print(f"\n  {SLATE}Connection cancelled.{RST}\n")
                 return False
             if not entered:
                 print(f"\n  {ROSE}API key is required for {preset.name}.{RST}\n")
                 return False
+
+            from axon.providers.verifier import verify_api_key
+            print(f"  {SLATE}⚡ Verifying API key with {preset.name}...{RST}", end="", flush=True)
+            ok, msg = verify_api_key(preset, entered)
+            if not ok:
+                print(f"\r\033[K  {ROSE}❌ API key test failed for {preset.name}:{RST} {WHITE}{msg}{RST}")
+                print(f"  {SLATE}The key is not working. Provider setup cancelled.{RST}\n")
+                return False
+
+            print(f"\r\033[K  {MINT}✓ API key verified successfully!{RST}")
             api_key_str = entered
             # Persist key to ~/.axon/.env
             try:
                 env_file = Path.home() / ".axon" / ".env"
                 env_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(env_file, "a", encoding="utf-8") as f:
-                    env_k = preset.env_var or "AXON_API_KEY"
-                    f.write(f'\n{env_k}="{api_key_str}"\n')
-                print(f"  {MINT}✓ Saved {env_k} to {env_file}{RST}")
+                    f.write(f'\n{target_var}="{api_key_str}"\n')
+                print(f"  {MINT}✓ Saved {target_var} to {env_file}{RST}")
             except Exception:
                 pass
 
-    # 2. Select Model
+    # 2. Select Model (with live local discovery, custom typing, and random selection)
+    import random
+    model_options: list[str] = []
+
+    # Check if local Ollama has active models installed
+    if preset.id == "ollama":
+        from axon.providers.catalog import fetch_local_ollama_models
+        local_installed = fetch_local_ollama_models(preset.base_url)
+        if local_installed:
+            print(f"  {MINT}⚡ Detected {len(local_installed)} model(s) installed on local Ollama daemon{RST}")
+            for m in local_installed:
+                if m not in model_options:
+                    model_options.append(m)
+
+    # Add preset models
+    for m in preset.models:
+        if m not in model_options:
+            model_options.append(m)
+
+    picker_items = [
+        "✏️  Enter custom model name...",
+        "🎲  Random model (surprise me)",
+    ] + model_options
+
     print(f"\n  {BOLD}{WHITE}Select default model for {preset.name}:{RST}")
-    chosen_model = pick(preset.models, title=f"Available Models on {preset.name}", current=preset.default_model)
-    if not chosen_model:
+    selection = pick(picker_items, title=f"Available Models on {preset.name}", current=preset.default_model)
+
+    if not selection:
         chosen_model = preset.default_model
+    elif selection == "🎲  Random model (surprise me)":
+        chosen_model = random.choice(model_options) if model_options else preset.default_model
+        print(f"  {GOLD}🎲 Selected random model: {BOLD}{chosen_model}{RST}")
+    elif selection == "✏️  Enter custom model name...":
+        try:
+            custom_typed = input(f"  {BOLD}{WHITE}Enter model name (e.g. qwen2.5-coder:1.5b, mistral:7b, gpt-4o): {RST}").strip()
+        except (KeyboardInterrupt, EOFError):
+            custom_typed = ""
+        chosen_model = custom_typed if custom_typed else preset.default_model
+    else:
+        chosen_model = selection
 
     # 3. Update Settings and Provider
     new_settings = agent.settings.model_copy(
@@ -273,14 +334,42 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
                 pass
         existing_cfg["base_url"] = preset.base_url
         existing_cfg["model"] = chosen_model
+
+        # Record custom model under provider
+        c_models = existing_cfg.get("custom_models", [])
+        entry = {"model": chosen_model, "provider": preset.id}
+        if not any(isinstance(x, dict) and x.get("model") == chosen_model and x.get("provider") == preset.id for x in c_models):
+            c_models.append(entry)
+            existing_cfg["custom_models"] = c_models
+
         with open(cfg_file, "wb") as f_out:
             tomli_w.dump(existing_cfg, f_out)
         print(f"  {MINT}✓ Saved default provider to {cfg_file}{RST}")
     except Exception:
         pass
 
-    print(f"\n  {MINT}{BOLD}✓ Successfully connected to {preset.name}!{RST}")
-    print(f"  {SLATE}Active Model: {BOLD}{WHITE}{chosen_model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}\n")
+    print(f"\n  {MINT}{BOLD}✓ Configured active provider: {preset.name}!{RST}")
+    print(f"  {SLATE}Active Model: {BOLD}{WHITE}{chosen_model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}")
+
+    # Check local service status if local
+    if preset.id == "ollama":
+        from axon.providers.catalog import fetch_local_ollama_models
+        mods = fetch_local_ollama_models(preset.base_url)
+        if not mods:
+            print(f"  {GOLD}⚠️  Ollama does not appear to be running on {preset.base_url}.{RST}")
+            print(f"  {SLATE}   To start Ollama, run: {WHITE}ollama serve{SLATE} (or open the Ollama app){RST}")
+            print(f"  {SLATE}   To switch to cloud AI anytime, run: {WHITE}/provider{RST}")
+        else:
+            print(f"  {MINT}✓ Ollama daemon is online ({len(mods)} installed models detected){RST}")
+
+    from axon.ui.render import Renderer
+    Renderer().print_banner(
+        version="GPR_27",
+        model=chosen_model,
+        effort=agent.settings.effort,
+        workspace=str(agent.settings.workspace),
+        mode=agent.settings.mode,
+    )
     return True
 
 def _fallback_provider_picker(agent: Agent) -> bool:

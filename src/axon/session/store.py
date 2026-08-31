@@ -62,8 +62,14 @@ class SessionStore:
             "timestamp": time.time(),
             "data": data if isinstance(data, (dict, list, str, int, float, bool)) else str(data),
         }
+        line_str = json.dumps(entry, ensure_ascii=False)
+        passphrase = os.environ.get("AXON_SESSION_PASSPHRASE", "")
+        if passphrase:
+            from axon.session.crypto import encrypt_session_record
+            line_str = encrypt_session_record(line_str, passphrase)
+
         with open(self.active_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(line_str + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -110,6 +116,50 @@ class SessionStore:
             os.fsync(f.fileno())
         return clean_title
 
+    def tag_session(self, tag_name: str, session_id: str | None = None) -> str:
+        """Add a custom tag to session metadata."""
+        clean_tag = tag_name.strip().lstrip("#")[:32]
+        sid = session_id or self.active_session_id
+        target = self.session_dir / f"{sid}.jsonl"
+        entry = {
+            "type": "session_tag",
+            "timestamp": time.time(),
+            "data": {"tag": clean_tag},
+        }
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return clean_tag
+
+    def star_session(self, session_id: str | None = None) -> bool:
+        """Toggle star/favorite status of a session."""
+        sid = session_id or self.active_session_id
+        target = self.session_dir / f"{sid}.jsonl"
+        is_starred = False
+        if target.exists():
+            try:
+                with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if "session_star" in line:
+                            entry = json.loads(line)
+                            if entry.get("type") == "session_star":
+                                is_starred = bool(entry.get("data", {}).get("starred", False))
+            except Exception:
+                pass
+
+        new_status = not is_starred
+        entry = {
+            "type": "session_star",
+            "timestamp": time.time(),
+            "data": {"starred": new_status},
+        }
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return new_status
+
 
     def read_conversation(self, session_id: str) -> Conversation:
         """Reconstruct Conversation from append-only transcript without changing active session."""
@@ -118,10 +168,15 @@ class SessionStore:
             raise FileNotFoundError(f"Session transcript not found: {target}")
 
         messages: list[dict[str, Any]] = []
+        passphrase = os.environ.get("AXON_SESSION_PASSPHRASE", "")
         with open(target, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
                     continue
+                if line.startswith("ENC:v1:"):
+                    from axon.session.crypto import decrypt_session_record
+                    line = decrypt_session_record(line, passphrase)
                 try:
                     entry = json.loads(line)
                     t = entry.get("type")

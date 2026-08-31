@@ -60,13 +60,17 @@ def pick(options: list[str], title: str = "Select Option", current: str | None =
             nonlocal rendered_lines_count
             tw = term_width()
             max_opt_len = max(20, tw - 8)
+            max_visible = 10
 
             lines: list[str] = []
-            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}(↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
+            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}({idx + 1}/{n} · ↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
             lines.append("")
 
-            for i, opt in enumerate(options):
-                # Clean option text to single line and truncate to prevent terminal wrapping
+            start_idx = max(0, min(idx - max_visible // 2, n - max_visible))
+            end_idx = min(n, start_idx + max_visible)
+
+            for i in range(start_idx, end_idx):
+                opt = options[i]
                 opt_clean = " ".join(opt.split())
                 if len(opt_clean) > max_opt_len:
                     opt_clean = opt_clean[:max_opt_len - 3] + "..."
@@ -75,6 +79,16 @@ def pick(options: list[str], title: str = "Select Option", current: str | None =
                     lines.append(f"  {MINT}{BOLD}▶ {WHITE}{opt_clean}{RST}")
                 else:
                     lines.append(f"    {SLATE}{opt_clean}{RST}")
+
+            if n > max_visible:
+                more_below = n - end_idx
+                more_above = start_idx
+                scroll_hint = []
+                if more_above > 0:
+                    scroll_hint.append(f"↑ {more_above} more above")
+                if more_below > 0:
+                    scroll_hint.append(f"↓ {more_below} more below")
+                lines.append(f"    {DARK_SLATE}... ({', '.join(scroll_hint)}){RST}")
 
             # Clear previously rendered lines cleanly
             if rendered_lines_count > 0:
@@ -142,12 +156,17 @@ def pick(options: list[str], title: str = "Select Option", current: str | None =
             nonlocal rendered_lines_count
             tw = term_width()
             max_opt_len = max(20, tw - 8)
+            max_visible = 10
 
             lines: list[str] = []
-            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}(↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
+            lines.append(f"  {GOLD}{BOLD}{title}{RST}  {DIM}({idx + 1}/{n} · ↑ ↓ Navigate · Enter Select · Esc Cancel){RST}")
             lines.append("")
 
-            for i, opt in enumerate(options):
+            start_idx = max(0, min(idx - max_visible // 2, n - max_visible))
+            end_idx = min(n, start_idx + max_visible)
+
+            for i in range(start_idx, end_idx):
+                opt = options[i]
                 opt_clean = " ".join(opt.split())
                 if len(opt_clean) > max_opt_len:
                     opt_clean = opt_clean[:max_opt_len - 3] + "..."
@@ -156,6 +175,16 @@ def pick(options: list[str], title: str = "Select Option", current: str | None =
                     lines.append(f"  {MINT}{BOLD}▶ {WHITE}{opt_clean}{RST}")
                 else:
                     lines.append(f"    {SLATE}{opt_clean}{RST}")
+
+            if n > max_visible:
+                more_below = n - end_idx
+                more_above = start_idx
+                scroll_hint = []
+                if more_above > 0:
+                    scroll_hint.append(f"↑ {more_above} more above")
+                if more_below > 0:
+                    scroll_hint.append(f"↓ {more_below} more below")
+                lines.append(f"    {DARK_SLATE}... ({', '.join(scroll_hint)}){RST}")
 
             if rendered_lines_count > 0:
                 sys.stdout.write(f"\033[{rendered_lines_count}A\r")

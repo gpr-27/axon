@@ -3,11 +3,14 @@ Interactive input reading with raw OS terminal key-handling, live Tab/Shift+Tab 
 SIGWINCH auto-resize, history, and interactive scrollable slash-command autocomplete popup.
 """
 from __future__ import annotations
+import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 try:
@@ -39,7 +42,6 @@ from axon.ui.theme import (
     UNDER,
     WHITE,
     strip_ansi,
-    term_height,
     term_width,
 )
 
@@ -47,8 +49,6 @@ MODES_CYCLE = ["default", "acceptEdits", "plan", "bypass"]
 
 # In-memory history across REPL turns in the session
 _SESSION_HISTORY: list[str] = []
-
-import re
 
 def safe_ansi_truncate(text: str, max_w: int) -> str:
     """Truncates visible width of string to max_w without corrupting ANSI codes."""
@@ -79,7 +79,8 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     # ⚙️ Core Configuration & Models
     ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek, GLM)", True),
     ("/provider", "core", "Core & Models", "Connect local or cloud engine (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI)", False),
-    ("/connect", "core", "Core & Models", "Alias for /provider connector dashboard", False),
+    ("/keys", "core", "Core & Models", "View and update API keys & environment credentials (/keys <provider>)", True),
+    ("/env", "core", "Core & Models", "Inspect runtime environment variables and provider keys", False),
     ("/effort", "core", "Core & Models", "Adjust neural reasoning tier (reflex, balanced, synapse, quantum)", True),
     ("/config", "core", "Core & Models", "View and adjust runtime configuration parameters", True),
     ("/status", "core", "Core & Models", "View comprehensive live system and agent status", False),
@@ -90,6 +91,8 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/breakdown", "core", "Context & Tokens", "Full input prompt breakdown & token matching", False),
     ("/context", "core", "Context & Tokens", "View active context token budget and limits", False),
     ("/compact", "core", "Context & Tokens", "Compact conversation context while preserving key facts", False),
+    ("/statusbar", "core", "Context & Tokens", "Live real-time token capacity gauge and metrics", False),
+    ("/analytics", "core", "Context & Tokens", "Lifetime workspace analytics and tool insights", False),
     ("/window", "core", "Context & Tokens", "Adjust sliding context window size (e.g. /window 10)", True),
     ("/cost", "core", "Context & Tokens", "View session billing ledger and prompt cache hits", False),
     ("/payload", "core", "Context & Tokens", "Inspect exact prompt payload and tool results", True),
@@ -99,16 +102,17 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/diff", "core", "History & Diff", "View working tree uncommitted git diff", False),
     ("/review", "core", "History & Diff", "Run automated multi-file code review", True),
     ("/rewind", "core", "History & Diff", "Revert file edits made during previous turns", False),
+    ("/copy", "core", "History & Diff", "Copy last response, code blocks, or diff to clipboard", True),
     ("/expand", "core", "History & Diff", "View full un-truncated output or expand any file", True),
+    ("/export", "core", "History & Diff", "Export session to Markdown or JSON transcript", True),
 
     # 🤖 Multi-Agent, Tasks & Skills
     ("/subagents", "core", "Multi-Agent", "Axon subagent matrix & isolated worker transcripts", False),
     ("/todos", "core", "Multi-Agent", "View active multi-step task checklist", False),
-    ("/queue", "core", "Multi-Agent", "Add/manage sequential prompt queue (/queue <text>)", True),
-    ("/q", "core", "Multi-Agent", "Quick alias for message queue (/q <text>, /q drop, /q clear)", True),
+    ("/q", "core", "Multi-Agent", "Add/manage sequential prompt queue (/q <text>, /q drop, /q clear)", True),
     ("/skills", "core", "Multi-Agent", "Browse active skills studio and create new skills", True),
     ("/mcp", "ext", "Multi-Agent", "Inspect Model Context Protocol servers and tools", False),
-    ("/plugin", "ext", "Multi-Agent", "Inspect installed plugins and extension manifests", False),
+    ("/plugin", "ext", "Multi-Agent", "Inspect installed plugins and extension manifests", True),
     ("/hooks", "ext", "Multi-Agent", "Inspect active lifecycle and execution hooks", False),
     ("/memory", "core", "Multi-Agent", "Inspect persistent workspace memory store", False),
     ("/learn", "core", "Multi-Agent", "Teach a new convention to persistent memory", True),
@@ -118,13 +122,20 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/root", "core", "Sessions & Root", "Alias for /main to return to root chart session", False),
     ("/sessions", "core", "Sessions & Root", "Axon session matrix timeline dashboard", False),
     ("/rename", "core", "Sessions & Root", "Rename the active session with custom title", True),
+    ("/tag", "core", "Sessions & Root", "Add tag to active session for categorized filtering", True),
+    ("/star", "core", "Sessions & Root", "Star the active session as a favorite", False),
     ("/resume", "core", "Sessions & Root", "Resume previous session from transcript", True),
     ("/branch", "core", "Sessions & Root", "Fork current conversation into an independent branch", True),
-    ("/tools", "core", "Sessions & Root", "List all 24 active agent tools, schemas, and permissions", False),
+    ("/find", "core", "Sessions & Root", "Interactive fuzzy file finder (Ctrl+P)", False),
+    ("/test", "core", "Sessions & Root", "Run test suite (pytest, npm test, cargo test)", True),
+    ("/notify", "core", "Sessions & Root", "Test system desktop notification", True),
+    ("/tools", "core", "Sessions & Root", "List all active agent tools, schemas, and permissions", False),
     ("/doctor", "core", "Sessions & Root", "Run local diagnostics & environment health check", False),
     ("/init", "ext", "Sessions & Root", "Initialize AGENTS.md conventions file in workspace", False),
 
     # ⌨️ Session Control & Input
+    ("/btw", "core", "Session Control", "Ask side inquiry with zero context pollution (/btw <q>)", True),
+    ("/voice", "core", "Session Control", "Toggle speech dictation / voice input mode", False),
     ("/ask", "core", "Session Control", "Ask simultaneous side question in isolated context", True),
     ("/kb", "core", "Session Control", "Keybindings and shortcuts cheat sheet", False),
     ("/help", "core", "Session Control", "Show categorized command reference and help", False),
@@ -182,6 +193,25 @@ def read_input(
     buffer: list[str] = []
     cursor_pos = 0
 
+    # Print clean divider and status header above prompt
+    def _render_status_header(m: str) -> None:
+        tw = term_width()
+        width = max(40, tw - 4)
+        label_text, mode_color = _get_mode_info(m)
+        plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
+        queue_badge = f"  {CYAN}{BOLD}{queue_summary}{RST}" if queue_summary else ""
+        agent_hint = f" · {DARK_SLATE}/main to return · ← sessions{RST}" if subagent_label else f" · {DARK_SLATE}← sessions{RST}"
+        left_str = f"▮ {label_text}{plan_badge}{queue_badge}{agent_hint}"
+        right_str = f"○ {effort} · /effort · ⌨ /kb · ? shortcuts"
+        pad = max(2, width - len(strip_ansi(left_str)) - len(strip_ansi(right_str)))
+        sys.stdout.write(f"\r\033[K  {mode_color}{BOLD}{left_str}{RST}{' ' * pad}{SLATE}{right_str}{RST}\n")
+        sys.stdout.flush()
+
+    width = max(40, term_width() - 4)
+    sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n")
+    sys.stdout.flush()
+    _render_status_header(current_mode)
+
     # Build history from session store + readline + recent user messages
     history: list[str] = []
     for h_item in _SESSION_HISTORY:
@@ -196,7 +226,6 @@ def read_input(
                     history.append(item)
         except Exception:
             pass
-
 
     if len(history) < 15:
         try:
@@ -216,17 +245,9 @@ def read_input(
 
     history_idx = len(history)
 
-    saved_draft = ""
-    last_prompt_lines = 1
-    last_popup_lines = 0
-    last_rendered_lines = 0
-    last_prompt_row = 0
-
-    # Slash command autocomplete state
+    # Autocomplete state
     selected_cmd_idx = 0
     cmd_popup_open = True
-
-    # File @ autocomplete state
     selected_file_idx = 0
     file_popup_open = True
 
@@ -257,30 +278,17 @@ def read_input(
         return res
 
     def draw(initial: bool = False):
-        nonlocal last_prompt_lines, last_popup_lines, last_rendered_lines, last_prompt_row
         tw = term_width()
         width = max(40, tw - 4)
         buf_str = "".join(buffer)
         is_bash = buf_str.startswith("!")
 
         if is_bash:
-            label_text = "bash mode on (Enter to run in shell)"
-            mode_color = AMBER
-            right_str = f"{AMBER}⚡ direct shell execution{RST} · {SLATE}cd supported{RST}"
             p_prefix = f"{AMBER}{BOLD}!{RST} "
-            p_plain = "! "
+        elif subagent_label:
+            p_prefix = f"{CYAN}[{subagent_label}]{RST} {BOLD}{CYAN}❯{RST} "
         else:
-            label_text, mode_color = _get_mode_info(current_mode)
-            right_str = f"○ {effort} · /effort · ⌨ /kb · ? shortcuts"
-            if subagent_label:
-                p_prefix = f"{CYAN}[{subagent_label}]{RST} {BOLD}{WHITE}›{RST} "
-                p_plain = f"[{subagent_label}] › "
-            else:
-                p_prefix = f"{BOLD}{WHITE}›{RST} "
-                p_plain = "› "
-
-        plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
-        queue_badge = f"  {CYAN}{BOLD}{queue_summary}{RST}" if queue_summary else ""
+            p_prefix = f"{BOLD}{CYAN}❯{RST} "
 
         # Check slash autocomplete
         matching_cmds: list[tuple[str, str, str, str, bool]] = []
@@ -295,77 +303,44 @@ def read_input(
             at_token = buf_before_cur[last_at + 1:]
             matching_files = get_matching_files(at_token)
 
-        max_visible = 8
-
-        frame_lines: list[str] = []
-        frame_lines.append(f"  {DARK_SLATE}{'─' * max(10, width)}{RST}")
-
-        # Prompt input row (horizontally scrolls if buffer exceeds available columns)
-        prompt_row_idx = len(frame_lines)
         avail_prompt_w = max(10, tw - len(strip_ansi(p_prefix)) - 4)
         if not buffer:
-            placeholder = f"{DARK_SLATE}Ask anything, use / for commands, @ for files, ! for shell...{RST}"
-            frame_lines.append(f"  {p_prefix}{placeholder}")
+            disp_body = f"{DARK_SLATE}Ask anything, use / for commands, @ for files, ! for shell...{RST}"
             col_in_disp = 0
         elif is_bash:
             cmd_body = buf_str[1:]
             if not cmd_body:
-                placeholder = f"{DARK_SLATE}type bash command (e.g. ls, git status, pytest)...{RST}"
-                frame_lines.append(f"  {p_prefix}{placeholder}")
+                disp_body = f"{DARK_SLATE}type bash command (e.g. ls, git status, pytest)...{RST}"
                 col_in_disp = 0
             else:
                 cursor_in_body = max(0, cursor_pos - 1)
                 if len(cmd_body) > avail_prompt_w:
                     start_ch = max(0, cursor_in_body - avail_prompt_w + 3)
-                    disp_body = cmd_body[start_ch:start_ch + avail_prompt_w]
+                    disp_body = f"{WHITE}{BOLD}{cmd_body[start_ch:start_ch + avail_prompt_w]}{RST}"
                     col_in_disp = cursor_in_body - start_ch
                 else:
-                    disp_body = cmd_body
+                    disp_body = f"{WHITE}{BOLD}{cmd_body}{RST}"
                     col_in_disp = cursor_in_body
-                frame_lines.append(f"  {p_prefix}{WHITE}{BOLD}{disp_body}{RST}")
         else:
             if len(buf_str) > avail_prompt_w:
                 start_ch = max(0, cursor_pos - avail_prompt_w + 3)
-                disp_body = buf_str[start_ch:start_ch + avail_prompt_w]
+                slice_body = buf_str[start_ch:start_ch + avail_prompt_w]
                 col_in_disp = cursor_pos - start_ch
             else:
-                disp_body = buf_str
+                slice_body = buf_str
                 col_in_disp = cursor_pos
-            # Highlight [Image #N] badges in bright cyan bold
-            styled_disp = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", disp_body)
-            frame_lines.append(f"  {p_prefix}{WHITE}{BOLD}{styled_disp}{RST}")
+            styled = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", slice_body)
+            disp_body = f"{WHITE}{BOLD}{styled}{RST}"
 
-        # Status row below prompt (strictly fits within terminal width)
-        max_status_w = max(20, tw - 4)
-        if subagent_label:
-            agent_hint = f" · {DARK_SLATE}/main to return · ← sessions{RST}"
-        else:
-            agent_hint = f" · {DARK_SLATE}← sessions{RST}"
+        target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
 
-        img_matches = re.findall(r"\[Image\s*#\d+\]", buf_str)
-        img_badge = f"  {MINT}{BOLD}📷 {len(img_matches)} image{'s' if len(img_matches) != 1 else ''}{RST}" if img_matches else ""
-
-        left_visible = f"▮ {label_text}{plan_badge}{queue_badge}{img_badge}{agent_hint}"
-        left_len = len(strip_ansi(left_visible))
-        right_len = len(strip_ansi(right_str))
-
-        if left_len + right_len + 4 <= max_status_w:
-            pad = max_status_w - left_len - right_len
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}{' ' * pad}{SLATE}{right_str}{RST}"
-        elif left_len + 14 <= max_status_w:
-            short_right = f"○ {effort}"
-            pad = max(2, max_status_w - left_len - len(strip_ansi(short_right)))
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}{' ' * pad}{SLATE}{short_right}{RST}"
-        else:
-            status_line = f"  {mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{img_badge}{agent_hint}"
-
-        frame_lines.append(status_line)
-
-        # Popups
+        # Check for popup lines
+        popup_lines: list[str] = []
+        max_visible = 8
         if matching_cmds:
             popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · {MINT}● Built-in{SLATE} · {GOLD}🔌 Config/Ext{SLATE} · ↑/↓ scroll · Tab fill · Enter run)"
             p_border_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            frame_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}\033[K")
+            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}")
             start_v = max(0, min(selected_cmd_idx - max_visible // 2, len(matching_cmds) - max_visible))
             end_v = min(len(matching_cmds), start_v + max_visible)
             for idx in range(start_v, end_v):
@@ -376,12 +351,12 @@ def read_input(
                 name = f"{WHITE}{BOLD}{c_name:<12}{RST}" if is_sel else f"{CYAN}{c_name:<12}{RST}"
                 cat = f"{PURPLE}{c_cat:<16}{RST}" if is_sel else f"{DARK_SLATE}{c_cat:<16}{RST}"
                 desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max(10, width - 42)]
-                frame_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {cat} {desc}\033[K")
-            frame_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}\033[K")
+                popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {cat} {desc}")
+            popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
         elif matching_files:
             popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)} · ↑/↓ scroll · Tab fill · Enter select)"
             p_border_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            frame_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}\033[K")
+            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}")
             start_v = max(0, min(selected_file_idx - max_visible // 2, len(matching_files) - max_visible))
             end_v = min(len(matching_files), start_v + max_visible)
             for idx in range(start_v, end_v):
@@ -390,29 +365,19 @@ def read_input(
                 prefix = f"{MINT}▶{RST}" if is_sel else " "
                 disp = (f_path if len(f_path) <= (width - 16) else "…" + f_path[-(width - 18):])
                 name = f"{WHITE}{BOLD}{disp}{RST}" if is_sel else f"{SLATE}{disp}{RST}"
-                frame_lines.append(f"  {DARK_SLATE}│{RST} {prefix} 📄 {name}\033[K")
-            frame_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}\033[K")
+                popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} 📄 {name}")
+            popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
 
-        # Cleanly fit all frame lines within terminal width to prevent auto-wrap skew
-        safe_max_w = max(20, tw - 2)
-        safe_lines = [safe_ansi_truncate(l, safe_max_w) for l in frame_lines]
-
-        # Erase previous frame cleanly from the prompt line up to frame top
-        sys.stdout.write("\033[?25l")
-        if not initial and last_prompt_row > 0:
-            sys.stdout.write(f"\033[{last_prompt_row}A\r\033[J")
+        if popup_lines:
+            safe_popup = [safe_ansi_truncate(l, max(20, tw - 2)) for l in popup_lines]
+            output = [f"\033[?25l\033[?7l\r\033[K  {p_prefix}{disp_body}"]
+            for pl in safe_popup:
+                output.append(f"\n\r\033[K{pl}")
+            output.append(f"\033[J\033[{len(safe_popup)}A\r\033[{target_col}G\033[?7h\033[?25h")
+            sys.stdout.write("".join(output))
         else:
-            sys.stdout.write("\r\033[J")
-        sys.stdout.write("\n".join(safe_lines))
-        lines_up = max(0, (len(safe_lines) - 1) - prompt_row_idx)
-        target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
-        if lines_up > 0:
-            sys.stdout.write(f"\033[{lines_up}A\r\033[{target_col}G\033[?25h")
-        else:
-            sys.stdout.write(f"\r\033[{target_col}G\033[?25h")
+            sys.stdout.write(f"\033[?25l\033[?7l\r\033[K  {p_prefix}{disp_body}\033[J\r\033[{target_col}G\033[?7h\033[?25h")
         sys.stdout.flush()
-        last_rendered_lines = len(safe_lines)
-        last_prompt_row = prompt_row_idx
 
     fd = sys.stdin.fileno()
     old_attr = termios.tcgetattr(fd)
@@ -423,15 +388,8 @@ def read_input(
     draw(initial=True)
 
     def handle_sigwinch(signum, frame):
-        nonlocal last_prompt_row
         try:
-            sys.stdout.write("\033[?25l")
-            if last_prompt_row > 0:
-                sys.stdout.write(f"\033[{last_prompt_row}A\r\033[J")
-            else:
-                sys.stdout.write("\r\033[J")
-            last_prompt_row = 0
-            draw(initial=True)
+            draw(initial=False)
         except Exception:
             pass
     try:
@@ -472,6 +430,8 @@ def read_input(
                 else:
                     idx = (MODES_CYCLE.index(current_mode) + 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
                     current_mode = MODES_CYCLE[idx]
+                    sys.stdout.write("\033[1A")
+                    _render_status_header(current_mode)
                     draw()
                 continue
 
@@ -479,6 +439,8 @@ def read_input(
             if any(raw_bytes.startswith(k) for k in (b"\x1b[Z", b"\x1b\t", b"\x1b\x09", b"\x1b[27;2;9~", b"\x1b[9;2u", b"\x1b[24~", b"\x1b[1;2Z", b"\x1bOZ")):
                 idx = (MODES_CYCLE.index(current_mode) - 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
                 current_mode = MODES_CYCLE[idx]
+                sys.stdout.write("\033[1A")
+                _render_status_header(current_mode)
                 draw()
                 continue
 
@@ -509,6 +471,8 @@ def read_input(
                 sys.stdout.write("\n")
                 sys.stdout.flush()
                 return ("/model", current_mode if current_mode != mode else None, current_subagent_idx)
+
+
 
             # Down Arrow -> Navigate command history forward
             if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
@@ -612,6 +576,90 @@ def read_input(
                     draw()
                 continue
 
+            # Ctrl+A (0x01) -> Move cursor to start of prompt (Emacs/Vim)
+            if raw_bytes == b"\x01":
+                cursor_pos = 0
+                draw()
+                continue
+
+            # Ctrl+E (0x05) -> Move cursor to end of prompt (Emacs/Vim)
+            if raw_bytes == b"\x05":
+                cursor_pos = len(buffer)
+                draw()
+                continue
+
+            # Ctrl+K (0x0b) -> Kill text to end of line
+            if raw_bytes == b"\x0b":
+                if cursor_pos < len(buffer):
+                    undo_stack.append((list(buffer), cursor_pos))
+                    buffer = buffer[:cursor_pos]
+                    draw()
+                continue
+
+            # Ctrl+U (0x15) -> Kill text to start of line
+            if raw_bytes == b"\x15":
+                if cursor_pos > 0:
+                    undo_stack.append((list(buffer), cursor_pos))
+                    buffer = buffer[cursor_pos:]
+                    cursor_pos = 0
+                    draw()
+                continue
+
+            # Ctrl+W (0x17) -> Delete word backward
+            if raw_bytes == b"\x17":
+                if cursor_pos > 0:
+                    undo_stack.append((list(buffer), cursor_pos))
+                    idx = cursor_pos
+                    # Skip trailing whitespace
+                    while idx > 0 and buffer[idx - 1] == " ":
+                        idx -= 1
+                    # Skip word chars
+                    while idx > 0 and buffer[idx - 1] != " ":
+                        idx -= 1
+                    buffer = buffer[:idx] + buffer[cursor_pos:]
+                    cursor_pos = idx
+                    draw()
+                continue
+
+            # Alt+B / Opt+Left -> Move word backward
+            if raw_bytes in (b"\x1bb", b"\x1b[1;3D", b"\x1b[1;5D", b"\x1b\x1b[D"):
+                idx = cursor_pos
+                while idx > 0 and buffer[idx - 1] == " ":
+                    idx -= 1
+                while idx > 0 and buffer[idx - 1] != " ":
+                    idx -= 1
+                cursor_pos = max(0, idx)
+                draw()
+                continue
+
+            # Alt+F / Opt+Right -> Move word forward
+            if raw_bytes in (b"\x1bf", b"\x1b[1;3C", b"\x1b[1;5C", b"\x1b\x1b[C"):
+                idx = cursor_pos
+                while idx < len(buffer) and buffer[idx] != " ":
+                    idx += 1
+                while idx < len(buffer) and buffer[idx] == " ":
+                    idx += 1
+                cursor_pos = min(len(buffer), idx)
+                draw()
+                continue
+
+            # Ctrl+P (0x10) -> Interactive Fuzzy File Finder
+            if raw_bytes == b"\x10":
+                from axon.ui.fuzzy_picker import run_fuzzy_file_finder
+                if termios is not None:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+                chosen_file = run_fuzzy_file_finder(Path.cwd())
+                if tty is not None:
+                    tty.setcbreak(fd)
+                if chosen_file:
+                    undo_stack.append((list(buffer), cursor_pos))
+                    ins = f"@{chosen_file} "
+                    for ch in ins:
+                        buffer.insert(cursor_pos, ch)
+                        cursor_pos += 1
+                draw(initial=True)
+                continue
+
 
             # Ctrl+V (0x16) -> Paste clipboard content / image data instantly (< 40ms)
             if raw_bytes == b"\x16":
@@ -673,20 +721,20 @@ def read_input(
                 continue
 
             # Home key
-            if raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x1bOH", b"\x01"):
+            if raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x1bOH"):
                 cursor_pos = 0
                 draw()
                 continue
 
             # End key
-            if raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x1bOF", b"\x05"):
+            if raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x1bOF"):
                 cursor_pos = len(buffer)
                 draw()
                 continue
 
             # Delete key
             if raw_bytes in (b"\x1b[3~", b"\x1b[3;5~"):
-                if cursor_pos < len(buffer):
+                if 0 <= cursor_pos < len(buffer):
                     buffer.pop(cursor_pos)
                     draw()
                 continue
@@ -717,16 +765,22 @@ def read_input(
                     cursor_pos = len(buffer)
                     draw()
                     continue
-                if last_prompt_row > 0:
-                    sys.stdout.write(f"\033[{last_prompt_row}A\r\033[J")
+                buf_str_final = "".join(buffer).strip()
+                if buf_str_final.startswith("!"):
+                    p_prefix_final = f"{AMBER}{BOLD}!{RST} "
+                elif subagent_label:
+                    p_prefix_final = f"{CYAN}[{subagent_label}]{RST} {BOLD}{CYAN}❯{RST} "
                 else:
-                    sys.stdout.write("\r\033[J")
+                    p_prefix_final = f"{BOLD}{CYAN}❯{RST} "
+                styled_final = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", buf_str_final)
+                sys.stdout.write(f"\r\033[K  {p_prefix_final}{WHITE}{BOLD}{styled_final}{RST}\n\n\033[J\033[?7h\033[?25h")
                 sys.stdout.flush()
                 break
 
             # Backspace
             if raw_bytes in (b"\x7f", b"\x08"):
-                if cursor_pos > 0:
+                cursor_pos = max(0, min(cursor_pos, len(buffer)))
+                if cursor_pos > 0 and len(buffer) >= cursor_pos:
                     buffer.pop(cursor_pos - 1)
                     cursor_pos -= 1
                     history_idx = len(history)
@@ -747,19 +801,9 @@ def read_input(
                 if not buffer:
                     sys.stdout.write("\n")
                     raise EOFError
-                if cursor_pos < len(buffer):
+                if 0 <= cursor_pos < len(buffer):
                     buffer.pop(cursor_pos)
                     draw()
-                continue
-
-            # Ctrl+U (Clear line)
-            if raw_bytes == b"\x15":
-                undo_stack.append((list(buffer), cursor_pos))
-                buffer = []
-                cursor_pos = 0
-                cmd_popup_open = True
-                file_popup_open = True
-                draw()
                 continue
 
             # Skip unknown escape sequences
@@ -802,7 +846,7 @@ def read_input(
                 pass
 
     finally:
-        sys.stdout.write("\033[?25h")
+        sys.stdout.write("\033[?7h\033[?25h")
         if orig_sigwinch is not None and hasattr(signal, "SIGWINCH"):
             try:
                 signal.signal(signal.SIGWINCH, orig_sigwinch)

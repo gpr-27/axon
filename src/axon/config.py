@@ -3,6 +3,7 @@ Axon typed Settings configuration.
 """
 from __future__ import annotations
 import os
+import sys
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -57,6 +58,16 @@ class Settings(BaseSettings):
     hooks: dict[str, list[HookSpec]] = Field(default_factory=dict)
     append_system_prompt: str | None = None
     dangerously_skip_permissions: bool = False
+    isolate_worktrees: bool = False
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def normalize_model(cls, v: Any) -> str:
+        if isinstance(v, str):
+            v_clean = v.strip().strip('"').strip("'")
+            if v_clean:
+                return v_clean
+        return "deepseek-v4-flash"
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -182,6 +193,16 @@ class Settings(BaseSettings):
                 except Exception:
                     entered_key = ""
                 if entered_key and entered_key not in invalid_placeholders:
+                    from axon.providers.verifier import verify_api_key
+                    print(f"  {SLATE}⚡ Verifying API key...{RST}", end="", flush=True)
+                    ok, msg = verify_api_key("agentrouter", entered_key, base_url=settings.base_url, model=settings.model)
+                    if not ok:
+                        from axon.ui.theme import ROSE
+                        print(f"\r\033[K  {ROSE}❌ API key test failed:{RST} {WHITE}{msg}{RST}")
+                        print(f"  {SLATE}The key is not working and was not saved.{RST}\n")
+                        raise ConfigError(f"Provided API key is not working: {msg}")
+                    print(f"\r\033[K  {MINT}✓ API key verified successfully!{RST}")
+
                     global_axon = Path.home() / ".axon"
                     global_axon.mkdir(parents=True, exist_ok=True)
                     env_file = global_axon / ".env"

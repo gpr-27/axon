@@ -67,57 +67,15 @@ class CodeSymbolsTool(Tool):
         return res
 
     def _parse_file(self, file_path: Path) -> list[str]:
-        suffix = file_path.suffix.lower()
-        if suffix == ".py":
-            return self._parse_python(file_path)
-        else:
-            return self._parse_generic(file_path)
-
-    def _parse_python(self, file_path: Path) -> list[str]:
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(content, filename=str(file_path))
-        except Exception as e:
-            return [f"(Syntax/Parse error: {e})"]
-
-        symbols: list[str] = []
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef):
-                bases = [ast.unparse(b) for b in node.bases]
-                base_str = f"({', '.join(bases)})" if bases else ""
-                doc = ast.get_docstring(node)
-                doc_preview = f" — \"{doc.splitlines()[0][:60]}\"" if doc else ""
-                symbols.append(f"class {node.name}{base_str} [L{node.lineno}-{node.end_lineno or node.lineno}]{doc_preview}")
-
-                # Methods inside class
-                for sub in node.body:
-                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        prefix = "async def" if isinstance(sub, ast.AsyncFunctionDef) else "def"
-                        args_list = [a.arg for a in sub.args.args]
-                        m_doc = ast.get_docstring(sub)
-                        m_doc_preview = f" — \"{m_doc.splitlines()[0][:50]}\"" if m_doc else ""
-                        symbols.append(f"  • {prefix} {sub.name}({', '.join(args_list)}) [L{sub.lineno}-{sub.end_lineno or sub.lineno}]{m_doc_preview}")
-
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
-                args_list = [a.arg for a in node.args.args]
-                doc = ast.get_docstring(node)
-                doc_preview = f" — \"{doc.splitlines()[0][:60]}\"" if doc else ""
-                symbols.append(f"{prefix} {node.name}({', '.join(args_list)}) [L{node.lineno}-{node.end_lineno or node.lineno}]{doc_preview}")
-
-        return symbols
-
-    def _parse_generic(self, file_path: Path) -> list[str]:
-        symbols: list[str] = []
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-            for idx, line in enumerate(content.splitlines(), 1):
-                clean = line.strip()
-                # Match class/function declarations in JS/TS/Go/Rust
-                if re.match(r"^(export\s+)?(class|interface|type|struct|enum)\s+([A-Za-z0-9_]+)", clean):
-                    symbols.append(f"{clean[:75]} [L{idx}]")
-                elif re.match(r"^(export\s+)?(async\s+)?(function\s+|const\s+\w+\s*=\s*(async\s*)?\([^)]*\)\s*=>|func\s+|fn\s+)([A-Za-z0-9_]+)", clean):
-                    symbols.append(f"{clean[:75]} [L{idx}]")
-        except Exception:
-            pass
-        return symbols
+        from axon.tools.code_graph import MultiLanguageSymbolExtractor
+        symbols_nodes = MultiLanguageSymbolExtractor.extract_symbols(file_path)
+        out: list[str] = []
+        for s in symbols_nodes:
+            parent_info = f" in {s.parent}" if s.parent else ""
+            doc_preview = f" — \"{s.docstring}\"" if s.docstring else ""
+            line_str = f"L{s.line_number}" if s.line_number == s.end_line_number else f"L{s.line_number}-{s.end_line_number}"
+            if s.kind == "method":
+                out.append(f"  • {s.signature} [{line_str}]{doc_preview}")
+            else:
+                out.append(f"{s.signature or s.name} [{line_str}]{parent_info}{doc_preview}")
+        return out

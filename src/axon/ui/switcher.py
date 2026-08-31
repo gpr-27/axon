@@ -69,6 +69,8 @@ def _clean_session_topic(text: str) -> str:
         return ""
     return t[0].upper() + t[1:]
 
+from dataclasses import dataclass, field
+
 @dataclass
 class DashboardSession:
     id: str
@@ -80,6 +82,8 @@ class DashboardSession:
     path: Path
     total_tokens: int = 0
     message_count: int = 0
+    tags: list[str] = field(default_factory=list)
+    is_starred: bool = False
 
 def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None, session_dir: Path | None = None) -> list[DashboardSession]:
     """Scan all session JSONL files and subagents to build structured session list."""
@@ -108,6 +112,8 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
         last_msg = ""
         user_prompts: list[str] = []
         assistant_texts: list[str] = []
+        session_tags: list[str] = []
+        is_starred: bool = False
         total_tokens = 0
         line_count = 0
         
@@ -125,6 +131,12 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
                             r_title = data.get("title")
                             if r_title:
                                 custom_title = r_title.strip()
+                        elif t == "session_tag":
+                            tg = data.get("tag")
+                            if tg and tg not in session_tags:
+                                session_tags.append(tg)
+                        elif t == "session_star":
+                            is_starred = bool(data.get("starred", True))
                         elif t == "user_message":
                             txt = data.get("content", "")
                             if isinstance(txt, str) and txt.strip():
@@ -186,6 +198,8 @@ def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None =
                 path=f,
                 total_tokens=total_tokens,
                 message_count=line_count,
+                tags=session_tags,
+                is_starred=is_starred,
             )
         )
 
@@ -276,7 +290,7 @@ def run_session_dashboard(agent: Agent) -> str | None:
         
         # Clean title banner
         lines_out.append("")
-        lines_out.append(f"  {TEAL}▲{CYAN}█{MINT}▲  {BOLD}{WHITE}Previous Chats{RST} {SLATE}· {len(flat_list)} chats · ↑/↓ navigate · Enter open · Esc return{RST}")
+        lines_out.append(f"  {TEAL}▲{CYAN}█{MINT}▲  {BOLD}{WHITE}Previous Chats{RST} {SLATE}· {len(flat_list)} chats · ↑/↓ navigate · Enter open · (r)ename · (t)ag · (s)tar · Esc return{RST}")
         lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
 
         # Render scrollable list of all previous chats with categorized time headers
@@ -295,14 +309,20 @@ def run_session_dashboard(agent: Agent) -> str | None:
 
             is_sel = (idx == selected_idx)
             cursor_mark = f"{MINT}▶{RST}" if is_sel else " "
-            clean_title = " ".join(s.title.split())[:24]
+            clean_title = " ".join(s.title.split())[:20]
+            tag_badge = f" {CYAN}#{s.tags[0]}{RST}" if s.tags else ""
+
+            if s.is_starred:
+                star = f"{GOLD}★{RST}"
+            elif s.is_current:
+                star = f"{MINT}●{RST}"
+            else:
+                star = f"{DARK_SLATE}•{RST}"
 
             if s.is_current:
-                star = f"{MINT}●{RST}"
-                t_str = f"{MINT}{BOLD}{clean_title:<24}{RST}" if not is_sel else f"{MINT}{BOLD}{UNDER}{clean_title:<24}{RST}"
+                t_str = f"{MINT}{BOLD}{clean_title:<20}{RST}{tag_badge}" if not is_sel else f"{MINT}{BOLD}{UNDER}{clean_title:<20}{RST}{tag_badge}"
             else:
-                star = f"{SLATE}✱{RST}"
-                t_str = f"{WHITE}{clean_title:<24}{RST}" if not is_sel else f"{WHITE}{BOLD}{UNDER}{clean_title:<24}{RST}"
+                t_str = f"{WHITE}{clean_title:<20}{RST}{tag_badge}" if not is_sel else f"{WHITE}{BOLD}{UNDER}{clean_title:<20}{RST}{tag_badge}"
 
             if s.total_tokens >= 1000:
                 tok_part = f" ({s.total_tokens / 1000:.1f}k tok)"
@@ -312,9 +332,9 @@ def run_session_dashboard(agent: Agent) -> str | None:
                 tok_part = ""
 
             time_str = f"current · {format_time_ago(s.updated_at)}{tok_part}" if s.is_current else f"{format_time_ago(s.updated_at)}{tok_part}"
-            max_msg = max(8, width - 40 - len(strip_ansi(time_str)))
+            max_msg = max(8, width - 42 - len(strip_ansi(time_str)) - len(strip_ansi(tag_badge)))
             msg_preview = " ".join(s.last_message.split())[:max_msg]
-            pad = max(2, width - 32 - len(msg_preview) - len(strip_ansi(time_str)))
+            pad = max(2, width - 28 - len(msg_preview) - len(strip_ansi(time_str)) - len(strip_ansi(tag_badge)))
 
             if is_sel:
                 line_str = f"  {cursor_mark} {star} {t_str} {SLATE}{msg_preview}{' ' * pad}{SLATE}{time_str}{RST}"
@@ -469,6 +489,52 @@ def run_session_dashboard(agent: Agent) -> str | None:
                     if chosen.is_current or chosen.id == active_id:
                         return None
                     return chosen.id
+
+            # 's' or '*' -> Toggle Star / Favorite
+            if (raw_bytes.lower() in (b"s", b"*")) and not buffer and flat_list:
+                if selected_idx < len(flat_list):
+                    target_s = flat_list[selected_idx]
+                    new_st = agent.session.star_session(target_s.id)
+                    target_s.is_starred = new_st
+                    draw()
+                continue
+
+            # 'r' or 'm' -> Rename / Modify session title
+            if (raw_bytes.lower() in (b"r", b"m")) and not buffer and flat_list:
+                if selected_idx < len(flat_list):
+                    target_s = flat_list[selected_idx]
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+                    sys.stdout.write(f"\n\r  {GOLD}✏️  Enter new title for session:{RST} ")
+                    sys.stdout.flush()
+                    try:
+                        new_t = sys.stdin.readline().strip()
+                        if new_t:
+                            agent.session.rename_session(new_t, target_s.id)
+                            target_s.title = new_t
+                    except Exception:
+                        pass
+                    tty.setcbreak(fd)
+                    draw()
+                continue
+
+            # 't' -> Add tag to session
+            if (raw_bytes.lower() == b"t") and not buffer and flat_list:
+                if selected_idx < len(flat_list):
+                    target_s = flat_list[selected_idx]
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+                    sys.stdout.write(f"\n\r  {CYAN}🏷️  Enter tag name (e.g. best, bugfix, docs):{RST} ")
+                    sys.stdout.flush()
+                    try:
+                        new_tg = sys.stdin.readline().strip().lstrip("#")
+                        if new_tg:
+                            agent.session.tag_session(new_tg, target_s.id)
+                            if new_tg not in target_s.tags:
+                                target_s.tags.append(new_tg)
+                    except Exception:
+                        pass
+                    tty.setcbreak(fd)
+                    draw()
+                continue
 
             # Ctrl+X or 'd' (Delete session) when buffer is empty
             if (raw_bytes in (b"\x18",) or (raw_bytes == b"d" and not buffer)) and flat_list:

@@ -183,9 +183,22 @@ def run_subagent(
 
     from axon.agent.loop import Agent
     from axon.session.store import SessionStore
+    from axon.agent.worktree import WorktreeManager, WorktreeInfo
+
+    worktree_info: WorktreeInfo | None = None
+    sub_ws = parent.settings.workspace
+    if getattr(parent.settings, "isolate_worktrees", False):
+        try:
+            worktree_info = WorktreeManager.create_worktree(parent.settings.workspace, task.id)
+            if worktree_info:
+                sub_ws = worktree_info.worktree_path
+                task.add_log(f"🌿 Git worktree isolated: {sub_ws.name}")
+        except Exception:
+            worktree_info = None
+
     parent_sess_id = parent.session.active_session_id.rsplit("_sub_", 1)[0]
     sub_sess_id = f"{parent_sess_id}_sub_{task.index}"
-    sub_store = SessionStore(parent.session.workspace, session_dir=parent.session.session_dir)
+    sub_store = SessionStore(sub_ws, session_dir=parent.session.session_dir)
     sub_store.open(sub_sess_id)
 
     sub_agent = Agent(
@@ -195,7 +208,7 @@ def run_subagent(
         context=parent.context,
         session=sub_store,
         ledger=parent.ledger,
-        settings=parent.settings.model_copy(update={"max_iterations": max_iterations}),
+        settings=parent.settings.model_copy(update={"max_iterations": max_iterations, "workspace": sub_ws}),
         on_event=sub_on_event,
     )
 
@@ -215,6 +228,13 @@ def run_subagent(
         sub_usage = result.usage
         tokens_total = (sub_usage.input or 0) + (sub_usage.output or 0)
 
+        # Merge worktree changes back if isolated
+        if worktree_info:
+            merged_ok, merge_msg = WorktreeManager.merge_back(worktree_info)
+            if merged_ok and "applied" in merge_msg.lower():
+                final_text += f"\n\n✓ Worktree changes merged back to workspace."
+            WorktreeManager.cleanup(worktree_info)
+
         # Record subagent tokens and cost into parent ledger so Main session total includes all subagents
         if hasattr(parent, "ledger") and parent.ledger is not None:
             try:
@@ -233,6 +253,11 @@ def run_subagent(
         parent.subagents.complete(task.id, final_text, sub_agent.conversation, status="completed", usage=sub_usage)
         return f"[Subagent #{task.index} Result ({task.title}) | {tokens_total:,} tokens (in: {sub_usage.input:,} · out: {sub_usage.output:,})]:\n{final_text}"
     except Exception as e:
+        if worktree_info:
+            try:
+                WorktreeManager.cleanup(worktree_info)
+            except Exception:
+                pass
         parent.subagents.fail(task.id, str(e))
         return f"[Subagent #{task.index} failed: {e}]"
 

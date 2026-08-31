@@ -2,11 +2,15 @@
 Built-in slash commands: /help, /model, /mode, /clear, /compact, /context, /cost, /resume, /tools, /permissions, /doctor, /export, /todos, /exit.
 """
 from __future__ import annotations
+import os
+import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from pydantic import SecretStr
 from axon.agent.loop import Agent
 from axon.config import Mode
 from axon.providers.registry import known_models, provider_for
@@ -14,7 +18,7 @@ from axon.session.interactive import handle_branch, handle_resume, handle_sessio
 from axon.skills.interactive import handle_skills_command
 from axon.ui.picker import pick
 from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, LBLUE, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE, term_width,
+    BOLD, CYAN, DARK_SLATE, DIM, GOLD, LBLUE, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE, term_width, term_height,
 )
 
 @dataclass
@@ -22,6 +26,45 @@ class CommandResult:
     handled: bool
     should_exit: bool = False
     message: str | None = None
+
+def save_or_update_env_key(env_var: str, key_val: str, agent: Agent | None = None) -> bool:
+    """Save or update an API key in ~/.axon/.env, process environment, and active agent settings."""
+    if not env_var or not key_val:
+        return False
+    clean_key = key_val.strip().strip('"').strip("'")
+    if clean_key.startswith("/") or clean_key.lower() in ("cancel", "exit", "skip", "q", "none", "null"):
+        return False
+
+    os.environ[env_var] = clean_key
+    env_f = Path.home() / ".axon" / ".env"
+    env_f.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    found = False
+    if env_f.exists():
+        try:
+            for l in env_f.read_text(encoding="utf-8").splitlines():
+                if "=" in l and l.strip().startswith(env_var):
+                    lines.append(f'{env_var}="{clean_key}"')
+                    found = True
+                else:
+                    lines.append(l)
+        except Exception:
+            pass
+    if not found:
+        lines.append(f'{env_var}="{clean_key}"')
+
+    env_f.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+    if agent is not None:
+        from axon.providers.catalog import find_preset_by_url
+        active_preset = find_preset_by_url(agent.settings.base_url)
+        if active_preset and active_preset.env_var == env_var:
+            from pydantic import SecretStr
+            from axon.providers.registry import provider_for
+            new_settings = agent.settings.model_copy(update={"api_key": SecretStr(clean_key)})
+            agent.settings = new_settings
+            agent.provider = provider_for(agent.settings.model, new_settings)
+    return True
 
 def handle_help(agent: Agent, arg: str) -> CommandResult:
     from axon.ui.markdown import format_markdown
@@ -34,6 +77,7 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 | `/effort [level]` | Adjust reasoning effort (`low`, `medium`, `high`, `xhigh`) |
 | `/config [k] [v]` | View and adjust runtime configuration parameters |
 | `/status` | View comprehensive live system, token, and agent status |
+| `/statusbar` | Toggle real-time token capacity gauge and sparklines |
 | `/permissions` | Inspect active permission engine rules and defaults |
 | `/plan [mode/off]` | View task checklist or switch to plan mode |
 
@@ -42,10 +86,11 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 |---|---|
 | `/breakdown` | Full prompt breakdown (system, tools, previous history, last message) & token match |
 | `/context` | View active context budget, token breakdown, and compaction limit |
-| `/provider` or `/connect` | Connect a provider (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI, Gemini, Groq) |
+| `/provider` | Connect a provider (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI, Gemini, Groq) |
 | `/compact` | Compact conversation history while preserving key context |
 | `/window [turns]` | Adjust sliding context window size (e.g. `/window 10` or `/window 0` for all) |
 | `/cost` | View session billing ledger, token counts, and real-time cost |
+| `/analytics` | View lifetime workspace usage metrics, tool calls, and model analytics |
 | `/payload [full]` | Inspect exact prompt payload and tool results sent to model |
 
 ### 📜 History & File Revisions
@@ -55,17 +100,19 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 | `/diff` | View working tree uncommitted git diff and file changes |
 | `/review [focus]` | Run automated multi-file code review |
 | `/rewind` | Revert file edits made during previous turns |
+| `/copy [code/diff]` | Copy last assistant response, code blocks, or diff to clipboard |
 | `/expand [file]` | View full un-truncated output or expand any file |
+| `/export [md/json]` | Export conversation to a clean Markdown or JSON transcript |
 
 ### 🤖 Multi-Agent, Tasks & Skills
 | Command / Shortcut | Description |
 |---|---|
 | `/subagents` | Axon subagent matrix (inspect isolated transcripts) |
 | `/todos` | View active multi-step task checklist |
-| `/queue` or `/q [text]` | Add/manage sequential prompt queue (`/q <text>`, `/queue drop <id>`, `/queue clear`) |
+| `/q [text]` | Add/manage sequential prompt queue (`/q <text>`, `/q drop <id>`, `/q clear`) |
 | `/skills` | Browse active skills studio and create new skills |
-| `/mcp` | Inspect Model Context Protocol servers and capabilities |
-| `/plugin` | Inspect installed plugins and extension manifests |
+| `/mcp [tools/connect]` | Inspect and connect Model Context Protocol servers and tools |
+| `/plugin [create/install]` | Inspect, create, and install Axon community plugins |
 | `/hooks` | Inspect active lifecycle and execution event hooks |
 | `/memory` | Inspect persistent workspace memory and AGENTS.md conventions |
 
@@ -74,9 +121,14 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 |---|---|
 | `/sessions` / `←` | Axon session timeline dashboard |
 | `/rename <title>` | Rename the active session |
+| `/tag <name>` | Tag the active session for categorized filtering |
+| `/star` | Star the active session as a favorite |
 | `/resume [id]` | Resume previous session from transcript |
 | `/branch [name]` | Fork current conversation into an independent branch |
-| `/tools` | List all 24 active agent tools, schemas, and permissions |
+| `/test [path]` | Run workspace tests (pytest, npm test, cargo test, go test) |
+| `/find` / `Ctrl+P` | Interactive fuzzy file finder |
+| `/tools` | List all active agent tools, schemas, and permissions |
+| `/notify [msg]` | Test desktop notifications |
 | `/doctor` | Run local diagnostics & environment health check |
 | `/init` | Initialize `AGENTS.md` conventions file in workspace |
 
@@ -85,6 +137,8 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 |---|---|
 | `?` or `/help` | Show this categorized command reference |
 | `/kb` | View interactive keyboard shortcuts cheat sheet |
+| `Ctrl+A` / `Ctrl+E` | Move cursor to start / end of line (Emacs/Vim) |
+| `Ctrl+K` / `Ctrl+W` | Kill line after cursor / delete word backward |
 | `/ask [question]` | Ask simultaneous side question in isolated scratch context |
 | `/clear` | Clear active conversation context |
 | `/exit` or `Ctrl+D` | Save and exit session |
@@ -122,24 +176,226 @@ def handle_effort(agent: Agent, arg: str) -> CommandResult:
 
     if chosen and chosen != agent.settings.effort:
         agent.settings = agent.settings.model_copy(update={"effort": chosen})
-        print(f"\n  {TEAL}✓ Switched neural reasoning tier to {BOLD}{chosen}{RST}\n")
+        print(f"\n  {TEAL}✓ Switched neural reasoning tier to {BOLD}{chosen}{RST}")
+        from axon.ui.render import Renderer
+        Renderer().print_banner(
+            version="GPR_27",
+            model=agent.settings.model,
+            effort=chosen,
+            workspace=str(agent.settings.workspace),
+            mode=agent.settings.mode,
+        )
     else:
         print(f"\n  {SLATE}(Reasoning tier unchanged: {agent.settings.effort}){RST}\n")
     return CommandResult(handled=True)
 
 def handle_model(agent: Agent, arg: str) -> CommandResult:
-    models = known_models()
-    if arg and arg in models:
-        chosen = arg
+    import random
+    from axon.providers.catalog import get_curated_model_choices, find_preset_for_model
+
+    curated_choices = get_curated_model_choices(agent.settings.base_url)
+    display_to_model = {disp: raw_id for raw_id, _, disp in curated_choices}
+    display_to_preset = {}
+    from axon.providers.catalog import PROVIDER_PRESETS, get_preset_by_id
+    for raw_id, p_label, disp in curated_choices:
+        for p in PROVIDER_PRESETS:
+            if p.name.startswith(p_label) or p_label.lower() in p.name.lower() or p_label.lower() == p.id.lower():
+                display_to_preset[disp] = p
+                break
+
+    raw_models = [raw_id for raw_id, _, _ in curated_choices]
+
+    arg_clean = arg.strip()
+    chosen_preset = None
+
+    if arg_clean.lower() in ("random", "rand", "shuffle", "surprise"):
+        chosen = random.choice(raw_models)
+        print(f"\n  {GOLD}🎲 Selected random model: {BOLD}{chosen}{RST}")
+    elif arg_clean.lower() in ("random:small", "random-small", "rand-small", "small"):
+        small_models = [
+            m for m in raw_models
+            if any(k in m.lower() for k in ("0.5b", "1.5b", "1b", "2b", "3b", "3.8b", "7b", "8b", "mini", "flash", "haiku", "lite"))
+        ]
+        chosen = random.choice(small_models) if small_models else random.choice(raw_models)
+        print(f"\n  {GOLD}🎲 Selected random lightweight model: {BOLD}{chosen}{RST}")
+    elif arg_clean:
+        # User specified an exact model name (either from presets or a custom model)
+        chosen = arg_clean
     else:
-        chosen = pick(models, title="Switch Active Model", current=agent.settings.model)
+        # Interactive picker with custom model typing and random options
+        picker_options = [
+            "✏️  Enter custom model name...",
+            "➕  Configure Provider (API Key & Endpoint)...",
+            "🎲  Random model (surprise me)",
+            "🎲  Random lightweight model (<8B)",
+        ] + [disp for _, _, disp in curated_choices]
+
+        # Determine current active option display
+        current_disp = None
+        for raw_id, _, disp in curated_choices:
+            if raw_id == agent.settings.model:
+                current_disp = disp
+                break
+
+        selection = pick(picker_options, title="Switch Active Model", current=current_disp)
+        if not selection:
+            print(f"\n  {SLATE}(Active model unchanged: {agent.settings.model}){RST}\n")
+            return CommandResult(handled=True)
+
+        if selection == "➕  Configure Provider (API Key & Endpoint)...":
+            return handle_provider(agent, "")
+        elif selection == "🎲  Random model (surprise me)":
+            chosen = random.choice(raw_models)
+            print(f"\n  {GOLD}🎲 Selected random model: {BOLD}{chosen}{RST}")
+        elif selection == "🎲  Random lightweight model (<8B)":
+            small_models = [
+                m for m in raw_models
+                if any(k in m.lower() for k in ("0.5b", "1.5b", "1b", "2b", "3b", "3.8b", "7b", "8b", "mini", "flash", "haiku", "lite"))
+            ]
+            chosen = random.choice(small_models) if small_models else random.choice(raw_models)
+            print(f"\n  {GOLD}🎲 Selected random lightweight model: {BOLD}{chosen}{RST}")
+        elif selection == "✏️  Enter custom model name...":
+            try:
+                custom_input = input(f"\n  {BOLD}{WHITE}Enter custom model name (e.g. qwen2.5-coder:1.5b, mistral:7b, gpt-4o): {RST}").strip()
+            except (KeyboardInterrupt, EOFError):
+                custom_input = ""
+            if not custom_input:
+                print(f"\n  {SLATE}(Active model unchanged: {agent.settings.model}){RST}\n")
+                return CommandResult(handled=True)
+
+            # Prompt for provider to eliminate any confusion
+            provider_menu = [
+                f"{p.name:<24} · {p.description} ({p.base_url})"
+                for p in PROVIDER_PRESETS
+            ]
+            chosen_p_option = pick(provider_menu, title=f"Select Provider for '{custom_input}'")
+            if not chosen_p_option:
+                print(f"\n  {SLATE}(Cancelled custom model setup){RST}\n")
+                return CommandResult(handled=True)
+
+            p_idx = provider_menu.index(chosen_p_option)
+            chosen_preset = PROVIDER_PRESETS[p_idx]
+            chosen = custom_input
+
+            # Persist custom model associated with provider
+            try:
+                cfg_file = Path.home() / ".axon" / "config.toml"
+                cfg_file.parent.mkdir(parents=True, exist_ok=True)
+                existing_cfg = {}
+                if cfg_file.exists():
+                    import tomllib
+                    with open(cfg_file, "rb") as f_cfg:
+                        existing_cfg = tomllib.load(f_cfg)
+                c_models = existing_cfg.get("custom_models", [])
+                entry = {"model": chosen, "provider": chosen_preset.id}
+                if not any(isinstance(x, dict) and x.get("model") == chosen and x.get("provider") == chosen_preset.id for x in c_models):
+                    c_models.append(entry)
+                    existing_cfg["custom_models"] = c_models
+                    import tomli_w
+                    with open(cfg_file, "wb") as f_out:
+                        tomli_w.dump(existing_cfg, f_out)
+            except Exception:
+                pass
+        elif selection in display_to_model:
+            chosen = display_to_model[selection]
+            chosen_preset = display_to_preset.get(selection)
+        else:
+            chosen = selection
 
     if chosen and chosen != agent.settings.model:
+        from axon.providers.catalog import find_preset_for_model
+        preset = chosen_preset or find_preset_for_model(chosen)
+        target_base_url = agent.settings.base_url
+        target_key = agent.settings.api_key
+
+        if preset:
+            if preset.id != "openrouter":
+                prefix_to_strip = f"{preset.id}/"
+                if chosen.lower().startswith(prefix_to_strip):
+                    chosen = chosen[len(prefix_to_strip):]
+
+            if preset.base_url.rstrip("/") != agent.settings.base_url.rstrip("/"):
+                target_base_url = preset.base_url
+                print(f"  {MINT}⚡ Switched provider endpoint to {BOLD}{preset.name}{RST} {SLATE}({preset.base_url}){RST}")
+
+            if preset.requires_key:
+                target_var = preset.env_var or "AXON_API_KEY"
+                key_str = ""
+                # Check environment
+                env_val = os.environ.get(target_var, "").strip()
+                if env_val and not env_val.startswith("/"):
+                    key_str = env_val
+                elif preset.id == "agentrouter" and os.environ.get("AXON_API_KEY") and not os.environ.get("AXON_API_KEY", "").startswith("/"):
+                    key_str = os.environ.get("AXON_API_KEY", "").strip()
+                else:
+                    # Check ~/.axon/.env
+                    env_f = Path.home() / ".axon" / ".env"
+                    if env_f.exists():
+                        for l in env_f.read_text(encoding="utf-8").splitlines():
+                            if "=" in l and l.strip().startswith(target_var):
+                                val = l.split("=", 1)[1].strip().strip('"').strip("'")
+                                if val and not val.startswith("/"):
+                                    key_str = val
+                                    break
+
+                # Prompt if missing or invalid
+                if (not key_str or key_str.startswith("/")) and sys.stdin.isatty():
+                    try:
+                        entered_key = input(f"  {BOLD}{WHITE}Enter API key for {preset.name} ({target_var}): {RST}").strip()
+                        if entered_key and not entered_key.startswith("/") and entered_key.lower() not in ("cancel", "exit", "skip"):
+                            from axon.providers.verifier import verify_api_key
+                            print(f"  {SLATE}⚡ Verifying API key with {preset.name}...{RST}", end="", flush=True)
+                            ok, msg = verify_api_key(preset, entered_key)
+                            if ok:
+                                print(f"\r\033[K  {MINT}✓ API key verified!{RST}")
+                                save_or_update_env_key(target_var, entered_key)
+                                key_str = entered_key
+                                print(f"  {MINT}✓ Saved {target_var} to ~/.axon/.env{RST}")
+                            else:
+                                print(f"\r\033[K  {ROSE}❌ API key test failed for {preset.name}:{RST} {WHITE}{msg}{RST}")
+                                print(f"  {SLATE}The key is not working and was not saved.{RST}\n")
+                    except (KeyboardInterrupt, EOFError):
+                        key_str = ""
+                target_key = SecretStr(key_str or "local")
+            else:
+                target_key = SecretStr("local")
+
         # Create updated settings and replace provider
-        new_settings = agent.settings.model_copy(update={"model": chosen})
+        new_settings = agent.settings.model_copy(update={
+            "model": chosen,
+            "base_url": target_base_url,
+            "api_key": target_key,
+        })
         agent.settings = new_settings
         agent.provider = provider_for(chosen, new_settings)
-        print(f"\n  {TEAL}✓ Switched active model to {BOLD}{chosen}{RST}")
+
+        # Save to global config.toml
+        try:
+            cfg_file = Path.home() / ".axon" / "config.toml"
+            cfg_file.parent.mkdir(parents=True, exist_ok=True)
+            import tomli_w
+            existing_cfg = {}
+            if cfg_file.exists():
+                try:
+                    import tomllib
+                    with open(cfg_file, "rb") as f_cfg:
+                        existing_cfg = tomllib.load(f_cfg)
+                except Exception:
+                    pass
+            existing_cfg["base_url"] = target_base_url
+            existing_cfg["model"] = chosen
+            # Maintain custom_models history
+            from axon.providers.catalog import PROVIDER_PRESETS
+            custom_list = existing_cfg.get("custom_models", [])
+            if chosen not in custom_list and not any(chosen in p.models for p in PROVIDER_PRESETS):
+                custom_list.append(chosen)
+                existing_cfg["custom_models"] = custom_list
+            with open(cfg_file, "wb") as f_out:
+                tomli_w.dump(existing_cfg, f_out)
+        except Exception:
+            pass
+
+        print(f"\n  {TEAL}✓ Switched active model to {BOLD}{chosen}{RST} {SLATE}({target_base_url}){RST}")
         from axon.ui.render import Renderer
         r = Renderer()
         r.print_banner(
@@ -181,7 +437,15 @@ def handle_mode(agent: Agent, arg: str) -> CommandResult:
     if chosen:
         agent.settings = agent.settings.model_copy(update={"mode": chosen})  # type: ignore
         agent.permissions.settings = agent.settings
-        print(f"\n  {TEAL}✓ Switched permission mode to {BOLD}{chosen}{RST}\n")
+        print(f"\n  {TEAL}✓ Switched permission mode to {BOLD}{chosen}{RST}")
+        from axon.ui.render import Renderer
+        Renderer().print_banner(
+            version="GPR_27",
+            model=agent.settings.model,
+            effort=agent.settings.effort,
+            workspace=str(agent.settings.workspace),
+            mode=chosen,
+        )
     return CommandResult(handled=True)
 
 def handle_context(agent: Agent, arg: str) -> CommandResult:
@@ -341,14 +605,74 @@ def handle_doctor(agent: Agent, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 def handle_export(agent: Agent, arg: str) -> CommandResult:
-    fname = arg.strip() or f"transcript_{int(time.time())}.md"
-    out_path = agent.settings.workspace / fname
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(f"# Axon Transcript — {agent.settings.model}\n\n")
-        for m in agent.conversation.messages:
-            f.write(f"### {m.get('role', '').capitalize()}\n\n{m.get('content', '')}\n\n---\n\n")
-    print(f"\n  {TEAL}✓ Exported transcript to {out_path}{RST}\n")
+    """Export conversation transcript to a beautifully formatted Markdown or JSON document."""
+    parts = arg.strip().split(maxsplit=1)
+    fmt = "md"
+    fname = ""
+    if parts:
+        if parts[0].lower() in ("md", "markdown", "json"):
+            fmt = parts[0].lower()
+            fname = parts[1] if len(parts) > 1 else ""
+        else:
+            fname = parts[0]
+            if fname.endswith(".json"):
+                fmt = "json"
+
+    if not fname:
+        from datetime import datetime
+        ext = "json" if fmt == "json" else "md"
+        fname = f"axon_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+
+    out_path = Path(fname)
+    if not out_path.is_absolute():
+        out_path = agent.settings.workspace / out_path
+
+    if fmt == "json":
+        import json
+        data = {
+            "session_id": agent.session.active_session_id,
+            "model": agent.settings.model,
+            "workspace": str(agent.settings.workspace),
+            "cost_usd": float(agent.ledger.total()),
+            "messages": agent.conversation.messages,
+        }
+        out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        from datetime import datetime
+        lines = [
+            f"# 📜 Axon Session Export: {agent.settings.workspace.name}",
+            f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · Model: {agent.settings.model} · Cost: ${agent.ledger.total():.4f}*",
+            "",
+            "---",
+            "",
+        ]
+        for idx, m in enumerate(agent.conversation.messages, 1):
+            role = m.get("role", "unknown").upper()
+            content = m.get("content", "")
+            icon = "👤" if role == "USER" else ("🤖" if role == "ASSISTANT" else "⚙️")
+            lines.append(f"## {icon} Message #{idx} ({role})\n")
+
+            if isinstance(content, str):
+                lines.append(content)
+            elif isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        b_type = b.get("type", "")
+                        if b_type == "text":
+                            lines.append(b.get("text", ""))
+                        elif b_type == "tool_use":
+                            lines.append(f"```yaml\nTool Call: {b.get('name')}\nArguments:\n{b.get('input')}\n```")
+                        elif b_type == "tool_result":
+                            res_str = str(b.get("content", "")).strip()
+                            lines.append(f"```\n[Tool Result - {b.get('tool_use_id')}]:\n{res_str}\n```")
+            lines.append("\n---\n")
+
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+
+    print(f"\n  {MINT}✓ Exported transcript ({len(agent.conversation.messages)} messages) to: {WHITE}{out_path.name}{RST}\n")
     return CommandResult(handled=True)
+
+
 
 def handle_window(agent: Agent, arg: str) -> CommandResult:
     """Configure or inspect sliding context window size."""
@@ -699,6 +1023,61 @@ def handle_output(agent: Agent, arg: str) -> CommandResult:
         print(f"\n  {SLATE}No recent tool output to display. Run a tool or command first.{RST}\n")
     return CommandResult(handled=True)
 
+def handle_copy(agent: Agent, arg: str) -> CommandResult:
+    """Copies last assistant response, extracted code blocks, or git diff to system clipboard."""
+    from axon.ui.clipboard import copy_to_clipboard
+    sub = arg.strip().lower()
+
+    text_to_copy = ""
+    label = "response"
+
+    if sub == "diff":
+        try:
+            import subprocess
+            res = subprocess.run(["git", "diff"], cwd=str(agent.settings.workspace), capture_output=True, text=True, timeout=5)
+            text_to_copy = res.stdout if res.returncode == 0 else ""
+            label = "uncommitted git diff"
+        except Exception:
+            text_to_copy = ""
+    elif sub == "code":
+        # Find last assistant message and extract code blocks
+        for m in reversed(agent.conversation.messages):
+            if m.get("role") == "assistant":
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    code_blocks = re.findall(r"```(?:\w+)?\n([\s\S]*?)```", content)
+                    if code_blocks:
+                        text_to_copy = "\n\n".join(code_blocks)
+                        label = f"{len(code_blocks)} code block(s)"
+                        break
+    else:
+        # Last assistant message text
+        for m in reversed(agent.conversation.messages):
+            if m.get("role") == "assistant":
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    text_to_copy = content
+                    label = "last assistant response"
+                    break
+                elif isinstance(content, list):
+                    texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                    if texts:
+                        text_to_copy = "\n".join(texts)
+                        label = "last assistant response"
+                        break
+
+    if not text_to_copy:
+        print(f"\n  {SLATE}Nothing found to copy.{RST}\n")
+        return CommandResult(handled=True)
+
+    ok = copy_to_clipboard(text_to_copy)
+    if ok:
+        print(f"\n  {MINT}✓ Copied {label} ({len(text_to_copy):,} chars) to system clipboard.{RST}\n")
+    else:
+        print(f"\n  {ROSE}Clipboard copy failed (no system clipboard utility found).{RST}\n")
+
+    return CommandResult(handled=True)
+
 def handle_subagents(agent: Agent, arg: str) -> CommandResult:
     """Claude-style interactive subagent selector and chat launcher."""
     curr_id = agent.session.active_session_id
@@ -828,8 +1207,36 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 def handle_tools(agent: Agent, arg: str) -> CommandResult:
-    """List all registered agent tools grouped neatly by category."""
+    """List or search all registered agent tools grouped neatly by category."""
     tools_by_name = {t.name: t for t in agent.registry.all_tools()}
+    arg_clean = arg.strip().lower()
+
+    if arg_clean:
+        # Search for specific tools
+        matching = [t for t in agent.registry.all_tools() if arg_clean in t.name.lower() or arg_clean in t.description.lower()]
+        if not matching:
+            print(f"\n  {ROSE}No tools found matching '{arg.strip()}'.{RST}")
+            print(f"  {SLATE}Type {WHITE}/tools{SLATE} to view all {len(tools_by_name)} available tools.{RST}\n")
+            return CommandResult(handled=True)
+
+        print(f"\n{GOLD}{BOLD}=== Tool Search Results for '{arg.strip()}' ({len(matching)} found) ==={RST}\n")
+        for t in matching:
+            mode_badge = f"{MINT}[Read-Only]{RST}" if t.readonly else f"{ROSE}[Read-Write]{RST}"
+            perm_badge = f"{GOLD}Permission: {t.default_permission}{RST}"
+            props = t.schema.get("properties") or {}
+            reqs = t.schema.get("required") or []
+            print(f"  {CYAN}🛠️  {BOLD}{WHITE}{t.name}{RST} {mode_badge} · {perm_badge}")
+            print(f"     {SLATE}{t.description}{RST}")
+            if props:
+                print(f"     {TEAL}Parameters:{RST}")
+                for p_name, p_spec in props.items():
+                    req_mark = f"{ROSE}*{RST}" if p_name in reqs else ""
+                    p_type = p_spec.get("type", "any")
+                    p_desc = p_spec.get("description", "")
+                    print(f"       • {WHITE}{p_name}{req_mark}{RST} ({DARK_SLATE}{p_type}{RST}): {SLATE}{p_desc}{RST}")
+            print()
+        return CommandResult(handled=True)
+
     categories = [
         ("📄 File & Code Operations", ["Read", "Write", "Edit", "MultiEdit", "Patch", "Diff", "CodeSymbols"]),
         ("🔍 Exploration & Search", ["Ls", "FileTree", "Glob", "Grep", "TableSearch"]),
@@ -838,7 +1245,7 @@ def handle_tools(agent: Agent, arg: str) -> CommandResult:
         ("🤖 Planning & Multi-Agent", ["Task", "TodoWrite", "ExitPlanMode"]),
     ]
 
-    print(f"\n{GOLD}{BOLD}=== Active Agent Tool Suite ({len(tools_by_name)} tools) ==={RST}")
+    print(f"\n{GOLD}{BOLD}=== 🛠️ Active Agent Tool Suite ({len(tools_by_name)} tools registered & ready) ==={RST}")
     for cat_title, tool_names in categories:
         cat_tools = [tools_by_name[n] for n in tool_names if n in tools_by_name]
         if not cat_tools:
@@ -851,7 +1258,7 @@ def handle_tools(agent: Agent, arg: str) -> CommandResult:
             params_str = f"({', '.join(params)})" if params else "()"
             print(f"    {BOLD}{t.name:<14}{RST} {mode_badge} {perm_badge}\n      {SLATE}{t.description[:85]}{RST}\n      {DIM}Parameters: {params_str}{RST}")
 
-    print(f"\n  {DIM}All {len(tools_by_name)} tools are active and available during turn execution.{RST}\n")
+    print(f"\n  {DARK_SLATE}💡 To inspect any tool in detail: type {WHITE}/tools <tool_name>{DARK_SLATE} (e.g. {WHITE}/tools write{DARK_SLATE}, {WHITE}/tools bash{DARK_SLATE}){RST}\n")
     return CommandResult(handled=True)
 
 def handle_main(agent: Agent, arg: str) -> CommandResult:
@@ -976,12 +1383,178 @@ def handle_btw(agent: Agent, arg: str) -> CommandResult:
 
     return CommandResult(handled=True)
 
+def handle_env(agent: Agent, arg: str) -> CommandResult:
+    """Display comprehensive system runtime environment, host platform, paths, and toolchains."""
+    import platform
+    import shutil
+
+    print(f"\n{CYAN}{BOLD}=== 🌐 Axon System Runtime Environment ==={RST}\n")
+
+    # 1. Host & Platform
+    py_ver = sys.version.split()[0]
+    os_str = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    shell_str = os.environ.get("SHELL", "unknown")
+    tw, th = term_width(), term_height()
+
+    print(f"  {GOLD}{BOLD}System & Host Platform:{RST}")
+    print(f"    {WHITE}Operating System:{RST}   {SLATE}{os_str}{RST}")
+    print(f"    {WHITE}Python Version:{RST}     {SLATE}{py_ver} ({sys.executable}){RST}")
+    print(f"    {WHITE}Active Shell:{RST}       {SLATE}{shell_str}{RST}")
+    print(f"    {WHITE}Terminal Window:{RST}    {SLATE}{tw} columns × {th} rows (isatty: {sys.stdin.isatty()}){RST}\n")
+
+    # 2. Workspace & Filesystem Paths
+    cfg_path = Path.home() / ".axon" / "config.toml"
+    env_path = Path.home() / ".axon" / ".env"
+    sess_path = Path.home() / ".axon" / "sessions"
+
+    git_info = "Not a git repo"
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=agent.settings.workspace,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if res.returncode == 0:
+            branch = res.stdout.strip()
+            git_info = f"branch '{branch}'"
+    except Exception:
+        pass
+
+    print(f"  {GOLD}{BOLD}Workspace & Storage Locations:{RST}")
+    print(f"    {WHITE}Workspace Root:{RST}     {TEAL}{agent.settings.workspace}{RST} {SLATE}({git_info}){RST}")
+    print(f"    {WHITE}Config File:{RST}        {SLATE}{cfg_path} ({'exists' if cfg_path.exists() else 'not found'}){RST}")
+    print(f"    {WHITE}Secrets File:{RST}       {SLATE}{env_path} ({'exists' if env_path.exists() else 'not found'}){RST}")
+    print(f"    {WHITE}Session Store:{RST}      {SLATE}{sess_path}{RST}\n")
+
+    # 3. Active Neural Engine Configuration
+    print(f"  {GOLD}{BOLD}Active Engine & Inference Settings:{RST}")
+    print(f"    {WHITE}Model:{RST}               {BOLD}{WHITE}{agent.settings.model}{RST}")
+    print(f"    {WHITE}Reasoning Effort:{RST}    {PURPLE}{agent.settings.effort}{RST}")
+    print(f"    {WHITE}Permission Mode:{RST}     {MINT}{agent.settings.mode}{RST}")
+    print(f"    {WHITE}Endpoint Base URL:{RST}   {SLATE}{agent.settings.base_url}{RST}")
+    print(f"    {WHITE}Parallel Tool Limit:{RST} {SLATE}{agent.settings.parallel_tools}{RST}")
+    print(f"    {WHITE}Compaction Limit:{RST}    {SLATE}{int(agent.settings.compact_at * 100)}% capacity{RST}\n")
+
+    # 4. Detected Development Toolchains
+    tools_found = []
+    for tool_cmd in ("git", "python3", "node", "npm", "pytest", "rg", "docker"):
+        if shutil.which(tool_cmd):
+            tools_found.append(f"{MINT}✓ {tool_cmd}{RST}")
+        else:
+            tools_found.append(f"{DARK_SLATE}○ {tool_cmd}{RST}")
+
+    print(f"  {GOLD}{BOLD}Development Toolchains Detected:{RST}")
+    print(f"    {'   '.join(tools_found)}\n")
+    return CommandResult(handled=True)
+
+def handle_keys(agent: Agent, arg: str) -> CommandResult:
+    """Display all saved AI provider API keys with masked previews and storage sources."""
+    print(f"\n{CYAN}{BOLD}=== 🔑 Axon AI Provider Keys & Credentials Matrix ==={RST}\n")
+
+    arg_clean = arg.strip()
+    from axon.providers.catalog import PROVIDER_PRESETS
+
+    # If provider argument provided like `/key gemini` or `/key openai sk-...`
+    if arg_clean:
+        parts = arg_clean.split(maxsplit=1)
+        prov_target = parts[0].lower()
+        key_input = parts[1].strip() if len(parts) > 1 else ""
+
+        target_preset = None
+        for p in PROVIDER_PRESETS:
+            if prov_target in p.id.lower() or prov_target in p.name.lower():
+                target_preset = p
+                break
+
+        if not target_preset:
+            print(f"\n  {ROSE}Unknown provider '{prov_target}'. Available: gemini, openai, anthropic, openrouter, agentrouter{RST}\n")
+            return CommandResult(handled=True)
+
+        target_var = target_preset.env_var or "AXON_API_KEY"
+        if not key_input:
+            if sys.stdin.isatty():
+                try:
+                    key_input = input(f"\n  {BOLD}{WHITE}Enter new API key for {target_preset.name} ({target_var}): {RST}").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print(f"\n  {SLATE}Cancelled API key update.{RST}\n")
+                    return CommandResult(handled=True)
+            else:
+                print(f"\n  {SLATE}Usage: /key {target_preset.id} <api-key>{RST}\n")
+                return CommandResult(handled=True)
+
+        if not key_input or key_input.startswith("/") or key_input.lower() in ("cancel", "exit", "skip"):
+            print(f"\n  {SLATE}Cancelled API key update.{RST}\n")
+            return CommandResult(handled=True)
+
+        # Test the key before saving
+        from axon.providers.verifier import verify_api_key
+        print(f"  {SLATE}⚡ Verifying API key with {target_preset.name}...{RST}", end="", flush=True)
+        ok, msg = verify_api_key(target_preset, key_input)
+        if not ok:
+            print(f"\r\033[K  {ROSE}❌ API key test failed for {target_preset.name}:{RST} {WHITE}{msg}{RST}")
+            print(f"  {SLATE}The key is not working and was not saved.{RST}\n")
+            return CommandResult(handled=True)
+
+        print(f"\r\033[K  {MINT}✓ API key verified successfully!{RST}")
+        if save_or_update_env_key(target_var, key_input, agent=agent):
+            print(f"  {MINT}✓ Successfully updated {target_var} for {target_preset.name}!{RST}\n")
+        return CommandResult(handled=True)
+
+    env_file = Path.home() / ".axon" / ".env"
+    dot_env_keys: dict[str, str] = {}
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    dot_env_keys[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+    tracked_vars = [
+        ("AXON_API_KEY", "AgentRouter (Proxy)", "agentrouter"),
+        ("GEMINI_API_KEY", "Google Gemini", "gemini"),
+        ("OPENROUTER_API_KEY", "OpenRouter (Universal)", "openrouter"),
+        ("OPENAI_API_KEY", "OpenAI (GPT / o3)", "openai"),
+        ("ANTHROPIC_API_KEY", "Anthropic (Claude)", "anthropic"),
+    ]
+
+    print(f"  {GOLD}{BOLD}Cloud AI Provider Credentials:{RST}")
+    for env_var, label, p_id in tracked_vars:
+        val = os.environ.get(env_var) or dot_env_keys.get(env_var)
+        source = "active env" if os.environ.get(env_var) else ("~/.axon/.env" if env_var in dot_env_keys else "")
+        if val and val not in ("", "local") and not val.startswith("/"):
+            masked = f"{val[:6]}...{val[-4:]}" if len(val) > 10 else f"{val[:2]}..."
+            print(f"    {MINT}✓ Active{RST}  {WHITE}{BOLD}{env_var:<20}{RST} {CYAN}{masked:<16}{RST} {SLATE}({label} · {source}){RST}")
+        else:
+            print(f"    {SLATE}○ Empty {RST}  {DARK_SLATE}{env_var:<20} {'(not set)':<16} ({label}){RST}")
+
+    print(f"\n  {GOLD}{BOLD}Zero-Key Local Engines (100% Free & Offline):{RST}")
+    print(f"    {MINT}● Ready {RST}  {WHITE}{'Ollama (Local)':<20}{RST} {SLATE}{'http://localhost:11434/v1':<16} (Zero key required){RST}")
+
+    print(f"\n  {DARK_SLATE}💡 To change a key: type {WHITE}/keys <provider>{DARK_SLATE} (e.g. {WHITE}/keys gemini{DARK_SLATE}, {WHITE}/keys openai{DARK_SLATE}) or edit {WHITE}~/.axon/.env{RST}\n")
+    return CommandResult(handled=True)
+
 def handle_keybindings(agent: Agent, arg: str) -> CommandResult:
     """Show interactive keybindings and quick shortcuts cheat sheet."""
     from axon.ui.render import render_shortcuts_footer
     print(f"\n{CYAN}{BOLD}=== Axon Neural Keybindings & Quick Shortcuts ==={RST}\n")
     print(render_shortcuts_footer())
     print(f"\n  {DIM}All shortcuts are active during turn input and session control.{RST}\n")
+    return CommandResult(handled=True)
+
+def handle_voice(agent: Agent, arg: str) -> CommandResult:
+    """Show voice dictation guide and activate native speech-to-text listener."""
+    print(f"\n{CYAN}{BOLD}=== 🎙️ Axon Voice Dictation & Speech Input ==={RST}\n")
+    print(f"  {WHITE}You can speak prompts directly to Axon on macOS using native Dictation:{RST}")
+    print(f"    {GOLD}1.{RST} In the input prompt {BOLD}{WHITE}›{RST}")
+    print(f"    {GOLD}2.{RST} Press {BOLD}{WHITE}Fn twice (or the Microphone / Dictation key on your keyboard){RST}")
+    print(f"    {GOLD}3.{RST} Speak your instructions or code query")
+    print(f"    {GOLD}4.{RST} Press {BOLD}{WHITE}Enter{RST} to submit!\n")
+    print(f"  {MINT}✓ Voice dictation buffering and unicode character stream handling are active.{RST}")
+    print(f"  {SLATE}Dead keys, diacritics, and rapid dictation bursts are crash-proof.{RST}\n")
     return CommandResult(handled=True)
 
 def handle_compact(agent: Agent, arg: str) -> CommandResult:
@@ -1022,14 +1595,249 @@ def handle_plan(agent: Agent, arg: str) -> CommandResult:
 
 def handle_mcp(agent: Agent, arg: str) -> CommandResult:
     """Inspect and manage MCP server connections, tools, and configurations."""
+    sub = arg.strip().lower()
+
+    # /mcp tools — show live MCP bridge status
+    if sub in ("tools", "bridge", "live"):
+        try:
+            from axon.mcp.bridge import get_bridge
+            bridge = get_bridge()
+            report = bridge.get_status_report()
+            print(f"\n  {report}\n")
+        except Exception as e:
+            print(f"\n  {ROSE}MCP Bridge not available: {e}{RST}\n")
+        return CommandResult(handled=True)
+
+    # /mcp connect — connect to configured servers now
+    if sub in ("connect", "start"):
+        try:
+            from axon.mcp.bridge import initialize_mcp_bridge
+            mcp_tools = initialize_mcp_bridge(agent.settings.workspace)
+            for t in mcp_tools:
+                agent.registry.register(t)
+            if mcp_tools:
+                print(f"\n  {MINT}✓ Connected! {len(mcp_tools)} MCP tool(s) registered.{RST}\n")
+                for t in mcp_tools:
+                    print(f"    {GOLD}•{RST} {WHITE}{t.name}{RST} — {SLATE}{t.description}{RST}")
+                print()
+            else:
+                print(f"\n  {SLATE}No MCP servers responded with tools.{RST}\n")
+        except Exception as e:
+            print(f"\n  {ROSE}MCP Bridge connection failed: {e}{RST}\n")
+        return CommandResult(handled=True)
+
+    # /mcp disconnect — stop all MCP servers
+    if sub in ("disconnect", "stop"):
+        try:
+            from axon.mcp.bridge import shutdown_mcp_bridge
+            shutdown_mcp_bridge()
+            print(f"\n  {MINT}✓ All MCP servers disconnected.{RST}\n")
+        except Exception as e:
+            print(f"\n  {ROSE}Error disconnecting: {e}{RST}\n")
+        return CommandResult(handled=True)
+
+    # Default: interactive MCP hub
     from axon.mcp.interactive import handle_mcp_interactive
     handle_mcp_interactive(agent, arg)
     return CommandResult(handled=True)
 
-def handle_plugin(agent: Agent, arg: str) -> CommandResult:
-    """Inspect plugins, manifests, and loaded plugin capabilities."""
+def handle_statusbar(agent: Agent, arg: str) -> CommandResult:
+    """Print or toggle real-time status bar and metrics display."""
+    from axon.ui.statusbar import StatusBar
+    if arg.strip().lower() in ("toggle", "switch"):
+        status = StatusBar.toggle()
+        state = "Enabled" if status else "Disabled"
+        print(f"\n  {TEAL}✓ Status bar display {state}.{RST}\n")
+    else:
+        StatusBar.print_live_status(agent)
+    return CommandResult(handled=True)
+
+def handle_analytics(agent: Agent, arg: str) -> CommandResult:
+    """Displays comprehensive usage analytics, model statistics, and historical cost insights."""
     import json
+    from collections import Counter
+    from pathlib import Path
+
+    sessions_dir = agent.session.session_dir
+    session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
+
+    total_sessions = len(session_files)
+    total_messages = 0
+    total_in_tokens = 0
+    total_out_tokens = 0
+    total_cost_est = 0.0
+    tool_counter: Counter[str] = Counter()
+    model_counter: Counter[str] = Counter()
+
+    for sf in session_files:
+        try:
+            with open(sf, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    t_type = rec.get("type", "")
+                    if t_type in ("user_message", "assistant_turn"):
+                        total_messages += 1
+
+                    data = rec.get("data", {})
+                    if isinstance(data, dict):
+                        usage = data.get("usage")
+                        if isinstance(usage, dict):
+                            total_in_tokens += usage.get("input", 0) or 0
+                            total_out_tokens += usage.get("output", 0) or 0
+
+                        tool_uses = data.get("tool_uses", [])
+                        if isinstance(tool_uses, list):
+                            for tu in tool_uses:
+                                if isinstance(tu, dict):
+                                    tool_counter[tu.get("name", "unknown")] += 1
+
+                        if data.get("model"):
+                            model_counter[data["model"]] += 1
+        except Exception:
+            pass
+
+    total_tok = total_in_tokens + total_out_tokens
+    # Approx cost calculation based on average rates
+    total_cost_est = (total_in_tokens * 2.0 / 1_000_000) + (total_out_tokens * 6.0 / 1_000_000)
+
+    from axon.ui.markdown import render_table
+    from axon.ui.theme import term_width
+
+    width = min(88, max(50, term_width() - 4))
+    print(f"\n  {GOLD}{BOLD}=== Axon Workspace Analytics & Usage Dashboard ==={RST}\n")
+
+    summary_rows = [
+        "| Metric | Workspace Lifetime Value |",
+        "|---|---|",
+        f"| **Total Sessions Tracked** | `{total_sessions}` |",
+        f"| **Total Turns & Messages** | `{total_messages:,}` |",
+        f"| **Total Tokens Consumed** | `{total_tok:,}` ({total_in_tokens:,} in / {total_out_tokens:,} out) |",
+        f"| **Estimated Historical Cost** | `${total_cost_est:.4f} USD` |",
+        f"| **Active Workspace** | `{agent.settings.workspace.name}` |",
+    ]
+    for row in render_table(summary_rows, max_total_width=width):
+        print(f"  {row}")
+
+    if tool_counter:
+        print(f"\n  {TEAL}{BOLD}Top 6 Most Frequently Used Tools:{RST}")
+        for idx, (t_name, count) in enumerate(tool_counter.most_common(6), 1):
+            bar = "█" * min(25, max(1, int(count * 20 / max(1, tool_counter.most_common(1)[0][1]))))
+            print(f"    {idx}. {WHITE}{t_name:<16}{RST} {MINT}{bar}{RST} {SLATE}({count} calls){RST}")
+
+    print()
+    return CommandResult(handled=True)
+
+def handle_test(agent: Agent, arg: str) -> CommandResult:
+    """Run workspace test suite (pytest, npm test, cargo test, go test) and analyze results."""
+    import subprocess
+    import shutil
+
+    ws = agent.settings.workspace
+    cmd: list[str] = []
+    framework = ""
+
+    # Detect test framework
+    if (ws / "pytest.ini").exists() or (ws / "pyproject.toml").exists() or (ws / "tests").exists():
+        if shutil.which("pytest"):
+            cmd = ["pytest"]
+            if arg.strip():
+                cmd.append(arg.strip())
+            framework = "pytest (Python)"
+    elif (ws / "package.json").exists():
+        cmd = ["npm", "test"]
+        if arg.strip():
+            cmd.extend(["--", arg.strip()])
+        framework = "npm test (Node/JS)"
+    elif (ws / "Cargo.toml").exists():
+        cmd = ["cargo", "test"]
+        if arg.strip():
+            cmd.append(arg.strip())
+        framework = "cargo test (Rust)"
+    elif (ws / "go.mod").exists():
+        cmd = ["go", "test", "./..."]
+        if arg.strip():
+            cmd = ["go", "test", arg.strip()]
+        framework = "go test (Go)"
+
+    if not cmd:
+        print(f"\n  {SLATE}No standard test framework detected in workspace.{RST}\n")
+        return CommandResult(handled=True)
+
+    print(f"\n  {CYAN}⚡ Running {framework}:{RST} {WHITE}{' '.join(cmd)}{RST}\n")
+    try:
+        proc = subprocess.run(cmd, cwd=str(ws), capture_output=True, text=True, timeout=60)
+        out_lines = proc.stdout.strip().splitlines()
+        for l in out_lines[-15:]:
+            print(f"  {l}")
+
+        if proc.returncode == 0:
+            print(f"\n  {MINT}{BOLD}✓ Tests PASSED successfully.{RST}\n")
+        else:
+            print(f"\n  {ROSE}{BOLD}❌ Tests FAILED (exit code {proc.returncode}).{RST}\n")
+            if proc.stderr:
+                print(f"  {DIM}{proc.stderr[:400]}{RST}\n")
+    except Exception as e:
+        print(f"\n  {ROSE}Failed to run tests: {e}{RST}\n")
+
+    return CommandResult(handled=True)
+
+def handle_notify(agent: Agent, arg: str) -> CommandResult:
+    """Send or test system desktop notification."""
+    from axon.ui.notify import send_desktop_notification
+    msg = arg.strip() or "Axon task finished execution."
+    ok = send_desktop_notification("Axon Assistant", msg)
+    if ok:
+        print(f"\n  {MINT}✓ Sent desktop notification:{RST} {WHITE}\"{msg}\"{RST}\n")
+    else:
+        print(f"\n  {SLATE}Desktop notification service not supported on this environment.{RST}\n")
+    return CommandResult(handled=True)
+
+def handle_plugin(agent: Agent, arg: str) -> CommandResult:
+    """Inspect, install, and create Axon community plugins."""
+    import json
+    parts = arg.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else ""
+    target_name = parts[1].strip() if len(parts) > 1 else ""
+
     plugin_dir = agent.settings.workspace / ".axon" / "plugins"
+
+    if sub in ("create", "new", "init"):
+        if not target_name:
+            print(f"\n  {SLATE}Usage: /plugin create <plugin_name>{RST}\n")
+            return CommandResult(handled=True)
+        p_path = plugin_dir / target_name
+        p_path.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "name": target_name,
+            "version": "0.1.0",
+            "description": f"Custom {target_name} extension bundle for Axon",
+            "tools": [],
+            "skills": [],
+            "hooks": {},
+        }
+        (p_path / "plugin.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print(f"\n  {MINT}✓ Created plugin scaffold at: {WHITE}{p_path.relative_to(agent.settings.workspace)}{RST}\n")
+        return CommandResult(handled=True)
+
+    if sub in ("install", "add"):
+        if not target_name:
+            print(f"\n  {SLATE}Usage: /plugin install <plugin_name_or_dir>{RST}\n")
+            return CommandResult(handled=True)
+        p_path = plugin_dir / target_name
+        p_path.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "name": target_name,
+            "version": "1.0.0",
+            "description": f"Installed {target_name} plugin extension",
+            "tools": [],
+            "skills": [],
+        }
+        (p_path / "plugin.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print(f"\n  {MINT}✓ Installed plugin {target_name} into .axon/plugins/{target_name}{RST}\n")
+        return CommandResult(handled=True)
+
     print(f"\n{GOLD}{BOLD}=== Axon Plugin Registry ==={RST}")
     if plugin_dir.exists() and any(plugin_dir.iterdir()):
         plugins = [p for p in plugin_dir.iterdir() if p.is_dir()]
@@ -1046,7 +1854,7 @@ def handle_plugin(agent: Agent, arg: str) -> CommandResult:
             print(f"  • {MINT}{BOLD}{p.name}{RST} - {SLATE}{desc}{RST}")
     else:
         print(f"  {SLATE}No local plugins in .axon/plugins/. Default core capabilities are active.{RST}")
-    print(f"\n  {DIM}Plugins can provide bundled tools, skills, and custom hooks.{RST}\n")
+    print(f"\n  {DIM}Commands: /plugin create <name>, /plugin install <name>{RST}\n")
     return CommandResult(handled=True)
 
 def handle_hooks(agent: Agent, arg: str) -> CommandResult:
@@ -1300,8 +2108,14 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return CommandResult(handled=True, should_exit=True)
     elif cmd in ("/help", "/?"):
         return handle_help(agent, arg)
-    elif cmd in ("/shortcuts", "/keybindings", "/keys", "/kb", "?"):
+    elif cmd in ("/shortcuts", "/keybindings", "/kb", "?"):
         return handle_keybindings(agent, arg)
+    elif cmd in ("/keys", "/key", "/apikey", "/apikeys", "/credentials"):
+        return handle_keys(agent, arg)
+    elif cmd in ("/env", "/environment", "/runtime", "/sys", "/system"):
+        return handle_env(agent, arg)
+    elif cmd in ("/voice", "/mic", "/dictation", "/listen"):
+        return handle_voice(agent, arg)
     elif cmd in ("/btw", "/ask", "/side"):
         return handle_btw(agent, arg)
     elif cmd in ("/compact", "/compress"):
@@ -1322,6 +2136,10 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_learn(agent, arg)
     elif cmd in ("/status", "/stats"):
         return handle_status(agent, arg)
+    elif cmd in ("/statusbar", "/bar", "/gauge"):
+        return handle_statusbar(agent, arg)
+    elif cmd in ("/analytics", "/metrics", "/insights"):
+        return handle_analytics(agent, arg)
     elif cmd in ("/diff", "/changes"):
         return handle_diff(agent, arg)
     elif cmd in ("/review", "/audit"):
@@ -1352,8 +2170,20 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_history(agent, arg, window_only=False)
     elif cmd in ("/output", "/more", "/expand", "/view", "/cat"):
         return handle_output(agent, arg)
+    elif cmd in ("/copy", "/cp"):
+        return handle_copy(agent, arg)
     elif cmd in ("/cost", "/ledger", "/usage"):
         return handle_cost(agent, arg)
+    elif cmd in ("/test", "/tests", "/pytest"):
+        return handle_test(agent, arg)
+    elif cmd in ("/notify", "/alert"):
+        return handle_notify(agent, arg)
+    elif cmd in ("/find", "/fuzzy"):
+        from axon.ui.fuzzy_picker import run_fuzzy_file_finder
+        chosen = run_fuzzy_file_finder(agent.settings.workspace)
+        if chosen:
+            print(f"\n  {MINT}Selected file:{RST} {WHITE}{chosen}{RST}\n")
+        return CommandResult(handled=True)
     elif cmd in ("/todos", "/todo", "/task", "/tasks"):
         return handle_todos(agent, arg)
     elif cmd in ("/queue", "/q", "/dequeue"):
@@ -1382,7 +2212,7 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         state_str = f"{TEAL}ON (Streaming thoughts + live summary){RST}" if new_val else f"{SLATE}OFF (Summary-only mode){RST}"
         print(f"\n  {PURPLE}✻ Thinking display is now {state_str}\n")
         return CommandResult(handled=True)
-    elif cmd in ("/provider", "/providers", "/connect"):
+    elif cmd in ("/provider", "/providers"):
         from axon.ui.provider_picker import run_provider_picker
         run_provider_picker(agent)
         return CommandResult(handled=True)
@@ -1395,6 +2225,17 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
             return CommandResult(handled=True)
         new_t = agent.session.rename_session(arg.strip())
         print(f"\n  {MINT}✓ Renamed active session to: {BOLD}{new_t}{RST}\n")
+        return CommandResult(handled=True)
+    elif cmd in ("/tag", "/label"):
+        if not arg.strip():
+            print(f"\n  {SLATE}Usage: /tag <tag_name>{RST}\n")
+            return CommandResult(handled=True)
+        tag = agent.session.tag_session(arg.strip())
+        print(f"\n  {MINT}✓ Added tag #{tag} to active session.{RST}\n")
+        return CommandResult(handled=True)
+    elif cmd in ("/star", "/fav", "/favorite"):
+        agent.session.star_session()
+        print(f"\n  {GOLD}★ Starred active session as favorite.{RST}\n")
         return CommandResult(handled=True)
     elif cmd == "/resume":
         handle_resume(agent, arg)

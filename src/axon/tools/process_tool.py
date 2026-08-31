@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from typing import Any, ClassVar
 from axon.errors import ToolError
 from axon.tools.base import Tool, ToolContext

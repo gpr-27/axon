@@ -43,6 +43,11 @@ class ContextManager:
             self._evict_stale_results(conv)
             est = conv.token_estimate()
 
+        if est > threshold and len(conv.messages) >= 12:
+            # Rung 3: Summarize older conversation turns for very long sessions
+            self._summarize_older_turns(conv)
+            est = conv.token_estimate()
+
     def _trim_large_results(self, conv: Conversation) -> None:
         for m in conv.messages:
             content = m.get("content")
@@ -68,3 +73,34 @@ class ContextManager:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         block["content"] = "[Result cleared to reclaim context. Re-run tool if needed.]"
+
+    def _summarize_older_turns(self, conv: Conversation) -> None:
+        """Compress older turns into a single structured summary block, keeping last 4 turns."""
+        if len(conv.messages) <= 6:
+            return
+
+        cutoff = len(conv.messages) - 4
+        old_msgs = conv.messages[:cutoff]
+        recent_msgs = conv.messages[cutoff:]
+
+        summary_points = []
+        for m in old_msgs:
+            role = m.get("role", "unknown")
+            content = m.get("content", "")
+            if isinstance(content, str) and content.strip():
+                first_line = content.strip().splitlines()[0][:100]
+                summary_points.append(f"- {role.title()}: {first_line}")
+            elif isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "text" and b.get("text"):
+                            summary_points.append(f"- {role.title()}: {b['text'][:100]}")
+                        elif b.get("type") == "tool_use":
+                            summary_points.append(f"- Tool Use: {b.get('name')}(...)")
+
+        if summary_points:
+            summary_msg = {
+                "role": "user",
+                "content": f"[Prior Conversation Summary ({len(old_msgs)} messages compacted)]:\n" + "\n".join(summary_points[:12]),
+            }
+            conv.messages = [summary_msg] + recent_msgs

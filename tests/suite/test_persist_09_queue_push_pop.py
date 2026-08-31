@@ -39,8 +39,8 @@ def test_queue_push_pop(workspace: Path):
     assert res_queue is not None and res_queue.handled
     assert len(mock_agent.message_queue) == 2
 
-    # Verify both /q and /queue are present in ALL_SLASH_COMMANDS autocomplete list
+    # Verify /q is present in ALL_SLASH_COMMANDS autocomplete list while redundant /queue is omitted
     slash_names = [c[0] for c in ALL_SLASH_COMMANDS]
     assert "/q" in slash_names
-    assert "/queue" in slash_names
+    assert "/queue" not in slash_names
 

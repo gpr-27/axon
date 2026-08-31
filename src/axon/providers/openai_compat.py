@@ -3,6 +3,7 @@ OpenAI-Compatible Provider using raw httpx2 and Stainless fingerprint headers.
 """
 from __future__ import annotations
 import json
+from typing import Any, Iterator
 try:
     import httpx
 except ImportError:
@@ -154,15 +155,34 @@ class OpenAICompatProvider:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._url = f"{settings.base_url.rstrip('/')}/v1/chat/completions"
+        base = settings.base_url.rstrip("/")
+        if base.endswith("/chat/completions"):
+            self._url = base
+        elif "googleapis.com" in base:
+            clean = base.rstrip("/")
+            if not clean.endswith("/openai"):
+                clean = f"{clean}/openai"
+            self._url = f"{clean}/chat/completions"
+        elif "openrouter.ai" in base:
+            clean = base.rstrip("/")
+            if not clean.endswith("/api/v1"):
+                clean = f"{clean.rstrip('/api').rstrip('/v1')}/api/v1"
+            self._url = f"{clean}/chat/completions"
+        elif base.endswith("/v1"):
+            self._url = f"{base}/chat/completions"
+        else:
+            self._url = f"{base}/v1/chat/completions"
         self._last_turn: AssistantTurn | None = None
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "authorization": f"Bearer {self.settings.api_key.get_secret_value()}",
+        key_val = self.settings.api_key.get_secret_value() if self.settings.api_key else ""
+        headers = {
             "content-type": "application/json",
             **_FINGERPRINT,
         }
+        if key_val and key_val != "local":
+            headers["authorization"] = f"Bearer {key_val}"
+        return headers
 
     def stream(
         self,
@@ -190,7 +210,11 @@ class OpenAICompatProvider:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if effort:
+        is_reasoning_model = any(
+            k in model.lower()
+            for k in ("o1", "o3", "o4", "deepseek-reasoner", "deepseek-r1", "r1:", "r1-", "reasoning", "qwq")
+        )
+        if effort and is_reasoning_model:
             e_str = str(effort).lower()
             if e_str in ("reflex", "low"):
                 body["reasoning_effort"] = "low"
@@ -297,6 +321,28 @@ class OpenAICompatProvider:
                 if resp.status_code != 200:
                     resp.read()
                     err_text = resp.text
+                    # Check if thinking/reasoning_effort is rejected
+                    if "does not support thinking" in err_text.lower() or "reasoning_effort" in err_text.lower() or "does not support reasoning" in err_text.lower() or "thinking" in err_text.lower():
+                        body.pop("reasoning_effort", None)
+                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                            if retry_resp.status_code == 200:
+                                yield from _parse_stream(retry_resp)
+                                return
+                            else:
+                                retry_resp.read()
+                                err_text = retry_resp.text
+
+                    # Check if stream_options is rejected by legacy local server
+                    if "stream_options" in err_text.lower() or "extra_forbidden" in err_text.lower():
+                        body.pop("stream_options", None)
+                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                            if retry_resp.status_code == 200:
+                                yield from _parse_stream(retry_resp)
+                                return
+                            else:
+                                retry_resp.read()
+                                err_text = retry_resp.text
+
                     if "does not support image" in err_text.lower() or "invalid_image" in err_text.lower():
                         # Fallback: Strip image_url blocks and retry with text placeholder
                         for m in openai_messages:
@@ -374,6 +420,33 @@ class OpenAICompatProvider:
                     "  The model's content filter flagged this conversation context.\n"
                     "  Fix: try /clear to reset context, shorten your prompt, or switch model with /model."
                 ) from e
+            if "<!doctype html>" in err_str.lower() or "not found | openrouter" in err_str.lower() or "http 404" in err_str.lower():
+                raise ProviderError(
+                    f"HTTP 404 Not Found from endpoint '{self._url}'.\n"
+                    f"  💡 The model '{self.settings.model}' or path is not available on this provider.\n"
+                    f"  Fix: Run `/model` to select an active model or `/provider` to re-configure the provider endpoint."
+                ) from e
+            if "connection refused" in err_str.lower() or "[errno 61]" in err_str.lower() or "[errno 111]" in err_str.lower() or "winerror 10061" in err_str.lower():
+                base_u = self.settings.base_url
+                if "11434" in base_u or "ollama" in base_u.lower():
+                    raise ProviderError(
+                        f"Cannot connect to Ollama at {base_u} (Connection refused).\n"
+                        f"  💡 How to fix:\n"
+                        f"     1. Start Ollama by running: `ollama serve` (or open the Ollama application)\n"
+                        f"     2. Or switch back to cloud AI anytime by typing: `/provider` and choosing AgentRouter."
+                    ) from e
+                elif "1234" in base_u or "lmstudio" in base_u.lower():
+                    raise ProviderError(
+                        f"Cannot connect to LM Studio at {base_u} (Connection refused).\n"
+                        f"  💡 How to fix:\n"
+                        f"     1. Open LM Studio -> 'Local Server' tab -> 'Start Server' (port 1234)\n"
+                        f"     2. Or switch back to cloud AI anytime by typing: `/provider`."
+                    ) from e
+                else:
+                    raise ProviderError(
+                        f"Cannot connect to local AI endpoint at {base_u} (Connection refused).\n"
+                        f"  💡 Ensure your local server is running, or run `/provider` to switch to cloud."
+                    ) from e
             raise ProviderError(f"OpenAI streaming failed: {e}") from e
 
     def finalize(self) -> AssistantTurn:

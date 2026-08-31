@@ -267,3 +267,35 @@ class SkillManager:
 
         rendered = re.sub(r"!`([^`]+)`", _replace_dyn, instructions)
         return f"## Skill: /{skill.name}\n\n{rendered}"
+
+    def auto_match(self, user_input: str) -> list[Skill]:
+        """Automatically match and activate skills based on user intent keywords in prompt."""
+        if not user_input or not user_input.strip():
+            return []
+
+        text = user_input.lower()
+        matched: list[Skill] = []
+
+        intent_keywords = {
+            "code-review": ("review", "audit code", "code review", "pr review", "inspect changes"),
+            "debug": ("debug", "traceback", "fix error", "fix bug", "exception", "crash", "segfault"),
+            "test-gen": ("write test", "generate test", "unit test", "test suite", "coverage"),
+            "verify": ("verify", "run test", "check test", "pytest", "npm test", "cargo test"),
+            "optimize": ("optimize", "profiling", "speed up", "performance", "slow", "bottleneck"),
+            "deep-research": ("deep research", "investigate topic", "architecture benchmark"),
+            "refactor": ("refactor", "clean up code", "redesign architecture", "technical debt"),
+            "security-audit": ("security audit", "vulnerability", "sql injection", "xss", "cve"),
+        }
+
+        for skill_name, keywords in intent_keywords.items():
+            if skill_name in self.skills:
+                if any(kw in text for kw in keywords):
+                    matched.append(self.skills[skill_name])
+
+        # Also match explicit skill names (e.g. "use my-skill")
+        for name, skill in self.skills.items():
+            if f"/{name}" in text or f"skill {name}" in text:
+                if skill not in matched:
+                    matched.append(skill)
+
+        return matched
