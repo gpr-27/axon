@@ -30,23 +30,18 @@ class Ledger:
         self.last_usage = None
 
     def record(self, model: str, usage: Usage, *, tag: str = "main") -> Decimal:
-        pricing = PRICING.get(model, {"input": 3.0, "output": 15.0, "cache_read": 0.6})
+        pricing = PRICING.get(model, {"input": 3.0, "output": 15.0})
         in_rate = Decimal(str(pricing.get("input", 3.0)))
         out_rate = Decimal(str(pricing.get("output", 15.0)))
-        cache_rate = Decimal(str(pricing.get("cache_read", 0.6)))
 
-        # Cost formula
-        uncached_in = max(0, usage.input - usage.cache_read)
-        cost_in = (Decimal(uncached_in) / Decimal("1000000")) * in_rate
-        cost_cache = (Decimal(usage.cache_read) / Decimal("1000000")) * cache_rate
+        # Cost formula: direct input prompt tokens + completion output tokens
+        cost_in = (Decimal(usage.input) / Decimal("1000000")) * in_rate
         cost_out = (Decimal(usage.output) / Decimal("1000000")) * out_rate
 
-        turn_cost = cost_in + cost_cache + cost_out
+        turn_cost = cost_in + cost_out
 
         self.total_input_tokens += usage.input
         self.total_output_tokens += usage.output
-        self.total_cache_read_tokens += usage.cache_read
-        self.total_cache_write_tokens += usage.cache_write
         self.total_reasoning_tokens += usage.reasoning
         self.total_cost += turn_cost
         self.turn_costs.append(turn_cost)

@@ -31,7 +31,7 @@ def test_ledger_cost_and_counterfactual():
     assert cost > Decimal("0.0")
 
     counterfactual = ledger.uncached_counterfactual("claude-opus-5")
-    assert counterfactual > cost
+    assert counterfactual >= cost
     assert ledger.total() == cost
 
 def test_dashboard_sessions_and_time_formatting(workspace: Path):

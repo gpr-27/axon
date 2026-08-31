@@ -3,8 +3,11 @@
 <div align="center">
 
 ```
-  ▲█▲   A X O N
-  █⚡█   Terminal-Native Agentic Coding Assistant
+   ___   _  __ ___   _  __
+  / _ | | |/ // _ \ / |/ /
+ / __ |  / // // //    / 
+/_/ |_| /_/  \___//_/|_/  
+Terminal-Native Agentic Coding Assistant
 ```
 
 [![PyPI Version](https://img.shields.io/pypi/v/axon-gpr.svg)](https://pypi.org/project/axon-gpr/)
@@ -31,45 +34,34 @@ pip install axon-gpr
 
 ---
 
-## 🔑 Environment Configuration (`.env`)
+## 🔑 Environment Configuration
 
-Axon supports **AgentRouter**, **Anthropic**, and **OpenAI-compatible** endpoints. To start using Axon, set your API key using either method below:
+Axon requires only a single environment variable (`AXON_API_KEY`) to authenticate. All other settings (default model, base URL, effort tier, and budgets) work automatically out of the box.
 
-### Method 1: Export Directly in Your Shell (Quickest)
+### Option 1: Permanent Global Setup (Recommended)
 
-Add your key to your terminal or shell profile (`~/.zshrc` or `~/.bashrc`):
+Save your key to the global Axon directory (`~/.axon/.env`). This is set once and works permanently across all terminal windows, IDEs, and project folders.
+
+```bash
+mkdir -p ~/.axon
+echo 'AXON_API_KEY="your_api_key_here"' > ~/.axon/.env
+```
+
+* **Pros**: Permanent. Never disappears after closing your terminal or rebooting your computer.
+* **Cons**: None.
+
+---
+
+### Option 2: Temporary Session Export (Quick Test)
+
+Export your key directly in your current terminal session:
 
 ```bash
 export AXON_API_KEY="your_api_key_here"
 ```
 
-### Method 2: Global Configuration File (Recommended)
-
-To use Axon seamlessly across any directory without repeating setup, create a global `.env` file at `~/.axon/.env`:
-
-```bash
-mkdir -p ~/.axon
-cat << 'EOF' > ~/.axon/.env
-AXON_API_KEY="your_api_key_here"
-AXON_BASE_URL="https://agentrouter.org"
-EOF
-```
-
-> **Note**: Axon searches for configuration in the following order:  
-> `System Environment Variables` → `Current Workspace .env` → `~/.axon/.env` → `~/.axon/config.toml`
-
-### Configuration Parameters Reference
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| **`AXON_API_KEY`** | *Required* | API key for AgentRouter, Anthropic, or OpenAI-compatible provider. |
-| **`AXON_BASE_URL`** | `https://agentrouter.org` | API endpoint base URL. |
-| **`AXON_MODEL`** | `deepseek-v4-flash` | Active model (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`). |
-| **`AXON_EFFORT`** | `quantum` | Reasoning intensity: `reflex` (fast), `balanced` (standard), `synapse` (deep), `quantum` (max). |
-| **`AXON_THINKING`** | `true` | Stream live step-by-step assistant reasoning traces. |
-| **`AXON_MODE`** | `default` | Permission mode: `default` (ask before edits/bash), `acceptEdits` (auto-write), `plan` (read-only), `bypass` (auto-run all). |
-| **`AXON_MAX_TOKENS`** | `64000` | Maximum reasoning + output tokens per turn. |
-| **`AXON_SESSION_COST_CEILING`** | `10.00` | Safety budget limit ($USD) per session before halting execution. |
+* **Pros**: Instant one-liner for a quick trial run.
+* **Cons**: **Temporary**. Vanishes the moment you close the terminal tab or start a new shell session.
 
 ---
 
@@ -179,9 +171,9 @@ To keep your repositories and workspaces 100% clean, Axon isolates all state and
 | Key / Command | Action |
 | :--- | :--- |
 | **`Tab`** | Cycle permission modes: `default` ➔ `acceptEdits` ➔ `plan` ➔ `bypass` |
-| **`←` (Left Arrow)** | Open interactive **Previous Chats / Session Switcher** |
-| **`!`** | Run raw shell commands immediately (e.g. `!pytest`, `!git status`) |
-| **`@`** | Fuzzy search and link workspace files into prompt context |
+| **`←` (Left Arrow)** | Open interactive **Previous Chats / Session Switcher** dashboard |
+| **`!`** | Run direct shell commands immediately (e.g. `!pytest`, `!git status`) |
+| **`@` (At Symbol)** | Fuzzy search and insert workspace files into prompt context |
 | **`/cost`** | Display token usage, prompt cache breakdown, and session dollar cost |
 | **`/model`** | Switch active model on the fly (`deepseek-v4-flash`, `claude-opus-5`, etc.) |
 | **`/effort`** | Adjust reasoning tier (`reflex`, `balanced`, `synapse`, `quantum`) |

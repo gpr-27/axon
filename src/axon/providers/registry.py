@@ -9,11 +9,11 @@ from axon.providers.anthropic import AnthropicProvider
 from axon.providers.openai_compat import OpenAICompatProvider
 
 PRICING: dict[str, dict[str, float]] = {
-    "deepseek-v4-flash": {"input": 2.00, "output": 6.00, "cache_read": 0.50},
-    "gpt-5.6-sol":       {"input": 3.00, "output": 15.00, "cache_read": 0.75},
-    "claude-opus-5":     {"input": 6.00, "output": 30.00, "cache_read": 0.60},
-    "claude-opus-4-8":   {"input": 6.00, "output": 30.00, "cache_read": 0.60},
-    "glm-5.3":           {"input": 3.00, "output": 12.00, "cache_read": 0.75},
+    "deepseek-v4-flash": {"input": 2.00, "output": 6.00},
+    "gpt-5.6-sol":       {"input": 3.00, "output": 15.00},
+    "claude-opus-5":     {"input": 8.00, "output": 40.00},
+    "claude-opus-4-8":   {"input": 8.00, "output": 40.00},
+    "glm-5.3":           {"input": 3.00, "output": 12.00},
 }
 
 # Verified Model Context Windows & Max Output Limits
