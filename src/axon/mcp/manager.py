@@ -117,23 +117,101 @@ class MCPManager:
             return candidate
         return None
 
-    def import_from_claude_desktop(self) -> int:
-        """Import all configured MCP servers from Claude Desktop."""
-        claude_cfg = self.find_claude_desktop_config()
-        if not claude_cfg:
-            return 0
+    def find_all_external_mcp_configs(self) -> list[tuple[str, Path]]:
+        """Search all known IDEs and tools for existing MCP configurations."""
+        candidates: list[tuple[str, Path]] = []
 
+        # 1. Claude Desktop
+        claude_cfg = self.find_claude_desktop_config()
+        if claude_cfg and claude_cfg.exists():
+            candidates.append(("Claude Desktop", claude_cfg))
+
+        # 2. Cursor IDE (~/.cursor/mcp.json and <workspace>/.cursor/mcp.json)
+        cursor_home = Path.home() / ".cursor" / "mcp.json"
+        if cursor_home.exists():
+            candidates.append(("Cursor (Global)", cursor_home))
+        cursor_ws = self.workspace / ".cursor" / "mcp.json"
+        if cursor_ws.exists():
+            candidates.append(("Cursor (Workspace)", cursor_ws))
+
+        # 3. Windsurf / Codeium
+        windsurf_cfg = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+        if windsurf_cfg.exists():
+            candidates.append(("Windsurf", windsurf_cfg))
+
+        # 4. VS Code (Cline / Roo Code extensions)
+        if sys.platform == "darwin":
+            code_storage = Path.home() / "Library" / "Application Support" / "Code" / "User" / "globalStorage"
+        elif sys.platform == "win32":
+            appdata = os.environ.get("APPDATA")
+            code_storage = Path(appdata) / "Code" / "User" / "globalStorage" if appdata else None
+        else:
+            code_storage = Path.home() / ".config" / "Code" / "User" / "globalStorage"
+
+        if code_storage and code_storage.exists():
+            cline_cfg = code_storage / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
+            if cline_cfg.exists():
+                candidates.append(("VS Code (Cline)", cline_cfg))
+            roo_cfg = code_storage / "rooveterinaryinc.roo-cline" / "settings" / "cline_mcp_settings.json"
+            if roo_cfg.exists():
+                candidates.append(("VS Code (Roo Code)", roo_cfg))
+
+        # 5. Project root mcp.json or .mcp.json
+        for candidate_name in ("mcp.json", ".mcp.json"):
+            ws_mcp = self.workspace / candidate_name
+            if ws_mcp.exists() and ws_mcp != self.local_config_file:
+                candidates.append(("Project Root", ws_mcp))
+
+        return candidates
+
+    def import_from_all_discovered(self) -> int:
+        """Import all MCP servers from all discovered IDE configurations."""
+        all_sources = self.find_all_external_mcp_configs()
+        total_imported = 0
+        for source_name, cfg_path in all_sources:
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                servers = data.get("mcpServers", {})
+                for name, spec in servers.items():
+                    self.add_server(
+                        name=name,
+                        command=spec.get("command", ""),
+                        args=spec.get("args", []),
+                        env=spec.get("env"),
+                        scope="global",
+                    )
+                    total_imported += 1
+            except Exception:
+                pass
+        return total_imported
+
+    def detect_workspace_recommended_presets(self) -> list[str]:
+        """Auto-detect workspace characteristics and recommend relevant MCP presets."""
+        recommended: list[str] = []
         try:
-            data = json.loads(claude_cfg.read_text(encoding="utf-8"))
-            servers = data.get("mcpServers", {})
-            for name, spec in servers.items():
-                self.add_server(
-                    name=name,
-                    command=spec.get("command", ""),
-                    args=spec.get("args", []),
-                    env=spec.get("env"),
-                    scope="global",
-                )
-            return len(servers)
+            # Check for sqlite files
+            if list(self.workspace.glob("*.sqlite")) or list(self.workspace.glob("*.db")):
+                recommended.append("sqlite")
+            # Check for git repo with github remote
+            git_cfg = self.workspace / ".git" / "config"
+            if git_cfg.exists():
+                try:
+                    txt = git_cfg.read_text(encoding="utf-8", errors="ignore")
+                    if "github.com" in txt:
+                        recommended.append("github")
+                except Exception:
+                    pass
+            # Check for PostgreSQL configs or docker compose
+            dc = self.workspace / "docker-compose.yml"
+            if dc.exists():
+                try:
+                    txt = dc.read_text(encoding="utf-8", errors="ignore").lower()
+                    if "postgres" in txt:
+                        recommended.append("postgres")
+                except Exception:
+                    pass
         except Exception:
-            return 0
+            pass
+
+        return recommended
+

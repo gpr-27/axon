@@ -39,15 +39,15 @@ def handle_mcp_interactive(agent: Agent, arg: str = "") -> None:
         return
 
     if arg_clean.startswith("import"):
-        count = manager.import_from_claude_desktop()
-        if count > 0:
-            print(f"\n  {MINT}✓ Successfully imported {count} MCP servers from Claude Desktop config!{RST}\n")
-        else:
-            claude_cfg = manager.find_claude_desktop_config()
-            if not claude_cfg:
-                print(f"\n  {SLATE}No Claude Desktop configuration file found on this machine.{RST}\n")
-            else:
-                print(f"\n  {SLATE}No MCP servers found in {claude_cfg}.{RST}\n")
+        found = manager.find_all_external_mcp_configs()
+        if not found:
+            print(f"\n  {SLATE}No external MCP configs found across Claude Desktop, Cursor, Windsurf, or VS Code.{RST}\n")
+            return
+        count = manager.import_from_all_discovered()
+        print(f"\n  {MINT}✓ Successfully imported {count} MCP servers from {len(found)} discovered IDE configs:{RST}")
+        for ide_name, path in found:
+            print(f"    • {TEAL}{ide_name}{RST}: {WHITE}{path}{RST}")
+        print()
         return
 
     if arg_clean.startswith("remove") or arg_clean.startswith("rm"):
@@ -72,14 +72,22 @@ def handle_mcp_interactive(agent: Agent, arg: str = "") -> None:
 
 def _main_mcp_menu(manager: MCPManager) -> None:
     servers = manager.get_all_servers()
+    discovered_sources = manager.find_all_external_mcp_configs()
+    recommended = manager.detect_workspace_recommended_presets()
+
     print(f"\n  {GOLD}{BOLD}=== Model Context Protocol (MCP) Hub ==={RST}")
-    print(f"  {SLATE}Active servers: {BOLD}{WHITE}{len(servers)}{RST} {SLATE}· Global: {manager.global_config_file}{RST}\n")
+    status_parts = [f"Active servers: {BOLD}{WHITE}{len(servers)}{RST}"]
+    if discovered_sources:
+        status_parts.append(f"{MINT}{len(discovered_sources)} IDE configs discovered{RST}")
+    if recommended:
+        status_parts.append(f"{GOLD}{len(recommended)} recommended for project{RST}")
+    print(f"  {' · '.join(status_parts)}\n")
 
     options = [
         "1. 📦 Install Popular MCP Server (GitHub, SQLite, Postgres, Brave, Puppeteer...)",
         "2. 📋 List & Inspect Configured Servers",
         "3. ⚙️ Add Custom Stdio / SSE Server",
-        "4. 📥 Import from Claude Desktop (claude_desktop_config.json)",
+        f"4. 🔍 Auto-Discover & Import from IDEs ({len(discovered_sources)} found: Cursor, Claude, Windsurf, VS Code)",
         "5. 🗑️ Remove an MCP Server",
         "6. ↩ Exit MCP Hub",
     ]
@@ -94,12 +102,16 @@ def _main_mcp_menu(manager: MCPManager) -> None:
         _list_servers(manager)
     elif "Add Custom" in chosen:
         _add_custom_server_flow(manager)
-    elif "Import from Claude" in chosen:
-        count = manager.import_from_claude_desktop()
-        if count > 0:
-            print(f"\n  {MINT}✓ Imported {count} servers from Claude Desktop!{RST}\n")
+    elif "Auto-Discover" in chosen:
+        if not discovered_sources:
+            print(f"\n  {SLATE}No external MCP configs detected.{RST}")
+            print(f"  {DIM}Searched Claude Desktop, Cursor, Windsurf, and VS Code (Cline/Roo Code).{RST}\n")
         else:
-            print(f"\n  {SLATE}No Claude Desktop configuration found.{RST}\n")
+            count = manager.import_from_all_discovered()
+            print(f"\n  {MINT}✓ Successfully imported {count} servers from {len(discovered_sources)} IDE configs:{RST}")
+            for ide_name, path in discovered_sources:
+                print(f"    • {TEAL}{ide_name}{RST}: {WHITE}{path}{RST}")
+            print()
     elif "Remove" in chosen:
         _remove_server_flow(manager)
 
