@@ -13,171 +13,204 @@
 [![Architecture](https://img.shields.io/badge/architecture-ReAct%20Loop%20%2B%20Subagents-orange.svg)](docs/01-ARCHITECTURE.md)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-**Axon** is a production-grade, terminal-native AI coding assistant built from first principles. It reads entire codebases, architects multi-step plans, performs surgical code edits, executes shell workflows, validates test results, and coordinates concurrent subagents — with full prompt cache cost accounting, rollback checkpoints, zero project pollution, and zero external agent frameworks.
+**Axon** is a production-grade, terminal-native AI coding assistant built from first principles in pure Python. It autonomously analyzes codebases, plans multi-stage architectures, performs surgical code edits, executes shell workflows, validates test suites, and orchestrates concurrent subagents — complete with exact prompt cache cost accounting, multi-tier reasoning, rollback checkpoints, and zero workspace pollution.
 
 </div>
 
 ---
 
-## 🚀 Quick Setup & Getting Started
+## 📦 Installation
 
-### For New Users
+Install Axon directly from PyPI:
 
-#### Option 1: Install via PyPI (Recommended)
-Install the published package on any computer:
 ```bash
 pip install axon-gpr
 ```
-*(Or with `uv`: `uv tool install axon-gpr`)*
 
-#### Option 2: Install from Source (Developer Mode)
-If you want to contribute or modify Axon's source code:
-```bash
-# 1. Clone the repository
-git clone https://github.com/gpr-27/axon.git
-cd axon
-
-# 2. Install in editable mode
-pip install -e .
-```
+*(To upgrade an existing installation at any time: `pip install --upgrade axon-gpr`)*
 
 ---
 
-### Step 2: Configure Your API Key
+## 🔑 Environment Configuration (`.env`)
 
-Axon supports **AgentRouter**, **Anthropic**, and **OpenAI-compatible** providers.
+Axon supports **AgentRouter**, **Anthropic**, and **OpenAI-compatible** endpoints. To start using Axon, set your API key using either method below:
 
-Copy `.env.example` to `.env` in your project or create `~/.axon/.env` for global access:
+### Method 1: Export Directly in Your Shell (Quickest)
+
+Add your key to your terminal or shell profile (`~/.zshrc` or `~/.bashrc`):
+
 ```bash
-cp .env.example .env
+export AXON_API_KEY="your_api_key_here"
 ```
 
-Open `.env` and set your API key:
-```ini
+### Method 2: Global Configuration File (Recommended)
+
+To use Axon seamlessly across any directory without repeating setup, create a global `.env` file at `~/.axon/.env`:
+
+```bash
+mkdir -p ~/.axon
+cat << 'EOF' > ~/.axon/.env
+# Required Authentication
 AXON_API_KEY="your_api_key_here"
 AXON_BASE_URL="https://agentrouter.org"
+
+# Default Model & Reasoning Tier
 AXON_MODEL="deepseek-v4-flash"
 AXON_EFFORT="quantum"
 AXON_THINKING=true
+
+# Security Mode (default | acceptEdits | plan | bypass)
 AXON_MODE="default"
+EOF
 ```
 
-*(You can also export `export AXON_API_KEY="sk-..."` directly in your shell).*
+> **Note**: Axon searches for configuration in the following order:  
+> `System Environment Variables` → `Current Workspace .env` → `~/.axon/.env` → `~/.axon/config.toml`
+
+### Configuration Parameters Reference
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| **`AXON_API_KEY`** | *Required* | API key for AgentRouter, Anthropic, or OpenAI-compatible provider. |
+| **`AXON_BASE_URL`** | `https://agentrouter.org` | API endpoint base URL. |
+| **`AXON_MODEL`** | `deepseek-v4-flash` | Active model (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`). |
+| **`AXON_EFFORT`** | `quantum` | Reasoning intensity: `reflex` (fast), `balanced` (standard), `synapse` (deep), `quantum` (max). |
+| **`AXON_THINKING`** | `true` | Stream live step-by-step assistant reasoning traces. |
+| **`AXON_MODE`** | `default` | Permission mode: `default` (ask before edits/bash), `acceptEdits` (auto-write), `plan` (read-only), `bypass` (auto-run all). |
+| **`AXON_MAX_TOKENS`** | `64000` | Maximum reasoning + output tokens per turn. |
+| **`AXON_SESSION_COST_CEILING`** | `10.00` | Safety budget limit ($USD) per session before halting execution. |
 
 ---
 
-### Step 3: Start Axon
+## 🚀 Quick Start
 
-Launch the assistant in any directory:
+Launch Axon anywhere on your system:
+
 ```bash
-# 1. Interactive terminal assistant
+# 1. Start interactive terminal assistant
 axon
 
-# 2. One-shot query / command
-axon -p "Review this repository and summarize architecture"
+# 2. Run a one-shot query or direct instruction
+axon -p "Analyze this codebase and write unit tests for edge cases"
 
 # 3. Resume your latest conversation
 axon --continue
 
-# 4. Use a specific model override
+# 4. Launch with a specific model override
 axon --model claude-opus-5
 ```
 
 ---
 
-## 🔄 For Existing Users: How to Update
+## 🧠 What is Axon? (Complete Project Overview)
 
-To update your existing Axon installation to the newest release:
+Axon is engineered to provide an autonomous, developer-first coding agent inside your terminal without third-party agent framework bloat:
 
-### If installed via PyPI / Pip:
-```bash
-pip install --upgrade axon-gpr
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              USER PROMPT                                │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        AXON REACT ENGINE LOOP                           │
+│                                                                         │
+│   ┌───────────────────┐    Prompt + History    ┌────────────────────┐   │
+│   │                   │ ─────────────────────> │                    │   │
+│   │   LLM REASONING   │                        │   6-LAW SECURITY   │   │
+│   │  & THINKING TRACE │ <───────────────────── │  PERMISSION MATRIX │   │
+│   │                   │      Tool Decisions    │                    │   │
+│   └─────────┬─────────┘                        └─────────┬──────────┘   │
+│             │                                            │              │
+│             │ Executes Tool Call                         │              │
+│             ▼                                            ▼              │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │               24 NATIVE RUNTIME AGENT TOOLS                     │   │
+│   │   File I/O  ·  Ripgrep/AST  ·  Shell  ·  Subagents  ·  Research  │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│             GLOBAL ~/.axon/ LEDGER & AUTO CHECKPOINT ROLLBACK           │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### If installed via `uv`:
-```bash
-uv tool upgrade axon-gpr
-```
+### Key Architectural Pillars
 
-### If installed from Source Git Repo:
-```bash
-git pull origin main
-pip install -e .
-```
+1. **⚡ Native ReAct Loop with Thinking Traces**:
+   Built from first principles with zero dependencies on LangChain or CrewAI. Streams real-time reasoning tokens, self-corrects on tool failures, and manages structured multi-turn context.
+
+2. **🔒 6-Law Security & Permission Matrix**:
+   Enforces strict safety boundaries. Tools are classified into read-only, workspace mutation, external shell, and privileged execution. Instantly toggle between `default`, `acceptEdits`, `plan`, and `bypass` modes with `Tab`.
+
+3. **⏪ Atomic File Checkpoints & Undo (`/rewind`)**:
+   Every file edit takes an in-memory SHA256 snapshot before touching disk. If a patch fails or tests break, rollback your workspace instantly.
+
+4. **👥 Concurrent Subagents (`Task` Tool)**:
+   Axon can spawn isolated subagent workers to research documentation, run background tasks, or explore repositories concurrently without polluting the main conversation context.
+
+5. **💰 Prompt Cache & Exact Token Cost Ledger**:
+   Full visibility into cache read/write tokens and real-time dollar costs per session, logged append-only into `~/.axon/sessions/`.
 
 ---
 
-## 🛠️ For Developers: Making Changes & Publishing Updates
+## 📂 Zero-Pollution Global Storage (`~/.axon/`)
 
-If you edit Axon and want to publish new versions to PyPI or deploy to other computers:
-
-### 1. Develop & Test Locally
-Because Axon is installed in editable mode (`pip install -e .`), any edits in `src/axon/` are live immediately on your computer.
-
-Always verify that tests pass before releasing:
-```bash
-uv run pytest
-```
-
-### 2. Bump the Version
-When you're ready to publish, open [`pyproject.toml`](file:///Users/gpr/Documents/axon/pyproject.toml) and increment the version:
-```toml
-[project]
-name = "axon-gpr"
-version = "0.27.3"   # <-- Increment patch, minor, or major version
-```
-
-### 3. Build the Distribution
-Clean previous builds and package the new wheels:
-```bash
-rm -rf dist/*
-uv build
-```
-
-### 4. Upload to PyPI
-Upload the new release:
-```bash
-twine upload dist/*
-```
-
-### 5. Commit and Push to Git
-```bash
-git add .
-git commit -m "Release v0.27.3: Summary of changes"
-git push origin main
-```
-
----
-
-## 📂 Global Storage Architecture (`~/.axon/`)
-
-Axon saves all persistent states in your home directory (**`~/.axon/`**) rather than polluting your individual project workspaces:
+To keep your repositories and workspaces 100% clean, Axon isolates all state and history in your home directory:
 
 ```
 ~/.axon/
-├── config.toml       # Global configuration (default model, effort, permissions)
-├── sessions/         # Append-only JSONL chat transcripts and token cost ledgers
-├── memory/           # Universal learned conventions & facts (from /learn --global)
-├── skills/           # Custom & community skills (from /skill install)
-├── research/         # Full markdown reports from DeepResearch
-├── images/           # Image cache and screenshot attachments
-└── bin/              # CLI executable binaries and launchers
+├── config.toml       # Global defaults (default model, effort tier, permissions)
+├── .env              # Global API credentials
+├── sessions/         # Append-only JSONL transcripts, cost ledgers, and switcher data
+├── memory/           # Universal long-term learned conventions (from /learn --global)
+├── skills/           # Custom reusable workflows (from /skill create or /skill install)
+├── research/         # Full deep-research markdown briefs
+├── images/           # Multimodal image ingestion cache & vision attachments
+└── bin/              # Precompiled native helpers (e.g., instant macOS clipboard paste)
 ```
-
-* **Zero Workspace Clutter**: Your project folders stay 100% clean with zero unintended dotfiles.
-* **Universal Resumption**: You can switch between and resume past sessions from any workspace with `/resume` or `axon --continue`.
 
 ---
 
-## 🩺 Model Connectivity Check (`check_models.py`)
+## 🛠️ 24 Built-In Native Tools
 
-Verify connectivity and response latency across all 5 supported models (`deepseek-v4-flash`, `gpt-5.6-sol`, `glm-5.3`, `claude-opus-5`, `claude-opus-4-8`):
+| Category | Tools | Purpose |
+| :--- | :--- | :--- |
+| **File I/O** | `Read`, `Write`, `Edit`, `MultiEdit`, `Patch`, `Diff` | Surgical source code edits with `(mtime, sha256)` staleness detection and read-before-write safety. |
+| **Navigation** | `Ls`, `FileTree`, `Glob`, `Grep`, `CodeSymbols` | AST-aware code symbol extraction and high-speed ripgrep search. |
+| **Execution** | `Bash`, `Process`, `Env`, `Git`, `Doctor` | Controlled shell execution, background task monitoring, git state inspection, and system health checks. |
+| **Research & Web** | `DeepResearch`, `TableSearch`, `WebSearch`, `WebFetch`, `Http` | Multi-step deep technical research, web search, URL fetching, and API interaction. |
+| **Planning & Tasks**| `Task`, `TodoWrite`, `ExitPlanMode` | Spawning specialized subagent workers, maintaining interactive task checklists, and plan approval. |
+
+---
+
+## ⌨️ Shortcuts & Slash Commands
+
+| Key / Command | Action |
+| :--- | :--- |
+| **`Tab`** | Cycle permission modes: `default` ➔ `acceptEdits` ➔ `plan` ➔ `bypass` |
+| **`←` (Left Arrow)** | Open interactive **Previous Chats / Session Switcher** |
+| **`!`** | Run raw shell commands immediately (e.g. `!pytest`, `!git status`) |
+| **`@`** | Fuzzy search and link workspace files into prompt context |
+| **`/cost`** | Display token usage, prompt cache breakdown, and session dollar cost |
+| **`/model`** | Switch active model on the fly (`deepseek-v4-flash`, `claude-opus-5`, etc.) |
+| **`/effort`** | Adjust reasoning tier (`reflex`, `balanced`, `synapse`, `quantum`) |
+| **`/learn`** | Save long-term facts, conventions, or debugging tips into memory |
+| **`/subagents`** | View live subagent status, spawned tasks, and token usage |
+| **`/rewind`** | Roll back file edits made during previous turns |
+| **`/diff`** | View uncommitted git diff in the current workspace |
+| **`/clear`** | Clear conversation context and start fresh |
+| **`?` / `/help`** | Open interactive commands cheat sheet |
+
+---
+
+## 🩺 Multi-Model Diagnostic Suite (`check_models.py`)
+
+Test and benchmark live connectivity and latency across all supported model endpoints:
 
 ```bash
 python3 check_models.py
 ```
 
-**Output:**
 ```
 ⚡ Testing connectivity for 5 models (2 rounds · Base: https://agentrouter.org)...
 
@@ -193,35 +226,9 @@ claude-opus-4-8      | ● WORKING |   1772 ms | OK. I'm Claude, made by Anthrop
 
 ---
 
-## 🛠️ 24 Built-In Native Tools
+## 🧪 Test Suite
 
-| Category | Tools | Description |
-| :--- | :--- | :--- |
-| **File I/O** | `Read`, `Write`, `Edit`, `MultiEdit`, `Patch`, `Diff` | Surgical edits with `(mtime, sha256)` staleness detection and read-before-edit enforcement. |
-| **Navigation** | `Ls`, `FileTree`, `Glob`, `Grep`, `CodeSymbols` | AST-aware code symbol extraction and fast workspace search with ripgrep. |
-| **Execution** | `Bash`, `Process`, `Env`, `Git`, `Doctor` | Direct shell execution, process monitoring, diagnostics, and git status analysis. |
-| **Research & Web** | `DeepResearch`, `TableSearch`, `WebSearch`, `WebFetch`, `Http` | Multi-round technical research, table querying, and web exploration. |
-| **Planning & Tasks** | `Task`, `TodoWrite`, `ExitPlanMode` | Concurrent subagent workers, multi-step checklists, and plan-mode control. |
-
----
-
-## ⌨️ Useful Commands & Shortcuts
-
-* **`Tab`**: Cycle permission modes (`default` → `acceptEdits` → `plan` → `bypass`).
-* **`←` (Left Arrow)**: Open the interactive **Previous Chats / Session Switcher** dashboard.
-* **`!` (Exclamation)**: Run shell commands directly (e.g. `!pytest`, `!git status`, `!npm test`).
-* **`@` (At symbol)**: Fuzzy search and link project files into your prompt context.
-* **`/cost`**: View detailed token breakdown, prompt cache savings, and workspace lifetime billing.
-* **`/subagents`**: Open the subagent monitor to inspect isolated subagent tasks and costs.
-* **`/main`**: Return to the main chat session from any subagent view.
-* **`/model`**: Switch active LLM on the fly (`deepseek-v4-flash`, `claude-opus-5`, `gpt-5.6-sol`, `glm-5.3`).
-* **`/effort`**: Adjust reasoning effort tier (`reflex`, `balanced`, `synapse`, `quantum`).
-* **`/clear`**: Reset the conversation and start a clean session.
-* **`?` or `/help`**: Show the interactive commands cheat sheet.
-
----
-
-## 🧪 Running Unit Tests (522 Tests)
+Axon is backed by a comprehensive suite of **522 automated unit and integration tests** covering all security jails, permission matrices, session ledgers, tools, and UI rendering:
 
 ```bash
 uv run pytest
