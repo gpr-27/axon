@@ -77,3 +77,72 @@ def test_assistant_turn_properties():
     assert len(turn.tool_uses) == 2
     assert turn.tool_uses[0].id == "t1"
     assert turn.tool_uses[1].id == "t2"
+
+def test_usage_prompt_caching_normalization():
+    # Anthropic semantics: raw input (uncached) + cache_read + cache_write
+    raw_uncached = 235
+    cache_read = 6600
+    cache_write = 0
+    total_input = raw_uncached + cache_read + cache_write
+    usage = Usage(input=total_input, output=52, cache_read=cache_read, cache_write=cache_write)
+    assert usage.input == 6835
+    assert usage.cache_read == 6600
+    assert (usage.cache_read / usage.input * 100) > 96.0
+
+def test_turn_footer_cache_pct_rendered():
+    import io, sys
+    from axon.ui.render import Renderer
+    r = Renderer()
+    usage = Usage(input=6835, output=52, cache_read=6600)
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = buf
+        r.turn_footer(tool_count=0, usage=usage, cost=0.0166, elapsed=2.8)
+    finally:
+        sys.stdout = old_stdout
+    out = buf.getvalue()
+    assert "6.8k in" in out
+    assert "97% cached" in out
+    assert "52 out" in out
+
+def test_handle_breakdown_command(workspace):
+    import io, sys
+    from unittest.mock import MagicMock
+    from axon.agent.state import Conversation
+    from axon.commands.builtin import handle_breakdown, dispatch_command
+    from axon.tools import create_default_registry
+    from axon.skills.manager import SkillManager
+    from axon.session.ledger import Ledger
+    from axon.config import Settings
+
+    mock_agent = MagicMock()
+    mock_agent.settings = Settings(workspace=workspace, model="gpt-5.6-sol")
+    mock_agent.registry = create_default_registry()
+    mock_agent.skills = SkillManager(workspace)
+    mock_agent.ledger = Ledger()
+    mock_agent.provider = MagicMock()
+    mock_agent.provider.name = "openai_compat"
+    mock_agent.conversation = Conversation([
+        {"role": "user", "content": "hello world"},
+        {"role": "assistant", "content": "Hi! How can I help?"},
+        {"role": "user", "content": "how r u?"},
+    ])
+
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = buf
+        res = dispatch_command("/breakdown", mock_agent)
+    finally:
+        sys.stdout = old_stdout
+
+    assert res.handled is True
+    out = buf.getvalue()
+    assert "Active Input Payload Breakdown" in out
+    assert "SYSTEM PROMPT" in out
+    assert "TOOL DEFINITIONS" in out
+    assert "PREVIOUS CONVERSATION" in out
+    assert "LAST MESSAGE" in out
+    assert "TOTAL INPUT TOKEN RECONCILIATION" in out
+    assert "how r u?" in out

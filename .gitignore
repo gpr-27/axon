@@ -10,3 +10,5 @@ __pycache__/
 ._*
 *.swp
 *.swo
+dist/
+build/

@@ -227,10 +227,17 @@ class OpenAICompatProvider:
                 if "usage" in chunk and chunk["usage"]:
                     u = chunk["usage"]
                     prompt_t = u.get("prompt_tokens", 0) or 0
-                    cache_hit_t = u.get("prompt_cache_hit_tokens", 0) or 0
-                    # DeepSeek/OpenAI report prompt_tokens as uncached-only;
-                    # normalize to total input (cached + uncached) to match Anthropic semantics.
-                    total_input = prompt_t + cache_hit_t
+                    cache_hit_t = (
+                        u.get("prompt_cache_hit_tokens", 0)
+                        or u.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        or 0
+                    )
+                    # DeepSeek/OpenAI report prompt_tokens as total input (cached + uncached);
+                    # if a gateway only returns uncached prompt_tokens, add cache_hit_t.
+                    if prompt_t >= cache_hit_t:
+                        total_input = prompt_t
+                    else:
+                        total_input = prompt_t + cache_hit_t
                     usage = Usage(
                         input=total_input,
                         output=u.get("completion_tokens", 0) or 0,

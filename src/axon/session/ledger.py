@@ -16,6 +16,7 @@ class Ledger:
         self.total_cost: Decimal = Decimal("0.0")
         self.turn_costs: list[Decimal] = []
         self.chat_count: int = 0
+        self.last_usage: Usage | None = None
 
     def clear(self) -> None:
         self.total_input_tokens = 0
@@ -26,6 +27,7 @@ class Ledger:
         self.total_cost = Decimal("0.0")
         self.turn_costs.clear()
         self.chat_count = 0
+        self.last_usage = None
 
     def record(self, model: str, usage: Usage, *, tag: str = "main") -> Decimal:
         pricing = PRICING.get(model, {"input": 3.0, "output": 15.0, "cache_read": 0.6})
@@ -48,6 +50,7 @@ class Ledger:
         self.total_reasoning_tokens += usage.reasoning
         self.total_cost += turn_cost
         self.turn_costs.append(turn_cost)
+        self.last_usage = usage
 
         return turn_cost
 
@@ -72,7 +75,7 @@ class Ledger:
 
     def render(self, model: str) -> str:
         tot_tok = self.total_input_tokens + self.total_output_tokens
-        tot_prompt = self.total_input_tokens + self.total_cache_read_tokens if self.total_cache_read_tokens > self.total_input_tokens else self.total_input_tokens
+        tot_prompt = self.total_input_tokens
         cache_pct = (
             min(100.0, (self.total_cache_read_tokens / max(1, tot_prompt) * 100))
             if tot_prompt > 0 else 0.0

@@ -1098,7 +1098,7 @@ class Renderer:
         in_t = usage.input
         out_t = usage.output
         cache_t = usage.cache_read
-        pct = (cache_t / in_t * 100) if in_t > 0 else 0.0
+        pct = min(100.0, (cache_t / in_t * 100)) if in_t > 0 else 0.0
         now_str = datetime.now().strftime("%-I:%M %p")
         verb = "Worked" if tool_count > 0 else "Thought"
         cache_str = f" ({pct:.0f}% cached)" if cache_t > 0 else ""

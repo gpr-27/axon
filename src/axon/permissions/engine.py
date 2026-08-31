@@ -80,7 +80,10 @@ class PermissionEngine:
 
             if config_path.exists():
                 try:
-                    import tomllib
+                    try:
+                        import tomllib
+                    except ModuleNotFoundError:
+                        import tomli as tomllib  # type: ignore[no-redef]
                     with open(config_path, "rb") as f:
                         data = tomllib.load(f)
                     perms = data.get("permissions", {})

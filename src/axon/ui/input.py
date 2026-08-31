@@ -73,6 +73,7 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/plan", "core", "Core & Models", "View task checklist or switch to plan mode", True),
 
     # 📊 Context & Token Budget
+    ("/breakdown", "core", "Context & Tokens", "Full input prompt breakdown & token matching", False),
     ("/context", "core", "Context & Tokens", "View active context token budget and limits", False),
     ("/compact", "core", "Context & Tokens", "Compact conversation context while preserving key facts", False),
     ("/window", "core", "Context & Tokens", "Adjust sliding context window size (e.g. /window 10)", True),

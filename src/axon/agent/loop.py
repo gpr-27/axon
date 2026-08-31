@@ -3,6 +3,7 @@ The ReAct Agent Loop: reason -> act -> observe -> iterate.
 Enforces the 5 Invariants (Pairing, Batching, Verbatim Replay, Errors as Data, Interrupt Safety).
 """
 from __future__ import annotations
+import json
 import os
 import re
 import sys
@@ -248,10 +249,12 @@ class Agent:
             self.context.prepare(self.conversation, system_blocks, tool_schemas, model=self.settings.model)
 
             # Calculate full payload token projection (system prompt + tools + messages)
-            sys_chars = sum(len(str(b.get("text", ""))) for b in system_blocks)
-            tool_chars = sum(len(str(s)) for s in tool_schemas)
+            sys_text = "".join(str(b.get("text", "")) for b in system_blocks)
+            sys_tokens = max(1, int(len(sys_text) / 3.7))
+            tool_json = json.dumps(tool_schemas, separators=(",", ":"))
+            tool_tokens = max(1, int(len(tool_json) / 4.0))
             conv_tokens = self.conversation.token_estimate()
-            total_prompt_tokens = conv_tokens + int((sys_chars + tool_chars) / 3.7)
+            total_prompt_tokens = sys_tokens + tool_tokens + conv_tokens
 
             # Emit LLM step start event
             if self.on_event:

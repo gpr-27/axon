@@ -125,11 +125,15 @@ class AnthropicProvider:
                 stop_reason = getattr(final_msg, "stop_reason", "end_turn") or "end_turn"
                 raw_usage = getattr(final_msg, "usage", None)
                 if raw_usage:
+                    input_t = getattr(raw_usage, "input_tokens", 0) or 0
+                    cache_read_t = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
+                    cache_write_t = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+                    total_input = input_t + cache_read_t + cache_write_t
                     usage = Usage(
-                        input=getattr(raw_usage, "input_tokens", 0) or 0,
+                        input=total_input,
                         output=getattr(raw_usage, "output_tokens", 0) or 0,
-                        cache_read=getattr(raw_usage, "cache_read_input_tokens", 0) or 0,
-                        cache_write=getattr(raw_usage, "cache_creation_input_tokens", 0) or 0,
+                        cache_read=cache_read_t,
+                        cache_write=cache_write_t,
                     )
 
                 # Store native content blocks for verbatim replay
