@@ -15,7 +15,6 @@
 - `pyproject.toml`
 - `requirements-dev.txt`
 - `requirements.txt`
-- `scratch`
 - `src`
 - `tests`
 - `uv.lock`

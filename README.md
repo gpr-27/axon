@@ -50,17 +50,8 @@ To use Axon seamlessly across any directory without repeating setup, create a gl
 ```bash
 mkdir -p ~/.axon
 cat << 'EOF' > ~/.axon/.env
-# Required Authentication
 AXON_API_KEY="your_api_key_here"
 AXON_BASE_URL="https://agentrouter.org"
-
-# Default Model & Reasoning Tier
-AXON_MODEL="deepseek-v4-flash"
-AXON_EFFORT="quantum"
-AXON_THINKING=true
-
-# Security Mode (default | acceptEdits | plan | bypass)
-AXON_MODE="default"
 EOF
 ```
 
