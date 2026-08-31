@@ -112,30 +112,12 @@ def install_requirements(python_exe: Path, root_dir: Path) -> bool:
 
 
 def initialize_axon_config() -> None:
-    """Initialize ~/.axon directory and global config."""
+    """Initialize ~/.axon storage directories."""
     axon_dir = Path.home() / ".axon"
     for sub in ("sessions", "memory", "skills", "research", "images"):
         (axon_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    cfg_file = axon_dir / "config.toml"
-    if not cfg_file.exists():
-        try:
-            cfg_content = (
-                '# Axon Global Configuration\n'
-                'model = "deepseek-v4-flash"\n'
-                'effort = "quantum"\n'
-                'thinking = true\n'
-                'mode = "default"\n'
-                'parallel_tools = 6\n'
-                'compact_at = 0.85\n'
-            )
-            with open(cfg_file, "w", encoding="utf-8") as f:
-                f.write(cfg_content)
-            print(f"✓ Initialized global configuration at {cfg_file}")
-        except Exception:
-            pass
-
-    # Ensure local .env exists
+    # Ensure local .env exists if example is present
     local_env = Path.cwd() / ".env"
     example_env = Path.cwd() / ".env.example"
     if not local_env.exists() and example_env.exists():
@@ -147,6 +129,7 @@ def initialize_axon_config() -> None:
             print("✓ Created .env template from .env.example")
         except Exception:
             pass
+
 
 
 def main() -> int:
