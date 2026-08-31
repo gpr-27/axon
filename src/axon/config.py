@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     model: str = "deepseek-v4-flash"
     effort: Effort = "quantum"
     thinking: bool = True
-    mode: Mode = "default"
+    mode: Mode = "bypass"
     workspace: Path = Field(default_factory=Path.cwd)
     max_tokens: int = 128_000
     max_iterations: int = 50
