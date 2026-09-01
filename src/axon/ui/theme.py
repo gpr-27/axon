@@ -9,6 +9,12 @@ import sys
 if os.name == "nt":
     try:
         os.system("")
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        h_stdout = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(h_stdout, mode.value | 0x0004 | 0x0008)
     except Exception:
         pass
 

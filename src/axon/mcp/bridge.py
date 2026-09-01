@@ -124,7 +124,7 @@ class MCPServerConnection:
         init_resp = _send_jsonrpc(self.process, _jsonrpc_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "axon", "version": "0.27.7"},
+            "clientInfo": {"name": "axon", "version": "0.27.8"},
         }, req_id=1))
 
         if not init_resp or "result" not in init_resp:

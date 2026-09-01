@@ -93,6 +93,8 @@ class BashTool(Tool):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
                 env=clean_env,
                 preexec_fn=preexec,
@@ -123,6 +125,8 @@ class BashTool(Tool):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
             raw_output = res.stdout.strip()

@@ -91,9 +91,10 @@ int main(int argc, const char * argv[]) {
     except Exception:
         pass
 
-    # 3. Fallback to osascript with PNG and TIFF support
-    try:
-        osa = f'''set dest to POSIX file "{dest_path}"
+    # 3. Fallback to osascript with PNG and TIFF support (macOS)
+    if sys.platform == "darwin":
+        try:
+            osa = f'''set dest to POSIX file "{dest_path}"
 try
     set img to the clipboard as «class PNGf»
     set f to open for access dest with write permission
@@ -113,11 +114,39 @@ on error
         return "FAIL"
     end try
 end try'''
-        res = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True, timeout=1.0)
-        if res.returncode == 0 and "OK" in res.stdout and dest_path.exists() and dest_path.stat().st_size > 0:
-            return True
-    except Exception:
-        pass
+            res = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True, timeout=1.0)
+            if res.returncode == 0 and "OK" in res.stdout and dest_path.exists() and dest_path.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+
+    # 4. Windows clipboard capture (PowerShell .NET / PIL)
+    if sys.platform == "win32":
+        try:
+            from PIL import ImageGrab  # type: ignore
+            img = ImageGrab.grabclipboard()
+            if img is not None:
+                img.save(str(dest_path), "PNG")
+                if dest_path.exists() and dest_path.stat().st_size > 0:
+                    return True
+        except Exception:
+            pass
+
+        try:
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+                "$img = [System.Windows.Forms.Clipboard]::GetImage(); "
+                f"if ($img) {{ $img.Save('{dest_path.as_posix()}', [System.Drawing.Imaging.ImageFormat]::Png); exit 0 }} else {{ exit 1 }}"
+            )
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True,
+                timeout=2.5,
+            )
+            if res.returncode == 0 and dest_path.exists() and dest_path.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -183,13 +212,25 @@ def _extract_ocr_text(p: Path) -> str:
     except Exception:
         pass
 
-    # 3. Try tesseract if installed
-    try:
-        res = subprocess.run(["tesseract", str(p), "stdout"], capture_output=True, text=True, timeout=2)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
-    except Exception:
-        pass
+    # 3. Try tesseract if installed (across Unix and Windows paths)
+    tess_candidates = ["tesseract"]
+    if sys.platform == "win32":
+        for win_tess in (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+        ):
+            if os.path.exists(win_tess):
+                tess_candidates.insert(0, win_tess)
+                break
+
+    for tess_bin in tess_candidates:
+        try:
+            res = subprocess.run([tess_bin, str(p), "stdout"], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
 
     return ""
 
@@ -200,11 +241,16 @@ def unescape_path(raw: str) -> str:
     if (clean.startswith('"') and clean.endswith('"')) or (clean.startswith("'") and clean.endswith("'")):
         clean = clean[1:-1].strip()
     # Strip drag-and-drop file:// prefix
-    if clean.startswith("file://"):
+    if clean.startswith("file:///"):
+        clean = clean[8:]
+    elif clean.startswith("file://"):
         clean = clean[7:]
     # Unquote URL-encoded characters (%20, %E2%80%AF, etc.)
     import urllib.parse
     clean = urllib.parse.unquote(clean)
+    # Fix Windows path leading slash from URL (e.g. /C:/Users -> C:/Users)
+    if sys.platform == "win32" and len(clean) >= 3 and clean[0] == "/" and clean[2] == ":":
+        clean = clean[1:]
     # Replace escaped spaces and quotes
     clean = clean.replace(r"\ ", " ").replace(r"\'", "'").replace(r'\"', '"').replace(r"\:", ":")
     return clean.strip()

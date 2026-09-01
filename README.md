@@ -24,73 +24,76 @@ Terminal-Native Agentic Coding Assistant
 
 ## ⚡ Quick Start & Installation
 
-Axon requires **Python >= 3.10**. Follow the complete setup from scratch below:
+Axon requires **Python >= 3.10**. Follow the 3-step setup below:
+
+### 1️⃣ Try the Standard Install Command First
+
+If you already have Python and `pip` installed, run the standard installation command directly:
+
+```bash
+# macOS / Linux / Configured Windows
+pip install axon-gpr
+
+# Windows Zero-Configuration Alternative (Works immediately via built-in py launcher):
+py -m pip install axon-gpr
+```
+
+Once installed, launch Axon:
+```bash
+axon
+# (Or on Windows if PATH is not configured: py -m axon)
+```
 
 ---
 
-### Step 0: Ensure Python & Pip are Installed
+### 2️⃣ If Python or Pip is Missing (1-Command Full Automated Setup)
 
-Before installing Axon, verify that Python and pip are available on your system.
+If `pip` or `python` is missing entirely on your computer, use the 1-liner for your operating system:
+
+* **🪟 Windows (PowerShell - 1-Click All-in-One)**:
+  Run this single command in PowerShell. It automatically downloads Python, accepts agreements silently, bootstraps & upgrades Pip, refreshes the active session, and configures the system `PATH`:
+  ```powershell
+  winget install --id Python.Python.3.12 --exact --source winget --accept-source-agreements --accept-package-agreements; $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); python -m ensurepip --upgrade; python -m pip install --upgrade pip; $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"; $userPath = [Environment]::GetEnvironmentVariable('Path','User'); if (($userPath -split ';') -notcontains $scripts) { [Environment]::SetEnvironmentVariable('Path', "$userPath;$scripts", 'User') }
+  ```
+
+* **🍎 macOS (Terminal - 1-Liner via Homebrew)**:
+  ```bash
+  brew install python && python3 -m pip install --upgrade pip
+  ```
+  *(Or download the official installer directly from [python.org/downloads](https://www.python.org/downloads/)).*
+
+* **🐧 Linux (Ubuntu / Debian - 1-Liner)**:
+  ```bash
+  sudo apt update && sudo apt install -y python3 python3-pip python3-venv && python3 -m pip install --upgrade pip
+  ```
 
 ---
 
-#### 🪟 Windows Setup & Pip Installation
+### 3️⃣ If `pip` Still Says "Not Recognized" on Windows (Quick PATH Fix)
 
-1. **Verify if Python and Pip are already installed**:
-   Open **Command Prompt** (`cmd.exe`) or **PowerShell** and run:
-   ```cmd
-   python --version
-   pip --version
-   ```
+If Python is already installed but typing `pip` or `axon` returns `'not recognized'`:
 
-2. **If `python` is not recognized**:
-   * **Quick Install via PowerShell**:
-     ```powershell
-     winget install Python.Python.3.12
-     ```
-   * **Or Manual Installer**: Download from [python.org/downloads](https://www.python.org/downloads/) and **ensure you check the box: `"Add python.exe to PATH"`** on the first screen.
+* **Option A: 1-Line Automated PATH Fix (PowerShell)**:
+  ```powershell
+  $pyScripts = (python -c "import sysconfig; print(sysconfig.get_path('scripts'))"); [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ";$pyScripts", 'User'); Write-Host "✓ Added $pyScripts to PATH. Restart terminal to apply." -ForegroundColor Green
+  ```
 
-3. **If `pip` is not recognized or not installed (`'pip' is not recognized as an internal or external command`)**:
-   * **Option 1 (Built-in Standard Bootstrap)**:
+* **Option B: Manual GUI Setup**:
+  1. Find your Scripts directory:
      ```cmd
-     python -m ensurepip --default-pip
-     python -m pip install --upgrade pip
+     py -m pip -V
      ```
-     *(If `python` command is not in PATH, use the Windows Python Launcher: `py -m ensurepip --default-pip`)*
-   * **Option 2 (Official `get-pip.py` script)**:
-     ```powershell
-     curl.exe -sSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-     python get-pip.py
-     ```
+  2. Press <kbd>Win</kbd> + <kbd>R</kbd>, type **`sysdm.cpl`**, and press **Enter**.
+  3. Go to **Advanced** $\rightarrow$ **Environment Variables...** $\rightarrow$ Under **User variables**, select **`Path`** $\rightarrow$ **Edit...** $\rightarrow$ **New**.
+  4. Paste the path to your `...\Scripts` folder and click **OK**.
+  5. Restart your terminal/IDE.
+
+* **Option C: 1-Click Repo Auto-Setup**:
+  Clone the repo and double-click `install.bat` (or run `.\install.ps1`).
 
 ---
 
-#### 🍎 macOS Setup & Pip Installation
-
-1. **Verify if Python 3 and Pip are installed**:
-   Open **Terminal** (`Terminal.app`) and run:
-   ```bash
-   python3 --version
-   python3 -m pip --version
-   ```
-
-2. **If `pip` is missing or gives `pip: command not found`**:
-   * **Option 1 (Built-in Standard Bootstrap)**:
-     ```bash
-     python3 -m ensurepip --upgrade
-     ```
-   * **Option 2 (Official `get-pip.py` installer)**:
-     ```bash
-     curl -sSL https://bootstrap.pypa.io/get-pip.py | python3
-     ```
-   * **Option 3 (Via Homebrew - Recommended)**:
-     ```bash
-     brew install python
-     ```
-
----
-
-#### 🐧 Linux Setup & Pip Installation (Ubuntu, Debian, Fedora, Arch)
+### 🐧 Linux (Ubuntu / Debian / Fedora / Arch)
 
 * **Ubuntu / Debian**:
   ```bash
@@ -104,19 +107,17 @@ Before installing Axon, verify that Python and pip are available on your system.
   ```bash
   sudo pacman -S python python-pip python-virtualenv
   ```
-* **Universal (No root / curl fallback)**:
+* **Universal (Without Root)**:
   ```bash
   curl -sSL https://bootstrap.pypa.io/get-pip.py | python3
   ```
 
 ---
 
-### Step 1: Install Axon
+## 💻 Axon Installation Methods
 
-Choose any of the following installation methods:
-
-#### Method A: Using `pipx` (Recommended for all platforms)
-`pipx` automatically installs CLI tools in an isolated environment so you never run into environment conflicts:
+### Method 1: Using `pipx` (Recommended for isolated CLI tools)
+`pipx` installs Axon into its own isolated environment so it never conflicts with system packages:
 ```bash
 # Install pipx (if not already installed)
 # Windows: winget install pipx  OR  python -m pip install --user pipx
@@ -127,23 +128,23 @@ pipx install axon-gpr
 axon
 ```
 
-#### Method B: Standard Pip Install
-* **Windows (Command Prompt / PowerShell)**:
+### Method 2: Standard Pip Install
+* **Windows**:
   ```cmd
-  python -m pip install --upgrade axon-gpr
+  pip install --upgrade axon-gpr
   axon
   ```
-  *(If `axon` is not directly in your PATH, you can always launch it with: `python -m axon`)*
+  *(If `pip` is not in PATH, use: `python -m pip install --upgrade axon-gpr` and launch with `python -m axon`)*
 
 * **macOS & Linux**:
   ```bash
-  python3 -m pip install --user --upgrade axon-gpr
+  pip3 install --user --upgrade axon-gpr
   axon
   ```
-  *(If `axon` is not in your PATH, you can always launch it with: `python3 -m axon`)*
+  *(If `axon` is not in PATH, launch with: `python3 -m axon`)*
 
-#### Method C: 1-Click Bootstrap from Source (Zero Dependencies)
-If you cloned or downloaded the Axon repository:
+### Method 3: 1-Click Bootstrap from Source (Cloned Repository)
+If you have cloned or downloaded the Axon repository, run the self-contained bootstrapper:
 * **Windows**: Double-click `install.bat` or run:
   ```powershell
   python setup_env.py
@@ -156,12 +157,14 @@ If you cloned or downloaded the Axon repository:
 
 ---
 
-### Step 2: Launch in Any Project Folder
+## 🛠️ Troubleshooting Common Setup Errors
 
-Navigate to any codebase and launch Axon:
-```bash
-axon
-```
+| Error | Why It Happens | How to Fix |
+|---|---|---|
+| **`pip: command not found`** | `pip` is not linked in your `$PATH`. | Run `python3 -m pip install axon-gpr` (macOS/Linux) or `python -m pip install axon-gpr` (Windows). |
+| **`'pip' is not recognized as the name of a cmdlet`** (Windows) | Python's Scripts folder was not added to your Windows environment PATH. | Run `python -m ensurepip --default-pip` or `py -m pip install axon-gpr`. |
+| **`error: externally-managed-environment`** (macOS/Linux) | PEP 668 prevents modifying system Python directly. | Use `pipx install axon-gpr` or run `pip3 install --user axon-gpr --break-system-packages`. |
+| **`axon: command not found` after install** | Python's global script directory is not in your shell `$PATH`. | Run `python3 -m axon` (or on Windows `python -m axon`), or run `pipx ensurepath`. |
 
 > [!TIP]
 > **First-Time Setup**: When you launch `axon` for the first time, it will automatically prompt you for your `AXON_API_KEY`, test it live against the API, and save it permanently to `~/.axon/.env` (or `%USERPROFILE%\.axon\.env` on Windows). You only have to enter your key once!

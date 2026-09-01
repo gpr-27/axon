@@ -91,6 +91,8 @@ class GitTool(Tool):
                 cwd=str(ctx.workspace),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             out = (res.stdout or res.stderr).strip()

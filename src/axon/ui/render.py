@@ -1097,7 +1097,7 @@ class Renderer:
     def turn_footer(self, tool_count: int, usage: Any, cost: float, elapsed: float, llm_calls: int = 1) -> None:
         in_t = usage.input
         out_t = usage.output
-        now_str = datetime.now().strftime("%-I:%M %p")
+        now_str = datetime.now().strftime("%I:%M %p").lstrip("0")
         verb = "Worked" if tool_count > 0 else "Thought"
 
         in_fmt = f"{in_t/1000:.1f}k" if in_t >= 1000 else f"{in_t}"
