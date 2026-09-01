@@ -30,46 +30,84 @@ Axon requires **Python >= 3.10**. Follow the complete setup from scratch below:
 
 ### Step 0: Ensure Python & Pip are Installed
 
-Before installing Axon, verify that Python and pip are available on your system:
+Before installing Axon, verify that Python and pip are available on your system.
 
-#### 🪟 On Windows
-1. Open **Command Prompt** or **PowerShell** and run:
+---
+
+#### 🪟 Windows Setup & Pip Installation
+
+1. **Verify if Python and Pip are already installed**:
+   Open **Command Prompt** (`cmd.exe`) or **PowerShell** and run:
    ```cmd
    python --version
-   python -m pip --version
+   pip --version
    ```
-2. **If you get `'python' or 'pip' is not recognized`**:
-   * Install Python via winget:
+
+2. **If `python` is not recognized**:
+   * **Quick Install via PowerShell**:
      ```powershell
      winget install Python.Python.3.12
      ```
-   * Or download from [python.org/downloads](https://www.python.org/downloads/) and **make sure to check the box: `"Add python.exe to PATH"`** during installation.
-   * If Python is installed but `pip` is missing, bootstrap it:
+   * **Or Manual Installer**: Download from [python.org/downloads](https://www.python.org/downloads/) and **ensure you check the box: `"Add python.exe to PATH"`** on the first screen.
+
+3. **If `pip` is not recognized or not installed (`'pip' is not recognized as an internal or external command`)**:
+   * **Option 1 (Built-in Standard Bootstrap)**:
      ```cmd
-     python -m ensurepip --upgrade
+     python -m ensurepip --default-pip
+     python -m pip install --upgrade pip
+     ```
+     *(If `python` command is not in PATH, use the Windows Python Launcher: `py -m ensurepip --default-pip`)*
+   * **Option 2 (Official `get-pip.py` script)**:
+     ```powershell
+     curl.exe -sSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+     python get-pip.py
      ```
 
-#### 🍎 On macOS
-1. Open **Terminal** and run:
+---
+
+#### 🍎 macOS Setup & Pip Installation
+
+1. **Verify if Python 3 and Pip are installed**:
+   Open **Terminal** (`Terminal.app`) and run:
    ```bash
    python3 --version
    python3 -m pip --version
    ```
-2. **If you get `pip: command not found` or Python is missing**:
-   * Install via Homebrew (recommended):
-     ```bash
-     brew install python
-     ```
-   * Or install the official macOS installer from [python.org/downloads](https://www.python.org/downloads/).
-   * If pip is missing from Python, enable it:
+
+2. **If `pip` is missing or gives `pip: command not found`**:
+   * **Option 1 (Built-in Standard Bootstrap)**:
      ```bash
      python3 -m ensurepip --upgrade
      ```
+   * **Option 2 (Official `get-pip.py` installer)**:
+     ```bash
+     curl -sSL https://bootstrap.pypa.io/get-pip.py | python3
+     ```
+   * **Option 3 (Via Homebrew - Recommended)**:
+     ```bash
+     brew install python
+     ```
 
-#### 🐧 On Linux (Ubuntu / Debian / Fedora)
-```bash
-sudo apt update && sudo apt install -y python3 python3-pip python3-venv
-```
+---
+
+#### 🐧 Linux Setup & Pip Installation (Ubuntu, Debian, Fedora, Arch)
+
+* **Ubuntu / Debian**:
+  ```bash
+  sudo apt update && sudo apt install -y python3 python3-pip python3-venv
+  ```
+* **Fedora / RHEL**:
+  ```bash
+  sudo dnf install -y python3 python3-pip python3-virtualenv
+  ```
+* **Arch Linux**:
+  ```bash
+  sudo pacman -S python python-pip python-virtualenv
+  ```
+* **Universal (No root / curl fallback)**:
+  ```bash
+  curl -sSL https://bootstrap.pypa.io/get-pip.py | python3
+  ```
 
 ---
 
