@@ -283,11 +283,29 @@ class MessageQueue:
                 return True
         return False
 
+    def remove_by_index(self, idx: int) -> QueuedMessage | None:
+        """Remove a queued message by its 1-based positional index. Returns the removed item or None."""
+        if 1 <= idx <= len(self.items):
+            return self.items.pop(idx - 1)
+        return None
+
     def clear(self) -> None:
         self.items.clear()
 
     def __len__(self) -> int:
         return len(self.items)
+
+    def list_summary(self) -> str:
+        """Return a compact one-line summary suitable for a status bar badge."""
+        if not self.items:
+            return ""
+        n = len(self.items)
+        nxt = self.items[0].text
+        if len(nxt) > 40:
+            nxt = nxt[:37] + "..."
+        if n == 1:
+            return f"📥 Queue: 1 pending · Next: {nxt}"
+        return f"📥 Queue: {n} pending · Next: {nxt}"
 
     def render(self) -> str:
         if not self.items:
@@ -297,3 +315,4 @@ class MessageQueue:
             tag = " [Next]" if idx == 1 else ""
             lines.append(f"  #{it.id}{tag}: {it.text}")
         return "\n".join(lines)
+

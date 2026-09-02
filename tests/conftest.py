@@ -16,6 +16,13 @@ from axon.agent.context import ContextManager
 from axon.session.store import SessionStore
 from axon.session.ledger import Ledger
 
+@pytest.fixture(autouse=True)
+def isolate_user_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate user home directory so test runs never overwrite ~/.axon/config.toml."""
+    fake_home = tmp_path_factory.mktemp("axon_fake_home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    return fake_home
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Fixture providing isolated temporary workspace."""

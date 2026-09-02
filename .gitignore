@@ -12,3 +12,5 @@ __pycache__/
 *.swo
 dist/
 build/
+dsa_beginners/
+

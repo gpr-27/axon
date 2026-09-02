@@ -83,6 +83,14 @@ def make_clickable_link(path_str: str, line_range: str = "", workspace: Path | N
     display = f"{path_str}{line_range}"
     return f"\x1b]8;;{file_url}\x1b\\{display}\x1b]8;;\x1b\\"
 
+def make_clickable_custom(label: str, target_path: str, workspace: Path | None = None) -> str:
+    """Create terminal OSC 8 clickable link with custom display label."""
+    ws = workspace or Path.cwd()
+    p = Path(target_path)
+    abs_p = (ws / p).resolve() if not p.is_absolute() else p
+    file_url = f"file://{abs_p}"
+    return f"\x1b]8;;{file_url}\x1b\\{label}\x1b]8;;\x1b\\"
+
 def highlight_code(line: str) -> str:
     """Token-based fast syntax highlighter that guarantees 100% clean ANSI sequences."""
     if not line:
@@ -198,44 +206,51 @@ def render_read_box(p: str, content: str, max_show: int = 3, max_width: int = 88
     line_cnt = len(lines)
     size_kb = len(content) / 1024
 
+    clickable_f = make_clickable_custom(filename, p)
     title = f"File Content · {icon} {filename} ({line_cnt} lines · {size_kb:.1f} KB)"
     border_w = max(10, max_width - str_width(title) - 8)
-    out = [f"  {DARK_SLATE}┌── {LBLUE}{title}{DARK_SLATE} {'─' * border_w}{RST}"]
+    out = [f"  {DARK_SLATE}┌── {LBLUE}File Content · {icon} {clickable_f} {SLATE}({line_cnt} lines · {size_kb:.1f} KB){DARK_SLATE} {'─' * border_w}{RST}"]
 
     inner = []
     for l in lines:
-        if "→" in l and (l[:l.index("→")].strip().isdigit() or l.lstrip().startswith(tuple("0123456789"))):
+        if "→" in l:
             parts = l.split("→", 1)
-            line_no = parts[0]
+            line_no_raw = parts[0].strip()
+            line_no = int(line_no_raw) if line_no_raw.isdigit() else 0
             code_text = parts[1] if len(parts) > 1 else ""
             hl_code = highlight_code(code_text)
-            inner.append(f"  {DARK_SLATE}│{RST} {DARK_SLATE}{line_no}{TEAL}→{RST}{hl_code}")
+            inner.append(f"  {DARK_SLATE}│{RST} {DARK_SLATE}{line_no:4d} │{RST} {hl_code}")
         else:
             hl_code = highlight_code(l)
-            inner.append(f"  {DARK_SLATE}│{RST} {hl_code}")
+            inner.append(f"  {DARK_SLATE}│{RST}      │ {hl_code}")
     out.extend(_head_tail(inner))
 
-    out.append(f"  {DARK_SLATE}└──{'─' * max(10, max_width - 6)}{RST}")
-    out.append(f"    {SLATE}└─ Read {line_cnt} lines ({size_kb:.1f} KB){RST}")
+    out.append(f"  {DARK_SLATE}└── Read {line_cnt} lines ({size_kb:.1f} KB) {'─' * max(4, max_width - 32)}{RST}")
     return "\n".join(out)
 
 def render_ls_box(path_str: str, content: str, max_show: int = 3, max_width: int = 88) -> str:
-    """Render directory contents list in a specialized box with contextual file/folder icons."""
+    """Render directory contents list in a specialized box with contextual file/folder icons and clickable links."""
     raw_lines = [l.strip() for l in content.strip().splitlines() if l.strip()]
     if not raw_lines or content.strip() == "(Empty directory)":
         return f"    {SLATE}└─ (Empty directory){RST}"
 
-    title = f"Directory Listing · 📁 {path_str or '.'} ({len(raw_lines)} items)"
-    border_w = max(10, max_width - str_width(title) - 8)
+    base_p = Path(path_str or ".").expanduser()
+    title = f"Directory Listing · 📁 {make_clickable_link(path_str or '.')} ({len(raw_lines)} items)"
+    border_w = max(10, max_width - str_width(f"Directory Listing · 📁 {path_str or '.'} ({len(raw_lines)} items)") - 8)
     out = [f"  {DARK_SLATE}┌── {TEAL}{title}{DARK_SLATE} {'─' * border_w}{RST}"]
 
     inner = []
     for item in raw_lines:
+        if item.startswith("Total:") or item.startswith("...") or item.startswith("Directory"):
+            inner.append(f"  {DARK_SLATE}│{RST} {SLATE}{item}{RST}")
+            continue
+        clean_name = item.rstrip("/")
+        item_path = str(base_p / clean_name)
         if item.endswith("/"):
-            inner.append(f"  {DARK_SLATE}│{RST} 📁 {CYAN}{item}{RST}")
+            inner.append(f"  {DARK_SLATE}│{RST} 📁 {CYAN}{make_clickable_custom(item, item_path)}{RST}")
         else:
             icon = get_file_icon(item)
-            inner.append(f"  {DARK_SLATE}│{RST} {icon} {WHITE}{item}{RST}")
+            inner.append(f"  {DARK_SLATE}│{RST} {icon} {WHITE}{make_clickable_custom(item, item_path)}{RST}")
     out.extend(_head_tail(inner))
 
     out.append(f"  {DARK_SLATE}└──{'─' * max(10, max_width - 6)}{RST}")
@@ -243,7 +258,7 @@ def render_ls_box(path_str: str, content: str, max_show: int = 3, max_width: int
     return "\n".join(out)
 
 def render_grep_box(pattern: str, content: str, max_show: int = 3, max_width: int = 88) -> str:
-    """Render search matches with file paths, line numbers, and snippets."""
+    """Render search matches with clickable file paths, line numbers, and snippets."""
     lines = content.strip().splitlines()
     if not lines or content.strip().startswith("No matches"):
         return f"    {SLATE}└─ No matches found for \"{pattern}\"{RST}"
@@ -258,7 +273,8 @@ def render_grep_box(pattern: str, content: str, max_show: int = 3, max_width: in
         if len(parts) == 3 and parts[1].isdigit():
             fpath, lineno, snippet = parts
             icon = get_file_icon(fpath)
-            inner.append(f"  {DARK_SLATE}│{RST} {icon} {WHITE}{fpath}{RST}:{CYAN}{lineno}{RST}  {DIM}{snippet.strip()}{RST}")
+            clickable_f = make_clickable_link(fpath, f":{lineno}")
+            inner.append(f"  {DARK_SLATE}│{RST} {icon} {WHITE}{clickable_f}{RST}  {DIM}{snippet.strip()}{RST}")
         else:
             inner.append(f"  {DARK_SLATE}│{RST} {WHITE}{l}{RST}")
     out.extend(_head_tail(inner))
@@ -268,7 +284,7 @@ def render_grep_box(pattern: str, content: str, max_show: int = 3, max_width: in
     return "\n".join(out)
 
 def render_glob_box(pattern: str, content: str, max_show: int = 3, max_width: int = 88) -> str:
-    """Render matched file paths with icons."""
+    """Render matched file paths with icons and clickable links."""
     lines = [l.strip() for l in content.strip().splitlines() if l.strip()]
     if not lines or content.strip().startswith("No files"):
         return f"    {SLATE}└─ No files matched pattern '{pattern}'{RST}"
@@ -277,7 +293,7 @@ def render_glob_box(pattern: str, content: str, max_show: int = 3, max_width: in
     border_w = max(10, max_width - str_width(title) - 8)
     out = [f"  {DARK_SLATE}┌── {TEAL}{title}{DARK_SLATE} {'─' * border_w}{RST}"]
 
-    inner = [f"  {DARK_SLATE}│{RST} {get_file_icon(l)} {WHITE}{l}{RST}" for l in lines]
+    inner = [f"  {DARK_SLATE}│{RST} {get_file_icon(l)} {WHITE}{make_clickable_link(l)}{RST}" for l in lines]
     out.extend(_head_tail(inner))
 
     out.append(f"  {DARK_SLATE}└──{'─' * max(10, max_width - 6)}{RST}")
@@ -468,7 +484,7 @@ def render_side_question_box(question: str, answer: str, max_width: int = 88) ->
     return "\n".join(out)
 
 def render_shortcuts_footer(max_width: int = 88) -> str:
-    """Render the 3-column shortcuts helper panel matching Claude Code UI."""
+    """Render the 2-column shortcuts helper panel."""
     col1 = [
         f"{GOLD}!{RST} for {UNDER}shell{RST} mode",
         f"{GOLD}/{RST} for commands",
@@ -483,23 +499,14 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         f"{CYAN}ctrl + t{RST} to toggle tasks",
         f"{CYAN}\\⏎{RST} for newline",
     ]
-    col3 = [
-        f"{MINT}ctrl + v{RST} to paste images",
-        f"{MINT}opt + p{RST} to switch model",
-        f"{MINT}ctrl + s{RST} to stash prompt",
-        f"{MINT}ctrl + g{RST} to edit in $EDITOR",
-        f"{MINT}ctrl + z{RST} to suspend",
-    ]
 
-    max_rows = max(len(col1), len(col2), len(col3))
+    max_rows = max(len(col1), len(col2))
     out = []
     for r in range(max_rows):
         c1 = col1[r] if r < len(col1) else ""
         c2 = col2[r] if r < len(col2) else ""
-        c3 = col3[r] if r < len(col3) else ""
-        pad1 = max(2, 30 - str_width(c1))
-        pad2 = max(2, 34 - str_width(c2))
-        out.append(f"  {c1}{' ' * pad1}{c2}{' ' * pad2}{c3}")
+        pad1 = max(4, 34 - str_width(c1))
+        out.append(f"  {c1}{' ' * pad1}{c2}")
     return "\n".join(out)
 
 def render_web_search_box(query: str, content: str, max_show: int = 3, max_width: int = 88) -> str:
@@ -569,10 +576,11 @@ def render_tree_box(content: str, max_show: int = 4, max_width: int = 88) -> str
     out = [f"  {DARK_SLATE}┌── {TEAL}{title}{DARK_SLATE} {'─' * border_w}{RST}"]
     inner = []
     for l in lines:
+        clean_name = l.strip(" ├─└│ ")
         if l.endswith("/"):
-            inner.append(f"  {DARK_SLATE}│{RST} {CYAN}{BOLD}{l}{RST}")
+            inner.append(f"  {DARK_SLATE}│{RST} {CYAN}{BOLD}{make_clickable_custom(l, clean_name)}{RST}")
         else:
-            inner.append(f"  {DARK_SLATE}│{RST} {WHITE}{l}{RST}")
+            inner.append(f"  {DARK_SLATE}│{RST} {WHITE}{make_clickable_custom(l, clean_name)}{RST}")
     out.extend(_head_tail(inner, head=3, tail=2, max_line_len=max_width - 8))
     out.append(f"  {DARK_SLATE}└──{'─' * max(10, max_width - 6)}{RST}")
     return "\n".join(out)
@@ -666,6 +674,92 @@ def _save_tool_output(content: str) -> None:
     global _LAST_TOOL_OUTPUT
     _LAST_TOOL_OUTPUT = content
 
+def format_tool_decision_breakdown(tools: list) -> list[str]:
+    """Format an informative breakdown of model-chosen tools, switches, and intent."""
+    lines = []
+    total = len(tools)
+    for idx, tu in enumerate(tools):
+        is_last = (idx == total - 1)
+        tree_char = "└─" if is_last else "├─"
+        name = getattr(tu, "name", "") or "Tool"
+        inp = getattr(tu, "input", {}) or {}
+
+        target_parts = []
+        intent_desc = ""
+
+        if name in ("FileTree",):
+            p = inp.get("path") or "."
+            d = inp.get("max_depth") or 3
+            target_parts.append(f"path=\"{p}\"")
+            if d:
+                target_parts.append(f"max_depth={d}")
+            intent_desc = "Scan directory hierarchy & files"
+        elif name in ("Ls", "list_dir"):
+            p = inp.get("path") or inp.get("DirectoryPath") or "."
+            target_parts.append(f"path=\"{p}\"")
+            intent_desc = "List directory entries"
+        elif name in ("Read", "ReadFile", "view_file", "read_file"):
+            p = inp.get("path") or inp.get("AbsolutePath") or ""
+            target_parts.append(f"path=\"{p}\"")
+            if inp.get("offset") or inp.get("StartLine"):
+                target_parts.append(f"lines={inp.get('offset') or inp.get('StartLine')}-{inp.get('limit') or inp.get('EndLine') or ''}")
+            intent_desc = "Inspect file contents"
+        elif name in ("Write", "WriteFile", "write_to_file"):
+            p = inp.get("path") or inp.get("TargetFile") or ""
+            target_parts.append(f"path=\"{p}\"")
+            intent_desc = "Create/write new file"
+        elif name in ("Edit", "EditFile", "replace_file_content"):
+            p = inp.get("path") or inp.get("TargetFile") or ""
+            target_parts.append(f"path=\"{p}\"")
+            intent_desc = "Apply targeted code modifications"
+        elif name in ("Bash", "bash", "run_command"):
+            cmd = inp.get("command") or inp.get("CommandLine") or ""
+            target_parts.append(f"cmd=\"{cmd[:40]}{'...' if len(cmd) > 40 else ''}\"")
+            intent_desc = "Execute shell command"
+        elif name in ("Grep", "grep_search"):
+            q = inp.get("pattern") or inp.get("Query") or ""
+            p = inp.get("path") or inp.get("SearchPath") or ""
+            target_parts.append(f"query=\"{q}\"")
+            if p:
+                target_parts.append(f"in=\"{p}\"")
+            intent_desc = "Search codebase for pattern"
+        elif name in ("Glob",):
+            pat = inp.get("pattern") or "*"
+            target_parts.append(f"pattern=\"{pat}\"")
+            intent_desc = "Find files matching wildcard pattern"
+        elif name in ("CodeSymbols",):
+            p = inp.get("path") or "."
+            target_parts.append(f"path=\"{p}\"")
+            intent_desc = "Extract classes and functions"
+        elif name in ("WebSearch",):
+            q = inp.get("query") or ""
+            target_parts.append(f"query=\"{q}\"")
+            intent_desc = "Search web for real-time info"
+        elif name in ("WebFetch",):
+            url = inp.get("url") or ""
+            target_parts.append(f"url=\"{url}\"")
+            intent_desc = "Fetch and parse web page"
+        elif name in ("Git",):
+            subcmd = inp.get("subcommand") or "status"
+            target_parts.append(f"subcommand=\"{subcmd}\"")
+            intent_desc = "Version control operation"
+        elif name in ("TodoWrite",):
+            todos = inp.get("todos", [])
+            target_parts.append(f"count={len(todos)}")
+            intent_desc = "Update active plan checklist"
+        elif name in ("Task",):
+            target_parts.append("subagent=fanout")
+            intent_desc = "Spawn delegated subagent task"
+        else:
+            intent_desc = f"Execute {name}"
+
+        params_str = f"({', '.join(target_parts)})" if target_parts else ""
+        lines.append(
+            f"    {DARK_SLATE}{tree_char}{RST} {idx+1}. {CYAN}{BOLD}{name}{RST}{WHITE}{params_str}{RST} {DARK_SLATE}→{RST} {SLATE}{intent_desc}{RST}"
+        )
+    return lines
+
+
 class Renderer:
     _tip_idx: int = 0
 
@@ -681,6 +775,7 @@ class Renderer:
         self._active_tools: dict[str, dict[str, Any]] = {}
         self._tool_batch_count = 0
         self._tool_call_count = 0
+        self._thinking_cur_line_len = 0
 
     def print_banner(self, version: str, model: str, effort: str, workspace: str, mode: str) -> None:
         """Render Axon unique neural core logo and session header."""
@@ -721,13 +816,8 @@ class Renderer:
     def _flush_all_buffers(self) -> None:
         """Flush remaining text buffer and table buffer."""
         if self._buffer_text:
-            stripped = self._buffer_text.strip()
-            if stripped.startswith("|") and ("|" in stripped[1:]):
-                self._table_buffer.append(stripped)
-                self._flush_table()
-            else:
-                self._flush_table()
-                rendered = format_markdown(self._buffer_text, max_width=min(term_width() - 4, 100))
+            rendered = format_markdown(self._buffer_text, max_width=min(term_width() - 4, 100))
+            if rendered:
                 sys.stdout.write(f"{rendered}\n")
             self._buffer_text = ""
         else:
@@ -750,38 +840,51 @@ class Renderer:
             else:
                 tok_str = ""
             msg_str = f"{e.message_count} message{'s' if e.message_count != 1 else ''} in context{tok_str}"
-            sys.stdout.write(f"\n  {CYAN}⚡ {step_str} LLM Call{RST} {SLATE}· {e.model} ({msg_str})…{RST}\n")
+            if e.iteration > 1:
+                sys.stdout.write(f"\n  {GOLD}⚡ LLM Call [{step_str}]{RST} {SLATE}· {BOLD}{WHITE}{e.model}{RST} {SLATE}({msg_str}){RST}\n")
+                sys.stdout.write(f"    {DARK_SLATE}└─ 📥 Ingesting results from previous tool executions to conclude answer…{RST}\n\n")
+            else:
+                sys.stdout.write(f"\n  {GOLD}⚡ LLM Call [{step_str}]{RST} {SLATE}· {BOLD}{WHITE}{e.model}{RST} {SLATE}({msg_str})…{RST}\n")
             sys.stdout.flush()
 
         elif isinstance(e, ThinkingDelta):
             if not self._thinking_active:
                 if self.show_thinking:
-                    sys.stdout.write(f"\n  {PURPLE}{DIM}✻ Thinking…{RST}\n  {PURPLE}{DIM}│{RST} ")
+                    sys.stdout.write(f"\n  {PURPLE}{BOLD}🧠 Neural Reasoning & Plan{RST}\n  {PURPLE}│{RST} {SLATE}")
                 else:
-                    sys.stdout.write(f"  {PURPLE}✻ Thinking…{RST}\r")
+                    sys.stdout.write(f"  {PURPLE}🧠 Reasoning…{RST}\r")
                 self._thinking_active = True
                 self._thinking_lines = []
                 self._thinking_start_time = time.time()
+                self._thinking_cur_line_len = 0
             self._thinking_lines.append(e.text)
             if self.show_thinking:
-                formatted = e.text.replace("\n", f"\n  {PURPLE}{DIM}│{RST} ")
-                sys.stdout.write(f"{PURPLE}{DIM}{formatted}{RST}")
+                tw = term_width()
+                max_line_w = max(40, min(tw - 8, 96))
+                for ch in e.text:
+                    if ch == "\n":
+                        sys.stdout.write(f"\n  {PURPLE}│{RST} {SLATE}")
+                        self._thinking_cur_line_len = 0
+                    else:
+                        if self._thinking_cur_line_len >= max_line_w and ch == " ":
+                            sys.stdout.write(f"\n  {PURPLE}│{RST} {SLATE}")
+                            self._thinking_cur_line_len = 0
+                        else:
+                            sys.stdout.write(ch)
+                            self._thinking_cur_line_len += 1
                 sys.stdout.flush()
 
         elif isinstance(e, TextDelta):
             if self._thinking_active:
                 elapsed = max(0.1, time.time() - self._thinking_start_time)
-                width = min(84, term_width() - 4)
                 if self.show_thinking:
-                    # When thinking was streamed live, close the box with divider without repeating summary
-                    sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n\n")
+                    sys.stdout.write(f"{RST}\n  {PURPLE}└── {DIM}Reasoned for {elapsed:.1f}s · Strategy formulated{RST}\n\n")
                 else:
-                    # When thinking stream was hidden, show the concise 1-line summary badge
                     full_thinking = "".join(self._thinking_lines).strip()
                     first_thought = full_thinking.split(".")[0].replace("\n", " ").strip() if full_thinking else "Analyzed context"
                     if len(first_thought) > 75:
                         first_thought = first_thought[:72] + "..."
-                    sys.stdout.write(f"\033[2K\r  {PURPLE}✻ Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
+                    sys.stdout.write(f"\033[2K\r  {PURPLE}🧠 Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
                 self._thinking_active = False
 
             self._text_active = True
@@ -807,51 +910,37 @@ class Renderer:
             self._tool_batch_count += 1
             if self._thinking_active:
                 elapsed = max(0.1, time.time() - self._thinking_start_time)
-                width = min(80, term_width() - 4)
                 if self.show_thinking:
-                    sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n\n")
+                    sys.stdout.write(f"{RST}\n  {PURPLE}└── {DIM}Reasoned for {elapsed:.1f}s · Strategy formulated{RST}\n\n")
                 else:
                     full_thinking = "".join(self._thinking_lines).strip()
                     first_thought = full_thinking.split(".")[0].replace("\n", " ").strip() if full_thinking else "Decided on tool actions"
                     if len(first_thought) > 75:
                         first_thought = first_thought[:72] + "..."
-                    sys.stdout.write(f"\033[2K\r  {PURPLE}✻ Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
+                    sys.stdout.write(f"\033[2K\r  {PURPLE}🧠 Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
                 self._thinking_active = False
             self._flush_all_buffers()
 
-            reads = sum(1 for t in e.tools if t.name in ("Read", "ReadFile", "view_file", "read_file"))
-            writes = sum(1 for t in e.tools if t.name in ("Write", "WriteFile", "Edit", "EditFile", "MultiEdit", "write_to_file", "replace_file_content"))
-            cmds = sum(1 for t in e.tools if t.name in ("Bash", "bash", "run_command"))
-            searches = sum(1 for t in e.tools if t.name in ("Glob", "Grep", "Ls", "list_dir", "grep_search"))
-
-            parts = []
-            if reads:
-                parts.append(f"{reads} file{'s' if reads != 1 else ''}")
-            if writes:
-                parts.append(f"{writes} edit{'s' if writes != 1 else ''}")
-            if cmds:
-                parts.append(f"{cmds} command{'s' if cmds != 1 else ''}")
-            if searches:
-                parts.append(f"{searches} search{'es' if searches != 1 else ''}")
-
-            summary = ", ".join(parts) if parts else f"{e.total_count} actions"
             batch_str = get_ordinal(self._tool_batch_count)
-            sys.stdout.write(f"\n  {DARK_SLATE}⚡ {batch_str} Tool Execution ({e.total_count} tools · {summary})…{RST}\n\n")
+            sys.stdout.write(f"\n  {GOLD}{BOLD}⚡ Tool Execution Plan [{batch_str}]{RST} {SLATE}(LLM selected {e.total_count} action{'s' if e.total_count != 1 else ''}):{RST}\n")
+            plan_lines = format_tool_decision_breakdown(e.tools)
+            for pl in plan_lines:
+                sys.stdout.write(f"{pl}\n")
+            sys.stdout.write("\n")
             sys.stdout.flush()
             self._text_active = False
 
         elif isinstance(e, ToolUseStart):
             if self._thinking_active:
                 elapsed = max(0.1, time.time() - self._thinking_start_time)
-                width = min(80, term_width() - 4)
                 if self.show_thinking:
-                    sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n\n")
+                    sys.stdout.write(f"{RST}\n  {PURPLE}└── {DIM}Reasoned for {elapsed:.1f}s · Strategy formulated{RST}\n\n")
                 else:
                     full_thinking = "".join(self._thinking_lines).strip()
                     first_thought = full_thinking.split(".")[0].replace("\n", " ").strip() if full_thinking else "Decided on tool actions"
                     if len(first_thought) > 75:
                         first_thought = first_thought[:72] + "..."
-                    sys.stdout.write(f"\033[2K\r  {PURPLE}✻ Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
+                    sys.stdout.write(f"\033[2K\r  {PURPLE}🧠 Thought for {elapsed:.1f}s{RST} {DARK_SLATE}›{RST} {DIM}{ITALIC}{first_thought}{RST}\n\n")
                 self._thinking_active = False
             self._flush_all_buffers()
             self._text_active = False
@@ -869,13 +958,13 @@ class Renderer:
             name = e.name
             t_input = e.input
 
-            prefix = f"  {MINT}⚡ {tool_idx_str} Tool Call{RST} {DARK_SLATE}·{RST} {GOLD}{BOLD}🛠️ {name}{RST} {SLATE}❯{RST}"
+            prefix = f"  {GOLD}🛠️ Tool Action [{tool_idx_str}]{RST} {DARK_SLATE}·{RST} {CYAN}{BOLD}{name}{RST} {SLATE}❯{RST}"
 
             if name in ("Bash", "bash", "run_command"):
                 cmd = t_input.get("command") or t_input.get("CommandLine") or ""
                 desc = t_input.get("description") or ""
                 desc_str = f" {SLATE}({desc}){RST}" if desc else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Ran command:{RST} {CYAN}{cmd}{RST}{desc_str}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Executing:{RST} {CYAN}{BOLD}$ {cmd}{RST}{desc_str}\n")
             elif name in ("Read", "ReadFile", "view_file", "read_file"):
                 p = t_input.get("path") or t_input.get("AbsolutePath") or ""
                 offset = t_input.get("offset") or t_input.get("StartLine")
@@ -883,15 +972,15 @@ class Renderer:
                 range_str = f" #L{offset}-{limit}" if offset and limit else (f" #L{offset}+" if offset else "")
                 icon = get_file_icon(p)
                 link = make_clickable_link(p, range_str)
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Read file:{RST} {icon} {WHITE}{link}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Inspecting file:{RST} {icon} {WHITE}{link}{RST}\n")
             elif name in ("Write", "WriteFile", "write_to_file"):
                 p = t_input.get("path") or t_input.get("TargetFile") or ""
                 code_c = t_input.get("content") or t_input.get("CodeContent") or ""
                 added = len(code_c.splitlines()) if code_c else 0
                 icon = get_file_icon(p)
                 link = make_clickable_link(p)
-                diff_stat = f" {MINT}+{added}{RST}" if added > 0 else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Created file:{RST} {icon} {WHITE}{link}{RST}{diff_stat}\n")
+                diff_stat = f" {MINT}+{added} lines{RST}" if added > 0 else ""
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Creating file:{RST} {icon} {WHITE}{link}{RST}{diff_stat}\n")
             elif name in ("Edit", "EditFile", "replace_file_content"):
                 p = t_input.get("path") or t_input.get("TargetFile") or ""
                 old_s = t_input.get("old_string", "")
@@ -901,61 +990,62 @@ class Renderer:
                 icon = get_file_icon(p)
                 link = make_clickable_link(p)
                 diff_stat = f" {MINT}+{added}{RST} {ROSE}-{removed}{RST}" if (added or removed) else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Edited file:{RST} {icon} {WHITE}{link}{RST}{diff_stat}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Modifying file:{RST} {icon} {WHITE}{link}{RST}{diff_stat}\n")
             elif name in ("MultiEdit",):
                 p = t_input.get("path") or t_input.get("TargetFile") or ""
                 edits = t_input.get("edits", [])
                 icon = get_file_icon(p)
                 link = make_clickable_link(p)
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Applied multiple edits to:{RST} {icon} {WHITE}{link}{RST} {SLATE}({len(edits)} edits){RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Applying multiple edits to:{RST} {icon} {WHITE}{link}{RST} {SLATE}({len(edits)} edits){RST}\n")
             elif name in ("Ls", "list_dir"):
                 p = t_input.get("path") or t_input.get("DirectoryPath") or "."
                 link = make_clickable_link(p)
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Listed directory entries:{RST} 📁 {WHITE}{link}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Listing directory:{RST} 📁 {WHITE}{link}{RST}\n")
             elif name in ("FileTree",):
                 p = t_input.get("path") or "."
                 max_d = t_input.get("max_depth") or 3
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Generated directory tree:{RST} 📁 {WHITE}{p}{RST} {SLATE}(depth: {max_d}){RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Scanning project tree:{RST} 📁 {WHITE}{p}{RST} {SLATE}(depth: {max_d}){RST}\n")
             elif name in ("Glob",):
                 pattern = t_input.get("pattern") or "*"
                 base_p = t_input.get("path") or ""
                 base_str = f" in {base_p}" if base_p else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Matched files by pattern:{RST} 📁 {CYAN}{pattern}{RST}{SLATE}{base_str}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Matching files by pattern:{RST} 📁 {CYAN}{pattern}{RST}{SLATE}{base_str}{RST}\n")
             elif name in ("Grep", "grep_search"):
                 pattern = t_input.get("pattern") or t_input.get("Query") or ""
                 search_p = t_input.get("path") or t_input.get("SearchPath") or ""
                 in_str = f" in {search_p}" if search_p else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Searched code for pattern:{RST} {MINT}\"{pattern}\"{RST}{SLATE}{in_str}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Searching codebase for:{RST} {MINT}\"{pattern}\"{RST}{SLATE}{in_str}{RST}\n")
             elif name in ("CodeSymbols",):
                 p = t_input.get("path") or "."
                 icon = get_file_icon(p)
                 link = make_clickable_link(p)
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Extracted code symbols from:{RST} {icon} {WHITE}{link}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Parsing code symbols from:{RST} {icon} {WHITE}{link}{RST}\n")
             elif name in ("Git",):
                 subcmd = t_input.get("subcommand") or "status"
                 extra = t_input.get("args") or ""
                 extra_str = f" {WHITE}{extra}{RST}" if extra else ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Git {subcmd}:{RST}{extra_str}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Running git {subcmd}:{RST}{extra_str}\n")
             elif name in ("Patch",):
                 p = t_input.get("path") or ""
                 icon = get_file_icon(p)
                 link = make_clickable_link(p)
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Applied unified patch to:{RST} {icon} {WHITE}{link}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Applying unified patch to:{RST} {icon} {WHITE}{link}{RST}\n")
             elif name in ("WebSearch",):
                 q = t_input.get("query") or ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Searched the web for:{RST} 🔍 {CYAN}\"{q}\"{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Searching the web for:{RST} 🔍 {CYAN}\"{q}\"{RST}\n")
             elif name in ("WebFetch",):
                 url = t_input.get("url") or ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Fetched URL content from:{RST} 🌐 {WHITE}{url}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Fetching content from:{RST} 🌐 {WHITE}{url}{RST}\n")
             elif name in ("Http",):
                 method = (t_input.get("method") or "GET").upper()
                 url = t_input.get("url") or ""
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Sent HTTP {method} request to:{RST} 🌐 {CYAN}{url}{RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Dispatching HTTP {method} to:{RST} 🌐 {CYAN}{url}{RST}\n")
             elif name in ("Process",):
                 action = t_input.get("action") or "list"
-                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Inspected system processes:{RST} {SLATE}(action: {action}){RST}\n")
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Inspecting system processes:{RST} {SLATE}(action: {action}){RST}\n")
             elif name in ("Env",):
                 action = t_input.get("action") or "list"
+                sys.stdout.write(f"{prefix} {WHITE}{BOLD}Inspecting environment:{RST} {SLATE}(action: {action}){RST}\n")
                 var_n = t_input.get("variable", "")
                 var_str = f" ({var_n})" if var_n else ""
                 sys.stdout.write(f"{prefix} {WHITE}{BOLD}Inspected environment variables:{RST} {SLATE}(action: {action}{var_str}){RST}\n")

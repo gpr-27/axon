@@ -105,7 +105,7 @@ def test_specialized_boxes():
     read_box = render_read_box("test.py", "     1→import os\n     2→print(os.getcwd())")
     plain_read = strip_ansi(read_box)
     assert "File Content · 🐍 test.py (2 lines" in plain_read
-    assert "1→import os" in plain_read
+    assert "1 │ import os" in plain_read
     assert "Read 2 lines" in plain_read
 
     # Ls box
@@ -209,14 +209,14 @@ def test_renderer_tool_execution_events(capsys):
     # Turn iteration 1 start
     renderer.on_event(LLMCallStart(iteration=1, max_iterations=25, model="deepseek-v4-flash", message_count=5))
     captured = capsys.readouterr()
-    assert "1st LLM Call" in strip_ansi(captured.out)
+    assert "LLM Call [1st]" in strip_ansi(captured.out)
 
     # 1st Tool Call
     renderer.on_event(ToolExecutionStart(id="t1", name="Ls", input={"path": "."}))
     renderer.on_event(ToolExecutionResult(id="t1", name="Ls", input={"path": "."}, content="axon/\ncheck_models.py"))
     captured1 = capsys.readouterr()
     plain1 = strip_ansi(captured1.out)
-    assert "1st Tool Call · 🛠️ Ls ❯ Listed directory entries: 📁 ." in plain1
+    assert "Tool Action [1st] · Ls ❯ Listing directory: 📁 ." in plain1
     assert "Directory Listing · 📁 . (2 items)" in plain1
     assert "🐍 check_models.py" in plain1
 
@@ -225,7 +225,7 @@ def test_renderer_tool_execution_events(capsys):
     renderer.on_event(ToolExecutionResult(id="t2", name="Bash", input={"command": "python3 -m pytest"}, content="14 passed in 0.1s"))
     captured2 = capsys.readouterr()
     plain2 = strip_ansi(captured2.out)
-    assert "2nd Tool Call · 🛠️ Bash ❯ Ran command: python3 -m pytest" in plain2
+    assert "Tool Action [2nd] · Bash ❯ Executing: $ python3 -m pytest" in plain2
     assert "14 passed in 0.1s" in plain2
     assert "┌── Output" in plain2
 
@@ -234,7 +234,7 @@ def test_renderer_tool_execution_events(capsys):
     renderer.on_event(ToolExecutionResult(id="t3", name="Read", input={"path": "src/axon/ui/render.py"}, content="     1→line\n"*100))
     captured3 = capsys.readouterr()
     plain3 = strip_ansi(captured3.out)
-    assert "3rd Tool Call · 🛠️ Read ❯ Read file: 🐍 src/axon/ui/render.py #L1-100" in plain3
+    assert "Tool Action [3rd] · Read ❯ Inspecting file: 🐍 src/axon/ui/render.py #L1-100" in plain3
     assert "File Content · 🐍 render.py (100 lines" in plain3
     assert "Read 100 lines" in plain3
 
@@ -245,6 +245,6 @@ def test_renderer_tool_execution_events(capsys):
     renderer.on_event(LLMCallStart(iteration=2, max_iterations=25, model="deepseek-v4-flash", message_count=8))
     captured5 = capsys.readouterr()
     plain5 = strip_ansi(captured5.out)
-    assert "2nd LLM Call" in plain5
+    assert "LLM Call [2nd]" in plain5
     assert "deepseek-v4-flash" in plain5
 

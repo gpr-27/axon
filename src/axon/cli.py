@@ -295,19 +295,78 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     elapsed=elapsed,
                     llm_calls=res.iterations,
                 )
+                from axon.ui.notify import notify_if_unfocused
+                notify_if_unfocused(
+                    title="Axon Task Completed",
+                    message=f"Turn completed ({elapsed:.1f}s · ${agent.ledger.total():.4f})",
+                )
             except Exception as e:
                 print(f"\n  {ROSE}❌ Error during execution: {e}{RST}\n")
 
             # Auto-process queued messages sequentially
             while hasattr(agent, "message_queue") and len(agent.message_queue) > 0:
                 nxt = agent.message_queue.pop()
-                if not nxt:
-                    break
-                print(f"\n  {CYAN}📥 [Processing Queued #{nxt.id} · {len(agent.message_queue)} remaining]:{RST} {WHITE}{BOLD}{nxt.text}{RST}\n")
+                if not nxt or not nxt.text.strip():
+                    continue
+                # Ignore stray escape fragments
+                if nxt.text.strip() in ("[A", "[B", "[C", "[D", "OA", "OB", "OC", "OD", "\x1b"):
+                    continue
+                q_rem = len(agent.message_queue)
+                rem_str = f" · {q_rem} remaining" if q_rem > 0 else ""
+                from axon.ui.input import format_user_prompt_banner
+                print(f"\n  {CYAN}📥 [Processing Queued #{nxt.id}{rem_str}]:{RST}\n{format_user_prompt_banner(nxt.text)}\n")
+
+                q_line = nxt.text.strip()
+
+                # Direct shell execution shortcut with '!' prefix
+                if q_line.startswith("!"):
+                    cmd_shell = q_line[1:].strip()
+                    if cmd_shell:
+                        print(f"  {GOLD}⚡ Shell:{RST} {WHITE}{cmd_shell}{RST}\n")
+                        if cmd_shell == "cd" or cmd_shell.startswith("cd "):
+                            target_dir = cmd_shell[2:].strip() or str(Path.home())
+                            target_path = Path(target_dir).expanduser()
+                            if not target_path.is_absolute():
+                                target_path = Path.cwd() / target_path
+                            if target_path.exists() and target_path.is_dir():
+                                os.chdir(target_path)
+                                print(f"  {MINT}✓ Changed directory to {target_path}{RST}\n")
+                            else:
+                                print(f"  {ROSE}Directory not found: {target_dir}{RST}\n")
+                        else:
+                            try:
+                                subprocess.run(cmd_shell, shell=True)
+                            except Exception as e:
+                                print(f"  {ROSE}Command execution failed: {e}{RST}\n")
+                        print()
+                    continue
+
+                # Slash command dispatch for queued commands (/cost, /model, /clear, /plan, etc.)
+                if q_line.startswith("/"):
+                    cmd_res = dispatch_command(q_line, agent)
+                    if cmd_res is not None:
+                        if cmd_res.should_exit:
+                            print(f"\n  {TEAL}Goodbye! Total cost: {GOLD}${agent.ledger.total():.5f}{RST}\n")
+                            return 0
+                        continue
+
+                # Expand @file mentions into prompt context
+                if "@" in q_line:
+                    import re
+                    matches = re.findall(r"@([a-zA-Z0-9_\-\./\\]+)", q_line)
+                    for m in matches:
+                        p = agent.settings.workspace / m
+                        if p.exists() and p.is_file():
+                            try:
+                                content_snippet = p.read_text(encoding="utf-8", errors="replace")[:4000]
+                                q_line = q_line.replace(f"@{m}", f"\n\n[File: {m}]\n```\n{content_snippet}\n```\n")
+                            except Exception:
+                                pass
+
                 t_q0 = time.time()
                 try:
                     with InFlightInputListener(agent):
-                        res = agent.run_turn(nxt.text)
+                        res = agent.run_turn(q_line)
                     elapsed = time.time() - t_q0
                     renderer.turn_footer(
                         tool_count=res.tool_calls_count,
@@ -315,6 +374,11 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                         cost=float(agent.ledger.total()),
                         elapsed=elapsed,
                         llm_calls=res.iterations,
+                    )
+                    from axon.ui.notify import notify_if_unfocused
+                    notify_if_unfocused(
+                        title="Axon Task Completed",
+                        message=f"Queued #{nxt.id} finished ({elapsed:.1f}s · ${agent.ledger.total():.4f})",
                     )
                 except Exception as e:
                     print(f"\n  {ROSE}❌ Error during execution: {e}{RST}\n")

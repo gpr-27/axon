@@ -1,6 +1,6 @@
 [project]
-name = "axon-gpr"
-version = "0.27.8"
+name = "axon-terminal"
+version = "0.27.1"
 description = "A terminal-native agentic coding assistant."
 
 
@@ -23,7 +23,12 @@ dev = ["pytest", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]
 axon = "axon.cli:main"
+axon-terminal = "axon.cli:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

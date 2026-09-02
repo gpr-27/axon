@@ -17,7 +17,30 @@ def test_memory_store_delete(workspace: Path):
     item = mem.learn("Test convention for memory_store_delete")
     assert item.id is not None
 
-    q = MessageQueue()
-    q.push("prompt 1")
-    assert len(q) == 1
-    assert q.pop().text == "prompt 1"
+    assert len(mem.list_all()) >= 1
+    deleted = mem.delete(item.id)
+    assert deleted is True
+
+    from unittest.mock import MagicMock
+    from axon.commands.builtin import handle_memory
+    agent = MagicMock()
+    agent.settings.workspace = workspace
+    agent.provider = None
+
+    # Test /memory add
+    res_add = handle_memory(agent, "add Always run unit tests")
+    assert res_add.handled is True
+    assert len(mem.list_all()) == 1
+
+    # Test /memory view
+    res_view = handle_memory(agent, "view 1")
+    assert res_view.handled is True
+
+    # Test /memory list
+    res_list = handle_memory(agent, "")
+    assert res_list.handled is True
+
+    # Test /memory delete
+    res_del = handle_memory(agent, "delete 1")
+    assert res_del.handled is True
+    assert len(mem.list_all()) == 0

@@ -1113,6 +1113,8 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
     if arg.strip():
         if arg.strip().lower() in ("main", "root", "parent", "0"):
             return handle_main(agent, "")
+        if arg.strip().lower() in ("q", "queue"):
+            return handle_queue(agent, "")
         for t in tasks:
             if str(t.index) == arg.strip() or t.id == arg.strip() or t.title.lower().startswith(arg.strip().lower()):
                 tgt = t
@@ -1128,12 +1130,16 @@ def handle_subagents(agent: Agent, arg: str) -> CommandResult:
             is_active_sub = f"{parent_id}_sub_{t.index}" == curr_id
             active_marker = " (Active)" if is_active_sub else ""
             options.append(f"[Subagent {t.index}] ({st_icon}) {t.title}{active_marker} ({t.steps} steps)")
+        if hasattr(agent, "message_queue") and len(agent.message_queue) > 0:
+            options.append(f"[Message Queue] Inspect pending prompt queue ({len(agent.message_queue)} pending)")
 
         sel = pick(options, title="Select Subagent to Open as Chat", current=options[0])
         if not sel:
             return CommandResult(handled=True)
         if sel.startswith("[Main"):
             return handle_main(agent, "")
+        if sel.startswith("[Message Queue"):
+            return handle_queue(agent, "")
 
         import re
         m = re.search(r"\[Subagent (\d+)\]", sel)
@@ -1338,7 +1344,14 @@ def handle_queue(agent: Agent, arg: str) -> CommandResult:
         nxt = agent.message_queue.pop()
         if nxt:
             print(f"\n  {TEAL}⚡ Executing queued message #{nxt.id}: {WHITE}{nxt.text}{RST}\n")
-            agent.run_turn(nxt.text)
+            q_text = nxt.text.strip()
+            if q_text.startswith("!"):
+                import subprocess
+                subprocess.run(q_text[1:].strip(), shell=True)
+            elif q_text.startswith("/"):
+                dispatch_command(q_text, agent)
+            else:
+                agent.run_turn(q_text)
         else:
             print(f"\n  {SLATE}Queue is empty.{RST}\n")
         return CommandResult(handled=True)
@@ -1904,11 +1917,124 @@ def handle_learn(agent: Agent, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 def handle_memory(agent: Agent, arg: str) -> CommandResult:
-    """Inspect persistent workspace and global knowledge items and guidelines."""
-    from axon.agent.memory import MemoryStore
+    """Inspect and manage persistent workspace and global knowledge items (list, add, delete, view, clear)."""
+    from axon.agent.memory import MemoryStore, distill_and_learn
     store = MemoryStore(agent.settings.workspace)
     memories = store.list_all()
-    
+    arg_clean = arg.strip()
+
+    # Subcommand: /memory add <text> (or /memory learn <text>)
+    if arg_clean.startswith(("add ", "learn ", "+ ")):
+        text_part = arg_clean.split(" ", 1)[1].strip()
+        scope = "project"
+        if text_part.startswith("--global "):
+            scope = "global"
+            text_part = text_part[len("--global "):].strip()
+        elif text_part.startswith("global "):
+            scope = "global"
+            text_part = text_part[len("global "):].strip()
+
+        if not text_part:
+            print(f"\n  {ROSE}Usage: /memory add <rule or fact>{RST}")
+            print(f"         {SLATE}/memory add --global <rule or fact>{RST}\n")
+            return CommandResult(handled=True)
+
+        print(f"\n  {TEAL}🧠 Distilling and indexing memory pattern...{RST}")
+        item = distill_and_learn(agent.provider, text_part, agent.settings.workspace, scope=scope)
+        dest_path = f"~/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
+        scope_badge = f"{GOLD}[Global]{RST}" if scope == "global" else f"{TEAL}[Project]{RST}"
+
+        print(f"  {MINT}✓ Memorized {scope_badge} pattern:{RST} {WHITE}{BOLD}{item.title}{RST} {SLATE}({item.category}){RST}")
+        print(f"  {SLATE}Saved to persistent memory:{RST} {DIM}{dest_path}{RST}\n")
+
+        if scope == "project":
+            from axon.agent.loop import _sync_project_guide
+            _sync_project_guide(agent.settings.workspace, model=agent.settings.model, effort=agent.settings.effort)
+        return CommandResult(handled=True)
+
+    # Subcommand: /memory delete <id_or_number> (or /memory rm, /memory del, /memory remove)
+    if arg_clean.startswith(("delete", "rm", "del", "remove", "-")):
+        parts = arg_clean.split(maxsplit=1)
+        target_param = parts[1].strip() if len(parts) > 1 else ""
+        if not target_param:
+            if not memories:
+                print(f"\n  {SLATE}No memory items found to delete.{RST}\n")
+                return CommandResult(handled=True)
+            print(f"\n  {ROSE}Specify memory number or ID to delete:{RST} {SLATE}/memory delete <1..{len(memories)}|id>{RST}\n")
+            return CommandResult(handled=True)
+
+        # Match by number index (1..N) or by ID slug
+        target_item = None
+        if target_param.isdigit():
+            idx = int(target_param) - 1
+            if 0 <= idx < len(memories):
+                target_item = memories[idx]
+        else:
+            t_low = target_param.lower().rstrip(".md")
+            for m in memories:
+                if m.id.lower() == t_low or t_low in m.id.lower() or t_low == m.title.lower():
+                    target_item = m
+                    break
+
+        if not target_item:
+            print(f"\n  {ROSE}❌ Memory item not found matching '{target_param}'.{RST}")
+            print(f"  {SLATE}Type {GOLD}/memory{SLATE} to see numbered list of available memories.{RST}\n")
+            return CommandResult(handled=True)
+
+        deleted = store.delete(target_item.id)
+        if deleted:
+            scope_badge = f"{GOLD}[Global]{RST}" if target_item.scope == "global" else f"{TEAL}[Project]{RST}"
+            print(f"\n  {MINT}✓ Deleted {scope_badge} memory item:{RST} {WHITE}{BOLD}{target_item.title}{RST} {SLATE}(id: {target_item.id}){RST}\n")
+            if target_item.scope == "project":
+                from axon.agent.loop import _sync_project_guide
+                _sync_project_guide(agent.settings.workspace, model=agent.settings.model, effort=agent.settings.effort)
+        else:
+            print(f"\n  {ROSE}❌ Failed to delete memory item '{target_item.id}'.{RST}\n")
+        return CommandResult(handled=True)
+
+    # Subcommand: /memory view <id_or_number> (or /memory show, /memory read)
+    if arg_clean.startswith(("view", "show", "read", "inspect")):
+        parts = arg_clean.split(maxsplit=1)
+        target_param = parts[1].strip() if len(parts) > 1 else ""
+        if not target_param:
+            print(f"\n  {ROSE}Specify memory number or ID to view:{RST} {SLATE}/memory view <1..{len(memories)}|id>{RST}\n")
+            return CommandResult(handled=True)
+
+        target_item = None
+        if target_param.isdigit():
+            idx = int(target_param) - 1
+            if 0 <= idx < len(memories):
+                target_item = memories[idx]
+        else:
+            t_low = target_param.lower().rstrip(".md")
+            for m in memories:
+                if m.id.lower() == t_low or t_low in m.id.lower() or t_low == m.title.lower():
+                    target_item = m
+                    break
+
+        if not target_item:
+            print(f"\n  {ROSE}❌ Memory item not found matching '{target_param}'.{RST}\n")
+            return CommandResult(handled=True)
+
+        scope_badge = f"{GOLD}[Global]{RST}" if target_item.scope == "global" else f"{TEAL}[Project]{RST}"
+        dest_path = f"~/.axon/memory/{target_item.id}.md" if target_item.scope == "global" else f".axon/memory/{target_item.id}.md"
+        print(f"\n  {DARK_SLATE}╭── {TEAL}🧠 Memory Item:{RST} {BOLD}{WHITE}{target_item.title}{RST} {scope_badge} {DARK_SLATE}────────────────────────╮{RST}")
+        print(f"  {DARK_SLATE}│{RST} {SLATE}ID:{RST} {CYAN}{target_item.id}{RST} · {SLATE}Category:{RST} {PURPLE}{target_item.category}{RST} · {SLATE}File:{RST} {DIM}{dest_path}{RST}")
+        print(f"  {DARK_SLATE}│{RST}")
+        for l in target_item.content.splitlines():
+            print(f"  {DARK_SLATE}│{RST}   {WHITE}{l}{RST}")
+        print(f"  {DARK_SLATE}╰────────────────────────────────────────────────────────────────────────╯{RST}\n")
+        return CommandResult(handled=True)
+
+    # Subcommand: /memory clear (or /memory clear --project)
+    if arg_clean.startswith("clear"):
+        store.clear()
+        print(f"\n  {MINT}✓ Cleared all project-specific memory files (.axon/memory/).{RST}\n")
+        from axon.agent.loop import _sync_project_guide
+        _sync_project_guide(agent.settings.workspace, model=agent.settings.model, effort=agent.settings.effort)
+        return CommandResult(handled=True)
+
+    # Default: List all memory items with numbered indices and management actions
     # Check for project convention files
     conv_file = None
     for name in ("axon.md", "AXON.md", "AGENTS.md", "CLAUDE.md", ".axon/axon.md", ".axon/AGENTS.md"):
@@ -1925,24 +2051,165 @@ def handle_memory(agent: Agent, arg: str) -> CommandResult:
             print(f"    {SLATE}{l}{RST}")
         if len(lines) > 8:
             print(f"    {DIM}... ({len(lines)-8} more lines){RST}")
-            
+
     if memories:
-        proj_memories = [m for m in memories if m.scope == "project"]
-        glob_memories = [m for m in memories if m.scope == "global"]
+        proj_memories = [(i + 1, m) for i, m in enumerate(memories) if m.scope == "project"]
+        glob_memories = [(i + 1, m) for i, m in enumerate(memories) if m.scope == "global"]
 
         if proj_memories:
             print(f"\n  {TEAL}📁 Project-Specific Memory ({len(proj_memories)} items · .axon/memory/):{RST}")
-            for it in proj_memories:
-                print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
+            for num, it in proj_memories:
+                print(f"    {CYAN}[{num}]{RST} {BOLD}{WHITE}{it.title}{RST} {SLATE}({it.category} · id: {it.id}){RST}")
 
         if glob_memories:
             print(f"\n  {GOLD}🌐 Global Universal Memory ({len(glob_memories)} items · ~/.axon/memory/):{RST}")
-            for it in glob_memories:
-                print(f"    • {BOLD}{it.title}{RST} {SLATE}({it.category}){RST}")
-            
+            for num, it in glob_memories:
+                print(f"    {CYAN}[{num}]{RST} {BOLD}{WHITE}{it.title}{RST} {SLATE}({it.category} · id: {it.id}){RST}")
+
     if not conv_file and not memories:
-        print(f"\n  {SLATE}No memory files found. Use /learn <rule> or /init to save knowledge.{RST}")
-    print(f"\n  {DIM}Use /learn <rule> for project memory, or /learn --global <rule> for global memory.{RST}\n")
+        print(f"\n  {SLATE}No memory files found.{RST}")
+
+    print(f"\n  {SLATE}{BOLD}Memory Management Commands:{RST}")
+    print(f"    • {TEAL}/memory add <text>{RST}           {DARK_SLATE}Add a project-specific memory rule{RST}")
+    print(f"    • {GOLD}/memory add --global <text>{RST}  {DARK_SLATE}Add a global universal memory rule{RST}")
+    print(f"    • {ROSE}/memory delete <num|id>{RST}      {DARK_SLATE}Delete a memory item (e.g. /memory delete 1){RST}")
+    print(f"    • {CYAN}/memory view <num|id>{RST}        {DARK_SLATE}View full details of a memory item{RST}")
+    print(f"    • {SLATE}/memory clear{RST}                {DARK_SLATE}Clear all project memories{RST}\n")
+
+    return CommandResult(handled=True)
+
+def handle_prompt(agent: Agent, arg: str) -> CommandResult:
+    """Optimize, enrich, or generate high-leverage agent prompts and prompt templates."""
+    arg_clean = arg.strip()
+    subcmd = arg_clean.split()[0].lower() if arg_clean.split() else ""
+    subarg = arg_clean.split(" ", 1)[1].strip() if " " in arg_clean else ""
+
+    TEMPLATES: dict[str, dict[str, str]] = {
+        "bugfix": {
+            "title": "Bug Fix & Root Cause Analysis",
+            "desc": "Investigate bug, isolate root cause, reproduce with test, and verify fix.",
+            "prompt": "Investigate the issue in the codebase. Read the relevant files, reproduce the bug with a minimal test case or verification command, explain the exact root cause, apply the minimal fix, and verify with tests passing.",
+        },
+        "refactor": {
+            "title": "Safe Refactor & Code Quality",
+            "desc": "Clean up code, improve structure and types while preserving 100% functionality.",
+            "prompt": "Refactor the specified module to improve readability, modularity, and type safety without changing external behavior. Ensure all existing tests pass and match repository naming conventions.",
+        },
+        "testgen": {
+            "title": "Exhaustive Test Generator",
+            "desc": "Write comprehensive unit tests covering edge cases, failures, and boundaries.",
+            "prompt": "Write comprehensive unit tests for the specified component. Cover happy paths, boundary conditions, edge cases, and failure modes. Run pytest / test runner and verify 100% passing.",
+        },
+        "feature": {
+            "title": "End-to-End Feature Implementation",
+            "desc": "Plan, implement, document, and verify a new feature following repo architecture.",
+            "prompt": "Implement the requested feature end-to-end. First inspect existing architecture to match patterns, make targeted changes, add comprehensive tests, run verification, and summarize changes clearly.",
+        },
+        "review": {
+            "title": "Security & Architecture Review",
+            "desc": "Perform an in-depth security, performance, and maintainability audit.",
+            "prompt": "Perform an in-depth code review of the recent changes or specified files. Check for security vulnerabilities, race conditions, edge case failures, performance bottlenecks, and style inconsistencies.",
+        },
+        "docgen": {
+            "title": "API Documentation & Type Specs",
+            "desc": "Generate clean docstrings, markdown docs, and typing annotations.",
+            "prompt": "Generate complete, precise documentation and type annotations for all public classes and functions. Follow standard docstring formats and include concrete usage examples.",
+        },
+    }
+
+    custom_dir = agent.settings.workspace / ".axon" / "templates"
+
+    if not subcmd or subcmd in ("help", "list", "templates", "template"):
+        if subcmd in ("template", "templates") and subarg:
+            t_key = subarg.lower()
+            if t_key in TEMPLATES:
+                tpl = TEMPLATES[t_key]
+                print(f"\n  {DARK_SLATE}╭── {TEAL}📋 Prompt Template:{RST} {BOLD}{WHITE}{tpl['title']}{RST} {DARK_SLATE}──────────────────╮{RST}")
+                print(f"  {DARK_SLATE}│{RST} {SLATE}Description:{RST} {WHITE}{tpl['desc']}{RST}")
+                print(f"  {DARK_SLATE}│{RST}")
+                print(f"  {DARK_SLATE}│{RST} {GOLD}Optimal Prompt:{RST}")
+                for l in textwrap.wrap(tpl['prompt'], width=72):
+                    print(f"  {DARK_SLATE}│{RST}   {WHITE}{l}{RST}")
+                print(f"  {DARK_SLATE}╰──────────────────────────────────────────────────────────────────╯{RST}")
+                print(f"  {CYAN}💡 To run:{RST} {WHITE}{tpl['prompt']}{RST}\n")
+                return CommandResult(handled=True)
+
+        print(f"\n{GOLD}{BOLD}=== 🎯 Axon Prompt Engineering & Templates ==={RST}")
+        print(f"\n  {TEAL}📦 Built-in Optimal Agent Templates:{RST}")
+        for k, v in TEMPLATES.items():
+            print(f"    • {CYAN}{BOLD}/template {k:<10}{RST} {WHITE}{v['title']:<32}{RST} {SLATE}— {v['desc']}{RST}")
+
+        if custom_dir.exists():
+            custom_files = list(custom_dir.glob("*.md"))
+            if custom_files:
+                print(f"\n  {GOLD}📁 Custom Team Templates (.axon/templates/):{RST}")
+                for cf in custom_files:
+                    print(f"    • {PURPLE}/template {cf.stem:<10}{RST} {SLATE}({cf.name}){RST}")
+
+        print(f"\n  {SLATE}{BOLD}Prompt Engineering Commands:{RST}")
+        print(f"    • {MINT}/optimize <rough prompt>{RST}    {DARK_SLATE}Turn simple idea into optimal high-leverage prompt{RST}")
+        print(f"    • {CYAN}/template <name>{RST}             {DARK_SLATE}Load a battle-tested template (e.g. /template bugfix){RST}")
+        print(f"    • {GOLD}/prompt save <name> <text>{RST}   {DARK_SLATE}Save custom template to .axon/templates/<name>.md{RST}\n")
+        return CommandResult(handled=True)
+
+    if subcmd == "save":
+        parts = subarg.split(maxsplit=1)
+        if len(parts) < 2:
+            print(f"\n  {ROSE}Usage: /prompt save <name> <prompt content>{RST}\n")
+            return CommandResult(handled=True)
+        t_name, t_body = parts[0].lower().replace(".md", ""), parts[1].strip()
+        custom_dir.mkdir(parents=True, exist_ok=True)
+        (custom_dir / f"{t_name}.md").write_text(t_body, encoding="utf-8")
+        print(f"\n  {MINT}✓ Saved custom prompt template:{RST} {WHITE}{BOLD}{t_name}{RST} {SLATE}(.axon/templates/{t_name}.md){RST}\n")
+        return CommandResult(handled=True)
+
+    rough_text = subarg if subcmd in ("optimize", "enhance", "opt") else arg_clean
+    if not rough_text:
+        print(f"\n  {ROSE}Usage: /optimize <your rough prompt or idea>{RST}\n")
+        return CommandResult(handled=True)
+
+    print(f"\n  {TEAL}🎯 Optimizing prompt with neural reasoning engine...{RST}")
+
+    distill_prompt = f"""You are an expert prompt engineer for an autonomous agentic coding assistant with tools (Read, Write, Edit, Bash, Grep, Glob).
+Transform the user's raw prompt into an optimal, high-leverage agent prompt.
+
+User input:
+\"\"\"{rough_text}\"\"\"
+
+Produce an optimal prompt following these principles:
+1. Specify clear, unambiguous objective and scope.
+2. Outline key files/directories to inspect first.
+3. Include explicit verification criteria (e.g. run pytest, check compiler/build errors).
+4. Direct the agent to follow repository idioms and minimize extraneous changes.
+
+Output ONLY the enhanced prompt in 1-3 crisp, actionable sentences."""
+
+    enhanced_prompt = rough_text
+    if agent.provider is not None:
+        try:
+            model_name = getattr(getattr(agent.provider, "settings", None), "model", "deepseek-v4-flash")
+            stream = agent.provider.stream(
+                model=model_name,
+                system=[{"type": "text", "text": "You are a prompt optimization expert. Return only the optimized prompt."}],
+                messages=[{"role": "user", "content": distill_prompt}],
+                tools=[],
+                max_tokens=600,
+                effort="low",
+            )
+            for _ in stream:
+                pass
+            turn = agent.provider.finalize()
+            if turn.text.strip():
+                enhanced_prompt = turn.text.strip().strip('"')
+        except Exception:
+            enhanced_prompt = f"Inspect the workspace for context, implement: {rough_text}. Verify changes by running repository tests and confirming clean execution."
+
+    print(f"\n  {DARK_SLATE}╭── {GOLD}⚡ Optimized High-Leverage Prompt:{RST} {DARK_SLATE}───────────────────────────────────╮{RST}")
+    for l in textwrap.wrap(enhanced_prompt, width=76):
+        print(f"  {DARK_SLATE}│{RST}   {WHITE}{BOLD}{l}{RST}")
+    print(f"  {DARK_SLATE}╰────────────────────────────────────────────────────────────────────────────╯{RST}")
+    print(f"  {CYAN}💡 Copy or run directly:{RST} {enhanced_prompt}\n")
+
     return CommandResult(handled=True)
 
 def handle_init(agent: Agent, arg: str) -> CommandResult:
@@ -2182,7 +2449,18 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         from axon.ui.fuzzy_picker import run_fuzzy_file_finder
         chosen = run_fuzzy_file_finder(agent.settings.workspace)
         if chosen:
-            print(f"\n  {MINT}Selected file:{RST} {WHITE}{chosen}{RST}\n")
+            file_path = agent.settings.workspace / chosen
+            if file_path.exists() and file_path.is_file():
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    from axon.ui.render import render_read_box
+                    print(f"\n{render_read_box(chosen, content, max_show=6)}\n")
+                except Exception:
+                    print(f"\n  {MINT}✓ Selected file:{RST} {WHITE}{chosen}{RST}\n")
+            else:
+                print(f"\n  {MINT}✓ Selected file:{RST} {WHITE}{chosen}{RST}\n")
+            print(f"  {CYAN}💡 Ask anything about it:{RST} {WHITE}{BOLD}@{chosen} <your question>{RST}")
+            print(f"  {DARK_SLATE}💡 In-prompt shortcut: Press {BOLD}Ctrl+P{RST}{DARK_SLATE} anytime while typing to insert files directly into your prompt.{RST}\n")
         return CommandResult(handled=True)
     elif cmd in ("/todos", "/todo", "/task", "/tasks"):
         return handle_todos(agent, arg)
@@ -2196,6 +2474,8 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_permissions(agent, arg)
     elif cmd in ("/clear", "/reset"):
         return handle_clear(agent, arg)
+    elif cmd in ("/prompt", "/optimize", "/enhance", "/template", "/templates"):
+        return handle_prompt(agent, arg)
     elif cmd in ("/paste", "/multiline"):
         return handle_paste(agent, arg)
     elif cmd in ("/thinking", "/thought"):

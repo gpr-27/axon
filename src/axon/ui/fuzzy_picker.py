@@ -60,22 +60,39 @@ def run_fuzzy_file_finder(workspace: Path) -> str | None:
     except ImportError:
         return None
 
-    # Discover all workspace files, ignoring build artifacts, venvs, and VCS dirs
+    # Discover workspace files with fast pruned directory traversal
     ignore_dirs = {
         ".git", ".axon", "node_modules", "__pycache__", "venv", ".venv",
         ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build",
         "axon_gpr.egg-info", ".eggs", "target", "out",
+        "Library", "Applications", "Developer", "Pictures", "Music", "Movies",
+        ".cache", ".cargo", ".rustup", ".local", ".npm", ".nvm", ".docker",
+        ".gemini", ".vscode", ".idea", ".Trash", "Pods", "site-packages",
     }
-    ignore_exts = {".whl", ".tar.gz", ".tgz", ".zip", ".pyc", ".so", ".dylib", ".exe", ".bin"}
+    ignore_exts = {
+        ".whl", ".tar.gz", ".tgz", ".zip", ".pyc", ".so", ".dylib", ".exe", ".bin",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".dmg", ".iso", ".pkg",
+    }
 
     all_files: list[str] = []
-    for f in workspace.rglob("*"):
-        if f.is_file():
-            parts = f.relative_to(workspace).parts
-            if not any(p.startswith(".") or p in ignore_dirs for p in parts):
-                ext = "".join(f.suffixes).lower()
-                if ext not in ignore_exts and f.suffix.lower() not in ignore_exts:
-                    all_files.append(f.relative_to(workspace).as_posix())
+    max_files = 8000
+    try:
+        for root, dirs, files in os.walk(workspace):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            for f in sorted(files):
+                if f.startswith("."):
+                    continue
+                ext = os.path.splitext(f)[1].lower()
+                if ext not in ignore_exts:
+                    full = os.path.join(root, f)
+                    rel = os.path.relpath(full, workspace)
+                    all_files.append(rel.replace("\\", "/"))
+                    if len(all_files) >= max_files:
+                        break
+            if len(all_files) >= max_files:
+                break
+    except Exception:
+        pass
 
     if not all_files:
         return None

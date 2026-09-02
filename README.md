@@ -1,4 +1,4 @@
-# Axon (axon-gpr)
+# Axon (axon-terminal)
 
 <div align="center">
 
@@ -10,7 +10,7 @@
 Terminal-Native Agentic Coding Assistant
 ```
 
-[![PyPI Version](https://img.shields.io/pypi/v/axon-gpr.svg)](https://pypi.org/project/axon-gpr/)
+[![PyPI Version](https://img.shields.io/pypi/v/axon-terminal.svg)](https://pypi.org/project/axon-terminal/)
 [![Tests](https://img.shields.io/badge/tests-528%20passed-brightgreen.svg)](tests/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](pyproject.toml)
 [![Architecture](https://img.shields.io/badge/architecture-ReAct%20Loop%20%2B%20Subagents-orange.svg)](docs/01-ARCHITECTURE.md)
@@ -32,10 +32,10 @@ If you already have Python and `pip` installed, run the standard installation co
 
 ```bash
 # macOS / Linux / Configured Windows
-pip install axon-gpr
+pip install axon-terminal
 
 # Windows Zero-Configuration Alternative (Works immediately via built-in py launcher):
-py -m pip install axon-gpr
+py -m pip install axon-terminal
 ```
 
 Once installed, launch Axon:
@@ -124,21 +124,21 @@ If Python is already installed but typing `pip` or `axon` returns `'not recogniz
 # macOS:   brew install pipx    OR  python3 -m pip install --user pipx
 # Linux:   sudo apt install pipx
 
-pipx install axon-gpr
+pipx install axon-terminal
 axon
 ```
 
 ### Method 2: Standard Pip Install
 * **Windows**:
   ```cmd
-  pip install --upgrade axon-gpr
+  pip install --upgrade axon-terminal
   axon
   ```
-  *(If `pip` is not in PATH, use: `python -m pip install --upgrade axon-gpr` and launch with `python -m axon`)*
+  *(If `pip` is not in PATH, use: `python -m pip install --upgrade axon-terminal` and launch with `python -m axon`)*
 
 * **macOS & Linux**:
   ```bash
-  pip3 install --user --upgrade axon-gpr
+  pip3 install --user --upgrade axon-terminal
   axon
   ```
   *(If `axon` is not in PATH, launch with: `python3 -m axon`)*
@@ -161,9 +161,9 @@ If you have cloned or downloaded the Axon repository, run the self-contained boo
 
 | Error | Why It Happens | How to Fix |
 |---|---|---|
-| **`pip: command not found`** | `pip` is not linked in your `$PATH`. | Run `python3 -m pip install axon-gpr` (macOS/Linux) or `python -m pip install axon-gpr` (Windows). |
-| **`'pip' is not recognized as the name of a cmdlet`** (Windows) | Python's Scripts folder was not added to your Windows environment PATH. | Run `python -m ensurepip --default-pip` or `py -m pip install axon-gpr`. |
-| **`error: externally-managed-environment`** (macOS/Linux) | PEP 668 prevents modifying system Python directly. | Use `pipx install axon-gpr` or run `pip3 install --user axon-gpr --break-system-packages`. |
+| **`pip: command not found`** | `pip` is not linked in your `$PATH`. | Run `python3 -m pip install axon-terminal` (macOS/Linux) or `python -m pip install axon-terminal` (Windows). |
+| **`'pip' is not recognized as the name of a cmdlet`** (Windows) | Python's Scripts folder was not added to your Windows environment PATH. | Run `python -m ensurepip --default-pip` or `py -m pip install axon-terminal`. |
+| **`error: externally-managed-environment`** (macOS/Linux) | PEP 668 prevents modifying system Python directly. | Use `pipx install axon-terminal` or run `pip3 install --user axon-terminal --break-system-packages`. |
 | **`axon: command not found` after install** | Python's global script directory is not in your shell `$PATH`. | Run `python3 -m axon` (or on Windows `python -m axon`), or run `pipx ensurepath`. |
 
 > [!TIP]
@@ -175,9 +175,9 @@ If you have cloned or downloaded the Axon repository, run the self-contained boo
 
 | Error | Why It Happens | How to Fix |
 |---|---|---|
-| **`pip: command not found`** | The `pip` alias is not directly linked to your Python executable in your terminal PATH. | Run `python3 -m pip install axon-gpr` (macOS/Linux) or `python -m pip install axon-gpr` (Windows). |
-| **`'pip' is not recognized as the name of a cmdlet`** (Windows) | Python's Scripts directory was not added to your Windows environment PATH during installation. | Run `py -m pip install axon-gpr` or reinstall Python with the **"Add Python to PATH"** checkbox selected. |
-| **`error: externally-managed-environment`** (macOS/Linux) | Modern Linux & macOS (PEP 668) prevent modifying system Python directly. | Use `pipx install axon-gpr` or add the `--break-system-packages` flag: `python3 -m pip install --user axon-gpr --break-system-packages`. |
+| **`pip: command not found`** | The `pip` alias is not directly linked to your Python executable in your terminal PATH. | Run `python3 -m pip install axon-terminal` (macOS/Linux) or `python -m pip install axon-terminal` (Windows). |
+| **`'pip' is not recognized as the name of a cmdlet`** (Windows) | Python's Scripts directory was not added to your Windows environment PATH during installation. | Run `py -m pip install axon-terminal` or reinstall Python with the **"Add Python to PATH"** checkbox selected. |
+| **`error: externally-managed-environment`** (macOS/Linux) | Modern Linux & macOS (PEP 668) prevent modifying system Python directly. | Use `pipx install axon-terminal` or add the `--break-system-packages` flag: `python3 -m pip install --user axon-terminal --break-system-packages`. |
 | **`axon: command not found` after install** | Python's global bin/scripts folder is not in your shell `$PATH`. | Run `python3 -m axon` (or on Windows `python -m axon`), or run `pipx ensurepath`. |
 
 ---

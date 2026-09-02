@@ -1,4 +1,4 @@
-# Axon Project Guide: axon
+Axon Project Guide: axon
 
 ## 1. Project Overview
 - **Workspace**: `/Users/gpr/Documents/axon`
@@ -11,6 +11,7 @@
 - `check_models.py`
 - `dist`
 - `docs`
+- `dsa_beginners`
 - `install.bat`
 - `install.ps1`
 - `install.sh`
@@ -19,18 +20,17 @@
 - `requirements.txt`
 - `setup_env.py`
 - `src`
-- `tests`
 
 ## 3. Project Directives & Conventions
-- Use `/learn <rule>` to record project-specific patterns.
+- **Project for Learning Python** (preferences): This project is for learning Python.
 
 ## 4. Current State & Recent Accomplishments
-- The feature you described exists, but it's split across three files, and one detail differs from your description.
-- Here's a full explanation of the ANSI tokenization in `safe_ansi_truncate` (no changes made).
-- Here's my honest assessment — no changes made, as requested.
-- That includes the modified provider tests (+148 lines), the new
-- Yes — this is a **large uncommitted feature batch**, not just
-- That diff is the full picture — and it reveals something important: **the working tree already
+- Here's the complete picture of
+- I'm doing great — thanks for asking!
+- Here's the **access-control layer** — what happens between "the LLM requests a tool" and "the tool
+- Created a complete, production-quality **Two Sum** (LeetCode #1) solution with an O(n) hash-map approach.
+- Created a complete, production-quality Valid Parentheses (LeetCode #20) solution in
+- All three files pass.
 
 ## 5. Next Steps & Milestones
 - [ ] Explore project requirements and structure

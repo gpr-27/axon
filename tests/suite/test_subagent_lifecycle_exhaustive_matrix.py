@@ -143,3 +143,20 @@ def test_subagent_tool_registry_provisioning():
     assert "Bash" not in plan_names
     assert "Read" in plan_names
 
+def test_handle_subagents_queue_routing(workspace: Path):
+    from axon.agent.state import MessageQueue
+    agent = MagicMock()
+    agent.session = SessionStore(workspace)
+    agent.session.open("sess_test_q")
+    agent.message_queue = MessageQueue()
+    agent.message_queue.push("Queued question 1")
+
+    # /subagents q -> routes to handle_queue
+    res_q = handle_subagents(agent, "q")
+    assert res_q.handled is True
+
+    # /subagents queue -> routes to handle_queue
+    res_queue = handle_subagents(agent, "queue")
+    assert res_queue.handled is True
+
+

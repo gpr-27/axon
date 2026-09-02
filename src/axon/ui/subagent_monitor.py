@@ -52,10 +52,21 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
 
     fd = sys.stdin.fileno()
     old_attr = termios.tcgetattr(fd)
-    viewing_idx = 0  # 0 = Main overview, 1..N = Subagents
+    viewing_idx: Any = 0  # 0 = Main overview, 1..N = Subagents, 'Q' = Queue
     last_rendered_lines = 0
     input_buf: list[str] = []
     cursor_pos: int = 0
+
+    def get_view_list(tasks_list: list[Any]) -> list[Any]:
+        return [0] + [t.index for t in tasks_list] + ["Q"]
+
+    def cycle_view(curr: Any, delta: int, tasks_list: list[Any]) -> Any:
+        v_list = get_view_list(tasks_list)
+        try:
+            curr_pos = v_list.index(curr)
+        except ValueError:
+            curr_pos = 0
+        return v_list[(curr_pos + delta) % len(v_list)]
 
     try:
         tty.setcbreak(fd)
@@ -63,17 +74,26 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
             tasks = subagents_mgr.all_tasks()
             total_tasks = len(tasks)
 
-            # Check if keyboard input is available without blocking
+            # Check if keyboard input is available with high responsiveness
             try:
-                r, _, _ = select.select([sys.stdin], [], [], 0.08)
+                r, _, _ = select.select([sys.stdin], [], [], 0.03)
             except Exception:
                 r = []
-                time.sleep(0.08)
+                time.sleep(0.03)
 
             if r:
                 raw_bytes = os.read(fd, 1024)
                 if not raw_bytes:
                     break
+
+                # If standalone escape received, check if more bytes of ANSI sequence follow immediately
+                if raw_bytes == b"\x1b":
+                    try:
+                        r2, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        if r2:
+                            raw_bytes += os.read(fd, 1024)
+                    except Exception:
+                        pass
 
                 # Ctrl+C
                 if raw_bytes == b"\x03":
@@ -103,15 +123,59 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                                         dispatch_command(line_text, agent)
                                 else:
                                     if agent and hasattr(agent, "message_queue"):
-                                        agent.message_queue.push(line_text)
-                                        print(f"\n  {MINT}✓ Queued follow-up:{RST} {WHITE}{line_text}{RST} {SLATE}(runs when subagents complete){RST}\n")
+                                        item = agent.message_queue.push(line_text)
+                                        print(f"\n  {MINT}✓ Queued follow-up #{item.id}:{RST} {WHITE}{line_text}{RST} {SLATE}(runs when subagents complete){RST}\n")
                             except Exception as e:
                                 print(f"\n  ❌ Command error: {e}\n")
                             finally:
                                 tty.setcbreak(fd)
                             continue
 
-                # Esc
+                # Left Arrow variations -> Switch subagents or move cursor if typing
+                elif any(raw_bytes.startswith(k) for k in (b"\x1b[D", b"\x1bOD", b"\x1b[1;2D", b"\x1b[1;3D", b"\x1b[1;5D", b"\x1b[1;9D")):
+                    if input_buf:
+                        if cursor_pos > 0:
+                            cursor_pos -= 1
+                    else:
+                        viewing_idx = cycle_view(viewing_idx, -1, tasks)
+
+                # Right Arrow variations -> Switch subagents or move cursor if typing
+                elif any(raw_bytes.startswith(k) for k in (b"\x1b[C", b"\x1bOC", b"\x1b[1;2C", b"\x1b[1;3C", b"\x1b[1;5C", b"\x1b[1;9C")):
+                    if input_buf:
+                        if cursor_pos < len(input_buf):
+                            cursor_pos += 1
+                    else:
+                        viewing_idx = cycle_view(viewing_idx, 1, tasks)
+
+                # Up Arrow variations -> Cycle backward
+                elif any(raw_bytes.startswith(k) for k in (b"\x1b[A", b"\x1bOA", b"\x1b[1;2A", b"\x1b[1;3A", b"\x1b[1;5A", b"\x1b[1;9A")):
+                    viewing_idx = cycle_view(viewing_idx, -1, tasks)
+
+                # Down Arrow variations -> Cycle forward
+                elif any(raw_bytes.startswith(k) for k in (b"\x1b[B", b"\x1bOB", b"\x1b[1;2B", b"\x1b[1;3B", b"\x1b[1;5B", b"\x1b[1;9B")):
+                    viewing_idx = cycle_view(viewing_idx, 1, tasks)
+
+                # Shift+Tab variations -> Cycle backward across all views
+                elif any(raw_bytes.startswith(k) for k in (b"\x1b[Z", b"\x1b\t", b"\x1b[27;2;9~", b"\x1b[9;2u", b"\x1b[24~", b"\x1b[1;2Z", b"\x1bOZ")):
+                    viewing_idx = cycle_view(viewing_idx, -1, tasks)
+
+                # Tab -> Cycle forward or autocomplete
+                elif raw_bytes in (b"\t", b"\x09"):
+                    if not input_buf:
+                        viewing_idx = cycle_view(viewing_idx, 1, tasks)
+                    else:
+                        curr_str = "".join(input_buf)
+                        if curr_str.startswith("/b"):
+                            input_buf = list("/btw ")
+                            cursor_pos = len(input_buf)
+                        elif curr_str.startswith("/a"):
+                            input_buf = list("/ask ")
+                            cursor_pos = len(input_buf)
+                        elif curr_str.startswith("/q"):
+                            input_buf = list("/q ")
+                            cursor_pos = len(input_buf)
+
+                # Esc -> Clear input draft or return to Main
                 elif raw_bytes == b"\x1b":
                     if input_buf:
                         input_buf.clear()
@@ -121,7 +185,7 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
 
                 # Backspace
                 elif raw_bytes in (b"\x7f", b"\x08"):
-                    if cursor_pos > 0:
+                    if cursor_pos > 0 and input_buf:
                         input_buf.pop(cursor_pos - 1)
                         cursor_pos -= 1
 
@@ -130,55 +194,29 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                     input_buf.clear()
                     cursor_pos = 0
 
-                # Left Arrow
-                elif raw_bytes.startswith((b"\x1b[D", b"\x1bOD")):
-                    if cursor_pos > 0:
-                        cursor_pos -= 1
-                    elif not input_buf:
-                        viewing_idx = (viewing_idx - 1) % (total_tasks + 1)
-
-                # Right Arrow
-                elif raw_bytes.startswith((b"\x1b[C", b"\x1bOC")):
-                    if cursor_pos < len(input_buf):
-                        cursor_pos += 1
-                    elif not input_buf:
-                        viewing_idx = (viewing_idx + 1) % (total_tasks + 1)
-
-                # Up Arrow / Down Arrow
-                elif raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                    if not input_buf:
-                        viewing_idx = (viewing_idx - 1) % (total_tasks + 1)
-                elif raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                    if not input_buf:
-                        viewing_idx = (viewing_idx + 1) % (total_tasks + 1)
-
-                # Tab
-                elif raw_bytes in (b"\t", b"\x09"):
-                    if not input_buf:
-                        viewing_idx = (viewing_idx + 1) % (total_tasks + 1)
-                    else:
-                        # Tab autocomplete /btw or /ask
-                        curr_str = "".join(input_buf)
-                        if curr_str.startswith("/b"):
-                            input_buf = list("/btw ")
-                            cursor_pos = len(input_buf)
-                        elif curr_str.startswith("/a"):
-                            input_buf = list("/ask ")
-                            cursor_pos = len(input_buf)
-
                 # Home / End
-                elif raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x01"):
+                elif raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x01", b"\x1bOH"):
                     cursor_pos = 0
-                elif raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x05"):
+                elif raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x05", b"\x1bOF"):
                     cursor_pos = len(input_buf)
+
+                # 'q' or 'Q' when buffer is empty -> Jump to Queue view
+                elif not input_buf and raw_bytes.lower() == b"q":
+                    viewing_idx = "Q"
+
+                # 'm' or 'M' when buffer is empty -> Jump to Main Agent overview
+                elif not input_buf and raw_bytes.lower() == b"m":
+                    viewing_idx = 0
 
                 # Number keys when buffer is empty -> Quick agent switch
                 elif not input_buf and raw_bytes in (b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7", b"8", b"9"):
                     num = int(raw_bytes.decode("latin1"))
-                    if num <= total_tasks:
+                    if num == 0:
+                        viewing_idx = 0
+                    elif num <= total_tasks:
                         viewing_idx = num
 
-                # Skip unhandled escape sequences
+                # Skip any unhandled escape sequences completely so they don't corrupt input buffer
                 elif raw_bytes.startswith(b"\x1b"):
                     pass
 
@@ -187,7 +225,7 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                     try:
                         decoded = raw_bytes.decode("utf-8")
                         for ch in decoded:
-                            if ord(ch) >= 32:
+                            if ord(ch) >= 32 or ch == "\t":
                                 input_buf.insert(cursor_pos, ch)
                                 cursor_pos += 1
                     except Exception:
@@ -196,12 +234,12 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
             # Render frame
             tasks = subagents_mgr.all_tasks()
             tw = term_width()
-            width = min(84, max(20, tw - 4))
+            width = min(88, max(20, tw - 4))
             safe_max_w = max(20, tw - 2)
 
             frame_lines = []
 
-            # 1. Tab bar
+            # 1. Tab bar: [0:Main]  [1:Subagent] ... [Q:Queue]
             tab_items = []
             if viewing_idx == 0:
                 tab_items.append(f"{GOLD}{BOLD}● [0:Main]{RST}")
@@ -218,11 +256,17 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                 else:
                     tab_items.append(f"{SLATE}○ [{t.index}:{short_name}]{RST}")
 
+            q_len = len(agent.message_queue) if (agent and hasattr(agent, "message_queue")) else 0
+            if viewing_idx == "Q":
+                tab_items.append(f"{MINT}{BOLD}● [Q:Queue ({q_len})]{RST}")
+            else:
+                tab_items.append(f"{SLATE}○ [Q:Queue ({q_len})]{RST}")
+
             tabs_str = "  ".join(tab_items)
             frame_lines.append(f"  {tabs_str}")
             frame_lines.append(f"  {DARK_SLATE}{'─' * width}{RST}")
 
-            # 2. Body View: Main Overview vs Specific Subagent
+            # 2. Body View: Main Overview vs Specific Subagent vs Queue
             if viewing_idx == 0:
                 # Main Overview
                 done_count = sum(1 for t in tasks if t.status in ("completed", "exhausted", "error"))
@@ -247,6 +291,20 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                     if len(s_name) > 32:
                         s_name = s_name[:29] + "..."
                     frame_lines.append(f"    {b} {WHITE}{s_name:<32}{RST} {st}")
+            elif viewing_idx == "Q":
+                # Dedicated Queue view
+                q_items = agent.message_queue.items if (agent and hasattr(agent, "message_queue")) else []
+                frame_lines.append(f"  {CYAN}{BOLD}📥 Pending Prompt Queue ({len(q_items)} in queue){RST}")
+                if not q_items:
+                    frame_lines.append(f"    {SLATE}Queue is empty. Type a follow-up below and press Enter to enqueue.{RST}")
+                else:
+                    for q_i, it in enumerate(q_items, 1):
+                        tag = f"{MINT}[Next]{RST} " if q_i == 1 else f"{DARK_SLATE}[#{it.id}]{RST} "
+                        clean_txt = it.text.replace("\n", " ")
+                        if len(clean_txt) > 55:
+                            clean_txt = clean_txt[:52] + "..."
+                        frame_lines.append(f"    {tag}{WHITE}{clean_txt}{RST}")
+                frame_lines.append(f"    {DARK_SLATE}› Manage queue: /q <text> to add · /q drop <id> to remove · /q clear to empty{RST}")
             else:
                 # Specific Subagent detailed live view
                 task = None
@@ -269,7 +327,7 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
 
             # 3. Footer Control Bar
             frame_lines.append(f"  {DARK_SLATE}{'─' * width}{RST}")
-            ctrl_hint = f"{GOLD}[0-{min(9, total_tasks)}]{RST} {SLATE}select agent · {GOLD}[Tab / ↓ ↑]{RST} {SLATE}cycle · {GOLD}[Esc]{RST} {SLATE}Main · {GOLD}/ask{SLATE} or {GOLD}/btw{SLATE} side question{RST}"
+            ctrl_hint = f"{GOLD}[0-{min(9, total_tasks)}]{RST} {SLATE}agents · {GOLD}[Q]{RST} {SLATE}queue · {GOLD}[Tab / ← → ↑ ↓]{RST} {SLATE}cycle · {GOLD}[Esc/M]{RST} {SLATE}Main · {GOLD}/ask{SLATE} or {GOLD}/btw{SLATE}{RST}"
             frame_lines.append(f"  {ctrl_hint}")
             frame_lines.append(f"  {DARK_SLATE}{'─' * width}{RST}")
 
@@ -321,8 +379,4 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
             except Exception:
                 pass
-        if input_buf and agent and hasattr(agent, "message_queue"):
-            rem = "".join(input_buf).strip()
-            if rem:
-                agent.message_queue.push(rem)
 

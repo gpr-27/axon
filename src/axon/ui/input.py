@@ -34,6 +34,7 @@ from axon.ui.theme import (
     DARK_SLATE,
     DIM,
     GOLD,
+    GRAY_BG,
     MINT,
     PURPLE,
     RST,
@@ -75,6 +76,55 @@ def safe_ansi_truncate(text: str, max_w: int) -> str:
                 break
     return "".join(res) + RST
 
+def highlight_prompt_syntax(text: str) -> str:
+    """Highlight prompt keywords, @file mentions, /slash commands, !shell, and quotes with rich ANSI colors."""
+    if not text:
+        return ""
+
+    if text.startswith("!"):
+        cmd_part = text[1:]
+        return f"{AMBER}{BOLD}!{RST}{GOLD}{BOLD}{cmd_part}{RST}"
+
+    if text.startswith("/"):
+        parts = text.split(" ", 1)
+        cmd_name = parts[0]
+        rest = f" {parts[1]}" if len(parts) > 1 else ""
+        return f"{MINT}{BOLD}{cmd_name}{RST}{WHITE}{BOLD}{rest}{RST}"
+
+    # Style @files, quotes, `code`, ;; separators, and image tokens
+    styled = text
+    styled = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
+    styled = re.sub(r"(@[a-zA-Z0-9_\-\./\\]+)", f"{CYAN}{BOLD}{UNDER}\\1{RST}{WHITE}{BOLD}", styled)
+    styled = re.sub(r"(`[^`]+`)", f"{TEAL}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
+    styled = re.sub(r"(\"[^\"]*\"|'[^']*')", f"{GOLD}\\1{RST}{WHITE}{BOLD}", styled)
+    styled = re.sub(r"(;;)", f"{GOLD}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
+
+    return f"{WHITE}{BOLD}{styled}{RST}"
+
+def format_user_prompt_banner(text: str, subagent_label: str = "", is_bash: bool = False, max_w: int | None = None) -> str:
+    """Format submitted prompt into a sleek, full-width highlighted background banner."""
+    tw = max_w or term_width()
+    width = max(20, tw - 4)
+    lines = text.strip().splitlines() if text.strip() else [""]
+
+    if is_bash:
+        prefix_char = "! "
+    elif subagent_label:
+        prefix_char = f"[{subagent_label}] › "
+    else:
+        prefix_char = "› "
+
+    banner_lines = []
+    for l_idx, line in enumerate(lines):
+        styled_content = highlight_prompt_syntax(line)
+        styled_content_bg = styled_content.replace(RST, f"{RST}{GRAY_BG}")
+        pref = prefix_char if l_idx == 0 else "… "
+        raw_line_len = len(pref) + len(strip_ansi(styled_content))
+        pad_len = max(0, width - raw_line_len - 2)
+        banner_lines.append(f"  {GRAY_BG}{BOLD}{WHITE} {pref}{RST}{GRAY_BG}{styled_content_bg}{' ' * pad_len} {RST}")
+
+    return "\n".join(banner_lines)
+
 ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     # ⚙️ Core Configuration & Models
     ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek, GLM)", True),
@@ -114,8 +164,11 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/mcp", "ext", "Multi-Agent", "Inspect Model Context Protocol servers and tools", False),
     ("/plugin", "ext", "Multi-Agent", "Inspect installed plugins and extension manifests", True),
     ("/hooks", "ext", "Multi-Agent", "Inspect active lifecycle and execution hooks", False),
-    ("/memory", "core", "Multi-Agent", "Inspect persistent workspace memory store", False),
+    ("/memory", "core", "Multi-Agent", "Manage memory (list, add, delete, view, clear)", True),
     ("/learn", "core", "Multi-Agent", "Teach a new convention to persistent memory", True),
+    ("/prompt", "core", "Prompt Engineering", "Optimize rough prompts or load agent templates", True),
+    ("/optimize", "core", "Prompt Engineering", "Enhance simple prompt into high-leverage agent instructions", True),
+    ("/template", "core", "Prompt Engineering", "Load battle-tested prompt templates (bugfix, refactor, testgen)", True),
 
     # 📁 Sessions & Workspace
     ("/main", "core", "Sessions & Root", "Switch back to the Main Agent / parent chart session", False),
@@ -196,18 +249,42 @@ def read_input(
     # Print clean divider and status header above prompt
     def _render_status_header(m: str) -> None:
         tw = term_width()
-        width = max(40, tw - 4)
+        avail_w = max(20, tw - 4)
         label_text, mode_color = _get_mode_info(m)
         plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
         queue_badge = f"  {CYAN}{BOLD}{queue_summary}{RST}" if queue_summary else ""
         agent_hint = f" · {DARK_SLATE}/main to return · ← sessions{RST}" if subagent_label else f" · {DARK_SLATE}← sessions{RST}"
-        left_str = f"▮ {label_text}{plan_badge}{queue_badge}{agent_hint}"
-        right_str = f"○ {effort} · /effort · ⌨ /kb · ? shortcuts"
-        pad = max(2, width - len(strip_ansi(left_str)) - len(strip_ansi(right_str)))
-        sys.stdout.write(f"\r\033[K  {mode_color}{BOLD}{left_str}{RST}{' ' * pad}{SLATE}{right_str}{RST}\n")
+
+        left_styled = f"{mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{agent_hint}"
+        left_len = len(strip_ansi(left_styled))
+
+        # Dynamic right items based on available width
+        if avail_w >= 105:
+            right_styled = f"{SLATE}○ {effort} · /effort · ⌨ /kb · ? shortcuts{RST}"
+        elif avail_w >= 85:
+            right_styled = f"{SLATE}○ {effort} · /effort · /kb{RST}"
+        elif avail_w >= 65:
+            right_styled = f"{SLATE}○ {effort}{RST}"
+        else:
+            right_styled = ""
+
+        right_len = len(strip_ansi(right_styled)) if right_styled else 0
+
+        # If left is still too wide for small terminals, shorten left
+        if left_len + right_len + 2 > avail_w:
+            left_styled = f"{mode_color}{BOLD}▮ {label_text}{RST}"
+            left_len = len(strip_ansi(left_styled))
+            if left_len + right_len + 2 > avail_w:
+                right_styled = ""
+                right_len = 0
+
+        pad = max(1, avail_w - left_len - right_len)
+        line_content = f"  {left_styled}{' ' * pad}{right_styled}"
+        safe_line = safe_ansi_truncate(line_content, tw - 1)
+        sys.stdout.write(f"\r\033[K{safe_line}\n")
         sys.stdout.flush()
 
-    width = max(40, term_width() - 4)
+    width = max(10, term_width() - 4)
     sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n")
     sys.stdout.flush()
     _render_status_header(current_mode)
@@ -250,34 +327,60 @@ def read_input(
     cmd_popup_open = True
     selected_file_idx = 0
     file_popup_open = True
+    last_cur_line_idx = 0
 
     def get_matching_commands(prefix: str) -> list[tuple[str, str, str, str, bool]]:
-        if not prefix.startswith("/"):
+        if not prefix.startswith(("/", "\\")):
             return []
-        p_clean = prefix.split()[0].lower() if " " in prefix else prefix.lower()
+        p_clean = ("/" + prefix.lstrip("/\\")).split()[0].lower() if " " in prefix else ("/" + prefix.lstrip("/\\")).lower()
         return [c for c in ALL_SLASH_COMMANDS if c[0].startswith(p_clean)]
 
+    _cached_files_list: list[str] = []
+    _cached_files_time: float = 0.0
+
     def get_matching_files(query: str) -> list[str]:
-        q = query.lower()
-        res = []
-        cwd = os.getcwd()
-        ignore = {".git", "__pycache__", ".axon", ".pytest_cache", "node_modules", ".venv", "venv", ".idea", ".vscode"}
-        try:
-            for root, dirs, files in os.walk(cwd):
-                dirs[:] = [d for d in dirs if d not in ignore and not d.startswith(".")]
-                for f in sorted(files):
-                    if f.startswith("."):
+        nonlocal _cached_files_list, _cached_files_time
+        now = time.time()
+        if not _cached_files_list or (now - _cached_files_time > 4.0):
+            cwd = os.getcwd()
+            ignore = {
+                ".git", "__pycache__", ".axon", ".pytest_cache", "node_modules",
+                ".venv", "venv", ".idea", ".vscode", "Library", "Applications",
+                "Developer", ".Trash", "Downloads", "Music", "Movies", "Pictures",
+                ".cache", "build", "dist", ".cargo", ".rustup", ".npm", ".nvm",
+                "Pods", "DerivedData", ".gemini", ".antigravity", ".local"
+            }
+            res = []
+            t_start = time.time()
+            try:
+                for root, dirs, files in os.walk(cwd):
+                    if time.time() - t_start > 0.03:
+                        break
+                    dirs[:] = [d for d in dirs if d not in ignore and not d.startswith(".")]
+                    depth = len(Path(root).relative_to(cwd).parts) if root != cwd else 0
+                    if depth > 3:
+                        dirs.clear()
                         continue
-                    rel = os.path.relpath(os.path.join(root, f), cwd)
-                    if not q or q in rel.lower():
+                    for f in sorted(files):
+                        if f.startswith("."):
+                            continue
+                        rel = os.path.relpath(os.path.join(root, f), cwd)
                         res.append(rel)
-                        if len(res) >= 8:
-                            return res
-        except Exception:
-            pass
-        return res
+                        if len(res) >= 500:
+                            break
+                    if len(res) >= 500:
+                        break
+            except Exception:
+                pass
+            _cached_files_list = res
+            _cached_files_time = now
+
+        q = query.lower().strip()
+        matches = [f for f in _cached_files_list if not q or q in f.lower()]
+        return matches[:8]
 
     def draw(initial: bool = False):
+        nonlocal last_cur_line_idx
         tw = term_width()
         width = max(40, tw - 4)
         buf_str = "".join(buffer)
@@ -292,7 +395,7 @@ def read_input(
 
         # Check slash autocomplete
         matching_cmds: list[tuple[str, str, str, str, bool]] = []
-        if not is_bash and cmd_popup_open and buf_str.startswith("/") and not (" " in buf_str.strip() and not buf_str.endswith(" ")):
+        if not is_bash and cmd_popup_open and buf_str.startswith(("/", "\\")) and not (" " in buf_str.strip() and not buf_str.endswith(" ")):
             matching_cmds = get_matching_commands(buf_str)
 
         # Check file @ autocomplete
@@ -304,9 +407,12 @@ def read_input(
             matching_files = get_matching_files(at_token)
 
         avail_prompt_w = max(10, tw - len(strip_ansi(p_prefix)) - 4)
+        extra_prompt_lines: list[str] = []
+        cur_line_idx = 0
         if not buffer:
             disp_body = f"{DARK_SLATE}Ask anything, use / for commands, @ for files, ! for shell...{RST}"
             col_in_disp = 0
+            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
         elif is_bash:
             cmd_body = buf_str[1:]
             if not cmd_body:
@@ -321,6 +427,29 @@ def read_input(
                 else:
                     disp_body = f"{WHITE}{BOLD}{cmd_body}{RST}"
                     col_in_disp = cursor_in_body
+            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
+        elif "\n" in buf_str:
+            lines = buf_str.split("\n")
+            char_count = 0
+            cur_col_in_line = 0
+            for idx, line_text in enumerate(lines):
+                if char_count + len(line_text) >= cursor_pos:
+                    cur_line_idx = idx
+                    cur_col_in_line = cursor_pos - char_count
+                    break
+                char_count += len(line_text) + 1
+            else:
+                cur_line_idx = len(lines) - 1
+                cur_col_in_line = len(lines[-1])
+
+            disp_body = highlight_prompt_syntax(lines[0])
+            extra_prompt_lines = [f"  {DARK_SLATE}…{RST} {highlight_prompt_syntax(l)}" for l in lines[1:]]
+            if cur_line_idx == 0:
+                col_in_disp = cur_col_in_line
+                target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
+            else:
+                col_in_disp = cur_col_in_line
+                target_col = max(1, min(tw - 1, 2 + len(strip_ansi(f"  {DARK_SLATE}…{RST} ")) + col_in_disp + 1))
         else:
             if len(buf_str) > avail_prompt_w:
                 start_ch = max(0, cursor_pos - avail_prompt_w + 3)
@@ -329,18 +458,22 @@ def read_input(
             else:
                 slice_body = buf_str
                 col_in_disp = cursor_pos
-            styled = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", slice_body)
-            disp_body = f"{WHITE}{BOLD}{styled}{RST}"
-
-        target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
+            disp_body = highlight_prompt_syntax(slice_body)
+            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
 
         # Check for popup lines
         popup_lines: list[str] = []
         max_visible = 8
         if matching_cmds:
-            popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · {MINT}● Built-in{SLATE} · {GOLD}🔌 Config/Ext{SLATE} · ↑/↓ scroll · Tab fill · Enter run)"
-            p_border_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}")
+            if tw >= 95:
+                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · {MINT}● Built-in{SLATE} · {GOLD}🔌 Config/Ext{SLATE} · ↑/↓ scroll · Tab fill · Enter run)"
+            elif tw >= 65:
+                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · ↑/↓ scroll · Tab fill · Enter run)"
+            else:
+                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)})"
+
+            avail_hdr_w = max(4, width - len(strip_ansi(popup_header)) - 7)
+            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * avail_hdr_w}╮{RST}")
             start_v = max(0, min(selected_cmd_idx - max_visible // 2, len(matching_cmds) - max_visible))
             end_v = min(len(matching_cmds), start_v + max_visible)
             for idx in range(start_v, end_v):
@@ -349,34 +482,65 @@ def read_input(
                 prefix = f"{MINT}▶{RST}" if is_sel else " "
                 kind = f"{MINT}●{RST}" if c_kind == "core" else f"{GOLD}🔌{RST}"
                 name = f"{WHITE}{BOLD}{c_name:<12}{RST}" if is_sel else f"{CYAN}{c_name:<12}{RST}"
-                cat = f"{PURPLE}{c_cat:<16}{RST}" if is_sel else f"{DARK_SLATE}{c_cat:<16}{RST}"
-                desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max(10, width - 42)]
-                popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {cat} {desc}")
+                if tw >= 90:
+                    cat = f"{PURPLE}{c_cat:<16}{RST}" if is_sel else f"{DARK_SLATE}{c_cat:<16}{RST}"
+                    max_desc_w = max(10, tw - 46)
+                    desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max_desc_w]
+                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {cat} {desc}")
+                elif tw >= 65:
+                    max_desc_w = max(10, tw - 26)
+                    desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max_desc_w]
+                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {desc}")
+                else:
+                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name}")
             popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
         elif matching_files:
-            popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)} · ↑/↓ scroll · Tab fill · Enter select)"
-            p_border_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * p_border_w}╮{RST}")
+            if tw >= 75:
+                popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)} · ↑/↓ scroll · Tab fill · Enter select)"
+            else:
+                popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)})"
+
+            avail_hdr_w = max(4, width - len(strip_ansi(popup_header)) - 7)
+            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * avail_hdr_w}╮{RST}")
             start_v = max(0, min(selected_file_idx - max_visible // 2, len(matching_files) - max_visible))
             end_v = min(len(matching_files), start_v + max_visible)
             for idx in range(start_v, end_v):
                 f_path = matching_files[idx]
                 is_sel = (idx == selected_file_idx)
                 prefix = f"{MINT}▶{RST}" if is_sel else " "
-                disp = (f_path if len(f_path) <= (width - 16) else "…" + f_path[-(width - 18):])
+                max_f_len = max(10, tw - 16)
+                disp = (f_path if len(f_path) <= max_f_len else "…" + f_path[-(max_f_len - 1):])
                 name = f"{WHITE}{BOLD}{disp}{RST}" if is_sel else f"{SLATE}{disp}{RST}"
                 popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} 📄 {name}")
             popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
 
-        if popup_lines:
-            safe_popup = [safe_ansi_truncate(l, max(20, tw - 2)) for l in popup_lines]
-            output = [f"\033[?25l\033[?7l\r\033[K  {p_prefix}{disp_body}"]
-            for pl in safe_popup:
-                output.append(f"\n\r\033[K{pl}")
-            output.append(f"\033[J\033[{len(safe_popup)}A\r\033[{target_col}G\033[?7h\033[?25h")
-            sys.stdout.write("".join(output))
+        all_extra = extra_prompt_lines + popup_lines
+
+        # Build output buffer
+        output: list[str] = ["\033[?25l\033[?7l"]
+
+        # If previous frame left the cursor on line > 0, move back up to line 0
+        if last_cur_line_idx > 0:
+            output.append(f"\033[{last_cur_line_idx}A\r")
         else:
-            sys.stdout.write(f"\033[?25l\033[?7l\r\033[K  {p_prefix}{disp_body}\033[J\r\033[{target_col}G\033[?7h\033[?25h")
+            output.append("\r")
+
+        output.append(f"\033[K  {p_prefix}{disp_body}")
+        if all_extra:
+            safe_extra = [safe_ansi_truncate(l, max(20, tw - 2)) for l in all_extra]
+            for pl in safe_extra:
+                output.append(f"\n\r\033[K{pl}")
+            output.append("\033[J")
+            lines_up = len(safe_extra) - cur_line_idx
+            if lines_up > 0:
+                output.append(f"\033[{lines_up}A\r\033[{target_col}G\033[?7h\033[?25h")
+            else:
+                output.append(f"\r\033[{target_col}G\033[?7h\033[?25h")
+        else:
+            output.append(f"\033[J\r\033[{target_col}G\033[?7h\033[?25h")
+
+        last_cur_line_idx = cur_line_idx
+        sys.stdout.write("".join(output))
         sys.stdout.flush()
 
     fd = sys.stdin.fileno()
@@ -401,6 +565,7 @@ def read_input(
 
     last_esc_time = 0.0
     stashed_prompt = ""
+    saved_draft = ""
     undo_stack: list[tuple[list[str], int]] = []
 
     try:
@@ -409,7 +574,7 @@ def read_input(
             raw_bytes = os.read(fd, 8192)
             if not raw_bytes: break
             buf_str = "".join(buffer)
-            matching_cmds = get_matching_commands(buf_str) if (cmd_popup_open and buf_str.startswith("/")) else []
+            matching_cmds = get_matching_commands(buf_str) if (cmd_popup_open and buf_str.startswith(("/", "\\"))) else []
             buf_before_cur = "".join(buffer[:cursor_pos])
             last_at = buf_before_cur.rfind("@")
             matching_files = get_matching_files(buf_before_cur[last_at + 1:]) if (file_popup_open and not matching_cmds and last_at != -1 and " " not in buf_before_cur[last_at:]) else []
@@ -430,7 +595,8 @@ def read_input(
                 else:
                     idx = (MODES_CYCLE.index(current_mode) + 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
                     current_mode = MODES_CYCLE[idx]
-                    sys.stdout.write("\033[1A")
+                    lines_up_to_header = last_cur_line_idx + 1
+                    sys.stdout.write(f"\033[{lines_up_to_header}A\r")
                     _render_status_header(current_mode)
                     draw()
                 continue
@@ -439,21 +605,26 @@ def read_input(
             if any(raw_bytes.startswith(k) for k in (b"\x1b[Z", b"\x1b\t", b"\x1b\x09", b"\x1b[27;2;9~", b"\x1b[9;2u", b"\x1b[24~", b"\x1b[1;2Z", b"\x1bOZ")):
                 idx = (MODES_CYCLE.index(current_mode) - 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
                 current_mode = MODES_CYCLE[idx]
-                sys.stdout.write("\033[1A")
+                lines_up_to_header = last_cur_line_idx + 1
+                sys.stdout.write(f"\033[{lines_up_to_header}A\r")
                 _render_status_header(current_mode)
                 draw()
                 continue
 
-            # Ctrl+T (0x14) -> Toggle tasks / checklist (/todos)
-            if raw_bytes == b"\x14":
+            def _clean_exit():
+                if last_cur_line_idx > 0:
+                    sys.stdout.write(f"\033[{last_cur_line_idx}A\r\033[J")
                 sys.stdout.write("\n")
                 sys.stdout.flush()
+
+            # Ctrl+T (0x14) -> Toggle tasks / checklist (/todos)
+            if raw_bytes == b"\x14":
+                _clean_exit()
                 return ("/todos", current_mode if current_mode != mode else None, current_subagent_idx)
 
             # Ctrl+O (0x0f) -> Show full verbose output (/output)
             if raw_bytes == b"\x0f":
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                _clean_exit()
                 return ("/output", current_mode if current_mode != mode else None, current_subagent_idx)
 
             # Ctrl+Z (0x1a) -> Suspend process cleanly
@@ -465,22 +636,20 @@ def read_input(
                     draw()
                 continue
 
-
             # Opt+P / Alt+P (b"\x1bp", b"\xcf\x80") -> Switch model
             if raw_bytes in (b"\x1bp", b"\xcf\x80"):
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                _clean_exit()
                 return ("/model", current_mode if current_mode != mode else None, current_subagent_idx)
 
 
 
-            # Down Arrow -> Navigate command history forward
+            # Down Arrow -> Navigate command popup forward or command history forward
             if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                if matching_files and file_popup_open and ("@" in buf_str) and history_idx == len(history):
+                if matching_files and file_popup_open and ("@" in buf_str):
                     selected_file_idx = (selected_file_idx + 1) % len(matching_files)
                     draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith("/") and history_idx == len(history) and len(matching_cmds) > 1 and selected_cmd_idx < len(matching_cmds) - 1:
-                    selected_cmd_idx = selected_cmd_idx + 1
+                elif matching_cmds and cmd_popup_open and buf_str.startswith(("/", "\\")):
+                    selected_cmd_idx = (selected_cmd_idx + 1) % len(matching_cmds)
                     draw()
                 elif history_idx < len(history) - 1:
                     history_idx += 1
@@ -498,13 +667,13 @@ def read_input(
                     draw()
                 continue
 
-            # Up Arrow -> Navigate command history backward
+            # Up Arrow -> Navigate command popup backward (wrap to last entry) or command history backward
             if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                if matching_files and file_popup_open and ("@" in buf_str) and history_idx == len(history):
+                if matching_files and file_popup_open and ("@" in buf_str):
                     selected_file_idx = (selected_file_idx - 1) % len(matching_files)
                     draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith("/") and history_idx == len(history) and len(matching_cmds) > 1 and selected_cmd_idx > 0:
-                    selected_cmd_idx = selected_cmd_idx - 1
+                elif matching_cmds and cmd_popup_open and buf_str.startswith(("/", "\\")):
+                    selected_cmd_idx = (selected_cmd_idx - 1) % len(matching_cmds)
                     draw()
                 elif history and history_idx > 0:
                     if history_idx == len(history):
@@ -712,8 +881,7 @@ def read_input(
             # Left Arrow -> Switch to session switcher if buffer is empty, else move cursor left
             if raw_bytes.startswith((b"\x1b[D", b"\x1bOD")):
                 if not buffer:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    _clean_exit()
                     return ("__SWITCH_SESSION__", current_mode if current_mode != mode else None, current_subagent_idx)
                 if cursor_pos > 0:
                     cursor_pos -= 1
@@ -739,25 +907,55 @@ def read_input(
                     draw()
                 continue
 
-            # Enter (submit prompt, complete slash command, or complete @file)
-            if raw_bytes in (b"\r", b"\n", b"\r\n"):
-                if matching_files:
-                    chosen_file = matching_files[selected_file_idx % len(matching_files)]
-                    new_before = buf_before_cur[:last_at + 1] + chosen_file + " "
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = list(new_before + "".join(buffer[cursor_pos:]))
-                    cursor_pos = len(new_before)
-                    file_popup_open = False
-                    draw()
-                    continue
+            # Shift+Enter / Alt+Enter / Option+Enter / Ctrl+Enter / Shift+End -> Insert Newline
+            is_shift_enter = (
+                raw_bytes in (
+                    b"\x1b[13;2u", b"\x1b[27;2;13~", b"\x1b[13;2~",
+                    b"\x1b[10;2u", b"\x1b[27;2;10~", b"\x1b[1;2R",
+                    b"\x1b\r", b"\x1b\n", b"\x1b[13;3u", b"\x1b[27;3;13~",
+                    b"\x1b[10;3u", b"\x1b[27;3;10~", b"\x1b[13;5u",
+                    b"\x1b[27;5;13~", b"\x1b[10;5u", b"\x1b[27;5;10~",
+                    b"\x1b[13;4u", b"\x1b[13;6u",
+                    # Shift+End variations
+                    b"\x1b[1;2F", b"\x1b[4;2~", b"\x1b[8;2~", b"\x1b[1;2End",
+                )
+                or (raw_bytes.startswith(b"\x1b[13;") and raw_bytes.endswith((b"u", b"~")))
+                or (raw_bytes.startswith(b"\x1b[27;") and raw_bytes.endswith((b"u", b"~")))
+                or (raw_bytes.startswith(b"\x1b[10;") and raw_bytes.endswith((b"u", b"~")))
+            )
+            if is_shift_enter:
+                undo_stack.append((list(buffer), cursor_pos))
+                buffer.insert(cursor_pos, "\n")
+                cursor_pos += 1
+                draw()
+                continue
 
+            # Regular Enter (Return / newline / keypad enter) -> Submit prompt, complete slash command, or complete @file
+            if raw_bytes in (b"\r", b"\n", b"\r\n", b"\x1bOM"):
                 buf_text = "".join(buffer).strip()
-                if matching_cmds and not (" " in buf_text):
+
+                # If @file autocomplete popup was open and user hit Enter on a partial prefix
+                if matching_files and file_popup_open:
+                    chosen_file = matching_files[selected_file_idx % len(matching_files)]
+                    at_token = buf_before_cur[last_at + 1:].strip()
+                    if at_token != chosen_file:
+                        new_before = buf_before_cur[:last_at + 1] + chosen_file + " "
+                        undo_stack.append((list(buffer), cursor_pos))
+                        buffer = list(new_before + "".join(buffer[cursor_pos:]))
+                        cursor_pos = len(new_before)
+                        file_popup_open = False
+                        draw()
+                        continue
+
+                # If slash command popup was open on a bare slash command prefix
+                if matching_cmds and cmd_popup_open and not (" " in buf_text):
                     chosen_cmd = matching_cmds[selected_cmd_idx % len(matching_cmds)][0]
-                    buffer = list(chosen_cmd)
-                    cursor_pos = len(buffer)
-                    cmd_popup_open = False
-                    draw()
+                    if buf_text != chosen_cmd:
+                        buffer = list(chosen_cmd)
+                        cursor_pos = len(buffer)
+                        cmd_popup_open = False
+                        draw()
+                        continue
 
                 if buffer and buffer[-1] == "\\":
                     buffer.pop()
@@ -766,14 +964,10 @@ def read_input(
                     draw()
                     continue
                 buf_str_final = "".join(buffer).strip()
-                if buf_str_final.startswith("!"):
-                    p_prefix_final = f"{AMBER}{BOLD}!{RST} "
-                elif subagent_label:
-                    p_prefix_final = f"{CYAN}[{subagent_label}]{RST} {BOLD}{CYAN}❯{RST} "
-                else:
-                    p_prefix_final = f"{BOLD}{CYAN}❯{RST} "
-                styled_final = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", buf_str_final)
-                sys.stdout.write(f"\r\033[K  {p_prefix_final}{WHITE}{BOLD}{styled_final}{RST}\n\n\033[J\033[?7h\033[?25h")
+                if last_cur_line_idx > 0:
+                    sys.stdout.write(f"\033[{last_cur_line_idx}A\r")
+                banner = format_user_prompt_banner(buf_str_final, subagent_label=subagent_label, is_bash=buf_str_final.startswith("!"))
+                sys.stdout.write(f"\r\033[K{banner}\n\n\033[J\033[?7h\033[?25h")
                 sys.stdout.flush()
                 break
 

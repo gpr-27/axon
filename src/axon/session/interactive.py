@@ -129,11 +129,8 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
         if role == "user":
             if isinstance(content, str):
                 clean_text = content.strip()
-                if len(clean_text) > width - 6 or "\n" in clean_text:
-                    sys.stdout.write(f"  {BOLD}{CYAN}›{RST} {WHITE}{clean_text[:500]}{RST}\n\n")
-                else:
-                    pad_len = max(0, width - len(clean_text) - 4)
-                    sys.stdout.write(f"  {GRAY_BG}{BOLD}{WHITE} › {clean_text}{' ' * pad_len} {RST}\n\n")
+                from axon.ui.input import format_user_prompt_banner
+                sys.stdout.write(f"{format_user_prompt_banner(clean_text, max_w=width)}\n\n")
             elif isinstance(content, list):
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "tool_result":

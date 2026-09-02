@@ -283,47 +283,50 @@ def str_width(s: str) -> int:
         w += char_width(ch)
     return w
 
-def make_clickable(label: str, url_or_path: str) -> str:
+def make_clickable(label: str, url_or_path: str, workspace: Path | None = None) -> str:
     """OSC 8 terminal hyperlink: \x1b]8;;URL\x1b\\LABEL\x1b]8;;\x1b\\"""
-    if url_or_path.startswith(("http://", "https://", "file://")):
-        target = url_or_path
+    clean_target = url_or_path.strip().strip("'\"")
+    if clean_target.startswith(("http://", "https://", "file://")):
+        target = clean_target
     else:
-        abs_p = Path(url_or_path).resolve()
+        ws = workspace or Path.cwd()
+        p = Path(clean_target).expanduser()
+        abs_p = (ws / p).resolve() if not p.is_absolute() else p.resolve()
         target = f"file://{abs_p}"
     return f"\x1b]8;;{target}\x1b\\{UNDER}{TEAL}{label}{RST}\x1b]8;;\x1b\\"
 
 def _style_inline(s: str) -> str:
     """Apply inline bold, code, emphasis, clickable links, and inline math."""
-    # Inline math: $...$ -> Unicode formula (must run before other inline transforms)
+    # 1. Inline math: $...$ -> Unicode formula
     s = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", lambda m: f"{GOLD}{latex_to_unicode(m.group(1))}{RST}", s)
 
-    # Markdown links: [label](url_or_path) -> OSC 8 clickable link
-    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: make_clickable(m.group(1), m.group(2)), s)
+    # 2. Result badges: PASS, FAIL, WARN
+    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✓\s*)?PASS(?:\b|(?=[\s|`]))", rf"{MINT}{BOLD}✓ PASS{RST}", s)
+    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✗\s*)?FAIL(?:\b|(?=[\s|`]))", rf"{ROSE}{BOLD}✗ FAIL{RST}", s)
+    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:⚠\s*)?WARN(?:ING)?(?:\b|(?=[\s|`]))", rf"{GOLD}{BOLD}⚠ WARN{RST}", s)
 
-    # Bold + Italic ***text*** -> BOLD ITALIC WHITE
+    # 3. Bold + Italic ***text*** -> BOLD ITALIC WHITE
     s = re.sub(r"\*\*\*([^\n*]+?)\*\*\*", rf"{BOLD}{ITALIC}{WHITE}\1{RST}", s)
 
-    # Bold **text** or __text__ -> BOLD WHITE
+    # 4. Bold **text** or __text__ -> BOLD WHITE
     s = re.sub(r"\*\*([^\n*]+?)\*\*", rf"{BOLD}{WHITE}\1{RST}", s)
-    s = re.sub(r"__([^\n_]+?)__", rf"{BOLD}{WHITE}\1{RST}", s)
+    s = re.sub(r"(?<!\w)__([^\n_]+?)__(?!\w)", rf"{BOLD}{WHITE}\1{RST}", s)
 
-    # Inline code `code` -> check if file path
+    # 5. Italic *text* or _text_ (strictly outside word/path boundaries so filename underscores are never touched)
+    s = re.sub(r"(?<!\*)\*([^\n*]+?)\*(?!\*)", rf"{ITALIC}\1{RST}", s)
+    s = re.sub(r"(?<![\w/\\\.])_([^\n_]+?)_(?![\w/\\\.])", rf"{ITALIC}\1{RST}", s)
+
+    # 6. Markdown links: [label](url_or_path) -> OSC 8 clickable link
+    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: make_clickable(m.group(1), m.group(2)), s)
+
+    # 7. Inline code `code` -> check if file path (runs LAST so OSC 8 escapes are never corrupted)
     def _code_repl(m: re.Match) -> str:
         code_str = m.group(1)
-        if re.match(r"^[\w\-./\\]+\.(py|js|ts|json|md|toml|env|html|css|txt|sh|rs|go|cpp|c|h)$", code_str) or "/" in code_str:
+        if re.match(r"^[\w\-./\\]+\.(py|js|ts|json|md|toml|env|html|css|txt|sh|rs|go|cpp|c|h|csv|yaml|yml)$", code_str) or "/" in code_str:
             return make_clickable(code_str, code_str)
         return f"{TEAL}{code_str}{RST}"
 
     s = re.sub(r"`([^`]+)`", _code_repl, s)
-
-    # Italic *text* or _text_ -> ITALIC
-    s = re.sub(r"(?<!\*)\*([^\n*]+?)\*(?!\*)", rf"{ITALIC}\1{RST}", s)
-    s = re.sub(r"(?<!_)_([^\n_]+?)_(?!_)", rf"{ITALIC}\1{RST}", s)
-
-    # Result badges: PASS, FAIL, WARN (with or without checkmarks)
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✓\s*)?PASS(?:\b|(?=[\s|`]))", rf"{MINT}{BOLD}✓ PASS{RST}", s)
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✗\s*)?FAIL(?:\b|(?=[\s|`]))", rf"{ROSE}{BOLD}✗ FAIL{RST}", s)
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:⚠\s*)?WARN(?:ING)?(?:\b|(?=[\s|`]))", rf"{GOLD}{BOLD}⚠ WARN{RST}", s)
     return s
 
 def render_table(table_lines: list[str], max_total_width: int | None = None) -> list[str]:
@@ -421,7 +424,7 @@ def render_table(table_lines: list[str], max_total_width: int | None = None) -> 
         h_styled_cells = []
         for i, c in enumerate(header):
             w = col_widths[i]
-            styled = f"{BOLD}{WHITE}{_style_inline(c)}{RST}"
+            styled = f"{BOLD}{TEAL}{_style_inline(c)}{RST}"
             sw = str_width(styled)
             pad = " " * max(0, w - sw)
             h_styled_cells.append(f" {styled}{pad} ")
@@ -445,6 +448,8 @@ def render_table(table_lines: list[str], max_total_width: int | None = None) -> 
                 w = col_widths[col_i]
                 sub_text = wrapped_cols[col_i][sub_i] if sub_i < len(wrapped_cols[col_i]) else ""
                 styled = _style_inline(sub_text)
+                if col_i == 0 and "\033[" not in styled and styled.strip():
+                    styled = f"{CYAN}{BOLD}{styled}{RST}"
                 sw = str_width(styled)
                 pad = " " * max(0, w - sw)
                 row_cells.append(f" {styled}{pad} ")
@@ -503,8 +508,12 @@ def format_markdown(text: str, max_width: int | None = None) -> str:
             in_code_block = not in_code_block
             lang = stripped.lstrip("`").strip()
             if in_code_block:
-                border_w = max(20, min(max_width, 80) - len(lang) - 8)
-                out.append(f"  {DARK_SLATE}┌── {LBLUE}{lang or 'code'}{DARK_SLATE} {'─' * border_w}{RST}")
+                if lang:
+                    border_w = max(20, min(max_width, 80) - len(lang) - 8)
+                    out.append(f"  {DARK_SLATE}┌── {LBLUE}{lang}{DARK_SLATE} {'─' * border_w}{RST}")
+                else:
+                    border_w = max(26, min(max_width, 80) - 4)
+                    out.append(f"  {DARK_SLATE}┌──{'─' * border_w}{RST}")
             else:
                 border_w = max(26, min(max_width, 80) - 4)
                 out.append(f"  {DARK_SLATE}└──{'─' * border_w}{RST}")

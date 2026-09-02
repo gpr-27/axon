@@ -33,9 +33,15 @@ def test_ui_input_modes_cycle(workspace: Path):
     assert _get_mode_info("bypass")[1] == GOLD
 
     # Test ALL_SLASH_COMMANDS coverage
-    from axon.ui.input import ALL_SLASH_COMMANDS
+    from axon.ui.input import ALL_SLASH_COMMANDS, highlight_prompt_syntax
     cmd_names = [c[0] for c in ALL_SLASH_COMMANDS]
     assert "/subagents" in cmd_names
     assert "/main" in cmd_names
     assert "/model" in cmd_names
     assert "/effort" in cmd_names
+
+    # Test highlight_prompt_syntax
+    styled = highlight_prompt_syntax("@axon.md read this /cost !ls")
+    assert "@axon.md" in styled
+    assert "/cost" in styled
+    assert "!ls" in styled
