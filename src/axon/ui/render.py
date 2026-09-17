@@ -490,6 +490,7 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         f"{GOLD}/{RST} for commands",
         f"{GOLD}@{RST} for file paths",
         f"{GOLD}/btw{RST} for side question",
+        f"{CYAN}ctrl + s{RST} to stash prompt",
         f"{GOLD}?{RST} or {GOLD}/kb{RST} for shortcuts",
     ]
     col2 = [
@@ -497,6 +498,7 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         f"{CYAN}double esc{RST} to clear input",
         f"{CYAN}ctrl + o{RST} for verbose output",
         f"{CYAN}ctrl + t{RST} to toggle tasks",
+        f"{CYAN}ctrl + g{RST} to edit in $EDITOR",
         f"{CYAN}\\⏎{RST} for newline",
     ]
 
@@ -777,18 +779,49 @@ class Renderer:
         self._tool_call_count = 0
         self._thinking_cur_line_len = 0
 
-    def print_banner(self, version: str, model: str, effort: str, workspace: str, mode: str) -> None:
-        """Render Axon unique neural core logo and session header."""
-        w_path = str(workspace)
+    def print_banner(
+        self,
+        version: str = "",
+        model: str = "",
+        effort: str = "",
+        workspace: str = "",
+        mode: str = "",
+        base_url: str = "",
+    ) -> None:
+        """Render Axon unique neural core logo and session header dynamically from configs."""
+        import axon
+        v = version or getattr(axon, "__version__", "GPR_27")
+        v_str = v if str(v).startswith("v") else f"v{v}"
+
+        w_path = str(workspace) if workspace else str(Path.cwd())
         home = str(Path.home())
         if w_path.startswith(home):
             w_path = "~" + w_path[len(home):]
 
-        v_str = version if version.startswith("v") else f"v{version}"
+        m_name = model or "deepseek-v4-flash"
+        eff = effort or "quantum"
+
+        # Determine billing label dynamically from provider / base_url
+        url_lower = (base_url or "").lower()
+        if "localhost" in url_lower or "127.0.0.1" in url_lower or "11434" in url_lower or "ollama" in m_name.lower():
+            billing = "Local Inference (Free & Private)"
+        else:
+            is_local = False
+            try:
+                from axon.providers.catalog import PROVIDER_PRESETS
+                for p in PROVIDER_PRESETS:
+                    if (base_url and p.base_url.rstrip("/").lower() in url_lower) or (m_name and m_name in p.models):
+                        if p.category == "Local (Offline & Free)" or not p.requires_key:
+                            is_local = True
+                            break
+            except Exception:
+                pass
+            billing = "Local Inference (Free & Private)" if is_local else "API Usage Billing"
+
         axon_logo = [
             f"  {TEAL}▲{CYAN}█{MINT}▲  {BOLD}{WHITE}Axon{RST} {DIM}{v_str}{RST}",
-            f"  {TEAL}█{CYAN}⚡{MINT}█  {SLATE}{model} with {effort} effort · API Usage Billing{RST}",
-            f"  {TEAL}▼{CYAN}█{MINT}▼  {DARK_SLATE}{w_path}{RST}",
+            f"  {TEAL}█{CYAN}⚡{MINT}█  {SLATE}{m_name} with {eff} effort · {billing}{RST}",
+            f"  {TEAL}▼{CYAN}█{MINT}▼  {SLATE}{w_path}{RST}",
         ]
         print()
         for line in axon_logo:

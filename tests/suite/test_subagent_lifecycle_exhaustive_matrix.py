@@ -159,4 +159,50 @@ def test_handle_subagents_queue_routing(workspace: Path):
     res_queue = handle_subagents(agent, "queue")
     assert res_queue.handled is True
 
+def test_subagent_isolated_ledger_and_single_recording(workspace: Path):
+    from axon.agent.loop import Agent
+    from axon.session.ledger import Ledger
+    from axon.providers.base import Usage, AssistantTurn, TextBlock, TurnComplete
+    from axon.config import Settings
+    from axon.permissions.engine import PermissionEngine
+    from axon.agent.context import ContextManager
+    from axon.tools import create_default_registry
+    from axon.agent.subagent import run_subagent
+
+    class DummyProvider:
+        name = "openai_compat"
+        def stream(self, **kwargs):
+            yield TurnComplete(stop_reason="end_turn", usage=Usage(input=1000, output=100, cache_read=800))
+        def finalize(self):
+            return AssistantTurn(blocks=[TextBlock(text="Subagent finished")], stop_reason="end_turn", usage=Usage(input=1000, output=100, cache_read=800))
+        def supports(self, feat):
+            return True
+
+    settings = Settings(workspace=workspace, model="deepseek-v4-flash")
+    parent_ledger = Ledger()
+    # Main agent executes turn
+    parent_ledger.record("deepseek-v4-flash", Usage(input=2000, output=200, cache_read=1500))
+    initial_cost = parent_ledger.total()
+
+    parent = Agent(
+        provider=DummyProvider(),
+        tools=create_default_registry(),
+        permissions=PermissionEngine(settings),
+        context=ContextManager(settings),
+        session=SessionStore(workspace),
+        ledger=parent_ledger,
+        settings=settings,
+    )
+    parent.session.open("sess_parent")
+
+    out = run_subagent("Perform analysis", parent, max_iterations=2)
+    assert "Subagent finished" in out
+
+    # Verify parent ledger was updated exactly ONCE for the subagent's total
+    # (1 main agent turn + 1 subagent aggregated record = 2 records)
+    assert len(parent_ledger.turn_costs) == 2
+    assert parent_ledger.total() > initial_cost
+    assert parent_ledger.total_cache_read_tokens == 1500 + 800
+
+
 

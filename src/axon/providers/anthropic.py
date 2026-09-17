@@ -147,6 +147,42 @@ class AnthropicProvider:
                 yield TurnComplete(stop_reason=stop_reason, usage=usage)  # type: ignore
 
         except Exception as e:
+            err_str = str(e)
+            if "402" in err_str or "budget pool quota has been exhausted" in err_str.lower() or "budget pool" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 402 Budget Pool Quota Exhausted.\n"
+                    "  Claude and GPT models on AgentRouter are released in daily batches on a first-come, first-served basis:\n"
+                    "    • 00:00 Beijing time (16:00 UTC)\n"
+                    "    • 08:00 Beijing time (00:00 UTC)\n"
+                    "    • 16:00 Beijing time (08:00 UTC)\n"
+                    "  💡 How to fix:\n"
+                    "     1. Switch to DeepSeek with `/model deepseek-v4-flash` for uninterrupted use with unlimited quota.\n"
+                    "     2. Or wait for the next batch release time slot.\n"
+                    "     3. Run `/faq 402` for more details."
+                ) from e
+            if "content blocked" in err_str.lower() or "400 content blocked" in err_str.lower() or "unsupported language" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 400 Content Blocked: Language restriction triggered.\n"
+                    "  AgentRouter currently only supports Chinese, English, French, German, and Russian.\n"
+                    "  💡 How to fix: Modify or translate your request into a supported language and retry.\n"
+                    "  Run `/faq 400` for more details."
+                ) from e
+            if "sensitive_words_detected" in err_str or "sensitive words" in err_str.lower():
+                raise ProviderError(
+                    "Content filter triggered (sensitive_words_detected).\n"
+                    "  This is AgentRouter's sensitive word detection to prevent abuse.\n"
+                    "  💡 How to fix: Run `/clear` to reset context, or start a new session with `/sessions`.\n"
+                    "  Run `/faq sensitive` for more details."
+                ) from e
+            if "401" in err_str or "unauthorized" in err_str.lower() or "authentication" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 401 Unauthorized: Invalid API key or client rejected.\n"
+                    "  💡 How to fix:\n"
+                    "     1. Check your API key at https://agentrouter.org/console or https://ps.air-outer.com\n"
+                    "     2. Run `/keys` or `/provider` to update credentials.\n"
+                    "     3. Supported client documentation: https://ps.air-outer.com/docs/claude-code.html\n"
+                    "     4. Run `/faq 401` for more details."
+                ) from e
             raise ProviderError(f"Anthropic streaming failed: {e}") from e
 
     def finalize(self) -> AssistantTurn:

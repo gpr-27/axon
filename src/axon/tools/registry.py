@@ -34,7 +34,7 @@ class ToolRegistry:
         Export tool schemas in either Anthropic or OpenAI-compatible function format.
         """
         schemas = []
-        for t in self._tools.values():
+        for t in sorted(self._tools.values(), key=lambda x: x.name):
             if provider_style == "anthropic":
                 schemas.append({
                     "name": t.name,

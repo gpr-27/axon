@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,6 +229,24 @@ class Agent:
         # Open fresh session ID in store
         new_id = self.session.open(session_id)
         return new_id
+
+    def get_combined_cost(self) -> Decimal:
+        """Return combined session cost (main agent plus all subagents)."""
+        if hasattr(self, "session") and hasattr(self.session, "load_ledger"):
+            parent_id = self.session.active_session_id.rsplit("_sub_", 1)[0]
+            s_ledger = self.session.load_ledger(parent_id, self.settings.model, include_subagents=True)
+            if s_ledger and s_ledger.total_cost > Decimal("0.0"):
+                return max(self.ledger.total(), s_ledger.total())
+        return self.ledger.total()
+
+    def get_combined_tokens(self) -> int:
+        """Return combined session token count (main agent plus all subagents)."""
+        if hasattr(self, "session") and hasattr(self.session, "load_ledger"):
+            parent_id = self.session.active_session_id.rsplit("_sub_", 1)[0]
+            s_ledger = self.session.load_ledger(parent_id, self.settings.model, include_subagents=True)
+            if s_ledger:
+                return max(self.ledger.total_tokens(), s_ledger.total_tokens())
+        return self.ledger.total_tokens()
 
     def run_turn(self, user_input: str) -> TurnResult:
         """Run complete ReAct loop until end_turn or iteration exhaustion."""

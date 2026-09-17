@@ -86,10 +86,12 @@ def handle_help(agent: Agent, arg: str) -> CommandResult:
 |---|---|
 | `/breakdown` | Full prompt breakdown (system, tools, previous history, last message) & token match |
 | `/context` | View active context budget, token breakdown, and compaction limit |
-| `/provider` | Connect a provider (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI, Gemini, Groq) |
+| `/provider` | Connect a provider (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI, Gemini) |
 | `/compact` | Compact conversation history while preserving key context |
 | `/window [turns]` | Adjust sliding context window size (e.g. `/window 10` or `/window 0` for all) |
-| `/cost` | View session billing ledger, token counts, and real-time cost |
+| `/cost [calls]` | View session billing ledger, token counts, and call history |
+| `/pricing` | View AgentRouter live pricing matrix and cache discounts |
+| `/faq [topic]` | AgentRouter FAQs & error troubleshooting (400, 401, 402, pricing) |
 | `/analytics` | View lifetime workspace usage metrics, tool calls, and model analytics |
 | `/payload [full]` | Inspect exact prompt payload and tool results sent to model |
 
@@ -178,20 +180,34 @@ def handle_effort(agent: Agent, arg: str) -> CommandResult:
         agent.settings = agent.settings.model_copy(update={"effort": chosen})
         print(f"\n  {TEAL}✓ Switched neural reasoning tier to {BOLD}{chosen}{RST}")
         from axon.ui.render import Renderer
+        import axon
         Renderer().print_banner(
-            version="GPR_27",
+            version=getattr(axon, "__version__", ""),
             model=agent.settings.model,
             effort=chosen,
             workspace=str(agent.settings.workspace),
             mode=agent.settings.mode,
+            base_url=agent.settings.base_url,
         )
     else:
         print(f"\n  {SLATE}(Reasoning tier unchanged: {agent.settings.effort}){RST}\n")
     return CommandResult(handled=True)
 
+def handle_provider(agent: Agent, arg: str = "") -> CommandResult:
+    """Connect a provider modal / switcher."""
+    from axon.ui.provider_picker import run_provider_picker
+    run_provider_picker(agent)
+    return CommandResult(handled=True)
+
 def handle_model(agent: Agent, arg: str) -> CommandResult:
     import random
-    from axon.providers.catalog import get_curated_model_choices, find_preset_for_model
+    from axon.providers.catalog import get_curated_model_choices, find_preset_for_model, get_linked_providers
+
+    arg_clean = arg.strip()
+    if not arg_clean:
+        from axon.ui.model_picker import run_model_picker
+        run_model_picker(agent)
+        return CommandResult(handled=True)
 
     curated_choices = get_curated_model_choices(agent.settings.base_url)
     display_to_model = {disp: raw_id for raw_id, _, disp in curated_choices}
@@ -204,19 +220,17 @@ def handle_model(agent: Agent, arg: str) -> CommandResult:
                 break
 
     raw_models = [raw_id for raw_id, _, _ in curated_choices]
-
-    arg_clean = arg.strip()
     chosen_preset = None
 
     if arg_clean.lower() in ("random", "rand", "shuffle", "surprise"):
-        chosen = random.choice(raw_models)
+        chosen = random.choice(raw_models) if raw_models else "deepseek-v4-flash"
         print(f"\n  {GOLD}🎲 Selected random model: {BOLD}{chosen}{RST}")
     elif arg_clean.lower() in ("random:small", "random-small", "rand-small", "small"):
         small_models = [
             m for m in raw_models
             if any(k in m.lower() for k in ("0.5b", "1.5b", "1b", "2b", "3b", "3.8b", "7b", "8b", "mini", "flash", "haiku", "lite"))
         ]
-        chosen = random.choice(small_models) if small_models else random.choice(raw_models)
+        chosen = random.choice(small_models) if small_models else (random.choice(raw_models) if raw_models else "deepseek-v4-flash")
         print(f"\n  {GOLD}🎲 Selected random lightweight model: {BOLD}{chosen}{RST}")
     elif arg_clean:
         # User specified an exact model name (either from presets or a custom model)
@@ -395,15 +409,21 @@ def handle_model(agent: Agent, arg: str) -> CommandResult:
         except Exception:
             pass
 
-        print(f"\n  {TEAL}✓ Switched active model to {BOLD}{chosen}{RST} {SLATE}({target_base_url}){RST}")
+        if sys.stdin.isatty():
+            sys.stdout.write("\033[2J\033[H\n")
+            sys.stdout.flush()
+        else:
+            print(f"\n  {TEAL}✓ Switched active model to {BOLD}{chosen}{RST} {SLATE}({target_base_url}){RST}")
         from axon.ui.render import Renderer
+        import axon
         r = Renderer()
         r.print_banner(
-            version="GPR_27",
+            version=getattr(axon, "__version__", ""),
             model=chosen,
             effort=agent.settings.effort,
             workspace=str(agent.settings.workspace),
             mode=agent.settings.mode,
+            base_url=target_base_url,
         )
     else:
         print(f"\n  {SLATE}(Active model unchanged: {agent.settings.model}){RST}\n")
@@ -439,12 +459,14 @@ def handle_mode(agent: Agent, arg: str) -> CommandResult:
         agent.permissions.settings = agent.settings
         print(f"\n  {TEAL}✓ Switched permission mode to {BOLD}{chosen}{RST}")
         from axon.ui.render import Renderer
+        import axon
         Renderer().print_banner(
-            version="GPR_27",
+            version=getattr(axon, "__version__", ""),
             model=agent.settings.model,
             effort=agent.settings.effort,
             workspace=str(agent.settings.workspace),
             mode=chosen,
+            base_url=agent.settings.base_url,
         )
     return CommandResult(handled=True)
 
@@ -478,29 +500,42 @@ def handle_context(agent: Agent, arg: str) -> CommandResult:
 
 def handle_cost(agent: Agent, arg: str) -> CommandResult:
     from decimal import Decimal
+    arg_clean = arg.strip().lower()
     curr_id = agent.session.active_session_id
     parent_id = curr_id.rsplit("_sub_", 1)[0] if "_sub_" in curr_id else curr_id
     model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
 
+    # Support detailed call-by-call ledger history
+    if arg_clean in ("calls", "call", "detail", "details", "history", "-v", "--verbose"):
+        active_l = agent.ledger if (hasattr(agent, "ledger") and agent.ledger and agent.ledger.entries) else (agent.session.load_ledger(parent_id, model_name) if hasattr(agent, "session") else agent.ledger)
+        print(f"\n{GOLD}{BOLD}=== Detailed Call-by-Call API History ==={RST}")
+        print(f"{active_l.render_call_history()}\n")
+        return CommandResult(handled=True)
+
     if "_sub_" in curr_id:
         sub_part = curr_id.split("_sub_")[-1]
-        sub_ledger = agent.session.load_ledger(curr_id, model_name) if hasattr(agent, "session") else agent.ledger
+        sub_ledger = agent.ledger if (hasattr(agent, "ledger") and agent.ledger and agent.ledger.entries) else (agent.session.load_ledger(curr_id, model_name) if hasattr(agent, "session") else agent.ledger)
         print(f"\n{GOLD}{BOLD}=== Subagent #{sub_part} Cost & Token Ledger ==={RST}")
         print(f"\n{sub_ledger.render(model_name)}\n")
     else:
-        main_ledger = agent.session.load_ledger(parent_id, model_name) if hasattr(agent, "session") else agent.ledger
-        print(f"\n{GOLD}{BOLD}=== Main Agent Cost & Token Ledger ==={RST}")
-        print(f"\n{main_ledger.render(model_name)}\n")
+        # Load comprehensive session ledger (incorporating main agent + all subagents)
+        session_ledger = (
+            agent.session.load_ledger(parent_id, model_name, include_subagents=True)
+            if hasattr(agent, "session")
+            else agent.ledger
+        )
+        if hasattr(agent, "ledger") and agent.ledger and agent.ledger.total_cost > session_ledger.total_cost:
+            session_ledger = agent.ledger
+
+        print(f"\n{session_ledger.render(model_name)}\n")
 
         if hasattr(agent, "subagents") and agent.subagents:
             tasks = agent.subagents.all_tasks()
             if tasks:
-                print(f"  {CYAN}🤖 Subagent Cost Breakdown:{RST}")
-                tot_sub_tok = 0
-                tot_sub_cost = Decimal("0.0")
+                print(f"  {CYAN}🤖 Subagent Task Details:{RST}")
                 for t in tasks:
                     sub_f = f"{parent_id}_sub_{t.index}"
-                    sub_l = agent.session.load_ledger(sub_f, model_name) if hasattr(agent, "session") else None
+                    sub_l = agent.session.load_ledger(sub_f, model_name, include_subagents=False) if hasattr(agent, "session") else None
                     if sub_l and (sub_l.total_input_tokens + sub_l.total_output_tokens > 0):
                         sub_tok = sub_l.total_input_tokens + sub_l.total_output_tokens
                         sub_c = sub_l.total_cost
@@ -511,16 +546,13 @@ def handle_cost(agent: Agent, arg: str) -> CommandResult:
                         in_t = getattr(t, "input_tokens", 0)
                         out_t = getattr(t, "output_tokens", 0)
                         from axon.providers.registry import PRICING
-                        p = PRICING.get(model_name, {"input": 3.0, "output": 15.0})
-                        sub_c = (Decimal(str(in_t)) / Decimal("1000000")) * Decimal(str(p.get("input", 3.0))) + (Decimal(str(out_t)) / Decimal("1000000")) * Decimal(str(p.get("output", 15.0)))
+                        p = PRICING.get(model_name, {"input": 4.0, "output": 12.0})
+                        sub_c = (Decimal(str(in_t)) / Decimal("1000000")) * Decimal(str(p.get("input", 4.0))) + (Decimal(str(out_t)) / Decimal("1000000")) * Decimal(str(p.get("output", 12.0)))
 
-                    tot_sub_tok += sub_tok
-                    tot_sub_cost += sub_c
-                    print(f"     {SLATE}└─ Subagent #{t.index} ({t.title[:24]}): {WHITE}{sub_tok:,} tokens{SLATE} (in: {in_t:,} · out: {out_t:,}) · {GOLD}${float(sub_c):.5f}{RST}")
+                    print(f"     {SLATE}└─ Subagent #{t.index} ({t.title[:28]}): {WHITE}{sub_tok:,} tokens{SLATE} (in: {in_t:,} · out: {out_t:,}) · {GOLD}${float(sub_c):.5f}{RST}")
 
-                combined_tokens = (main_ledger.total_input_tokens + main_ledger.total_output_tokens) + tot_sub_tok
-                combined_cost = main_ledger.total_cost + tot_sub_cost
-                print(f"\n  {GOLD}{BOLD}🌟 Combined Session Total (Main + Subagents): {WHITE}{combined_tokens:,} tokens · ${float(combined_cost):.5f}{RST}\n")
+                tot_tok = session_ledger.total_input_tokens + session_ledger.total_output_tokens
+                print(f"\n  {GOLD}{BOLD}🌟 Combined Session Total (Main + Subagents): {WHITE}{tot_tok:,} tokens · ${float(session_ledger.total_cost):.5f}{RST}\n")
 
     try:
         if hasattr(agent, "session") and hasattr(agent.session, "load_workspace_ledger"):
@@ -531,6 +563,126 @@ def handle_cost(agent: Agent, arg: str) -> CommandResult:
             print(f"  {SLATE}Workspace Lifetime Total : {GOLD}${ws_ledger.total():.5f}{SLATE} ({total_toks:,} tokens recorded{chat_label}){RST}\n")
     except Exception:
         pass
+    return CommandResult(handled=True)
+
+def handle_faq(agent: Agent, arg: str) -> CommandResult:
+    """AgentRouter Frequently Asked Questions (FAQs) & troubleshooting reference."""
+    topic = arg.strip().lower()
+
+    cards: dict[str, tuple[str, str]] = {
+        "402": (
+            "402 Budget Pool Quota Has Been Exhausted",
+            f"""  {GOLD}{BOLD}╭── ⏳ 402 Budget Pool Quota Has Been Exhausted ───────────────────────────╮{RST}
+  {GOLD}│{RST} {WHITE}• {BOLD}Cause:{RST} Claude and GPT models operate on a shared budget pool with daily quota.{RST}
+  {GOLD}│{RST}   Supply is allocated in daily batches on a first-come, first-served basis:
+  {GOLD}│{RST}     {MINT}Batch 1:{RST} {WHITE}00:00 Beijing Time{RST} {SLATE}(16:00 UTC){RST}
+  {GOLD}│{RST}     {MINT}Batch 2:{RST} {WHITE}08:00 Beijing Time{RST} {SLATE}(00:00 UTC){RST}
+  {GOLD}│{RST}     {MINT}Batch 3:{RST} {WHITE}16:00 Beijing Time{RST} {SLATE}(08:00 UTC){RST}
+  {GOLD}│{RST} {WHITE}• {BOLD}Solutions:{RST}
+  {GOLD}│{RST}   1. Switch to high-availability fallback model: {CYAN}/model deepseek-v4-flash{RST}
+  {GOLD}│{RST}   2. Switch to GLM models or wait for the next batch refresh window.
+  {GOLD}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "400": (
+            "400 Content Blocked (Language Restriction)",
+            f"""  {ROSE}{BOLD}╭── 🛡️ 400 Content Blocked (Language Restriction) ─────────────────────────╮{RST}
+  {ROSE}│{RST} {WHITE}• {BOLD}Cause:{RST} Upstream AgentRouter filter strictly limits supported languages.{RST}
+  {ROSE}│{RST}   Supported languages: {MINT}Chinese (中文), English, French, German, Russian{RST}.
+  {ROSE}│{RST}   Any other language in prompt, file snippets, or tools triggers HTTP 400.
+  {ROSE}│{RST} {WHITE}• {BOLD}Solutions:{RST}
+  {ROSE}│{RST}   1. Translate prompt, file content, and docstrings to English or Chinese.
+  {ROSE}│{RST}   2. Remove unsupported non-Latin/non-Cyrillic scripts from prompt or files.
+  {ROSE}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "401": (
+            "401 Unauthorized & Client Configuration",
+            f"""  {CYAN}{BOLD}╭── 🔑 401 Unauthorized & Client Configuration ────────────────────────────╮{RST}
+  {CYAN}│{RST} {WHITE}• {BOLD}Cause:{RST} Missing/invalid AgentRouter API token or incompatible client setup.{RST}
+  {CYAN}│{RST} {WHITE}• {BOLD}Solutions:{RST}
+  {CYAN}│{RST}   1. Configure API key via {WHITE}/keys{RST} or set {WHITE}AGENTROUTER_API_KEY{RST} / {WHITE}OPENAI_API_KEY{RST}.
+  {CYAN}│{RST}   2. Officially supported client guides: {SLATE}https://ps.air-outer.com/docs/claude-code.html{RST}
+  {CYAN}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "sensitive": (
+            "Sensitive Words Detected (Abuse Detection)",
+            f"""  {PURPLE}{BOLD}╭── ⚠️ Sensitive Words Detected (Abuse Detection) ─────────────────────────╮{RST}
+  {PURPLE}│{RST} {WHITE}• {BOLD}Cause:{RST} AgentRouter sensitive word detection triggered to prevent abuse.{RST}
+  {PURPLE}│{RST}   Once triggered, the active session context remains flagged upstream.
+  {PURPLE}│{RST} {WHITE}• {BOLD}Solutions:{RST}
+  {PURPLE}│{RST}   1. Clear current conversation: {CYAN}/clear{RST}
+  {PURPLE}│{RST}   2. Or start an entirely fresh session: {CYAN}/sessions{RST}
+  {PURPLE}│{RST}   3. Rephrase prompt to eliminate sensitive terms or policy-triggering keywords.
+  {PURPLE}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "backup": (
+            "Backup Domain Officially Launched",
+            f"""  {TEAL}{BOLD}╭── 🌐 Backup Domain Officially Launched (Network & Mainland China) ──────╮{RST}
+  {TEAL}│{RST} {WHITE}• {BOLD}Details:{RST} For users experiencing network latency or connectivity issues:{RST}
+  {TEAL}│{RST}   • Primary Domain: {WHITE}https://agentrouter.org{RST}
+  {TEAL}│{RST}   • Backup Domain:  {CYAN}https://ps.air-outer.com{RST}
+  {TEAL}│{RST}   Backup domain supports identical API endpoints, tokens, and web console.
+  {TEAL}│{RST} {WHITE}• {BOLD}Switch:{RST} Set {WHITE}base_url = "https://ps.air-outer.com/v1"{RST} or configure via {CYAN}/provider{RST}.
+  {TEAL}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "credit": (
+            "Account Data: $25 Credit Claim vs Credit Limit Display",
+            f"""  {MINT}{BOLD}╭── 💳 Account Data: $25 Credit Claim vs Credit Limit Display ─────────────╮{RST}
+  {MINT}│{RST} {WHITE}• {BOLD}Sign in Claim:{RST} New accounts can claim a $25 credit upon login/registration.
+  {MINT}│{RST} {WHITE}• {BOLD}Credit Limit Displayed: 0 | Balance: $0:{RST}
+  {MINT}│{RST}   Pay-as-you-go billing uses deposited wallet balance rather than a credit line.
+  {MINT}│{RST}   Check Personal Center -> Wallet / Top-up Amount to view actual quota.
+  {MINT}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "gpt6": (
+            "GPT-6 Astra: Protocol & Function Tools Notice",
+            f"""  {LBLUE}{BOLD}╭── 🚀 GPT-6 Astra: Protocol & Function Tools Notice ──────────────────────╮{RST}
+  {LBLUE}│{RST} {WHITE}• {BOLD}Response Protocol:{RST} Adheres to OpenAI Responses API ({WHITE}/v1/responses{RST}).
+  {LBLUE}│{RST} {WHITE}• {BOLD}Function Calling Invariant:{RST}
+  {LBLUE}│{RST}   When calling {WHITE}/v1/chat/completions{RST} with function tools enabled,
+  {LBLUE}│{RST}   do {ROSE}{BOLD}NOT{RST} pass {WHITE}reasoning_effort{RST}. Axon automatically strips this parameter.
+  {LBLUE}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+        "pricing": (
+            "AgentRouter Official Pricing Table & Live Caching Rates",
+            f"""  {GOLD}{BOLD}╭── 💰 AgentRouter Official Pricing Table & Live Caching Rates ───────────╮{RST}
+  {GOLD}│{RST} {SLATE}{'Model Name':<20} {'Input / 1M':<14} {'Output / 1M':<14} {'Cache Read':<14} {'Cache Write':<12}{RST}
+  {GOLD}│{RST} ────────────────────────────────────────────────────────────────────────────
+  {GOLD}│{RST} {WHITE}deepseek-v4-flash{RST}    {GOLD}$4.000{RST}         {MINT}$12.000{RST}        {TEAL}$0.800 (80% off){RST}  {SLATE}Free (0.00){RST}
+  {GOLD}│{RST} {WHITE}gpt-5.6-sol{RST}          {GOLD}$3.000{RST}         {MINT}$15.000{RST}        {TEAL}$0.600 (80% off){RST}  {SLATE}—{RST}
+  {GOLD}│{RST} {WHITE}gpt-6-astra{RST}          {GOLD}$3.000{RST}         {MINT}$15.000{RST}        {TEAL}$0.600 (80% off){RST}  {SLATE}—{RST}
+  {GOLD}│{RST} {WHITE}claude-opus-5{RST}        {GOLD}$6.000{RST}         {MINT}$30.000{RST}        {TEAL}$1.200 (80% off){RST}  {PURPLE}$7.500{RST}
+  {GOLD}│{RST} {WHITE}claude-opus-4-8{RST}      {GOLD}$8.000{RST}         {MINT}$40.000{RST}        {TEAL}$1.600 (80% off){RST}  {PURPLE}$10.000{RST}
+  {GOLD}│{RST}
+  {GOLD}│{RST} {DIM}Formula: Spend = ((Uncached In * InRate) + (Cache In * CacheRate) + (Out * OutRate)) * GroupRatio{RST}
+  {GOLD}╰────────────────────────────────────────────────────────────────────────────╯"""
+        ),
+    }
+
+    key_map = {
+        "402": "402", "quota": "402", "budget": "402", "exhausted": "402", "batches": "402", "schedule": "402",
+        "400": "400", "language": "400", "blocked": "400", "languages": "400",
+        "401": "401", "auth": "401", "unauthorized": "401", "token": "401", "keys": "401",
+        "sensitive": "sensitive", "words": "sensitive", "abuse": "sensitive", "detected": "sensitive",
+        "backup": "backup", "domain": "backup", "china": "backup", "mirror": "backup", "ps": "backup",
+        "credit": "credit", "balance": "credit", "claim": "credit", "wallet": "credit", "$25": "credit", "topup": "credit",
+        "gpt6": "gpt6", "astra": "gpt6", "protocol": "gpt6", "responses": "gpt6",
+        "pricing": "pricing", "prices": "pricing", "rates": "pricing", "cost": "pricing", "models": "pricing",
+    }
+
+    print(f"\n{CYAN}{BOLD}=== 💡 AgentRouter Frequently Asked Questions (FAQ) ==={RST}\n")
+
+    if topic and topic in key_map:
+        target_key = key_map[topic]
+        title, content = cards[target_key]
+        print(content)
+        print(f"\n  {DARK_SLATE}💡 Quick jump: /faq 402 · /faq 400 · /faq 401 · /faq sensitive · /faq backup · /faq credit · /faq gpt6 · /faq pricing{RST}\n")
+        return CommandResult(handled=True)
+
+    for key, (title, content) in cards.items():
+        print(content)
+        print()
+
+    print(f"  {DARK_SLATE}💡 Quick jump: /faq 402 · /faq 400 · /faq 401 · /faq sensitive · /faq backup · /faq credit · /faq gpt6 · /faq pricing{RST}\n")
     return CommandResult(handled=True)
 
 def handle_todos(agent: Agent, arg: str) -> CommandResult:
@@ -570,13 +722,15 @@ def handle_clear(agent: Agent, arg: str) -> CommandResult:
 
     # 3. Display clean startup banner for new session
     from axon.ui.render import Renderer
+    import axon
     renderer = getattr(agent, "renderer", None) or Renderer()
     renderer.print_banner(
-        version="GPR_27",
+        version=getattr(axon, "__version__", ""),
         model=agent.settings.model,
         effort=agent.settings.effort,
         workspace=str(agent.settings.workspace),
         mode=agent.settings.mode,
+        base_url=agent.settings.base_url,
     )
     print(f"  {MINT}⚡ Started new session:{RST} {BOLD}{WHITE}{new_session_id}{RST}\n")
     return CommandResult(handled=True)
@@ -1278,18 +1432,7 @@ def handle_main(agent: Agent, arg: str) -> CommandResult:
             model_name = getattr(agent.settings, "model", "claude-opus-5") if hasattr(agent, "settings") and isinstance(getattr(agent.settings, "model", None), str) else "claude-opus-5"
             try:
                 # Main calculation is performed completely and separately, and combined total includes subagent costs
-                agent.ledger = agent.session.load_ledger(parent_id, model_name)
-                s_dir = getattr(agent.session, "session_dir", None)
-                if s_dir and s_dir.exists():
-                    for sub_file in sorted(s_dir.glob(f"{parent_id}_sub_*.jsonl")):
-                        sub_l = agent.session.load_ledger(sub_file.stem, model_name)
-                        agent.ledger.total_input_tokens += sub_l.total_input_tokens
-                        agent.ledger.total_output_tokens += sub_l.total_output_tokens
-                        agent.ledger.total_cache_read_tokens += sub_l.total_cache_read_tokens
-                        agent.ledger.total_cache_write_tokens += sub_l.total_cache_write_tokens
-                        agent.ledger.total_reasoning_tokens += sub_l.total_reasoning_tokens
-                        agent.ledger.total_cost += sub_l.total_cost
-                        agent.ledger.turn_costs.extend(sub_l.turn_costs)
+                agent.ledger = agent.session.load_ledger(parent_id, model_name, include_subagents=True)
             except Exception:
                 from axon.session.ledger import Ledger
                 agent.ledger = Ledger()
@@ -1389,6 +1532,8 @@ def handle_btw(agent: Agent, arg: str) -> CommandResult:
         for _ in stream:
             pass
         turn = side_provider.finalize()
+        if turn.usage and hasattr(agent, "ledger") and agent.ledger is not None:
+            agent.ledger.record(agent.settings.model, turn.usage, tag="side_question")
         ans_text = turn.text or "Completed."
         print(f"{render_side_question_box(question, ans_text)}\n")
     except Exception as e:
@@ -1902,7 +2047,7 @@ def handle_learn(agent: Agent, arg: str) -> CommandResult:
         text_to_save = arg_clean[len("global "):].strip()
 
     print(f"\n  {TEAL}🧠 Distilling and indexing memory pattern...{RST}")
-    item = distill_and_learn(agent.provider, text_to_save, agent.settings.workspace, scope=scope)
+    item = distill_and_learn(agent.provider, text_to_save, agent.settings.workspace, scope=scope, ledger=getattr(agent, "ledger", None))
     dest_path = f"~/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
     scope_badge = f"{GOLD}[Global]{RST}" if scope == "global" else f"{TEAL}[Project]{RST}"
 
@@ -1940,7 +2085,7 @@ def handle_memory(agent: Agent, arg: str) -> CommandResult:
             return CommandResult(handled=True)
 
         print(f"\n  {TEAL}🧠 Distilling and indexing memory pattern...{RST}")
-        item = distill_and_learn(agent.provider, text_part, agent.settings.workspace, scope=scope)
+        item = distill_and_learn(agent.provider, text_part, agent.settings.workspace, scope=scope, ledger=getattr(agent, "ledger", None))
         dest_path = f"~/.axon/memory/{item.id}.md" if scope == "global" else f".axon/memory/{item.id}.md"
         scope_badge = f"{GOLD}[Global]{RST}" if scope == "global" else f"{TEAL}[Project]{RST}"
 
@@ -2199,6 +2344,8 @@ Output ONLY the enhanced prompt in 1-3 crisp, actionable sentences."""
             for _ in stream:
                 pass
             turn = agent.provider.finalize()
+            if turn.usage and hasattr(agent, "ledger") and agent.ledger is not None:
+                agent.ledger.record(model_name, turn.usage, tag="prompt_enhancement")
             if turn.text.strip():
                 enhanced_prompt = turn.text.strip().strip('"')
         except Exception:
@@ -2441,6 +2588,10 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         return handle_copy(agent, arg)
     elif cmd in ("/cost", "/ledger", "/usage"):
         return handle_cost(agent, arg)
+    elif cmd in ("/faq", "/faqs", "/troubleshoot", "/kb-router"):
+        return handle_faq(agent, arg)
+    elif cmd in ("/pricing", "/prices", "/rates"):
+        return handle_faq(agent, "pricing")
     elif cmd in ("/test", "/tests", "/pytest"):
         return handle_test(agent, arg)
     elif cmd in ("/notify", "/alert"):
@@ -2493,9 +2644,7 @@ def dispatch_command(line: str | Agent, agent: Agent | str) -> CommandResult | N
         print(f"\n  {PURPLE}✻ Thinking display is now {state_str}\n")
         return CommandResult(handled=True)
     elif cmd in ("/provider", "/providers"):
-        from axon.ui.provider_picker import run_provider_picker
-        run_provider_picker(agent)
-        return CommandResult(handled=True)
+        return handle_provider(agent, arg)
     elif cmd in ("/sessions", "/session"):
         handle_sessions_list(agent.session)
         return CommandResult(handled=True)

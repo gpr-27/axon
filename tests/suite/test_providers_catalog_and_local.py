@@ -114,7 +114,7 @@ def test_handle_env_command(tmp_path: Path, monkeypatch):
     from axon.tools.registry import create_default_registry
 
     monkeypatch.setenv("AXON_API_KEY", "sk-agentrouter-test-key-12345")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk-groq-test-key-67890")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSy-gemini-test-key-67890")
 
     settings = Settings(workspace=tmp_path)
     agent = Agent(

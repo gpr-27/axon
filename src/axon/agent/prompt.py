@@ -85,7 +85,11 @@ def discover_project_context(cwd: Path) -> str:
             candidate = parent / name
             if candidate.exists() and candidate.is_file():
                 try:
-                    return candidate.read_text(encoding="utf-8", errors="ignore")
+                    text = candidate.read_text(encoding="utf-8", errors="ignore")
+                    # For prefix cache stability across turns, exclude volatile runtime accomplishments
+                    if "## 4. Current State & Recent Accomplishments" in text:
+                        text = text.split("## 4. Current State & Recent Accomplishments")[0].strip()
+                    return text
                 except Exception:
                     pass
     return ""
@@ -95,7 +99,7 @@ def discover_memory_context(workspace: Path) -> str:
     try:
         from axon.agent.memory import MemoryStore
         store = MemoryStore(workspace)
-        items = store.list_all()
+        items = sorted(store.list_all(), key=lambda it: (it.scope, it.title))
         if not items:
             return ""
         lines = ["## Persistent Learned Rules & Knowledge:"]
@@ -125,7 +129,7 @@ def build_system(settings: Settings, tools: ToolRegistry, skills: list[Any] | No
 
     if skills:
         skills_summary = ["## Available Skills (Invoke via slash command /<name> or execute when relevant):"]
-        for s in skills:
+        for s in sorted(skills, key=lambda x: getattr(x, "name", "")):
             skills_summary.append(f"- **/{s.name}**: {s.description}")
         blocks.append({"type": "text", "text": "\n".join(skills_summary)})
 

@@ -148,7 +148,7 @@ class Settings(BaseSettings):
                                 v = v.strip().strip("'\"")
                                 if (k.startswith("AXON_") or k in (
                                     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-                                    "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY"
+                                    "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "TOGETHER_API_KEY"
                                 )) and k not in os.environ:
                                     os.environ[k] = v
                 except Exception:
@@ -173,7 +173,7 @@ class Settings(BaseSettings):
             # Check if set in os.environ across all provider keys
             candidate_keys = (
                 "AXON_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY"
+                "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "TOGETHER_API_KEY"
             )
             env_key = None
             for ck in candidate_keys:

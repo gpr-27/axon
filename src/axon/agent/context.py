@@ -48,6 +48,32 @@ class ContextManager:
             self._summarize_older_turns(conv)
             est = conv.token_estimate()
 
+        # Rung 0: Attach prompt caching breakpoints (tools, system, conversation prefix)
+        self._apply_cache_control(conv, system, tools, model=model)
+
+    def _apply_cache_control(
+        self,
+        conv: Conversation,
+        system: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str | None = None,
+    ) -> None:
+        """Apply explicit Anthropic prompt caching breakpoints (Rung 0) if applicable."""
+        active_model = model or self.settings.model
+        from axon.providers.registry import ANTHROPIC_MODELS
+        if active_model in ANTHROPIC_MODELS or "claude" in str(active_model).lower():
+            if tools and isinstance(tools[-1], dict):
+                tools[-1]["cache_control"] = {"type": "ephemeral"}
+            if system and isinstance(system[-1], dict):
+                system[-1]["cache_control"] = {"type": "ephemeral"}
+            # Stable conversation prefix breakpoint (2 turns prior to newest message)
+            if len(conv.messages) >= 4:
+                stable_idx = len(conv.messages) - 3
+                m = conv.messages[stable_idx]
+                content = m.get("content")
+                if isinstance(content, list) and content and isinstance(content[-1], dict):
+                    content[-1]["cache_control"] = {"type": "ephemeral"}
+
     def _trim_large_results(self, conv: Conversation) -> None:
         for m in conv.messages:
             content = m.get("content")

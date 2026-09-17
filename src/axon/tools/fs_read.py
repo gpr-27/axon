@@ -49,7 +49,7 @@ class ReadTool(Tool):
         lines = content.splitlines()
         total_lines = len(lines)
         offset = max(1, int(args.get("offset") or 1))
-        limit = min(50000, max(1, int(args.get("limit") or 10000)))
+        limit = min(50000, max(1, int(args.get("limit") or 2500)))
 
         start_idx = offset - 1
         end_idx = min(total_lines, start_idx + limit)

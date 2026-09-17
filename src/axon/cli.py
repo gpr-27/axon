@@ -35,11 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="axon",
         description="A terminal-native agentic coding assistant.",
     )
-    parser.add_argument("-v", "--version", action="version", version="%(prog)s vGPR_27", help="Show version and exit")
+    import axon
+    v_str = getattr(axon, "__version__", "GPR_27")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s v{v_str}", help="Show version and exit")
     parser.add_argument("prompt", nargs="?", default="", help="Prompt to execute")
     parser.add_argument("-p", "--print", dest="print_mode", action="store_true", help="One-shot print mode")
     parser.add_argument("--output-format", choices=["text", "json"], default="text", help="Output format for print mode")
-    parser.add_argument("--model", help="LLM Model to use (claude-opus-5, gpt-5.6-sol, deepseek-v4-flash, glm-5.3)")
+    parser.add_argument("--model", help="LLM Model to use (claude-opus-5, gpt-5.6-sol, gpt-6-astra, deepseek-v4-flash)")
     parser.add_argument("--mode", choices=["default", "acceptEdits", "plan", "bypass"], help="Permission mode")
     parser.add_argument("--effort", choices=["reflex", "balanced", "synapse", "quantum", "low", "medium", "high", "xhigh", "max"], help="Reasoning effort tier")
     parser.add_argument("--workspace", help="Workspace root directory")
@@ -80,7 +82,7 @@ def run_print_mode(agent: Agent, prompt: str, fmt: str, renderer: Renderer | Non
             renderer.turn_footer(
                 tool_count=result.tool_calls_count,
                 usage=result.usage,
-                cost=float(agent.ledger.total()),
+                cost=float(agent.get_combined_cost()),
                 elapsed=elapsed,
                 llm_calls=result.iterations,
             )
@@ -94,12 +96,14 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
     if sys.stdin.isatty():
         sys.stdout.write("\033[2J\033[H\n")
         sys.stdout.flush()
+    import axon
     renderer.print_banner(
-        version="GPR_27",
+        version=getattr(axon, "__version__", ""),
         model=agent.settings.model,
         effort=agent.settings.effort,
         workspace=str(agent.settings.workspace),
         mode=agent.settings.mode,
+        base_url=agent.settings.base_url,
     )
 
     if hasattr(agent, "subagents"):
@@ -167,12 +171,14 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                     sys.stdout.write("\033[3J\033[H\033[2J")
                     sys.stdout.flush()
 
+                import axon
                 renderer.print_banner(
-                    version="GPR_27",
+                    version=getattr(axon, "__version__", ""),
                     model=agent.settings.model,
                     effort=agent.settings.effort,
                     workspace=str(agent.settings.workspace),
                     mode=agent.settings.mode,
+                    base_url=agent.settings.base_url,
                 )
 
                 if selected_target.startswith("__NEW_SESSION__:"):
@@ -200,12 +206,14 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 if sys.stdin.isatty():
                     sys.stdout.write("\033[3J\033[H\033[2J")
                     sys.stdout.flush()
+                import axon
                 renderer.print_banner(
-                    version="GPR_27",
+                    version=getattr(axon, "__version__", ""),
                     model=agent.settings.model,
                     effort=agent.settings.effort,
                     workspace=str(agent.settings.workspace),
                     mode=agent.settings.mode,
+                    base_url=agent.settings.base_url,
                 )
                 if agent.conversation.messages:
                     from axon.session.interactive import render_restored_conversation
@@ -288,17 +296,18 @@ def run_repl(agent: Agent, renderer: Renderer) -> int:
                 with InFlightInputListener(agent):
                     res = agent.run_turn(turn_input)
                 elapsed = time.time() - t0
+                tot_cost = float(agent.get_combined_cost() if hasattr(agent, "get_combined_cost") else agent.ledger.total())
                 renderer.turn_footer(
                     tool_count=res.tool_calls_count,
                     usage=res.usage,
-                    cost=float(agent.ledger.total()),
+                    cost=tot_cost,
                     elapsed=elapsed,
                     llm_calls=res.iterations,
                 )
                 from axon.ui.notify import notify_if_unfocused
                 notify_if_unfocused(
                     title="Axon Task Completed",
-                    message=f"Turn completed ({elapsed:.1f}s · ${agent.ledger.total():.4f})",
+                    message=f"Turn completed ({elapsed:.1f}s · ${tot_cost:.4f})",
                 )
             except Exception as e:
                 print(f"\n  {ROSE}❌ Error during execution: {e}{RST}\n")

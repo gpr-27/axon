@@ -174,6 +174,7 @@ def distill_and_learn(
     text: str,
     workspace: Path,
     scope: str = "project",
+    ledger: Any = None,
 ) -> MemoryItem:
     """Use fast LLM call to extract and format clean structured memory from conversational user input."""
     prompt = f"""You are a memory distillation module for an AI coding assistant.
@@ -208,6 +209,11 @@ Respond ONLY with valid JSON:
             for _ in stream:
                 pass
             turn = provider.finalize()
+            if ledger is not None and getattr(turn, "usage", None):
+                try:
+                    ledger.record(model_name, turn.usage, tag="memory_learn")
+                except Exception:
+                    pass
             raw = turn.text.strip()
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0].strip()

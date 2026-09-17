@@ -158,20 +158,25 @@ class OpenAICompatProvider:
         base = settings.base_url.rstrip("/")
         if base.endswith("/chat/completions"):
             self._url = base
+            self._responses_url = base.replace("/chat/completions", "/responses")
         elif "googleapis.com" in base:
             clean = base.rstrip("/")
             if not clean.endswith("/openai"):
                 clean = f"{clean}/openai"
             self._url = f"{clean}/chat/completions"
+            self._responses_url = f"{clean}/responses"
         elif "openrouter.ai" in base:
             clean = base.rstrip("/")
             if not clean.endswith("/api/v1"):
                 clean = f"{clean.rstrip('/api').rstrip('/v1')}/api/v1"
             self._url = f"{clean}/chat/completions"
+            self._responses_url = f"{clean}/responses"
         elif base.endswith("/v1"):
             self._url = f"{base}/chat/completions"
+            self._responses_url = f"{base}/responses"
         else:
             self._url = f"{base}/v1/chat/completions"
+            self._responses_url = f"{base}/v1/responses"
         self._last_turn: AssistantTurn | None = None
 
     def _headers(self) -> dict[str, str]:
@@ -203,29 +208,58 @@ class OpenAICompatProvider:
 
         openai_messages = sanitize_openai_messages(raw_messages)
 
+        # Detect if model or settings requires Response protocol (OpenAI /v1/responses)
+        # As instructed for gpt-6-astra: use the Response protocol to prevent:
+        # "Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions"
+        is_response_protocol = (
+            getattr(self.settings, "wire_api", None) == "responses"
+            or getattr(self.settings, "api_format", None) == "responses"
+            or ("gpt-6" in model.lower() and getattr(self.settings, "wire_api", None) != "chat")
+        )
+        target_url = self._responses_url if is_response_protocol else self._url
+
         body: dict[str, Any] = {
             "model": model,
-            "messages": openai_messages,
             "max_tokens": max_tokens,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
-        is_reasoning_model = any(
-            k in model.lower()
-            for k in ("o1", "o3", "o4", "deepseek-reasoner", "deepseek-r1", "r1:", "r1-", "reasoning", "qwq")
-        )
-        if effort and is_reasoning_model:
-            e_str = str(effort).lower()
-            if e_str in ("reflex", "low"):
-                body["reasoning_effort"] = "low"
-            elif e_str in ("balanced", "medium"):
-                body["reasoning_effort"] = "medium"
-            elif e_str in ("synapse", "quantum", "high", "xhigh", "max", "hyper"):
-                body["reasoning_effort"] = "high"
-            else:
-                body["reasoning_effort"] = e_str
-        if tools:
-            body["tools"] = tools
+
+        if is_response_protocol:
+            body["input"] = openai_messages
+            body["messages"] = openai_messages  # compatibility with proxy forwarders
+            if effort:
+                e_str = str(effort).lower()
+                if e_str in ("reflex", "low"):
+                    body["reasoning"] = {"effort": "low"}
+                elif e_str in ("balanced", "medium"):
+                    body["reasoning"] = {"effort": "medium"}
+                elif e_str in ("synapse", "quantum", "high", "xhigh", "max", "hyper"):
+                    body["reasoning"] = {"effort": "high"}
+                else:
+                    body["reasoning"] = {"effort": e_str}
+            if tools:
+                body["tools"] = tools
+        else:
+            body["messages"] = openai_messages
+            body["stream_options"] = {"include_usage": True}
+            is_reasoning_model = any(
+                k in model.lower()
+                for k in ("o1", "o3", "o4", "gpt-6", "astra", "deepseek-reasoner", "deepseek-r1", "r1:", "r1-", "reasoning", "qwq")
+            )
+            if effort and is_reasoning_model:
+                # In /v1/chat/completions, GPT-6 with tools rejects reasoning_effort
+                if not (tools and "gpt-6" in model.lower()):
+                    e_str = str(effort).lower()
+                    if e_str in ("reflex", "low"):
+                        body["reasoning_effort"] = "low"
+                    elif e_str in ("balanced", "medium"):
+                        body["reasoning_effort"] = "medium"
+                    elif e_str in ("synapse", "quantum", "high", "xhigh", "max", "hyper"):
+                        body["reasoning_effort"] = "high"
+                    else:
+                        body["reasoning_effort"] = e_str
+            if tools:
+                body["tools"] = tools
 
         full_text = ""
         full_reasoning = ""
@@ -236,8 +270,14 @@ class OpenAICompatProvider:
 
         def _parse_stream(resp: httpx.Response) -> Iterator[StreamEvent]:
             nonlocal full_text, full_reasoning, tool_calls_acc, stop_reason, usage
+            current_event = ""
             for line in resp.iter_lines():
-                if not line or not line.startswith("data: "):
+                if not line:
+                    continue
+                if line.startswith("event: "):
+                    current_event = line[7:].strip()
+                    continue
+                if not line.startswith("data: "):
                     continue
                 raw = line[6:].strip()
                 if raw == "[DONE]":
@@ -247,28 +287,104 @@ class OpenAICompatProvider:
                 except Exception:
                     continue
 
-                # Parse Usage
-                if "usage" in chunk and chunk["usage"]:
-                    u = chunk["usage"]
-                    prompt_t = u.get("prompt_tokens", 0) or 0
+                event_type = current_event or chunk.get("type", "")
+
+                # 1. Parse Usage (both Chat Completions and Responses API formats)
+                u = chunk.get("usage") or chunk.get("response", {}).get("usage")
+                if u and isinstance(u, dict):
+                    prompt_t = u.get("prompt_tokens", 0) or u.get("input_tokens", 0) or 0
                     cache_hit_t = (
                         u.get("prompt_cache_hit_tokens", 0)
                         or u.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        or u.get("input_token_details", {}).get("cached_tokens", 0)
+                        or u.get("cache_read_tokens", 0)
                         or 0
                     )
-                    # DeepSeek/OpenAI report prompt_tokens as total input (cached + uncached);
-                    # if a gateway only returns uncached prompt_tokens, add cache_hit_t.
+                    out_t = u.get("completion_tokens", 0) or u.get("output_tokens", 0) or 0
+                    reasoning_t = (
+                        u.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+                        or u.get("output_token_details", {}).get("reasoning_tokens", 0)
+                        or 0
+                    )
                     if prompt_t >= cache_hit_t:
                         total_input = prompt_t
                     else:
                         total_input = prompt_t + cache_hit_t
                     usage = Usage(
                         input=total_input,
-                        output=u.get("completion_tokens", 0) or 0,
+                        output=out_t,
                         cache_read=cache_hit_t,
-                        reasoning=u.get("completion_tokens_details", {}).get("reasoning_tokens", 0) or 0,
+                        reasoning=reasoning_t,
                     )
 
+                # 2. Parse Response Protocol Events
+                if event_type in ("response.text.delta", "response.output_text.delta"):
+                    delta_text = chunk.get("delta") or chunk.get("text", "")
+                    if delta_text:
+                        full_text += delta_text
+                        yield TextDelta(text=delta_text)
+                    continue
+
+                if event_type in ("response.reasoning.delta", "response.thought.delta"):
+                    reasoning_delta = chunk.get("delta") or chunk.get("text", "")
+                    if reasoning_delta:
+                        full_reasoning += reasoning_delta
+                        if thinking:
+                            yield ThinkingDelta(text=reasoning_delta)
+                    continue
+
+                if event_type == "response.output_item.added":
+                    item = chunk.get("item", {})
+                    if item.get("type") == "function_call":
+                        call_id = item.get("call_id") or item.get("id", "")
+                        idx = chunk.get("output_index", len(tool_calls_acc))
+                        tool_calls_acc[idx] = {
+                            "id": call_id,
+                            "name": item.get("name", ""),
+                            "arguments": "",
+                        }
+                    continue
+
+                if event_type == "response.function_call_arguments.delta":
+                    call_id = chunk.get("call_id") or chunk.get("item_id", "")
+                    frag = chunk.get("delta", "")
+                    matched_idx = None
+                    for idx, tc in tool_calls_acc.items():
+                        if tc.get("id") == call_id:
+                            matched_idx = idx
+                            break
+                    if matched_idx is None:
+                        matched_idx = len(tool_calls_acc)
+                        tool_calls_acc[matched_idx] = {"id": call_id, "name": "", "arguments": ""}
+                    tool_calls_acc[matched_idx]["arguments"] += frag
+                    yield ToolArgsDelta(id=tool_calls_acc[matched_idx]["id"], fragment=frag)
+                    continue
+
+                if event_type == "response.output_item.done":
+                    item = chunk.get("item", {})
+                    if item.get("type") == "function_call":
+                        call_id = item.get("call_id") or item.get("id", "")
+                        name = item.get("name", "")
+                        args = item.get("arguments", "")
+                        for idx, tc in tool_calls_acc.items():
+                            if tc.get("id") == call_id:
+                                if name:
+                                    tc["name"] = name
+                                if args:
+                                    tc["arguments"] = args
+                                break
+                    continue
+
+                if event_type in ("response.done", "response.completed"):
+                    if tool_calls_acc:
+                        stop_reason = "tool_use"
+                    else:
+                        resp_obj = chunk.get("response", {})
+                        st = resp_obj.get("status", "")
+                        stop_reason = "max_tokens" if st == "incomplete" else "end_turn"
+                    continue
+
+                # 3. Parse Standard Choices Format (Chat Completions)
                 choices = chunk.get("choices", [])
                 if not choices:
                     continue
@@ -317,51 +433,103 @@ class OpenAICompatProvider:
                         stop_reason = "end_turn"
 
         try:
-            with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as resp:
+            with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as resp:
                 if resp.status_code != 200:
                     resp.read()
                     err_text = resp.text
-                    # Check if thinking/reasoning_effort is rejected
-                    if "does not support thinking" in err_text.lower() or "reasoning_effort" in err_text.lower() or "does not support reasoning" in err_text.lower() or "thinking" in err_text.lower():
-                        body.pop("reasoning_effort", None)
-                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                    retry_success = False
+
+                    # Check if tools with reasoning_effort error triggered:
+                    # "Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions"
+                    if "function tools with reasoning_effort are not supported" in err_text.lower() or ("reasoning_effort" in err_text.lower() and "tool" in err_text.lower()):
+                        # Switch to /v1/responses or strip reasoning_effort
+                        if target_url == self._url and self._responses_url != self._url:
+                            target_url = self._responses_url
+                            body.pop("reasoning_effort", None)
+                            if effort:
+                                body["reasoning"] = {"effort": str(effort).lower()}
+                            body["input"] = openai_messages
+                            body.pop("stream_options", None)
+                            with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                                if retry_resp.status_code == 200:
+                                    yield from _parse_stream(retry_resp)
+                                    retry_success = True
+                                else:
+                                    retry_resp.read()
+                                    err_text = retry_resp.text
+                        else:
+                            body.pop("reasoning_effort", None)
+                            body.pop("reasoning", None)
+                            with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                                if retry_resp.status_code == 200:
+                                    yield from _parse_stream(retry_resp)
+                                    retry_success = True
+                                else:
+                                    retry_resp.read()
+                                    err_text = retry_resp.text
+
+                    # If /v1/responses returned 404 (endpoint not supported by gateway/mock), fallback to /v1/chat/completions
+                    if not retry_success and resp.status_code == 404 and target_url == self._responses_url:
+                        target_url = self._url
+                        body.pop("input", None)
+                        body.pop("reasoning", None)
+                        body["messages"] = openai_messages
+                        body["stream_options"] = {"include_usage": True}
+                        if tools:
+                            body.pop("reasoning_effort", None)
+                        with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
                             if retry_resp.status_code == 200:
                                 yield from _parse_stream(retry_resp)
-                                return
+                                retry_success = True
+                            else:
+                                retry_resp.read()
+                                err_text = retry_resp.text
+
+                    # Check if thinking/reasoning_effort is rejected
+                    if not retry_success and ("does not support thinking" in err_text.lower() or "reasoning_effort" in err_text.lower() or "does not support reasoning" in err_text.lower() or "thinking" in err_text.lower()):
+                        body.pop("reasoning_effort", None)
+                        body.pop("reasoning", None)
+                        with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                            if retry_resp.status_code == 200:
+                                yield from _parse_stream(retry_resp)
+                                retry_success = True
                             else:
                                 retry_resp.read()
                                 err_text = retry_resp.text
 
                     # Check if stream_options is rejected by legacy local server
-                    if "stream_options" in err_text.lower() or "extra_forbidden" in err_text.lower():
+                    if not retry_success and ("stream_options" in err_text.lower() or "extra_forbidden" in err_text.lower()):
                         body.pop("stream_options", None)
-                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                        with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
                             if retry_resp.status_code == 200:
                                 yield from _parse_stream(retry_resp)
-                                return
+                                retry_success = True
                             else:
                                 retry_resp.read()
                                 err_text = retry_resp.text
 
-                    if "does not support image" in err_text.lower() or "invalid_image" in err_text.lower():
-                        # Fallback: Strip image_url blocks and retry with text placeholder
-                        for m in openai_messages:
-                            if isinstance(m.get("content"), list):
-                                text_only = []
-                                for b in m["content"]:
-                                    if isinstance(b, dict) and b.get("type") == "text":
-                                        text_only.append(b.get("text", ""))
-                                    elif isinstance(b, dict) and b.get("type") == "image_url":
-                                        text_only.append("[Attached User Screenshot / Image]")
-                                m["content"] = "\n".join(text_only)
-                        body["messages"] = openai_messages
-                        with httpx.stream("POST", self._url, headers=self._headers(), json=body, timeout=120) as retry_resp:
-                            if retry_resp.status_code != 200:
-                                retry_resp.read()
-                                raise ProviderError(f"HTTP {retry_resp.status_code}: {retry_resp.text}", status=retry_resp.status_code, body=retry_resp.text)
-                            yield from _parse_stream(retry_resp)
-                    else:
-                        raise ProviderError(f"HTTP {resp.status_code}: {err_text}", status=resp.status_code, body=err_text)
+                    if not retry_success:
+                        if "does not support image" in err_text.lower() or "invalid_image" in err_text.lower():
+                            # Fallback: Strip image_url blocks and retry with text placeholder
+                            for m in openai_messages:
+                                if isinstance(m.get("content"), list):
+                                    text_only = []
+                                    for b in m["content"]:
+                                        if isinstance(b, dict) and b.get("type") == "text":
+                                            text_only.append(b.get("text", ""))
+                                        elif isinstance(b, dict) and b.get("type") == "image_url":
+                                            text_only.append("[Attached User Screenshot / Image]")
+                                    m["content"] = "\n".join(text_only)
+                            body["messages"] = openai_messages
+                            if "input" in body:
+                                body["input"] = openai_messages
+                            with httpx.stream("POST", target_url, headers=self._headers(), json=body, timeout=120) as retry_resp:
+                                if retry_resp.status_code != 200:
+                                    retry_resp.read()
+                                    raise ProviderError(f"HTTP {retry_resp.status_code}: {retry_resp.text}", status=retry_resp.status_code, body=retry_resp.text)
+                                yield from _parse_stream(retry_resp)
+                        else:
+                            raise ProviderError(f"HTTP {resp.status_code}: {err_text}", status=resp.status_code, body=err_text)
                 else:
                     yield from _parse_stream(resp)
 
@@ -414,17 +582,54 @@ class OpenAICompatProvider:
 
         except Exception as e:
             err_str = str(e)
-            if "sensitive_words_detected" in err_str or "sensitive words" in err_str.lower():
+            if "sensitive_words_detected" in err_str or "sensitive words" in err_str.lower() or "sensitive_word" in err_str.lower():
                 raise ProviderError(
                     "Content filter triggered (sensitive_words_detected).\n"
-                    "  The model's content filter flagged this conversation context.\n"
-                    "  Fix: try /clear to reset context, shorten your prompt, or switch model with /model."
+                    "  This is AgentRouter's sensitive word detection to prevent abuse.\n"
+                    "  💡 How to fix: Run `/clear` to reset context, or start a new session with `/sessions`.\n"
+                    "  Run `/faq sensitive` for more details."
+                ) from e
+            if "402" in err_str or "budget pool quota has been exhausted" in err_str.lower() or "budget pool" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 402 Budget Pool Quota Exhausted.\n"
+                    "  Claude and GPT models on AgentRouter are released in daily batches on a first-come, first-served basis:\n"
+                    "    • 00:00 Beijing time (16:00 UTC)\n"
+                    "    • 08:00 Beijing time (00:00 UTC)\n"
+                    "    • 16:00 Beijing time (08:00 UTC)\n"
+                    "  💡 How to fix:\n"
+                    "     1. Switch to DeepSeek with `/model deepseek-v4-flash` for uninterrupted use with unlimited quota.\n"
+                    "     2. Or wait for the next batch release time slot.\n"
+                    "     3. Run `/faq 402` for more details."
+                ) from e
+            if "content blocked" in err_str.lower() or "400 content blocked" in err_str.lower() or "unsupported language" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 400 Content Blocked: Language restriction triggered.\n"
+                    "  AgentRouter currently only supports Chinese, English, French, German, and Russian.\n"
+                    "  💡 How to fix: Modify or translate your request into a supported language and retry.\n"
+                    "  Run `/faq 400` for more details."
+                ) from e
+            if "401" in err_str or "unauthorized" in err_str.lower() or "unauthenticated" in err_str.lower():
+                raise ProviderError(
+                    "HTTP 401 Unauthorized: API key missing, expired, or client unauthenticated.\n"
+                    "  💡 How to fix:\n"
+                    "     1. Verify your API token at https://agentrouter.org/console or https://ps.air-outer.com\n"
+                    "     2. Run `/keys` or `/provider` to update your credentials.\n"
+                    "     3. Supported client documentation: https://ps.air-outer.com/docs/claude-code.html\n"
+                    "     4. Run `/faq 401` for more details."
                 ) from e
             if "<!doctype html>" in err_str.lower() or "not found | openrouter" in err_str.lower() or "http 404" in err_str.lower():
                 raise ProviderError(
                     f"HTTP 404 Not Found from endpoint '{self._url}'.\n"
                     f"  💡 The model '{self.settings.model}' or path is not available on this provider.\n"
                     f"  Fix: Run `/model` to select an active model or `/provider` to re-configure the provider endpoint."
+                ) from e
+            if "agentrouter.org" in str(self.settings.base_url) and ("connection refused" in err_str.lower() or "[errno 61]" in err_str.lower() or "timeout" in err_str.lower() or "getaddrinfo" in err_str.lower() or "nameresolution" in err_str.lower()):
+                raise ProviderError(
+                    f"Cannot connect to AgentRouter at {self.settings.base_url}.\n"
+                    f"  💡 Backup Domain Available:\n"
+                    f"     AgentRouter provides an official alternative domain: https://ps.air-outer.com\n"
+                    f"     Switch anytime by running `/provider` or setting base_url to https://ps.air-outer.com\n"
+                    f"     Run `/faq domain` for details."
                 ) from e
             if "connection refused" in err_str.lower() or "[errno 61]" in err_str.lower() or "[errno 111]" in err_str.lower() or "winerror 10061" in err_str.lower():
                 base_u = self.settings.base_url

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from axon.agent.state import Conversation
 from axon.providers.base import AssistantTurn, ToolResultBlock, Usage
-from axon.session.ledger import Ledger
+from axon.session.ledger import Ledger, LedgerEntry
 
 @dataclass
 class SessionMeta:
@@ -221,8 +221,8 @@ class SessionStore:
         self.open(session_id)
         return conv
 
-    def load_ledger(self, session_id: str, model: str) -> Ledger:
-        """Reconstruct Ledger for a specific session from its JSONL entries."""
+    def load_ledger(self, session_id: str, model: str, include_subagents: bool = True) -> Ledger:
+        """Reconstruct Ledger for a specific session (including its subagents if include_subagents=True)."""
         target = self.session_dir / f"{session_id}.jsonl"
         ledger = Ledger()
         if not target.exists():
@@ -250,7 +250,7 @@ class SessionStore:
                                     cache_write=int(usage_dict.get("cache_write", 0)),
                                     reasoning=int(usage_dict.get("reasoning", 0)),
                                 )
-                                ledger.record(model, u)
+                                ledger.record(model, u, tag="main")
                             else:
                                 # Estimate usage for legacy sessions
                                 txt_len = len(data.get("text", "")) + len(data.get("thinking", ""))
@@ -258,12 +258,43 @@ class SessionStore:
                                 est_in = max(150, sum(estimate_content_tokens(m.get("content", "")) for m in conv_messages))
                                 est_out = max(25, int(txt_len / 3.7))
                                 u = Usage(input=est_in, output=est_out)
-                                ledger.record(model, u)
+                                ledger.record(model, u, tag="main")
                             conv_messages.append({"role": "assistant", "content": data.get("text", "")})
                     except Exception:
                         pass
         except Exception:
             pass
+
+        # Incorporate any subagent runs belonging to this session
+        if include_subagents and "_sub_" not in session_id:
+            for sub_file in sorted(self.session_dir.glob(f"{session_id}_sub_*.jsonl")):
+                sub_idx = sub_file.stem.split("_sub_")[-1]
+                sub_l = self.load_ledger(sub_file.stem, model, include_subagents=False)
+                sub_usage = Usage(
+                    input=sub_l.total_input_tokens,
+                    output=sub_l.total_output_tokens,
+                    cache_read=sub_l.total_cache_read_tokens,
+                    cache_write=sub_l.total_cache_write_tokens,
+                    reasoning=sub_l.total_reasoning_tokens,
+                )
+                if sub_usage.input > 0 or sub_usage.output > 0:
+                    entry = LedgerEntry(
+                        id=len(ledger.entries) + 1,
+                        timestamp=time.time(),
+                        tag=f"subagent_{sub_idx}",
+                        model=model,
+                        usage=sub_usage,
+                        cost=sub_l.total_cost,
+                    )
+                    ledger.entries.append(entry)
+                    ledger.total_input_tokens += sub_l.total_input_tokens
+                    ledger.total_output_tokens += sub_l.total_output_tokens
+                    ledger.total_cache_read_tokens += sub_l.total_cache_read_tokens
+                    ledger.total_cache_write_tokens += sub_l.total_cache_write_tokens
+                    ledger.total_reasoning_tokens += sub_l.total_reasoning_tokens
+                    ledger.total_cost += sub_l.total_cost
+                    ledger.turn_costs.append(sub_l.total_cost)
+
         return ledger
 
     def load_workspace_ledger(self, model: str) -> Ledger:
@@ -275,7 +306,7 @@ class SessionStore:
 
         for f in main_files:
             main_stem = f.stem
-            s_ledger = self.load_ledger(main_stem, model)
+            s_ledger = self.load_ledger(main_stem, model, include_subagents=True)
             total_ledger.total_input_tokens += s_ledger.total_input_tokens
             total_ledger.total_output_tokens += s_ledger.total_output_tokens
             total_ledger.total_cache_read_tokens += s_ledger.total_cache_read_tokens
@@ -283,17 +314,6 @@ class SessionStore:
             total_ledger.total_reasoning_tokens += s_ledger.total_reasoning_tokens
             total_ledger.total_cost += s_ledger.total_cost
             total_ledger.turn_costs.extend(s_ledger.turn_costs)
-
-            # Include any subagents belonging to this main chat
-            for sub_file in sorted(self.session_dir.glob(f"{main_stem}_sub_*.jsonl")):
-                sub_l = self.load_ledger(sub_file.stem, model)
-                total_ledger.total_input_tokens += sub_l.total_input_tokens
-                total_ledger.total_output_tokens += sub_l.total_output_tokens
-                total_ledger.total_cache_read_tokens += sub_l.total_cache_read_tokens
-                total_ledger.total_cache_write_tokens += sub_l.total_cache_write_tokens
-                total_ledger.total_reasoning_tokens += sub_l.total_reasoning_tokens
-                total_ledger.total_cost += sub_l.total_cost
-                total_ledger.turn_costs.extend(sub_l.turn_costs)
 
         return total_ledger
 

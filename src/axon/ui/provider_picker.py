@@ -20,7 +20,7 @@ except ModuleNotFoundError:
     tty = None      # type: ignore
     _HAS_TERMIOS = False
 
-from axon.providers.catalog import PROVIDER_PRESETS, ProviderPreset, get_preset_by_id
+from axon.providers.catalog import PROVIDER_PRESETS, ProviderPreset, get_preset_by_id, is_provider_linked
 from axon.providers.registry import provider_for
 from axon.ui.picker import pick
 from axon.ui.theme import (
@@ -97,25 +97,35 @@ def run_provider_picker(agent: Agent) -> bool:
 
                 is_sel = (idx == selected_idx)
                 cursor = f"{MINT}▶{RST}" if is_sel else " "
-                is_active = (agent.settings.base_url.rstrip("/") == p.base_url.rstrip("/"))
-                star = f"{MINT}●{RST}" if is_active else " "
+                is_active = (agent.settings.base_url.rstrip("/").lower() == p.base_url.rstrip("/").lower())
+                is_linked = is_provider_linked(p, agent)
 
-                name_str = f"{p.name:<28}"
+                # Prominent tick mark next to provider if it already exists / is linked
+                tick_icon = f"{MINT}✓{RST}" if is_linked else f"{DARK_SLATE}○{RST}"
+
+                name_str = f"{p.name:<24}"
                 if is_sel:
                     p_name = f"{MINT}{BOLD}{UNDER}{name_str}{RST}"
                 elif is_active:
-                    p_name = f"{MINT}{BOLD}{name_str}{RST}"
+                    p_name = f"{GOLD}{BOLD}{name_str}{RST}"
+                elif is_linked:
+                    p_name = f"{WHITE}{BOLD}{name_str}{RST}"
                 else:
                     p_name = f"{WHITE}{name_str}{RST}"
 
-                desc_max = max(8, width - 36)
+                status_badge = ""
+                if is_active:
+                    status_badge = f" {GOLD}[Active ●]{RST}"
+                elif is_linked:
+                    status_badge = f" {MINT}[Linked ✓]{RST}"
+
+                desc_max = max(8, width - 36 - len(strip_ansi(status_badge)))
                 desc = p.description[:desc_max]
-                pad_line = max(1, width - 32 - len(desc))
 
                 if is_sel:
-                    lines_out.append(f"  {cursor} {star} {p_name} {SLATE}{desc}{RST}")
+                    lines_out.append(f"  {cursor} {tick_icon} {p_name}{status_badge} {SLATE}{desc}{RST}")
                 else:
-                    lines_out.append(f"    {star} {p_name} {SLATE}{desc}{RST}")
+                    lines_out.append(f"    {tick_icon} {p_name}{status_badge} {SLATE}{desc}{RST}")
 
         lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
         lines_out.append(f"  {SLATE}↑/↓ navigate · Enter connect · Type to search · Esc back{RST}")
@@ -212,29 +222,37 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
     api_key_str = "local"
     if preset.requires_key:
         existing_key = None
-        target_var = preset.env_var or "AXON_API_KEY"
+        target_var = preset.env_var or (f"{preset.id.upper()}_API_KEY" if preset.id != "agentrouter" else "AXON_API_KEY")
 
         # Check process environment
-        if os.environ.get(target_var):
-            existing_key = os.environ.get(target_var)
+        val = os.environ.get(target_var, "").strip()
+        if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
+            existing_key = val
 
         # Check ~/.axon/.env
         if not existing_key:
             env_file = Path.home() / ".axon" / ".env"
             if env_file.exists():
                 try:
-                    for line in env_file.read_text(encoding="utf-8").splitlines():
+                    for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                         if "=" in line and line.strip().startswith(target_var):
-                            existing_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
+                            k_val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            if k_val and not k_val.startswith("/") and k_val.lower() not in ("none", "null", "local", "skip"):
+                                existing_key = k_val
+                                break
                 except Exception:
                     pass
 
-        # Fallback to AXON_API_KEY only for AgentRouter
+        # For AgentRouter, also check AGENTROUTER_API_KEY
         if not existing_key and preset.id == "agentrouter":
-            existing_key = os.environ.get("AXON_API_KEY")
+            for alt_var in ("AXON_API_KEY", "AGENTROUTER_API_KEY"):
+                val = os.environ.get(alt_var, "").strip()
+                if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
+                    existing_key = val
+                    target_var = alt_var
+                    break
 
-        if existing_key and existing_key not in ("", "local"):
+        if existing_key:
             print(f"  {MINT}✓ Found existing API key in environment ({target_var}){RST}")
             api_key_str = existing_key
         else:
@@ -363,18 +381,27 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
             print(f"  {MINT}✓ Ollama daemon is online ({len(mods)} installed models detected){RST}")
 
     from axon.ui.render import Renderer
+    import axon
     Renderer().print_banner(
-        version="GPR_27",
+        version=getattr(axon, "__version__", ""),
         model=chosen_model,
         effort=agent.settings.effort,
         workspace=str(agent.settings.workspace),
         mode=agent.settings.mode,
+        base_url=preset.base_url,
     )
     return True
 
 def _fallback_provider_picker(agent: Agent) -> bool:
     """Non-raw terminal fallback picker."""
-    options = [f"{p.name} ({p.category}) - {p.default_model}" for p in PROVIDER_PRESETS]
+    options = []
+    for p in PROVIDER_PRESETS:
+        is_linked = is_provider_linked(p, agent)
+        is_active = (agent.settings.base_url.rstrip("/").lower() == p.base_url.rstrip("/").lower())
+        tick = "✓ " if is_linked else "○ "
+        tag = " [Active]" if is_active else (" [Linked]" if is_linked else "")
+        options.append(f"{tick}{p.name}{tag} ({p.category}) - {p.default_model}")
+
     chosen_str = pick(options, title="Connect a Provider")
     if not chosen_str:
         return False

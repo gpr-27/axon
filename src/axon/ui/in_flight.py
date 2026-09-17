@@ -259,6 +259,11 @@ class InFlightInputListener:
             for _ in stream:
                 pass
             turn = side_provider.finalize()
+            if hasattr(self.agent, "ledger") and self.agent.ledger is not None and getattr(turn, "usage", None):
+                try:
+                    self.agent.ledger.record(self.agent.settings.model, turn.usage, tag="side_question")
+                except Exception:
+                    pass
             ans_text = turn.text or "Completed."
             sys.stdout.write(f"\n{render_side_question_box(question, ans_text)}\n\n")
             sys.stdout.flush()

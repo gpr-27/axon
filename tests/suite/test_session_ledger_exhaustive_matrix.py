@@ -18,7 +18,7 @@ from axon.providers.base import AssistantTurn, TextBlock, ToolUseBlock, Usage
     ("gpt-5.6-sol", 5000, 500, 0, Decimal("0.005")),
     ("gpt-5-mini", 5000, 500, 0, Decimal("0.0005")),
     ("deepseek-v4-flash", 10000, 2000, 0, Decimal("0.0001")),
-    ("glm-5.3", 10000, 2000, 0, Decimal("0.0001")),
+    ("gpt-6-astra", 10000, 2000, 0, Decimal("0.0001")),
 ])
 def test_ledger_pricing_calculations(model: str, in_tok: int, out_tok: int, cache_read: int, expected_min_cost: Decimal):
     ledger = Ledger()
@@ -32,8 +32,38 @@ def test_ledger_uncached_counterfactual_comparison():
     usage = Usage(input=10000, output=1000, cache_read=8000)
     actual_cost = ledger.record("claude-opus-5", usage)
     counterfactual = ledger.uncached_counterfactual("claude-opus-5")
-    assert counterfactual >= actual_cost
-    assert ledger.savings_pct("claude-opus-5") >= 0.0
+    assert counterfactual > actual_cost
+    assert ledger.savings_pct("claude-opus-5") > 0.0
+
+def test_agentrouter_cache_tokens_exact_billing():
+    """Verify exact formula from live AgentRouter billing log:
+    Input tokens: 39365 (39168 cached, 197 direct uncached)
+    Output tokens: 4886
+    Rates: $4.00/1M in, $12.00/1M out, $0.80/1M cache
+    Expected: (197 * $4.00 + 39168 * $0.80 + 4886 * $12.00) / 1M = $0.0907544
+    """
+    ledger = Ledger()
+    usage = Usage(input=39365, output=4886, cache_read=39168)
+    cost = ledger.record("deepseek-v4-flash", usage)
+    expected = Decimal("197") / Decimal("1000000") * Decimal("4.00") + \
+               Decimal("39168") / Decimal("1000000") * Decimal("0.80") + \
+               Decimal("4886") / Decimal("1000000") * Decimal("12.00")
+    assert cost == expected
+    assert round(float(cost), 6) == 0.090754
+    assert ledger.total_cache_read_tokens == 39168
+    rendered = ledger.render("deepseek-v4-flash")
+    assert "Cache Tokens" in rendered
+    assert "Cache Savings" in rendered
+
+    # Also verify exact deduction from live 18:42:02 non-stream test run:
+    # 40 prompt tokens, 20 completion tokens -> $0.000400
+    ledger2 = Ledger()
+    usage2 = Usage(input=40, output=20, cache_read=0)
+    cost2 = ledger2.record("deepseek-v4-flash", usage2)
+    expected2 = Decimal("40") / Decimal("1000000") * Decimal("4.00") + \
+                Decimal("20") / Decimal("1000000") * Decimal("12.00")
+    assert cost2 == expected2
+    assert float(cost2) == 0.000400
 
 # ─── Session Store Durability & Recovery (20 tests) ─────────────────────────
 def test_session_store_append_and_corrupt_line_recovery(workspace: Path):

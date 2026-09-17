@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 from axon.agent.state import Conversation
 from axon.errors import ToolError
+from axon.providers.base import Usage
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
@@ -183,6 +184,7 @@ def run_subagent(
 
     from axon.agent.loop import Agent
     from axon.session.store import SessionStore
+    from axon.session.ledger import Ledger, LedgerEntry
     from axon.agent.worktree import WorktreeManager, WorktreeInfo
 
     worktree_info: WorktreeInfo | None = None
@@ -200,6 +202,7 @@ def run_subagent(
     sub_sess_id = f"{parent_sess_id}_sub_{task.index}"
     sub_store = SessionStore(sub_ws, session_dir=parent.session.session_dir)
     sub_store.open(sub_sess_id)
+    sub_ledger = Ledger()
 
     sub_agent = Agent(
         provider=parent.provider,
@@ -207,7 +210,7 @@ def run_subagent(
         permissions=parent.permissions,
         context=parent.context,
         session=sub_store,
-        ledger=parent.ledger,
+        ledger=sub_ledger,
         settings=parent.settings.model_copy(update={"max_iterations": max_iterations, "workspace": sub_ws}),
         on_event=sub_on_event,
     )
@@ -235,10 +238,17 @@ def run_subagent(
                 final_text += f"\n\n✓ Worktree changes merged back to workspace."
             WorktreeManager.cleanup(worktree_info)
 
-        # Record subagent tokens and cost into parent ledger so Main session total includes all subagents
+        # Record subagent tokens and cost into parent ledger to reflect combined session total
         if hasattr(parent, "ledger") and parent.ledger is not None:
             try:
-                parent.ledger.record(parent.settings.model, sub_usage)
+                sub_usage_agg = Usage(
+                    input=sub_ledger.total_input_tokens or (sub_usage.input or 0),
+                    output=sub_ledger.total_output_tokens or (sub_usage.output or 0),
+                    cache_read=sub_ledger.total_cache_read_tokens or getattr(sub_usage, "cache_read", 0),
+                    cache_write=sub_ledger.total_cache_write_tokens or getattr(sub_usage, "cache_write", 0),
+                    reasoning=sub_ledger.total_reasoning_tokens or getattr(sub_usage, "reasoning", 0),
+                )
+                parent.ledger.record(parent.settings.model, sub_usage_agg, tag=f"subagent_{task.index}")
             except Exception:
                 pass
 

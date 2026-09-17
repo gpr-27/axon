@@ -47,9 +47,9 @@ PROVIDER_PRESETS: list[ProviderPreset] = [
         models=[
             "deepseek-v4-flash",
             "gpt-5.6-sol",
+            "gpt-6-astra",
             "claude-opus-5",
             "claude-opus-4-8",
-            "glm-5.3",
         ],
         env_var="AXON_API_KEY",
         requires_key=True,
@@ -150,74 +150,158 @@ PROVIDER_PRESETS: list[ProviderPreset] = [
     ),
 ]
 
-def get_curated_model_choices(active_base_url: str = "") -> list[tuple[str, str, str]]:
-    """
-    Builds a clean, non-overwhelming list of curated models across providers.
-    Returns list of tuples: (raw_model_id, provider_name, formatted_display_string).
-    Models belonging to the active provider and previously saved custom models are displayed at the top.
-    """
-    # Identify active preset
-    active_preset = find_preset_by_url(active_base_url) if active_base_url else None
-    active_id = active_preset.id if active_preset else "agentrouter"
+def is_provider_linked(preset: ProviderPreset, agent: Any = None) -> bool:
+    """Check if a provider is already linked / configured (has valid API key or reachable local daemon)."""
+    import os
+    from pathlib import Path
 
-    # If Ollama is active or available, query local models dynamically
-    local_ollama_models: list[str] = []
-    if active_id == "ollama" or "11434" in active_base_url:
-        local_ollama_models = fetch_local_ollama_models(active_base_url or "http://localhost:11434")
+    # 1. If currently active in agent settings
+    if agent is not None and hasattr(agent, "settings") and agent.settings:
+        active_url = agent.settings.base_url.rstrip("/").lower()
+        preset_url = preset.base_url.rstrip("/").lower()
+        if (preset_url in active_url or active_url in preset_url) and agent.settings.api_key:
+            secret = agent.settings.api_key.get_secret_value() if hasattr(agent.settings.api_key, "get_secret_value") else str(agent.settings.api_key)
+            if secret and secret not in ("", "local", "none", "null"):
+                return True
 
-    # Load previously typed custom models from ~/.axon/config.toml
-    custom_saved_models: list[Any] = []
+    # 2. If requires key, check process environment and ~/.axon/.env for preset.env_var
+    if preset.requires_key:
+        target_vars = [preset.env_var] if preset.env_var else []
+        if preset.id == "agentrouter":
+            if "AXON_API_KEY" not in target_vars:
+                target_vars.append("AXON_API_KEY")
+            if "AGENTROUTER_API_KEY" not in target_vars:
+                target_vars.append("AGENTROUTER_API_KEY")
+
+        for var in target_vars:
+            val = os.environ.get(var, "").strip()
+            if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
+                return True
+
+            env_file = Path.home() / ".axon" / ".env"
+            if env_file.exists():
+                try:
+                    for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        if "=" in line and line.strip().startswith(var):
+                            k_val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            if k_val and not k_val.startswith("/") and k_val.lower() not in ("none", "null", "local", "skip"):
+                                return True
+                except Exception:
+                    pass
+        return False
+    else:
+        # Local daemon without key (e.g. Ollama): check if reachable or has models
+        if preset.id == "ollama":
+            mods = fetch_local_ollama_models(preset.base_url)
+            if mods:
+                return True
+            cfg_file = Path.home() / ".axon" / "config.toml"
+            if cfg_file.exists():
+                try:
+                    import tomllib
+                    with open(cfg_file, "rb") as f_cfg:
+                        c = tomllib.load(f_cfg)
+                        if "11434" in c.get("base_url", ""):
+                            return True
+                except Exception:
+                    pass
+            return False
+        return True
+
+def get_linked_providers(agent: Any = None) -> list[ProviderPreset]:
+    """Returns list of ProviderPresets that are actively linked/configured."""
+    linked = [p for p in PROVIDER_PRESETS if is_provider_linked(p, agent)]
+    if not linked:
+        # Always ensure agentrouter is available as default
+        ar = get_preset_by_id("agentrouter")
+        if ar:
+            linked.append(ar)
+    return linked
+
+def get_models_for_provider(preset: ProviderPreset, agent: Any = None) -> list[str]:
+    """Returns models available for a specific provider preset."""
+    models: list[str] = []
+    seen: set[str] = set()
+
+    # Dynamic local models if Ollama
+    if preset.id == "ollama":
+        live_m = fetch_local_ollama_models(preset.base_url)
+        for m in live_m:
+            if m not in seen:
+                seen.add(m)
+                models.append(m)
+
+    # Saved custom models for this provider in ~/.axon/config.toml
     try:
         from pathlib import Path
         cfg_file = Path.home() / ".axon" / "config.toml"
         if cfg_file.exists():
-            try:
-                import tomllib
-                with open(cfg_file, "rb") as f_cfg:
-                    cfg_dict = tomllib.load(f_cfg)
-                    custom_saved_models = cfg_dict.get("custom_models", [])
-            except Exception:
-                pass
+            import tomllib
+            with open(cfg_file, "rb") as f_cfg:
+                cfg = tomllib.load(f_cfg)
+                for cm in cfg.get("custom_models", []):
+                    if isinstance(cm, dict) and cm.get("provider") == preset.id:
+                        m_name = cm.get("model", "").strip()
+                        if m_name and m_name not in seen:
+                            seen.add(m_name)
+                            models.append(m_name)
+                    elif isinstance(cm, str) and preset.id == "agentrouter":
+                        if cm not in seen:
+                            seen.add(cm)
+                            models.append(cm)
     except Exception:
         pass
 
-    # Order presets with active preset first
-    ordered_presets = list(PROVIDER_PRESETS)
-    if active_preset and active_preset in ordered_presets:
-        ordered_presets.remove(active_preset)
-        ordered_presets.insert(0, active_preset)
+    # Preset standard models
+    for m in preset.models:
+        if m not in seen:
+            seen.add(m)
+            models.append(m)
+
+    return models
+
+def get_curated_model_choices(active_base_url: str = "") -> list[tuple[str, str, str]]:
+    """
+    Builds a clean, non-overwhelming list of curated models across ONLY LINKED providers.
+    Returns list of tuples: (raw_model_id, provider_name, formatted_display_string).
+    """
+    # Identify active preset
+    active_preset = find_preset_by_url(active_base_url) if active_base_url else None
+
+    # Load custom_models from config.toml to check for user-saved provider models
+    custom_prov_ids: set[str] = set()
+    try:
+        from pathlib import Path
+        cfg_file = Path.home() / ".axon" / "config.toml"
+        if cfg_file.exists():
+            import tomllib
+            with open(cfg_file, "rb") as f_cfg:
+                cfg = tomllib.load(f_cfg)
+                for cm in cfg.get("custom_models", []):
+                    if isinstance(cm, dict) and cm.get("provider"):
+                        custom_prov_ids.add(cm.get("provider").lower())
+    except Exception:
+        pass
+
+    # Filter to only linked providers, active preset, or providers with saved custom models
+    linked_presets = [p for p in PROVIDER_PRESETS if is_provider_linked(p) or p.id.lower() in custom_prov_ids]
+    if active_preset and active_preset not in linked_presets:
+        linked_presets.append(active_preset)
+    if not linked_presets:
+        ar = get_preset_by_id("agentrouter")
+        linked_presets = [ar] if ar else PROVIDER_PRESETS[:1]
+
+    # Active preset first
+    if active_preset and active_preset in linked_presets:
+        linked_presets.remove(active_preset)
+        linked_presets.insert(0, active_preset)
 
     choices: list[tuple[str, str, str]] = []
     seen_models: set[str] = set()
 
-    # Add dynamic local Ollama models first if active
-    if local_ollama_models:
-        for lm in local_ollama_models[:8]:
-            if lm not in seen_models:
-                seen_models.add(lm)
-                disp = f"[{'Ollama (Local)':<13}]  {lm}"
-                choices.append((lm, "Ollama (Local)", disp))
-
-    # Add previously entered custom models (provider-specific)
-    if custom_saved_models:
-        for cm in custom_saved_models:
-            if isinstance(cm, dict):
-                model_name = cm.get("model", "").strip()
-                prov_id = cm.get("provider", "") or cm.get("provider_id", "")
-                p = get_preset_by_id(prov_id) or find_preset_for_model(model_name)
-            else:
-                model_name = str(cm).strip()
-                p = find_preset_for_model(model_name)
-
-            if model_name and model_name not in seen_models:
-                seen_models.add(model_name)
-                p_label = p.name.split(" ")[0] if p else "Custom"
-                disp = f"[{p_label:<13}]  {model_name} (custom)"
-                choices.append((model_name, p_label, disp))
-
-    for p in ordered_presets:
+    for p in linked_presets:
         p_label = p.name.split(" ")[0] if not p.name.startswith("Ollama") else "Ollama"
-        for m in p.models:
+        for m in get_models_for_provider(p):
             if m not in seen_models:
                 seen_models.add(m)
                 disp = f"[{p_label:<13}]  {m}"
@@ -241,8 +325,6 @@ def find_preset_for_model(model_name: str) -> ProviderPreset | None:
             return p
 
     # Explicit provider overrides
-    if m_clean.lower().startswith("groq/"):
-        return get_preset_by_id("groq")
     if m_clean.lower().startswith("ollama/"):
         return get_preset_by_id("ollama")
     if m_clean.lower().startswith("gemini/"):
