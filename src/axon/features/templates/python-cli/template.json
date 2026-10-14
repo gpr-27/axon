@@ -1,0 +1,11 @@
+{
+  "description": "Python command-line app (argparse, src layout, pytest)",
+  "language": "Python",
+  "next": [
+    "python -m venv .venv",
+    "activate it (.venv\\Scripts\\activate on Windows, source .venv/bin/activate elsewhere)",
+    "pip install -e \".[dev]\"",
+    "{{name}} --help",
+    "pytest"
+  ]
+}

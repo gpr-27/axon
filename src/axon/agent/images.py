@@ -13,7 +13,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".tiff")
 
@@ -41,12 +40,16 @@ class ImageAttachment:
 
 def save_clipboard_image(dest_path: Path) -> bool:
     """Instantly save image from macOS/system clipboard to dest_path (< 40ms)."""
-    # 1. Native macOS Cocoa helper
-    axon_bin = Path.home() / ".axon" / "bin"
-    axon_bin.mkdir(parents=True, exist_ok=True)
+    # 1. Native macOS Cocoa helper (compiled once into ~/.axon/bin)
+    from axon.storage import axon_home as _axon_home
+    axon_bin = _axon_home() / "bin"
     helper = axon_bin / "axon_paste_helper"
 
-    if not helper.exists():
+    if sys.platform == "darwin" and not helper.exists() and shutil.which("clang"):
+        try:
+            axon_bin.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         src_c = """#import <Cocoa/Cocoa.h>
 #import <stdio.h>
 int main(int argc, const char * argv[]) {
@@ -76,7 +79,7 @@ int main(int argc, const char * argv[]) {
         except Exception:
             pass
 
-    if helper.exists():
+    if sys.platform == "darwin" and helper.exists():
         try:
             res = subprocess.run([str(helper), str(dest_path)], capture_output=True, text=True, timeout=0.8)
             if res.returncode == 0 and dest_path.exists() and dest_path.stat().st_size > 0:
@@ -86,6 +89,8 @@ int main(int argc, const char * argv[]) {
 
     # 2. Fallback to pngpaste if installed
     try:
+        if not shutil.which("pngpaste"):
+            raise FileNotFoundError("pngpaste")
         res = subprocess.run(["pngpaste", str(dest_path)], capture_output=True, timeout=0.5)
         if res.returncode == 0 and dest_path.exists() and dest_path.stat().st_size > 0:
             return True
@@ -153,7 +158,8 @@ end try'''
 
 def get_images_cache_dir() -> Path:
     """Return the persistent image cache directory."""
-    d = Path.home() / ".axon" / "images"
+    from axon.storage import axon_home as _axon_home
+    d = _axon_home() / "images"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -161,6 +167,8 @@ def _get_image_dimensions(p: Path) -> tuple[int, int]:
     """Extract width and height from image headers or macOS sips."""
     # 1. Try macOS sips if available
     try:
+        if sys.platform != "darwin":
+            raise OSError("sips is macOS-only")
         res = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(p)], capture_output=True, text=True, timeout=1)
         if res.returncode == 0:
             w_match = re.search(r"pixelWidth:\s*(\d+)", res.stdout)
@@ -174,7 +182,7 @@ def _get_image_dimensions(p: Path) -> tuple[int, int]:
     try:
         with open(p, "rb") as f:
             data = f.read(32)
-            if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            if data[:8] == b"\x89PNG\r\n\x1a\n":
                 w, h = struct.unpack(">II", data[16:24])
                 return int(w), int(h)
             elif data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
@@ -186,17 +194,22 @@ def _get_image_dimensions(p: Path) -> tuple[int, int]:
 
 def _extract_ocr_text(p: Path) -> str:
     """Extract OCR text from image using native macOS Vision OCR or tesseract."""
-    # 1. Try precompiled /tmp/axon_ocr if available
-    try:
-        if os.path.exists("/tmp/axon_ocr"):
-            res = subprocess.run(["/tmp/axon_ocr", str(p)], capture_output=True, text=True, timeout=2)
-            if res.returncode == 0 and res.stdout.strip():
-                return res.stdout.strip()
-    except Exception:
-        pass
+    # 1. Optional user-installed OCR helper in ~/.axon/bin (user-owned, never a shared temp dir)
+    if sys.platform == "darwin":
+        from axon.storage import axon_home as _axon_home
+        helper = _axon_home() / "bin" / "axon_ocr"
+        try:
+            if helper.is_file() and os.access(helper, os.X_OK):
+                res = subprocess.run([str(helper), str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
+                if res.returncode == 0 and res.stdout.strip():
+                    return res.stdout.strip()
+        except Exception:
+            pass
 
-    # 2. Try swift Vision script fallback
+    # 2. Try swift Vision script fallback (macOS only)
     try:
+        if sys.platform != "darwin" or not shutil.which("swift"):
+            raise OSError("swift Vision OCR unavailable")
         swift_code = (
             'import Foundation, Vision, AppKit\n'
             'guard CommandLine.arguments.count > 1, let img = NSImage(contentsOfFile: CommandLine.arguments[1]), '
@@ -207,14 +220,14 @@ def _extract_ocr_text(p: Path) -> str:
             '}\n'
             'try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])'
         )
-        res = subprocess.run(["swift", "-e", swift_code, str(p)], capture_output=True, text=True, timeout=3)
+        res = subprocess.run(["swift", "-e", swift_code, str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3)
         if res.returncode == 0 and res.stdout.strip():
             return res.stdout.strip()
     except Exception:
         pass
 
     # 3. Try tesseract if installed (across Unix and Windows paths)
-    tess_candidates = ["tesseract"]
+    tess_candidates = ["tesseract"] if shutil.which("tesseract") else []
     if sys.platform == "win32":
         for win_tess in (
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
@@ -227,7 +240,7 @@ def _extract_ocr_text(p: Path) -> str:
 
     for tess_bin in tess_candidates:
         try:
-            res = subprocess.run([tess_bin, str(p), "stdout"], capture_output=True, text=True, timeout=2)
+            res = subprocess.run([tess_bin, str(p), "stdout"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
             if res.returncode == 0 and res.stdout.strip():
                 return res.stdout.strip()
         except Exception:
@@ -383,7 +396,8 @@ def compact_image_paths(text: str) -> tuple[str, list[ImageAttachment]]:
         for m in re.finditer(re.escape(ext), text, re.IGNORECASE):
             end_idx = m.end()
             start_idx = end_idx - len(ext)
-            while start_idx > 0:
+            floor = max(0, end_idx - 400)
+            while start_idx > floor:
                 prev_ch = text[start_idx - 1]
                 if prev_ch in ('\r', '\n'):
                     break

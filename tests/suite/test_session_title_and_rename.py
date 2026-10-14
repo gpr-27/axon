@@ -20,36 +20,36 @@ def test_clean_session_topic():
 def test_categorize_session_time():
     now = time.time()
     assert categorize_session_time(now) == "Today"
-    
+
     yesterday = (datetime.now() - timedelta(days=1)).timestamp()
     assert categorize_session_time(yesterday) == "Yesterday"
-    
+
     four_days_ago = (datetime.now() - timedelta(days=4)).timestamp()
     assert categorize_session_time(four_days_ago) == "Previous 7 Days"
-    
+
     two_weeks_ago = (datetime.now() - timedelta(days=14)).timestamp()
     assert categorize_session_time(two_weeks_ago) == "Older"
 
 def test_session_rename_and_persistence(tmp_path: Path):
     s_dir = tmp_path / "sessions"
     store = SessionStore(workspace=tmp_path, session_dir=s_dir)
-    
+
     # Append a prompt and turn
     store.append_user("Refactor database models to use SQLModel")
-    
+
     # Check title before rename
     recent = store.list_recent()
     assert len(recent) == 1
     assert "Refactor database models" in recent[0].first_prompt
-    
+
     # Rename session
     renamed = store.rename_session("Core DB Refactoring")
     assert renamed == "Core DB Refactoring"
-    
+
     # Check title after rename
     recent_renamed = store.list_recent()
     assert recent_renamed[0].first_prompt == "Core DB Refactoring"
-    
+
     # Test switcher loader
     dashboard_sessions = load_dashboard_sessions(tmp_path, store.active_session_id, session_dir=s_dir)
     assert len(dashboard_sessions) == 1
@@ -58,10 +58,10 @@ def test_session_rename_and_persistence(tmp_path: Path):
 def test_empty_session_fallback_name(tmp_path: Path):
     s_dir = tmp_path / "sessions"
     store = SessionStore(workspace=tmp_path, session_dir=s_dir)
-    
+
     # Create empty session
     store.append("session_start", {"model": "deepseek-v4-flash"})
-    
+
     dashboard_sessions = load_dashboard_sessions(tmp_path, store.active_session_id, session_dir=s_dir)
     assert len(dashboard_sessions) == 1
     # Fallback should not contain raw ISO date format like 2026-08-31T

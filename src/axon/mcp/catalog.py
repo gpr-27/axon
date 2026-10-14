@@ -3,7 +3,6 @@ Model Context Protocol (MCP) Server Presets Catalog.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any
 
 @dataclass
 class MCPServerPreset:
@@ -29,8 +28,8 @@ MCP_CATALOG: list[MCPServerPreset] = [
         id="sqlite",
         name="SQLite Database MCP",
         description="Connect, query, inspect tables, and analyze SQLite database files",
-        command="npx",
-        args=["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "./database.sqlite"],
+        command="uvx",
+        args=["mcp-server-sqlite", "--db-path", "./database.sqlite"],
         category="Databases",
     ),
     MCPServerPreset(

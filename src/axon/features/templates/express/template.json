@@ -1,0 +1,9 @@
+{
+  "description": "Express HTTP API with node:test integration tests",
+  "language": "JavaScript",
+  "next": [
+    "npm install",
+    "npm run dev",
+    "npm test"
+  ]
+}

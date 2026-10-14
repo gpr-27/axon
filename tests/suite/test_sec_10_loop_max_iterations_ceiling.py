@@ -1,17 +1,16 @@
-"""Security and invariant test for Agent loop terminates at max_iterations (loop_max_iterations_ceiling)."""
-import pytest
+"""Security and invariant test: the agent loop terminates at max_iterations with valid pairing."""
 from pathlib import Path
-from axon.config import Settings
-from axon.permissions.engine import PermissionEngine
-from axon.skills.importer import parse_github_skill_url
-from axon.errors import ToolError, PermissionDenied
+from axon.providers.base import AssistantTurn, ToolUseBlock
+from tests.fakes import FakeProvider
+from tests.test_core_helpers import make_agent
+
 
 def test_sec_loop_max_iterations_ceiling(workspace: Path):
-    settings = Settings(workspace=workspace)
-    perms = PermissionEngine(settings)
-    assert perms is not None
-
-    # Parse GitHub URL safety
-    owner, repo, ref, subpath = parse_github_skill_url("https://github.com/owner/repo/tree/main/skills/test")
-    assert owner == "owner"
-    assert repo == "repo"
+    turns = [AssistantTurn(blocks=[ToolUseBlock(id=f"c{i}", name="Ls", input={"path": "."})], stop_reason="tool_use")
+             for i in range(20)]
+    prov = FakeProvider(turns)
+    agent = make_agent(prov, workspace, max_iterations=4)
+    res = agent.run_turn("never stop")
+    assert res.stop_reason == "max_iterations"
+    assert len(prov.requests) == 4
+    agent.conversation.validate()  # every tool_use has its tool_result

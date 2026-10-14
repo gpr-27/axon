@@ -1,0 +1,17 @@
+# {{title}}
+
+A typed Python library.
+
+```python
+from {{module}} import chunked, slugify
+list(chunked(range(5), 2))   # [[0, 1], [2, 3], [4]]
+slugify("Hello, World!")     # "hello-world"
+```
+
+## Develop
+
+```bash
+python -m venv .venv
+pip install -e ".[dev]"
+pytest
+```

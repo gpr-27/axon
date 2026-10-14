@@ -1,0 +1,9 @@
+{
+  "description": "TypeScript library compiled with tsc, node:test tests",
+  "language": "TypeScript",
+  "next": [
+    "npm install",
+    "npm test",
+    "npm run build"
+  ]
+}

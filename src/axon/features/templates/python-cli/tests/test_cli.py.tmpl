@@ -1,0 +1,11 @@
+from {{module}}.cli import greet, main
+
+
+def test_greet() -> None:
+    assert greet("Ada") == "Hello, Ada!"
+    assert greet("Ada", shout=True) == "HELLO, ADA!"
+
+
+def test_main_prints_greeting(capsys) -> None:
+    assert main(["Ada"]) == 0
+    assert capsys.readouterr().out.strip() == "Hello, Ada!"

@@ -5,6 +5,19 @@ from axon.tools import WebSearchTool
 from axon.tools.base import ToolContext
 from axon.agent.state import FileState, TodoState
 
+
+import httpx
+from axon.tools import _http
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Tests never touch the network: every request fails like an offline machine."""
+    def offline(request):
+        raise httpx.ConnectError("offline (test)", request=request)
+    monkeypatch.setattr(_http, "_TRANSPORT", httpx.MockTransport(offline))
+
+
 def test_web_search_tool_initialization(workspace: Path, settings):
     tool = WebSearchTool()
     assert tool.name is not None

@@ -1,0 +1,10 @@
+{
+  "description": "React + Vite single-page app with a Vitest test",
+  "language": "JavaScript",
+  "next": [
+    "npm install",
+    "npm run dev",
+    "npm test",
+    "npm run build"
+  ]
+}

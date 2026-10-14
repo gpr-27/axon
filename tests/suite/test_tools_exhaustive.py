@@ -1,5 +1,5 @@
 """
-Exhaustive test suite for all 24 Axon tools.
+Exhaustive test suite for the Axon tool set.
 Covers edge cases, parameter validations, error handling, and state transitions.
 """
 import os
@@ -81,7 +81,7 @@ def test_edit_successful_replacement(tool_ctx: ToolContext):
     registry = create_default_registry()
     read_tool = registry.get("Read")
     read_tool.run({"path": "edit_ok.txt"}, tool_ctx)
-    
+
     edit_tool = registry.get("Edit")
     res = edit_tool.run({"path": "edit_ok.txt", "old_string": "Hello", "new_string": "Hi"}, tool_ctx)
     assert "Successfully applied edit" in res
@@ -92,7 +92,7 @@ def test_edit_multiple_occurrences_error(tool_ctx: ToolContext):
     f.write_text("foo bar foo\n", encoding="utf-8")
     registry = create_default_registry()
     registry.get("Read").run({"path": "edit_dup.txt"}, tool_ctx)
-    
+
     with pytest.raises(ToolError, match="appears 2 times"):
         registry.get("Edit").run({"path": "edit_dup.txt", "old_string": "foo", "new_string": "baz"}, tool_ctx)
 
@@ -137,7 +137,7 @@ def test_ls_empty_and_populated_directory(tool_ctx: ToolContext):
     d.mkdir()
     registry = create_default_registry()
     tool = registry.get("Ls")
-    
+
     res_empty = tool.run({"path": "ls_test"}, tool_ctx)
     assert "(Empty directory)" in res_empty
 
@@ -151,8 +151,8 @@ def test_filetree_structure(tool_ctx: ToolContext):
     (tool_ctx.workspace / "pkg/subpkg").mkdir(parents=True)
     (tool_ctx.workspace / "pkg/subpkg/mod.py").write_text("x=1")
     registry = create_default_registry()
-    tool = registry.get("FileTree")
-    res = tool.run({"path": "pkg"}, tool_ctx)
+    tool = registry.get("Ls")
+    res = tool.run({"path": "pkg", "depth": 3}, tool_ctx)
     assert "subpkg" in res
     assert "mod.py" in res
 
@@ -163,7 +163,7 @@ def test_glob_matching(tool_ctx: ToolContext):
     (tool_ctx.workspace / "src/readme.md").write_text("doc")
     registry = create_default_registry()
     tool = registry.get("Glob")
-    
+
     res = tool.run({"pattern": "**/*.py"}, tool_ctx)
     assert "src/main.py" in res
     assert "src/util.py" in res
@@ -195,8 +195,8 @@ async def fetch_user(uid: int):
     pass
 """, encoding="utf-8")
     registry = create_default_registry()
-    tool = registry.get("CodeSymbols")
-    res = tool.run({"path": "classes.py"}, tool_ctx)
+    tool = registry.get("CodeSearch")
+    res = tool.run({"action": "symbols", "path": "classes.py"}, tool_ctx)
     assert "class AuthService" in res
     assert "def authenticate" in res
     assert "async def fetch_user" in res
@@ -213,35 +213,12 @@ def test_bash_error_exit(tool_ctx: ToolContext):
     res = tool.run({"command": "false"}, tool_ctx)
     assert "non-zero code" in res
 
-def test_env_tool_operations(tool_ctx: ToolContext):
-    registry = create_default_registry()
-    tool = registry.get("Env")
-    res = tool.run({"action": "get", "variable": "PATH"}, tool_ctx)
-    assert "PATH=" in res
-
 def test_doctor_diagnostic(tool_ctx: ToolContext):
     registry = create_default_registry()
     tool = registry.get("Doctor")
     res = tool.run({}, tool_ctx)
     assert "Axon Environment Diagnostics" in res
     assert "Python Version" in res
-
-def test_http_tool_request(tool_ctx: ToolContext):
-    registry = create_default_registry()
-    tool = registry.get("Http")
-    # Verify parameter validation
-    with pytest.raises(ToolError, match="Invalid URL"):
-        tool.run({}, tool_ctx)
-
-def test_table_search_markdown_and_csv(tool_ctx: ToolContext):
-    f = tool_ctx.workspace / "data.csv"
-    f.write_text("name,age,role\nAlice,30,Engineer\nBob,25,Designer\nCharlie,35,Manager\n")
-    registry = create_default_registry()
-    tool = registry.get("TableSearch")
-    res = tool.run({"path": "data.csv", "query": "Engineer"}, tool_ctx)
-    assert "Alice" in res
-    assert "Engineer" in res
-    assert "Designer" not in res
 
 def test_todo_state_transitions(tool_ctx: ToolContext):
     registry = create_default_registry()
@@ -268,13 +245,3 @@ def test_exit_plan_mode_validation(tool_ctx: ToolContext):
 
     res = tool.run({"plan": "1. Research\n2. Implement\n3. Verify"}, tool_ctx)
     assert "Plan proposed for approval" in res
-
-def test_diff_tool_no_changes(tool_ctx: ToolContext):
-    f1 = tool_ctx.workspace / "f1.txt"
-    f2 = tool_ctx.workspace / "f2.txt"
-    f1.write_text("hello\n")
-    f2.write_text("hello\n")
-    registry = create_default_registry()
-    tool = registry.get("Diff")
-    res = tool.run({"path_a": "f1.txt", "path_b": "f2.txt"}, tool_ctx)
-    assert "identical" in res

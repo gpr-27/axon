@@ -1,0 +1,8 @@
+{
+  "description": "Static HTML/CSS/JS site, no build step",
+  "language": "HTML",
+  "next": [
+    "open index.html in a browser",
+    "or serve it: python -m http.server 8000"
+  ]
+}

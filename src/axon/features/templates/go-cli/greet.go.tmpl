@@ -1,0 +1,15 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Greet returns a greeting for name.
+func Greet(name string, shout bool) string {
+	msg := fmt.Sprintf("Hello, %s!", name)
+	if shout {
+		return strings.ToUpper(msg)
+	}
+	return msg
+}

@@ -1,6 +1,16 @@
 """
-UI package exports.
+UI package exports. Importing the UI prepares the console (UTF-8 streams, Windows VT mode).
 """
+import sys as _sys
+
+from axon import platform as _platform
+
+try:
+    if _sys.stdout is not None and _sys.stdout.isatty():
+        _platform.setup_console()
+except Exception:
+    pass
+
 from axon.ui.theme import (
     RST,
     BOLD,

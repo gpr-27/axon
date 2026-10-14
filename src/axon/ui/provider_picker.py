@@ -1,409 +1,277 @@
 """
-Interactive 'Connect a provider' TUI Modal (Matching Claude Code / OpenCode UI).
-Allows seamless live switching between Local (Ollama, LM Studio) and Cloud engines.
+"Connect a provider" picker: choose a preset, supply/verify its API key, pick a model, apply it.
+
+Also hosts the single implementation of "apply provider + model to the agent and persist it",
+shared with axon.ui.model_picker.
 """
 from __future__ import annotations
-import json
-import os
+
+import getpass
 import sys
-import time
+import os
+import random
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 from pydantic import SecretStr
 
-try:
-    import termios
-    import tty
-    _HAS_TERMIOS = True
-except ModuleNotFoundError:
-    termios = None  # type: ignore
-    tty = None      # type: ignore
-    _HAS_TERMIOS = False
-
-from axon.providers.catalog import PROVIDER_PRESETS, ProviderPreset, get_preset_by_id, is_provider_linked
-from axon.providers.registry import provider_for
-from axon.ui.picker import pick
-from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, LBLUE, MINT, RST, ROSE, SLATE, TEAL, UNDER, WHITE,
-    strip_ansi, term_width,
-)
+from axon import platform as plat
+from axon.providers.catalog import PROVIDER_PRESETS, ProviderPreset, is_provider_linked
+from axon.ui.picker import SelectItem, Selector, pick
+from axon.ui.theme import BOLD, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, WHITE
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
-def run_provider_picker(agent: Agent) -> bool:
-    """
-    Renders interactive full-viewport provider connector matching OpenCode / Claude Code.
-    Returns True if provider was switched, False if cancelled.
-    """
-    if not sys.stdin.isatty() or not _HAS_TERMIOS or termios is None:
-        # Fallback to simple picker
-        return _fallback_provider_picker(agent)
+_HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
-    presets = PROVIDER_PRESETS
-    selected_idx = 0
-    query: list[str] = []
-    rendered_lines = 0
+CUSTOM_MODEL_OPTION = "✏️  Enter custom model name..."
+RANDOM_MODEL_OPTION = "🎲  Random model (from this provider)"
 
-    fd = sys.stdin.fileno()
-    old_attr = termios.tcgetattr(fd)
 
-    # Clean screen
-    sys.stdout.write("\033[3J\033[H\033[2J")
-    sys.stdout.flush()
+# ── shared helpers ───────────────────────────────────────────────────────────
 
-    def get_filtered_items() -> list[ProviderPreset]:
-        q_str = "".join(query).strip().lower()
-        if not q_str:
-            return presets
-        return [
-            p for p in presets
-            if q_str in p.name.lower() or q_str in p.description.lower() or q_str in p.category.lower() or any(q_str in m.lower() for m in p.models)
-        ]
-
-    def draw():
-        nonlocal rendered_lines
-        tw = term_width()
-        width = max(52, min(76, tw - 4))
-        
-        filtered = get_filtered_items()
-        lines_out: list[str] = []
-        
-        # Header banner
-        lines_out.append("")
-        header_title = f"{BOLD}{WHITE}Connect a provider{RST}"
-        esc_hint = f"{SLATE}esc{RST}"
-        pad_top = max(2, width - len(strip_ansi(header_title)) - len(strip_ansi(esc_hint)))
-        lines_out.append(f"  {header_title}{' ' * pad_top}{esc_hint}")
-        lines_out.append("")
-
-        # Search bar
-        q_display = "".join(query)
-        if q_display:
-            lines_out.append(f"  {GOLD}Search:{RST} {WHITE}{BOLD}{q_display}{RST}{MINT}█{RST}")
-        else:
-            lines_out.append(f"  {SLATE}Search (type to filter)...{RST}")
-        lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
-
-        if not filtered:
-            lines_out.append(f"  {ROSE}No matching providers found for '{q_display}'.{RST}")
-            lines_out.append("")
-        else:
-            current_category: str | None = None
-            for idx, p in enumerate(filtered):
-                if p.category != current_category:
-                    current_category = p.category
-                    lines_out.append(f"  {GOLD}{BOLD}{current_category}{RST}")
-
-                is_sel = (idx == selected_idx)
-                cursor = f"{MINT}▶{RST}" if is_sel else " "
-                is_active = (agent.settings.base_url.rstrip("/").lower() == p.base_url.rstrip("/").lower())
-                is_linked = is_provider_linked(p, agent)
-
-                # Prominent tick mark next to provider if it already exists / is linked
-                tick_icon = f"{MINT}✓{RST}" if is_linked else f"{DARK_SLATE}○{RST}"
-
-                name_str = f"{p.name:<24}"
-                if is_sel:
-                    p_name = f"{MINT}{BOLD}{UNDER}{name_str}{RST}"
-                elif is_active:
-                    p_name = f"{GOLD}{BOLD}{name_str}{RST}"
-                elif is_linked:
-                    p_name = f"{WHITE}{BOLD}{name_str}{RST}"
-                else:
-                    p_name = f"{WHITE}{name_str}{RST}"
-
-                status_badge = ""
-                if is_active:
-                    status_badge = f" {GOLD}[Active ●]{RST}"
-                elif is_linked:
-                    status_badge = f" {MINT}[Linked ✓]{RST}"
-
-                desc_max = max(8, width - 36 - len(strip_ansi(status_badge)))
-                desc = p.description[:desc_max]
-
-                if is_sel:
-                    lines_out.append(f"  {cursor} {tick_icon} {p_name}{status_badge} {SLATE}{desc}{RST}")
-                else:
-                    lines_out.append(f"    {tick_icon} {p_name}{status_badge} {SLATE}{desc}{RST}")
-
-        lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
-        lines_out.append(f"  {SLATE}↑/↓ navigate · Enter connect · Type to search · Esc back{RST}")
-
-        sys.stdout.write("\033[H")
-        output_str = "\n".join([f"\033[2K\r{l}" for l in lines_out])
-        sys.stdout.write(output_str + "\n\033[J")
-        sys.stdout.flush()
-        rendered_lines = len(lines_out)
-
+def _stdin_is_tty() -> bool:
     try:
-        tty.setcbreak(fd)
-        draw()
+        return bool(sys.stdin is not None and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
 
-        while True:
-            raw_bytes = os.read(fd, 1024)
-            if not raw_bytes:
-                break
 
-            filtered = get_filtered_items()
-            num_items = len(filtered)
+def preset_env_vars(preset: ProviderPreset) -> list[str]:
+    names = list(getattr(preset, "env_vars", ()) or ())
+    if preset.env_var and preset.env_var not in names:
+        names.insert(0, preset.env_var)
+    if not names:
+        names = ["AXON_API_KEY" if preset.id == "agentrouter" else f"{preset.id.upper()}_API_KEY"]
+    return names
 
-            # Esc / Ctrl+C
-            if raw_bytes in (b"\x1b", b"\x03"):
-                return False
 
-            # Down Arrow
-            if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                if num_items > 0:
-                    selected_idx = (selected_idx + 1) % num_items
-                    draw()
-                continue
+def find_key(preset: ProviderPreset) -> str | None:
+    try:
+        from axon.providers.catalog import find_api_key
+        return find_api_key(preset_env_vars(preset))
+    except (ImportError, AttributeError):
+        for var in preset_env_vars(preset):
+            val = os.environ.get(var, "").strip()
+            if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
+                return val
+        return None
 
-            # Up Arrow
-            if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                if num_items > 0:
-                    selected_idx = (selected_idx - 1) % num_items
-                    draw()
-                continue
 
-            # Backspace
-            if raw_bytes in (b"\x7f", b"\x08"):
-                if query:
-                    query.pop()
-                    selected_idx = 0
-                    draw()
-                continue
+def store_key(env_var: str, value: str) -> Path | None:
+    """Persist an API key to ~/.axon/.env (chmod 600). Returns the file or None on failure."""
+    try:
+        from axon.providers.catalog import save_api_key
+        return save_api_key(env_var, value)
+    except (ImportError, AttributeError):
+        pass
+    except Exception:
+        return None
+    from axon.storage import user_file
+    path = user_file(".env")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [ln for ln in (path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else [])
+                 if ln.split("=", 1)[0].strip().removeprefix("export ").strip() != env_var]
+        lines.append(f'{env_var}="{value}"')
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        os.environ[env_var] = value
+        return path
+    except OSError:
+        return None
 
-            # Enter
-            if raw_bytes in (b"\r", b"\n", b"\r\n"):
-                if filtered and selected_idx < len(filtered):
-                    chosen_preset = filtered[selected_idx]
-                    break
-                return False
 
-            # Skip escape sequences
-            if raw_bytes.startswith(b"\x1b"):
-                continue
+def _load_toml(path: Path) -> dict[str, Any]:
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
 
-            # Printable characters
-            try:
-                decoded = raw_bytes.decode("utf-8")
-                for ch in decoded:
-                    if ord(ch) >= 32:
-                        query.append(ch)
-                        selected_idx = 0
-                draw()
-            except Exception:
-                pass
 
-    finally:
-        if termios is not None:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-            except Exception:
-                pass
-        if rendered_lines > 0:
-            sys.stdout.write(f"\033[{rendered_lines}A\r")
-            for _ in range(rendered_lines):
-                sys.stdout.write("\033[2K\n")
-            sys.stdout.write(f"\033[{rendered_lines}A\r")
-            sys.stdout.flush()
+def save_provider_choice(preset: ProviderPreset, model: str) -> Path | None:
+    """Record base_url/model (and custom models) in ~/.axon/config.toml."""
+    from axon.storage import user_file
+    cfg_file = user_file("config.toml")
+    try:
+        import tomli_w
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg = _load_toml(cfg_file) if cfg_file.exists() else {}
+        cfg["base_url"] = preset.base_url
+        cfg["model"] = model
+        if model not in preset.models:
+            customs = [c for c in cfg.get("custom_models", []) if isinstance(c, dict)]
+            if not any(c.get("model") == model and c.get("provider") == preset.id for c in customs):
+                customs.append({"model": model, "provider": preset.id})
+            cfg["custom_models"] = customs
+        with open(cfg_file, "wb") as f:
+            tomli_w.dump(cfg, f)
+        return cfg_file
+    except Exception:
+        return None
 
-    if chosen_preset:
-        return _configure_and_apply_preset(agent, chosen_preset)
-    return False
+
+def same_endpoint(a: str, b: str) -> bool:
+    x, y = (a or "").rstrip("/").lower(), (b or "").rstrip("/").lower()
+    return bool(x and y) and (x == y or x in y or y in x)
+
+
+def apply_provider(agent: Agent, preset: ProviderPreset, model: str, api_key: str | None) -> bool:
+    """Switch the running agent to preset+model, persist the choice and print a summary."""
+    from axon.providers.registry import provider_for
+    key = api_key or "local"
+    new_settings = agent.settings.model_copy(update={"model": model, "base_url": preset.base_url, "api_key": SecretStr(key)})
+    agent.settings = new_settings
+    agent.provider = provider_for(model, new_settings)
+    if getattr(agent, "permissions", None) is not None and hasattr(agent.permissions, "settings"):
+        try:
+            agent.permissions.settings = new_settings
+        except Exception:
+            pass
+    cfg = save_provider_choice(preset, model)
+    print(f"\n  {MINT}{BOLD}✓ Configured active provider: {preset.name}!{RST}")
+    print(f"  {SLATE}Active Model: {BOLD}{WHITE}{model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}")
+    if cfg:
+        print(f"  {DARK_SLATE}Saved as default in {cfg}{RST}")
+    if preset.id == "ollama":
+        try:
+            from axon.providers.catalog import fetch_local_ollama_models
+            if not fetch_local_ollama_models(preset.base_url):
+                print(f"  {GOLD}⚠ Ollama is not answering on {preset.base_url}. Start it with {WHITE}ollama serve{RST}")
+        except Exception:
+            pass
+    print()
+    return True
+
+
+def choose_model_option(preset: ProviderPreset, option: str) -> str | None:
+    """Resolve the special custom/random options into a concrete model name."""
+    if option.startswith("✏️"):
+        if not _stdin_is_tty():
+            return None
+        try:
+            typed = input(f"  {BOLD}{WHITE}Model name for {preset.name}: {RST}").strip()
+        except (KeyboardInterrupt, EOFError):
+            typed = ""
+        return typed or None
+    if option.startswith("🎲"):
+        avail = [m for m in preset.models if m]
+        chosen = random.choice(avail) if avail else preset.default_model
+        print(f"  {GOLD}🎲 Random model: {BOLD}{chosen}{RST}")
+        return chosen
+    return option
+
+
+# ── picker ──────────────────────────────────────────────────────────────────
+
+def _provider_items(agent: Agent) -> list[SelectItem]:
+    items: list[SelectItem] = []
+    for p in PROVIDER_PRESETS:
+        try:
+            linked = is_provider_linked(p, agent)
+        except Exception:
+            linked = False
+        active = same_endpoint(agent.settings.base_url, p.base_url)
+        badge = f"{MINT}✓{RST}" if linked else f"{DARK_SLATE}○{RST}"
+        hint = ("active · " if active else ("linked · " if linked else "")) + p.description
+        items.append(SelectItem(label=p.name, value=p, hint=hint, group=p.category, badge=badge,
+                                search=" ".join([p.id, p.category, *p.models])))
+    return items
+
+
+def run_provider_picker(agent: Agent) -> bool:
+    """Interactive provider connector. Returns True if the provider was switched."""
+    if not plat.is_interactive():
+        if not _stdin_is_tty():
+            # Nothing to choose with: never switch providers (or prompt for keys) blindly.
+            print(f"  {SLATE}The provider picker needs an interactive terminal. Configure a provider with "
+                  f"/model <name> and its API key environment variable instead.{RST}")
+            return False
+        return _fallback_provider_picker(agent)
+    items = _provider_items(agent)
+    start = next((i for i, it in enumerate(items) if same_endpoint(agent.settings.base_url, it.value.base_url)), 0)
+    chosen = Selector(items, title="Connect a provider", index=start, filterable=True,
+                      placeholder="type to search providers and models", max_visible=14).run()
+    if not isinstance(chosen, SelectItem):
+        return False
+    return _configure_and_apply_preset(agent, chosen.value)
+
 
 def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
-    """Interactively configure credentials, model, and apply provider preset."""
-    print(f"\n  {GOLD}▲█▲ Connecting to {preset.name}{RST}")
-    print(f"  {SLATE}Base URL: {preset.base_url}{RST}")
-
-    # 1. API Key handling
-    api_key_str = "local"
+    print(f"\n  {GOLD}◆{RST} {BOLD}Connecting to {preset.name}{RST}  {SLATE}{preset.base_url}{RST}")
+    api_key: str | None = None
     if preset.requires_key:
-        existing_key = None
-        target_var = preset.env_var or (f"{preset.id.upper()}_API_KEY" if preset.id != "agentrouter" else "AXON_API_KEY")
-
-        # Check process environment
-        val = os.environ.get(target_var, "").strip()
-        if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
-            existing_key = val
-
-        # Check ~/.axon/.env
-        if not existing_key:
-            env_file = Path.home() / ".axon" / ".env"
-            if env_file.exists():
-                try:
-                    for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                        if "=" in line and line.strip().startswith(target_var):
-                            k_val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            if k_val and not k_val.startswith("/") and k_val.lower() not in ("none", "null", "local", "skip"):
-                                existing_key = k_val
-                                break
-                except Exception:
-                    pass
-
-        # For AgentRouter, also check AGENTROUTER_API_KEY
-        if not existing_key and preset.id == "agentrouter":
-            for alt_var in ("AXON_API_KEY", "AGENTROUTER_API_KEY"):
-                val = os.environ.get(alt_var, "").strip()
-                if val and not val.startswith("/") and val.lower() not in ("none", "null", "local", "skip"):
-                    existing_key = val
-                    target_var = alt_var
-                    break
-
-        if existing_key:
-            print(f"  {MINT}✓ Found existing API key in environment ({target_var}){RST}")
-            api_key_str = existing_key
+        api_key = find_key(preset)
+        env_var = preset_env_vars(preset)[0]
+        if api_key:
+            print(f"  {MINT}✓ Using existing API key ({env_var}){RST}")
         else:
+            if getattr(preset, "docs_url", ""):
+                print(f"  {SLATE}Get a key at {preset.docs_url}{RST}")
+            if not _stdin_is_tty():
+                print(f"  {ROSE}No terminal to read the API key from.{RST} {SLATE}Set {env_var} "
+                      f"(or run /keys {preset.id} <key>) and try again.{RST}\n")
+                return False
             try:
-                entered = input(f"  {BOLD}{WHITE}Enter your API key for {preset.name} ({target_var}): {RST}").strip()
+                entered = getpass.getpass(f"  {BOLD}{WHITE}API key for {preset.name} ({env_var}, hidden): {RST}").strip()
             except (KeyboardInterrupt, EOFError):
                 print(f"\n  {SLATE}Connection cancelled.{RST}\n")
                 return False
             if not entered:
-                print(f"\n  {ROSE}API key is required for {preset.name}.{RST}\n")
+                print(f"  {ROSE}An API key is required for {preset.name}.{RST}\n")
                 return False
-
-            from axon.providers.verifier import verify_api_key
-            print(f"  {SLATE}⚡ Verifying API key with {preset.name}...{RST}", end="", flush=True)
-            ok, msg = verify_api_key(preset, entered)
+            try:
+                from axon.providers.verifier import verify_api_key
+                print(f"  {SLATE}Verifying key…{RST}", end="", flush=True)
+                ok, msg = verify_api_key(preset, entered)
+            except Exception as exc:  # verifier unavailable or network failure: report, don't save
+                ok, msg = False, str(exc)
             if not ok:
-                print(f"\r\033[K  {ROSE}❌ API key test failed for {preset.name}:{RST} {WHITE}{msg}{RST}")
-                print(f"  {SLATE}The key is not working. Provider setup cancelled.{RST}\n")
+                print(f"\r\033[K  {ROSE}✗ Key check failed:{RST} {WHITE}{msg}{RST}\n")
                 return False
+            print(f"\r\033[K  {MINT}✓ API key verified{RST}")
+            saved = store_key(env_var, entered)
+            if saved:
+                print(f"  {MINT}✓ Saved {env_var} to {saved} (owner-only){RST}")
+            api_key = entered
 
-            print(f"\r\033[K  {MINT}✓ API key verified successfully!{RST}")
-            api_key_str = entered
-            # Persist key to ~/.axon/.env
-            try:
-                env_file = Path.home() / ".axon" / ".env"
-                env_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(env_file, "a", encoding="utf-8") as f:
-                    f.write(f'\n{target_var}="{api_key_str}"\n')
-                print(f"  {MINT}✓ Saved {target_var} to {env_file}{RST}")
-            except Exception:
-                pass
-
-    # 2. Select Model (with live local discovery, custom typing, and random selection)
-    import random
-    model_options: list[str] = []
-
-    # Check if local Ollama has active models installed
+    models: list[str] = []
     if preset.id == "ollama":
-        from axon.providers.catalog import fetch_local_ollama_models
-        local_installed = fetch_local_ollama_models(preset.base_url)
-        if local_installed:
-            print(f"  {MINT}⚡ Detected {len(local_installed)} model(s) installed on local Ollama daemon{RST}")
-            for m in local_installed:
-                if m not in model_options:
-                    model_options.append(m)
-
-    # Add preset models
-    for m in preset.models:
-        if m not in model_options:
-            model_options.append(m)
-
-    picker_items = [
-        "✏️  Enter custom model name...",
-        "🎲  Random model (surprise me)",
-    ] + model_options
-
-    print(f"\n  {BOLD}{WHITE}Select default model for {preset.name}:{RST}")
-    selection = pick(picker_items, title=f"Available Models on {preset.name}", current=preset.default_model)
-
-    if not selection:
-        chosen_model = preset.default_model
-    elif selection == "🎲  Random model (surprise me)":
-        chosen_model = random.choice(model_options) if model_options else preset.default_model
-        print(f"  {GOLD}🎲 Selected random model: {BOLD}{chosen_model}{RST}")
-    elif selection == "✏️  Enter custom model name...":
         try:
-            custom_typed = input(f"  {BOLD}{WHITE}Enter model name (e.g. qwen2.5-coder:1.5b, mistral:7b, gpt-4o): {RST}").strip()
-        except (KeyboardInterrupt, EOFError):
-            custom_typed = ""
-        chosen_model = custom_typed if custom_typed else preset.default_model
-    else:
-        chosen_model = selection
+            from axon.providers.catalog import fetch_local_ollama_models
+            models = list(fetch_local_ollama_models(preset.base_url))
+        except Exception:
+            models = []
+    for m in preset.models:
+        if m not in models:
+            models.append(m)
+    selection = pick(models + [CUSTOM_MODEL_OPTION, RANDOM_MODEL_OPTION], title=f"Model for {preset.name}",
+                     current=preset.default_model if preset.default_model in models else None)
+    if not selection:
+        selection = preset.default_model
+    model = choose_model_option(preset, selection) or preset.default_model
+    return apply_provider(agent, preset, model, api_key)
 
-    # 3. Update Settings and Provider
-    new_settings = agent.settings.model_copy(
-        update={
-            "base_url": preset.base_url,
-            "model": chosen_model,
-            "api_key": SecretStr(api_key_str),
-        }
-    )
-    agent.settings = new_settings
-    agent.provider = provider_for(chosen_model, new_settings)
-
-    # 4. Save to global config.toml
-    try:
-        cfg_file = Path.home() / ".axon" / "config.toml"
-        cfg_file.parent.mkdir(parents=True, exist_ok=True)
-        import tomli_w
-        existing_cfg = {}
-        if cfg_file.exists():
-            try:
-                import tomllib
-                with open(cfg_file, "rb") as f_cfg:
-                    existing_cfg = tomllib.load(f_cfg)
-            except Exception:
-                pass
-        existing_cfg["base_url"] = preset.base_url
-        existing_cfg["model"] = chosen_model
-
-        # Record custom model under provider
-        c_models = existing_cfg.get("custom_models", [])
-        entry = {"model": chosen_model, "provider": preset.id}
-        if not any(isinstance(x, dict) and x.get("model") == chosen_model and x.get("provider") == preset.id for x in c_models):
-            c_models.append(entry)
-            existing_cfg["custom_models"] = c_models
-
-        with open(cfg_file, "wb") as f_out:
-            tomli_w.dump(existing_cfg, f_out)
-        print(f"  {MINT}✓ Saved default provider to {cfg_file}{RST}")
-    except Exception:
-        pass
-
-    print(f"\n  {MINT}{BOLD}✓ Configured active provider: {preset.name}!{RST}")
-    print(f"  {SLATE}Active Model: {BOLD}{WHITE}{chosen_model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}")
-
-    # Check local service status if local
-    if preset.id == "ollama":
-        from axon.providers.catalog import fetch_local_ollama_models
-        mods = fetch_local_ollama_models(preset.base_url)
-        if not mods:
-            print(f"  {GOLD}⚠️  Ollama does not appear to be running on {preset.base_url}.{RST}")
-            print(f"  {SLATE}   To start Ollama, run: {WHITE}ollama serve{SLATE} (or open the Ollama app){RST}")
-            print(f"  {SLATE}   To switch to cloud AI anytime, run: {WHITE}/provider{RST}")
-        else:
-            print(f"  {MINT}✓ Ollama daemon is online ({len(mods)} installed models detected){RST}")
-
-    from axon.ui.render import Renderer
-    import axon
-    Renderer().print_banner(
-        version=getattr(axon, "__version__", ""),
-        model=chosen_model,
-        effort=agent.settings.effort,
-        workspace=str(agent.settings.workspace),
-        mode=agent.settings.mode,
-        base_url=preset.base_url,
-    )
-    return True
 
 def _fallback_provider_picker(agent: Agent) -> bool:
-    """Non-raw terminal fallback picker."""
     options = []
     for p in PROVIDER_PRESETS:
-        is_linked = is_provider_linked(p, agent)
-        is_active = (agent.settings.base_url.rstrip("/").lower() == p.base_url.rstrip("/").lower())
-        tick = "✓ " if is_linked else "○ "
-        tag = " [Active]" if is_active else (" [Linked]" if is_linked else "")
-        options.append(f"{tick}{p.name}{tag} ({p.category}) - {p.default_model}")
-
-    chosen_str = pick(options, title="Connect a Provider")
-    if not chosen_str:
+        try:
+            linked = is_provider_linked(p, agent)
+        except Exception:
+            linked = False
+        tag = " [Active]" if same_endpoint(agent.settings.base_url, p.base_url) else (" [Linked]" if linked else "")
+        options.append(f"{'✓' if linked else '○'} {p.name}{tag} ({p.category}) - {p.default_model}")
+    chosen = pick(options, title="Connect a Provider")
+    if not chosen:
         return False
-    idx = options.index(chosen_str)
-    return _configure_and_apply_preset(agent, PROVIDER_PRESETS[idx])
+    return _configure_and_apply_preset(agent, PROVIDER_PRESETS[options.index(chosen)])

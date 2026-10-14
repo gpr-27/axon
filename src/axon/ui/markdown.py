@@ -1,31 +1,68 @@
 """
-Markdown styling and terminal formatter for Axon.
-Formats headings, tables, code blocks, lists, callouts, and inline elements with clean ANSI aesthetics.
+Markdown renderer for the Axon terminal.
+
+* ``MarkdownStream`` renders markdown incrementally (fed by streaming deltas): block state such as
+  fenced code, tables and math survives across chunks, complete lines are emitted exactly once
+  (no redraw, no flicker) and long paragraph lines are emitted row by row as they wrap.
+* ``format_markdown`` renders a whole document with the same engine.
+* Headings, emphasis, strikethrough, inline code, links (OSC 8 when supported), nested / numbered /
+  task lists, block quotes and callouts, width-aware tables, fenced code with lightweight syntax
+  highlighting, horizontal rules and LaTeX math (converted to Unicode).
+* Width calculations are ANSI-, wide-char- and emoji-aware; untrusted control characters are
+  stripped; malformed input never raises.
 """
 from __future__ import annotations
+
 import re
-import textwrap
-import unicodedata
 from pathlib import Path
+
 from axon.ui.theme import (
-    AMBER,
+    ACCENT,
     BOLD,
+    BORDER,
+    CODE_BG,
+    CODE_FG,
     CYAN,
-    DARK_SLATE,
-    DIM,
-    GOLD,
+    DIFF_ADD,
+    DIFF_DEL,
+    ERROR,
+    INFO,
     ITALIC,
-    LBLUE,
-    MINT,
-    PURPLE,
-    ROSE,
+    LINK,
+    MUTED,
+    PRIMARY,
     RST,
-    SLATE,
-    TEAL,
+    STRIKE,
+    SUBTLE,
+    SUCCESS,
+    TEXT,
     UNDER,
-    WHITE,
+    WARNING,
+    char_width,
+    display_width,
+    glyph,
+    hard_wrap_ansi,
+    hyperlink,
+    pad,
+    sanitize,
     term_width,
+    wrap_ansi,
 )
+
+# Backwards-compatible alias: width of a string ignoring escape sequences.
+str_width = display_width
+
+__all__ = [
+    "MarkdownStream",
+    "char_width",
+    "file_uri",
+    "format_markdown",
+    "highlight",
+    "latex_to_unicode",
+    "make_clickable",
+    "render_table",
+    "str_width",
+]
 
 # ── LaTeX to Unicode converter ──────────────────────────────────────────────────
 
@@ -128,12 +165,6 @@ def latex_to_unicode(latex: str) -> str:
     """Convert a LaTeX math expression to readable Unicode text for terminal display."""
     s = latex.strip()
 
-    # Pass 1: \frac{a}{b} → (a)/(b) or a/b for simple args
-    def _replace_frac(m: re.Match) -> str:
-        rest = s[m.end():] if m.end() < len(s) else ""
-        # We need to parse the braces from the original string
-        return m.group(0)  # placeholder, handled below
-
     # Manual \frac parsing (regex can't handle nested braces)
     result = []
     i = 0
@@ -147,6 +178,8 @@ def latex_to_unicode(latex: str) -> str:
                 continue
             while j < len(s) and (s[j].isalpha() or s[j] == "@"):
                 j += 1
+            if j == i + 1 and j < len(s):
+                j += 1  # single-character command such as \, \; \% \#
             cmd = s[i + 1:j]
 
             if cmd == "frac":
@@ -164,7 +197,9 @@ def latex_to_unicode(latex: str) -> str:
             elif cmd == "sqrt":
                 # Check for optional [n] root
                 if j < len(s) and s[j] == "[":
-                    k = s.index("]", j)
+                    k = s.find("]", j)
+                    if k < 0:
+                        k = len(s)
                     root_n = s[j + 1:k]
                     j = k + 1
                     arg, j = _extract_brace_arg(s, j)
@@ -199,30 +234,6 @@ def latex_to_unicode(latex: str) -> str:
             elif cmd in _SYMBOLS:
                 result.append(_SYMBOLS[cmd])
                 i = j
-            elif cmd == "log":
-                result.append("log")
-                i = j
-            elif cmd == "ln":
-                result.append("ln")
-                i = j
-            elif cmd == "sin":
-                result.append("sin")
-                i = j
-            elif cmd == "cos":
-                result.append("cos")
-                i = j
-            elif cmd == "tan":
-                result.append("tan")
-                i = j
-            elif cmd == "lim":
-                result.append("lim")
-                i = j
-            elif cmd == "max":
-                result.append("max")
-                i = j
-            elif cmd == "min":
-                result.append("min")
-                i = j
             else:
                 # Unknown command — render as-is without backslash
                 result.append(cmd)
@@ -252,332 +263,775 @@ def latex_to_unicode(latex: str) -> str:
     return "".join(result)
 
 
-def _render_math_block(latex_lines: list[str]) -> list[str]:
-    """Render a $$ math block as a styled Unicode formula."""
-    joined = " ".join(l.strip() for l in latex_lines if l.strip())
-    rendered = latex_to_unicode(joined)
-    out = []
-    out.append(f"  {DARK_SLATE}┌── {LBLUE}math{DARK_SLATE} {'─' * 40}{RST}")
-    for line in rendered.split("\n"):
-        out.append(f"  {DARK_SLATE}│{RST}  {GOLD}{line}{RST}")
-    out.append(f"  {DARK_SLATE}└──{'─' * 44}{RST}")
+
+
+# ── Links ──────────────────────────────────────────────────────────────────────
+
+def file_uri(path_str: str, workspace: Path | None = None) -> str:
+    """Return a valid ``file://`` URI for *path_str* (relative paths resolve against *workspace*)."""
+    try:
+        p = Path(str(path_str).strip().strip("'\"")).expanduser()
+        if not p.is_absolute():
+            p = (workspace or Path.cwd()) / p
+        return p.resolve().as_uri()
+    except (ValueError, OSError):
+        return ""
+
+
+def link_target(url_or_path: str, workspace: Path | None = None) -> str:
+    clean = url_or_path.strip().strip("<>").strip("'\"")
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", clean) or clean.startswith("mailto:"):
+        return clean
+    return file_uri(clean.split("#", 1)[0], workspace)
+
+
+def make_clickable(label: str, url_or_path: str, workspace: Path | None = None) -> str:
+    """Styled hyperlink (OSC 8 when the terminal supports it)."""
+    return hyperlink(link_target(url_or_path, workspace), f"{UNDER}{LINK}{label}{RST}")
+
+
+# ── Syntax highlighting ────────────────────────────────────────────────────────
+
+_LANG_ALIASES = {
+    "py": "python", "python3": "python", "py3": "python", "ipython": "python",
+    "js": "js", "javascript": "js", "jsx": "js", "ts": "js", "typescript": "js", "tsx": "js",
+    "mjs": "js", "cjs": "js", "java": "js", "c": "js", "cpp": "js", "c++": "js", "h": "js",
+    "hpp": "js", "cs": "js", "csharp": "js", "kotlin": "js", "swift": "js", "php": "js",
+    "sh": "bash", "bash": "bash", "zsh": "bash", "shell": "bash", "console": "bash", "fish": "bash",
+    "ps": "powershell", "ps1": "powershell", "powershell": "powershell", "pwsh": "powershell",
+    "bat": "powershell", "cmd": "powershell",
+    "json": "json", "jsonc": "json", "json5": "json",
+    "diff": "diff", "patch": "diff", "udiff": "diff",
+    "go": "go", "golang": "go",
+    "rs": "rust", "rust": "rust",
+    "sql": "sql", "postgres": "sql", "postgresql": "sql", "mysql": "sql", "sqlite": "sql",
+    "yaml": "yaml", "yml": "yaml", "toml": "yaml", "ini": "yaml", "cfg": "yaml", "conf": "yaml",
+    "dockerfile": "bash", "make": "bash", "makefile": "bash",
+}
+
+_KEYWORDS = {
+    "python": set("""and as assert async await break class continue def del elif else except finally
+        for from global if import in is lambda nonlocal not or pass raise return try while with yield
+        match case True False None self cls""".split()),
+    "js": set("""async await break case catch class const continue debugger default delete do else
+        export extends finally for from function if import in instanceof let new of return static super
+        switch this throw try typeof var void while with yield true false null undefined interface type
+        enum implements public private protected readonly abstract as public int void char long double
+        float bool struct namespace using include define""".split()),
+    "bash": set("""if then else elif fi for while until do done case esac in function return local
+        export source alias unset readonly declare echo cd exit set shift trap eval exec""".split()),
+    "powershell": set("""if else elseif foreach for while do until switch function param return
+        begin process end try catch finally throw break continue trap filter in""".split()),
+    "go": set("""break case chan const continue default defer else fallthrough for func go goto if
+        import interface map package range return select struct switch type var nil true false""".split()),
+    "rust": set("""as async await break const continue crate dyn else enum extern false fn for if impl
+        in let loop match mod move mut pub ref return self Self static struct super trait true type
+        unsafe use where while Some None Ok Err""".split()),
+    "sql": set("""select from where and or not insert into values update set delete create table drop
+        alter index join left right inner outer full on as group by order having limit offset union all
+        distinct case when then else end null is in like between exists primary key foreign references
+        default view with returning asc desc count sum avg min max begin commit rollback""".split()),
+    "json": {"true", "false", "null"},
+    "yaml": {"true", "false", "null", "yes", "no", "on", "off", "True", "False", "None"},
+}
+_TYPES = {
+    "python": set("int str float bool list dict set tuple bytes object type Any Optional Union List Dict "
+                  "Set Tuple Path Iterator Callable ClassVar Exception".split()),
+    "js": set("string number boolean any unknown never object Promise Array Map Set Record "
+              "Partial Error".split()),
+    "go": set("string int int64 int32 uint byte rune float64 float32 bool error any".split()),
+    "rust": set("i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str String "
+                "Vec Option Result Box Rc Arc HashMap".split()),
+}
+_LINE_COMMENT = {
+    "python": "#", "bash": "#", "powershell": "#", "yaml": "#",
+    "js": "//", "go": "//", "rust": "//", "sql": "--",
+}
+
+_TOKEN_RE = re.compile(
+    r"(?P<STRING>\"\"\"[\s\S]*?\"\"\"|'''[\s\S]*?'''|\"(?:\\.|[^\"\\])*\"?|'(?:\\.|[^'\\])*'?|`(?:\\.|[^`\\])*`?)"
+    r"|(?P<VAR>\$\{?[A-Za-z_][\w]*\}?|\$\w)"
+    r"|(?P<NUMBER>\b(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b)"
+    r"|(?P<WORD>[A-Za-z_][\w]*)"
+    r"|(?P<SPACE>\s+)"
+    r"|(?P<OTHER>.)"
+)
+
+
+def normalize_lang(lang: str) -> str:
+    key = (lang or "").strip().lower().split()[0] if (lang or "").strip() else ""
+    key = key.lstrip("{.").rstrip("}")
+    return _LANG_ALIASES.get(key, key)
+
+
+def highlight(line: str, lang: str = "") -> str:
+    """Lightweight single-line syntax highlighter; output always ends with a reset."""
+    if not line:
+        return ""
+    lang = normalize_lang(lang)
+    if lang == "diff":
+        if line.startswith("+") and not line.startswith("+++"):
+            return f"{DIFF_ADD}{line}{RST}"
+        if line.startswith("-") and not line.startswith("---"):
+            return f"{DIFF_DEL}{line}{RST}"
+        if line.startswith("@@"):
+            return f"{CYAN}{line}{RST}"
+        if line.startswith(("+++", "---", "diff ", "index ")):
+            return f"{BOLD}{TEXT}{line}{RST}"
+        return f"{MUTED}{line}{RST}"
+
+    comment = _LINE_COMMENT.get(lang)
+    code, tail = line, ""
+    if comment is None:
+        s = line.lstrip()
+        if s.startswith(("#", "//", "--", "/*", "* ")):
+            return f"{SUBTLE}{ITALIC}{line}{RST}"
+    else:
+        idx = _find_comment(line, comment)
+        if lang == "js" and idx < 0:
+            s = line.lstrip()
+            if s.startswith(("/*", "* ", "*/")):
+                return f"{SUBTLE}{ITALIC}{line}{RST}"
+        if idx >= 0:
+            code, tail = line[:idx], line[idx:]
+
+    keywords = _KEYWORDS.get(lang, _KEYWORDS["python"] | _KEYWORDS["js"])
+    types = _TYPES.get(lang, set())
+    out: list[str] = []
+    tokens = list(_TOKEN_RE.finditer(code))
+    for n, mo in enumerate(tokens):
+        kind = mo.lastgroup
+        val = mo.group()
+        if kind == "STRING":
+            nxt = code[mo.end():].lstrip()[:1]
+            if lang in ("json", "yaml") and nxt == ":":
+                out.append(f"{CYAN}{val}{RST}")
+            else:
+                out.append(f"{SUCCESS}{val}{RST}")
+        elif kind == "VAR" and lang in ("bash", "powershell"):
+            out.append(f"{CYAN}{val}{RST}")
+        elif kind == "NUMBER":
+            out.append(f"{WARNING}{val}{RST}")
+        elif kind == "WORD":
+            lookup = val.lower() if lang in ("sql", "powershell") else val
+            nxt = code[mo.end():mo.end() + 1]
+            if lang == "yaml" and n == _first_word_index(tokens) and code[mo.end():].lstrip().startswith((":", "=")):
+                out.append(f"{CYAN}{val}{RST}")
+            elif lookup in keywords:
+                out.append(f"{ACCENT}{val}{RST}")
+            elif val in types:
+                out.append(f"{PRIMARY}{val}{RST}")
+            elif nxt == "(":
+                out.append(f"{INFO}{val}{RST}")
+            elif lang in ("bash", "powershell") and mo.start() > 0 and code[mo.start() - 1] == "-":
+                out.append(f"{WARNING}{val}{RST}")
+            else:
+                out.append(f"{TEXT}{val}{RST}" if TEXT else val)
+        elif kind == "VAR":
+            out.append(val)
+        else:
+            out.append(val)
+    if tail:
+        out.append(f"{SUBTLE}{ITALIC}{tail}{RST}")
+    return "".join(out)
+
+
+def _first_word_index(tokens: list) -> int:
+    for i, t in enumerate(tokens):
+        if t.lastgroup in ("WORD", "STRING"):
+            return i
+    return -1
+
+
+def _find_comment(line: str, marker: str) -> int:
+    """Index of a line comment *marker* outside string literals, else -1."""
+    quote = ""
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"', "`"):
+            quote = ch
+        elif line.startswith(marker, i):
+            if marker == "#" and i > 0 and line[i - 1] not in " \t" and line[i - 1] != "(":
+                i += 1  # e.g. "${#arr}" or "a#b" - not a comment
+                continue
+            return i
+        i += 1
+    return -1
+
+
+# ── Inline styling ─────────────────────────────────────────────────────────────
+
+_PH_OPEN, _PH_CLOSE = "\ue000", "\ue001"
+_PH_RE = re.compile(_PH_OPEN + r"(\d+)" + _PH_CLOSE)
+_PATHLIKE_RE = re.compile(
+    r"^[\w\-.~/\\]+\.(py|pyi|js|jsx|ts|tsx|json|md|toml|env|html|css|txt|sh|ps1|rs|go|cpp|c|h|hpp|"
+    r"java|kt|rb|csv|yaml|yml|ini|cfg|lock|sql)(:\d+(-\d+)?)?$"
+)
+
+
+def _style_inline(s: str) -> str:
+    """Apply inline markdown: code spans, links, math, emphasis, strikethrough and result badges."""
+    if not s:
+        return s
+    slots: list[str] = []
+
+    def stash(text: str) -> str:
+        slots.append(text)
+        return f"{_PH_OPEN}{len(slots) - 1}{_PH_CLOSE}"
+
+    # 1. Code spans first: their content is literal.
+    def _code(m: re.Match) -> str:
+        code = m.group(2).strip() if m.group(2).strip() else m.group(2)
+        if _PATHLIKE_RE.match(code) or ("/" in code and " " not in code and not code.startswith(("http", "-"))):
+            path = re.sub(r":\d+(-\d+)?$", "", code)
+            return stash(hyperlink(link_target(path), f"{CODE_FG}{code}{RST}"))
+        return stash(f"{CODE_BG}{CODE_FG}{code}{RST}" if CODE_FG else f"`{code}`")
+
+    s = re.sub(r"(`+)(.+?)\1", _code, s)
+    # 2. Backslash escapes.
+    s = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~$<>])", lambda m: stash(m.group(1)), s)
+    # 3. Links: [label](target), <autolink>, bare URLs.
+    s = re.sub(
+        r"\[([^\]\n]+)\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)",
+        lambda m: stash(make_clickable(_emphasis(m.group(1)), m.group(2))),
+        s,
+    )
+    s = re.sub(r"<((?:https?|file)://[^>\s]+)>", lambda m: stash(make_clickable(m.group(1), m.group(1))), s)
+    s = re.sub(
+        r"(?<![\w(\"'=/])(https?://[^\s<>()\"']+[^\s<>()\"'.,;:!?])",
+        lambda m: stash(make_clickable(m.group(1), m.group(1))),
+        s,
+    )
+    # 4. Inline math $...$ (must not start with a space or digit: "$5 and $10" is money).
+    s = re.sub(
+        r"(?<![\$\w])\$(?=[^\s\d$])([^$\n]+?)(?<=\S)\$(?![\$\w])",
+        lambda m: stash(f"{WARNING}{latex_to_unicode(m.group(1))}{RST}"),
+        s,
+    )
+    s = _emphasis(s)
+    # 5. Result badges (colour only; the text is never rewritten).
+    s = re.sub(r"(?<![\w-])(PASS(?:ED)?|OK)(?![\w-])", lambda m: f"{SUCCESS}{BOLD}{m.group(1)}{RST}", s)
+    s = re.sub(r"(?<![\w-])(FAIL(?:ED|URE)?|ERROR)(?![\w-])", lambda m: f"{ERROR}{BOLD}{m.group(1)}{RST}", s)
+    s = re.sub(r"(?<![\w-])(WARN(?:ING)?)(?![\w-])", lambda m: f"{WARNING}{BOLD}{m.group(1)}{RST}", s)
+
+    # Restore placeholders (they may nest, e.g. a link label containing code).
+    for _ in range(4):
+        if _PH_OPEN not in s:
+            break
+        s = _PH_RE.sub(lambda m: slots[int(m.group(1))] if int(m.group(1)) < len(slots) else "", s)
+    return s
+
+
+def _inline_closed(src: str) -> bool:
+    """True when *src* has no inline construct left open (safe to render on its own)."""
+    if src.count("`") % 2 or src.count("$") % 2:
+        return False
+    if src.count("[") != src.count("]") or src.count("(") != src.count(")") or src.count("<") != src.count(">"):
+        return False
+    if src.count("**") % 2 or src.count("~~") % 2 or src.count("__") % 2:
+        return False
+    if (src.count("*") - 2 * src.count("**")) % 2:
+        return False
+    if src.endswith("\\"):
+        return False
+    return True
+
+
+def _emphasis(s: str) -> str:
+    s = re.sub(r"\*\*\*(?=\S)([^\n*]+?)(?<=\S)\*\*\*", rf"{BOLD}{ITALIC}\1{RST}", s)
+    s = re.sub(r"\*\*(?=\S)([^\n]+?)(?<=\S)\*\*", rf"{BOLD}\1{RST}", s)
+    s = re.sub(r"(?<![\w_])__(?=\S)([^\n]+?)(?<=\S)__(?![\w_])", rf"{BOLD}\1{RST}", s)
+    s = re.sub(r"~~(?=\S)([^\n~]+?)(?<=\S)~~", rf"{STRIKE}{MUTED}\1{RST}", s)
+    s = re.sub(r"(?<![\w*])\*(?=[^\s*])([^\n*]+?)(?<=[^\s*])\*(?![\w*])", rf"{ITALIC}\1{RST}", s)
+    s = re.sub(r"(?<![\w/\\.])_(?=[^\s_])([^\n_]+?)(?<=[^\s_])_(?![\w/\\.])", rf"{ITALIC}\1{RST}", s)
+    return s
+
+
+# ── Tables ─────────────────────────────────────────────────────────────────────
+
+_DELIM_CELL_RE = re.compile(r"^\s*:?-{1,}:?\s*$")
+
+
+def _split_row(line: str) -> list[str]:
+    """Split a table row on unescaped pipes that are outside code spans."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    cells: list[str] = []
+    cur: list[str] = []
+    in_code = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == "\\" and i + 1 < len(s) and s[i + 1] == "|":
+            cur.append("|")
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+        if ch == "|" and not in_code:
+            cells.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    cells.append("".join(cur).strip())
+    return cells
+
+
+def _is_delimiter_row(cells: list[str]) -> bool:
+    non_empty = [c for c in cells if c]
+    return bool(non_empty) and all(_DELIM_CELL_RE.match(c) for c in non_empty)
+
+
+def render_table(table_lines: list[str], max_total_width: int | None = None) -> list[str]:
+    """Render markdown table rows as an aligned, width-aware box table (cells wrap to fit)."""
+    if max_total_width is None:
+        max_total_width = min(term_width() - 2, 120)
+    rows = [_split_row(l) for l in table_lines if l.strip()]
+    if not rows:
+        return []
+    header: list[str] | None = None
+    aligns: list[str] = []
+    body = rows
+    if len(rows) >= 2 and _is_delimiter_row(rows[1]):
+        header, delim, body = rows[0], rows[1], rows[2:]
+        for c in delim:
+            c = c.strip()
+            aligns.append("center" if c.startswith(":") and c.endswith(":") else "right" if c.endswith(":") else "left")
+    else:
+        body = [r for r in rows if not _is_delimiter_row(r)]
+    ncols = max([len(r) for r in body] + ([len(header)] if header else []) + [0])
+    if ncols == 0:
+        return []
+    aligns += ["left"] * (ncols - len(aligns))
+
+    def norm(r: list[str]) -> list[str]:
+        return (r + [""] * ncols)[:ncols]
+
+    styled_header = [f"{BOLD}{PRIMARY}{_style_inline(c)}{RST}" if c else "" for c in norm(header)] if header else None
+    styled_body = [[_style_inline(c) for c in norm(r)] for r in body]
+
+    natural = [0] * ncols
+    for r in ([styled_header] if styled_header else []) + styled_body:
+        for i, c in enumerate(r):
+            natural[i] = max(natural[i], display_width(c), 1)
+
+    indent = 2
+    overhead = indent + 3 * ncols + 1
+    avail = max_total_width - overhead
+    if avail < 3 * ncols:
+        return _render_table_vertical(styled_header, styled_body, max_total_width)
+    widths = list(natural)
+    while sum(widths) > avail:
+        i = max(range(ncols), key=lambda k: widths[k])
+        if widths[i] <= 3:
+            break
+        widths[i] -= 1
+
+    v = glyph("v")
+    h = glyph("h")
+    sp = " " * indent
+    out = [f"{sp}{BORDER}{glyph('sq_tl')}" + glyph("t_down").join(h * (w + 2) for w in widths) + f"{glyph('sq_tr')}{RST}"]
+
+    def emit(cells: list[str], is_header: bool = False) -> None:
+        wrapped = [wrap_ansi(c, widths[i]) if c else [""] for i, c in enumerate(cells)]
+        height = max(len(w) for w in wrapped)
+        for k in range(height):
+            parts = []
+            for i in range(ncols):
+                text = wrapped[i][k] if k < len(wrapped[i]) else ""
+                parts.append(" " + pad(text, widths[i], "center" if is_header else aligns[i]) + " ")
+            out.append(f"{sp}{BORDER}{v}{RST}" + f"{BORDER}{v}{RST}".join(parts) + f"{BORDER}{v}{RST}")
+
+    if styled_header:
+        emit(styled_header, is_header=True)
+        out.append(f"{sp}{BORDER}{glyph('t_right')}" + glyph("cross").join(h * (w + 2) for w in widths) + f"{glyph('t_left')}{RST}")
+    for r in styled_body:
+        emit(r)
+    out.append(f"{sp}{BORDER}{glyph('sq_bl')}" + glyph("t_up").join(h * (w + 2) for w in widths) + f"{glyph('sq_br')}{RST}")
     return out
 
 
-def char_width(ch: str) -> int:
-    """Compute terminal cell width for a Unicode character."""
-    if unicodedata.east_asian_width(ch) in ("F", "W"):
-        return 2
-    if ord(ch) >= 0x1F300 or unicodedata.category(ch) == "So":
-        return 2
-    return 1
+def _render_table_vertical(header: list[str] | None, body: list[list[str]], width: int) -> list[str]:
+    """Fallback for tables too wide for the terminal: one 'key: value' block per row."""
+    out: list[str] = []
+    for n, row in enumerate(body):
+        if n:
+            out.append(f"  {BORDER}{glyph('h') * max(4, min(width - 4, 20))}{RST}")
+        for i, cell in enumerate(row):
+            key = header[i] if header and i < len(header) else f"{i + 1}"
+            for line in wrap_ansi(f"{key}{RST}: {cell}", max(10, width - 4)):
+                out.append(f"  {line}")
+    return out
 
-def str_width(s: str) -> int:
-    """Calculate visible terminal column width of a string (ignoring ANSI & OSC 8 sequences)."""
-    # Strip OSC 8 hyperlinks \x1b]8;;...\x1b\ or \x07
-    t = re.sub(r"\x1b\]8;;.*?(?:\x1b\\|\x07)", "", s)
-    # Strip standard ANSI color sequences \x1b[...m
-    t = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", t)
-    w = 0
-    for ch in t:
-        w += char_width(ch)
-    return w
 
-def make_clickable(label: str, url_or_path: str, workspace: Path | None = None) -> str:
-    """OSC 8 terminal hyperlink: \x1b]8;;URL\x1b\\LABEL\x1b]8;;\x1b\\"""
-    clean_target = url_or_path.strip().strip("'\"")
-    if clean_target.startswith(("http://", "https://", "file://")):
-        target = clean_target
-    else:
-        ws = workspace or Path.cwd()
-        p = Path(clean_target).expanduser()
-        abs_p = (ws / p).resolve() if not p.is_absolute() else p.resolve()
-        target = f"file://{abs_p}"
-    return f"\x1b]8;;{target}\x1b\\{UNDER}{TEAL}{label}{RST}\x1b]8;;\x1b\\"
+# ── Block rendering ────────────────────────────────────────────────────────────
 
-def _style_inline(s: str) -> str:
-    """Apply inline bold, code, emphasis, clickable links, and inline math."""
-    # 1. Inline math: $...$ -> Unicode formula
-    s = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", lambda m: f"{GOLD}{latex_to_unicode(m.group(1))}{RST}", s)
+_FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^`\s]*)[^`]*$")
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_HR_RE = re.compile(r"^\s{0,3}((?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$")
+_TASK_RE = re.compile(r"^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$")
+_BULLET_RE = re.compile(r"^(\s*)[-*+•]\s+(.*)$")
+_NUM_RE = re.compile(r"^(\s*)(\d{1,9})([.)])\s+(.*)$")
+_QUOTE_RE = re.compile(r"^\s*((?:>\s?)+)(.*)$")
+_CALLOUTS = {
+    "NOTE": ("info", INFO, "Note"),
+    "TIP": ("ok", SUCCESS, "Tip"),
+    "IMPORTANT": ("diamond", ACCENT, "Important"),
+    "WARNING": ("warn", WARNING, "Warning"),
+    "CAUTION": ("warn", ERROR, "Caution"),
+}
 
-    # 2. Result badges: PASS, FAIL, WARN
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✓\s*)?PASS(?:\b|(?=[\s|`]))", rf"{MINT}{BOLD}✓ PASS{RST}", s)
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:✗\s*)?FAIL(?:\b|(?=[\s|`]))", rf"{ROSE}{BOLD}✗ FAIL{RST}", s)
-    s = re.sub(r"(?:\b|(?<=[\s|`]))(?:⚠\s*)?WARN(?:ING)?(?:\b|(?=[\s|`]))", rf"{GOLD}{BOLD}⚠ WARN{RST}", s)
 
-    # 3. Bold + Italic ***text*** -> BOLD ITALIC WHITE
-    s = re.sub(r"\*\*\*([^\n*]+?)\*\*\*", rf"{BOLD}{ITALIC}{WHITE}\1{RST}", s)
+class MarkdownStream:
+    """Incremental markdown renderer.
 
-    # 4. Bold **text** or __text__ -> BOLD WHITE
-    s = re.sub(r"\*\*([^\n*]+?)\*\*", rf"{BOLD}{WHITE}\1{RST}", s)
-    s = re.sub(r"(?<!\w)__([^\n_]+?)__(?!\w)", rf"{BOLD}{WHITE}\1{RST}", s)
+    ``feed(chunk)`` returns the rendered rows that became final (joined with ``\\n``, with a trailing
+    newline when non-empty); ``flush()`` renders whatever is still pending.  Output is never revised.
+    """
 
-    # 5. Italic *text* or _text_ (strictly outside word/path boundaries so filename underscores are never touched)
-    s = re.sub(r"(?<!\*)\*([^\n*]+?)\*(?!\*)", rf"{ITALIC}\1{RST}", s)
-    s = re.sub(r"(?<![\w/\\\.])_([^\n_]+?)_(?![\w/\\\.])", rf"{ITALIC}\1{RST}", s)
+    def __init__(self, width: int | None = None, indent: int = 2) -> None:
+        self.width = max(20, width if width is not None else min(term_width() - 2, 110))
+        self.indent = indent
+        self._partial = ""
+        self._para: tuple[str, str, int, int] | None = None  # early-emitted paragraph state
+        self._para_rows = 0
+        self._fence: tuple[str, int] | None = None  # (char, length)
+        self._lang = ""
+        self._table: list[str] = []
+        self._math: list[str] | None = None
+        self._last_blank = True
+        self._emitted_any = False
 
-    # 6. Markdown links: [label](url_or_path) -> OSC 8 clickable link
-    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: make_clickable(m.group(1), m.group(2)), s)
-
-    # 7. Inline code `code` -> check if file path (runs LAST so OSC 8 escapes are never corrupted)
-    def _code_repl(m: re.Match) -> str:
-        code_str = m.group(1)
-        if re.match(r"^[\w\-./\\]+\.(py|js|ts|json|md|toml|env|html|css|txt|sh|rs|go|cpp|c|h|csv|yaml|yml)$", code_str) or "/" in code_str:
-            return make_clickable(code_str, code_str)
-        return f"{TEAL}{code_str}{RST}"
-
-    s = re.sub(r"`([^`]+)`", _code_repl, s)
-    return s
-
-def render_table(table_lines: list[str], max_total_width: int | None = None) -> list[str]:
-    """Parse markdown table lines and render as aligned Unicode box-drawing table."""
-    if max_total_width is None:
-        max_total_width = min(term_width() - 4, 100)
-
-    raw_rows = []
-    for line in table_lines:
-        line_clean = line.strip()
-        if line_clean.startswith("|"):
-            line_clean = line_clean[1:]
-        if line_clean.endswith("|"):
-            line_clean = line_clean[:-1]
-        cells = [c.strip() for c in line_clean.split("|")]
-        raw_rows.append(cells)
-
-    if not raw_rows:
-        return []
-
-    # Check for delimiter row (e.g. |---|---|)
-    has_header = False
-    delimiter_idx = -1
-    for idx, row in enumerate(raw_rows):
-        if any(re.match(r"^\s*:?-+:?\s*$", c) for c in row if c):
-            has_header = True
-            delimiter_idx = idx
-            break
-
-    header = raw_rows[0] if has_header and delimiter_idx > 0 else None
-    data_rows = raw_rows[delimiter_idx + 1:] if has_header else raw_rows
-
-    rows_to_check = [r for idx, r in enumerate(raw_rows) if idx != delimiter_idx]
-    num_cols = max(len(r) for r in rows_to_check) if rows_to_check else 0
-    if num_cols == 0:
-        return []
-
-    # Normalize rows to consistent column count
-    if header:
-        while len(header) < num_cols:
-            header.append("")
-    norm_data = []
-    for r in data_rows:
-        row_copy = list(r)
-        while len(row_copy) < num_cols:
-            row_copy.append("")
-        norm_data.append(row_copy[:num_cols])
-
-    # Measure max natural column widths using str_width
-    natural_widths = [0] * num_cols
-    if header:
-        for i, c in enumerate(header):
-            natural_widths[i] = max(natural_widths[i], str_width(c))
-    for r in norm_data:
-        for i, c in enumerate(r):
-            natural_widths[i] = max(natural_widths[i], str_width(c))
-
-    # Available width after border overhead (3 per col separator + 2 ends + 2 space indent)
-    avail_w = max_total_width - (3 * (num_cols - 1) + 4 + 2)
-
-    col_widths = list(natural_widths)
-    if sum(col_widths) > avail_w:
-        if num_cols == 2:
-            # 2-column format: col 0 is label/path, col 1 is description
-            col_widths[0] = min(natural_widths[0], 28)
-            col_widths[1] = max(20, avail_w - col_widths[0])
-        else:
-            # Give short/fixed columns their natural width (up to 24 chars)
-            # and compress only the wider elastic columns
-            fixed_w = 0
-            elastic_cols = []
-            for i, w in enumerate(col_widths):
-                if w <= 22:
-                    fixed_w += w
-                else:
-                    elastic_cols.append(i)
-
-            if elastic_cols and (avail_w - fixed_w) >= (12 * len(elastic_cols)):
-                rem_for_elastic = avail_w - fixed_w
-                elastic_nat = sum(col_widths[i] for i in elastic_cols) or 1
-                for i in elastic_cols:
-                    col_widths[i] = max(12, int(col_widths[i] * rem_for_elastic / elastic_nat))
+    # public API ---------------------------------------------------------------
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        text = sanitize(text).replace("\r", "")
+        rows: list[str] = []
+        data = self._partial + text
+        lines = data.split("\n")
+        self._partial = lines.pop()
+        for line in lines:
+            if self._para is not None:
+                rows.extend(self._finish_para(line))
             else:
-                tot_nat = sum(natural_widths) or 1
-                col_widths = [max(8, int(w * avail_w / tot_nat)) for w in natural_widths]
+                rows.extend(self._render_line(line))
+        rows.extend(self._early_rows())
+        return self._join(rows)
 
-    out_lines = []
+    def flush(self) -> str:
+        rows: list[str] = []
+        if self._partial and not self._partial.strip() and self._fence is None:
+            self._partial = ""
+        if self._para is not None:
+            rows.extend(self._finish_para(self._partial))
+            self._partial = ""
+        elif self._partial:
+            rows.extend(self._render_line(self._partial))
+            self._partial = ""
+        rows.extend(self._flush_table())
+        if self._math is not None:
+            rows.extend(self._render_math(self._math))
+            self._math = None
+        if self._fence is not None:
+            self._fence = None
+            self._lang = ""
+        return self._join(rows)
 
-    # Top border
-    top_b = f"  {DARK_SLATE}┌" + "┬".join("─" * (w + 2) for w in col_widths) + f"┐{RST}"
-    out_lines.append(top_b)
+    @property
+    def in_code_block(self) -> bool:
+        return self._fence is not None
 
-    # Header row
-    if header:
-        h_styled_cells = []
-        for i, c in enumerate(header):
-            w = col_widths[i]
-            styled = f"{BOLD}{TEAL}{_style_inline(c)}{RST}"
-            sw = str_width(styled)
-            pad = " " * max(0, w - sw)
-            h_styled_cells.append(f" {styled}{pad} ")
-        out_lines.append(f"  {DARK_SLATE}│{RST}" + f"{DARK_SLATE}│{RST}".join(h_styled_cells) + f"{DARK_SLATE}│{RST}")
+    # internals ----------------------------------------------------------------
+    @staticmethod
+    def _join(rows: list[str]) -> str:
+        return ("\n".join(rows) + "\n") if rows else ""
 
-        mid_b = f"  {DARK_SLATE}├" + "┼".join("─" * (w + 2) for w in col_widths) + f"┤{RST}"
-        out_lines.append(mid_b)
+    def _early_rows(self) -> list[str]:
+        """Emit complete rows of a long, still-growing paragraph line.
 
-    # Data rows with word wrapping
-    for row_idx, r in enumerate(norm_data):
-        wrapped_cols = []
-        for i, c in enumerate(r):
-            w = col_widths[i]
-            lines = textwrap.wrap(c, width=w) if c else [""]
-            wrapped_cols.append(lines or [""])
+        Rows are cut at the *source* level: a row is committed only when its markdown source is
+        self-contained (no open code span, emphasis, link or math), so the final render of the rest
+        of the line can never disagree with what was already printed (no text is ever lost).
+        """
+        p = self._partial
+        if not p or self._fence is not None or self._math is not None or self._table:
+            return []
+        if self._para is None:
+            s = p.lstrip()
+            if s.startswith(("|", "```", "~~~", "$$", "#", ">")) or display_width(p) <= self.width - self.indent:
+                return []
+            if _HR_RE.match(p):
+                return []
+            self._para = self._para_layout(p)
+        first_prefix, cont_prefix, avail, offset = self._para
+        out: list[str] = []
+        while True:
+            rest = p[offset:]
+            tokens = list(re.finditer(r"\S+", rest))
+            if len(tokens) < 2:
+                break
+            taken = 0
+            for i in range(1, len(tokens)):
+                candidate = rest[tokens[0].start():tokens[i - 1].end()]
+                if display_width(_style_inline(candidate)) > avail:
+                    break
+                taken = i
+            else:
+                break  # everything left still fits on one row: the row is not complete yet
+            if taken == 0:
+                break  # a single over-long token: let the final render hard-break it
+            row_src = rest[tokens[0].start():tokens[taken - 1].end()]
+            if not _inline_closed(row_src):
+                break
+            prefix = first_prefix if not self._para_rows else cont_prefix
+            out.append(prefix + _style_inline(row_src))
+            self._para_rows += 1
+            offset += tokens[taken].start()
+            self._para = (first_prefix, cont_prefix, avail, offset)
+        if out:
+            self._last_blank = False
+            self._emitted_any = True
+        return out
 
-        max_sublines = max(len(wc) for wc in wrapped_cols)
-        for sub_i in range(max_sublines):
-            row_cells = []
-            for col_i in range(num_cols):
-                w = col_widths[col_i]
-                sub_text = wrapped_cols[col_i][sub_i] if sub_i < len(wrapped_cols[col_i]) else ""
-                styled = _style_inline(sub_text)
-                if col_i == 0 and "\033[" not in styled and styled.strip():
-                    styled = f"{CYAN}{BOLD}{styled}{RST}"
-                sw = str_width(styled)
-                pad = " " * max(0, w - sw)
-                row_cells.append(f" {styled}{pad} ")
-            out_lines.append(f"  {DARK_SLATE}│{RST}" + f"{DARK_SLATE}│{RST}".join(row_cells) + f"{DARK_SLATE}│{RST}")
+    def _para_layout(self, line: str) -> tuple[str, str, int, int]:
+        """(first-row prefix, continuation prefix, body width, body source offset) for *line*."""
+        base = " " * self.indent
+        tm = _TASK_RE.match(line)
+        bm = None if tm else _BULLET_RE.match(line)
+        nm = None if (tm or bm) else _NUM_RE.match(line)
+        if tm or bm or nm:
+            if tm:
+                done = tm.group(2).lower() == "x"
+                marker = f"{SUCCESS}{glyph('task_done')}{RST}" if done else f"{MUTED}{glyph('task_todo')}{RST}"
+                depth, start = self._depth(tm.group(1)), tm.start(3)
+            elif bm:
+                depth, start = self._depth(bm.group(1)), bm.start(2)
+                marker = f"{PRIMARY}{glyph(('bullet', 'bullet2', 'bullet3')[depth % 3])}{RST}"
+            else:
+                depth, start = self._depth(nm.group(1)), nm.start(4)
+                marker = f"{PRIMARY}{nm.group(2)}{nm.group(3)}{RST}"
+            lead = " " * (self.indent + 2 * depth)
+            mw = display_width(marker) + 1
+            return f"{lead}{marker} ", lead + " " * mw, max(10, self.width - len(lead) - mw), start
+        start = len(line) - len(line.lstrip())
+        return base, base, self.width - self.indent, start
 
-    # Bottom border
-    bot_b = f"  {DARK_SLATE}└" + "┴".join("─" * (w + 2) for w in col_widths) + f"┘{RST}"
-    out_lines.append(bot_b)
-    return out_lines
+    def _finish_para(self, line: str) -> list[str]:
+        """Render the not-yet-emitted remainder of a paragraph whose first rows went out early."""
+        assert self._para is not None
+        first_prefix, cont_prefix, avail, offset = self._para
+        emitted = self._para_rows
+        self._para = None
+        self._para_rows = 0
+        if not emitted:
+            return self._render_line(line)
+        tm = _TASK_RE.match(line)
+        task_done = bool(tm) and tm.group(2).lower() == "x"
+        rest = line[offset:].strip()
+        self._last_blank = False
+        self._emitted_any = True
+        if not rest:
+            return []
+        styled = _style_inline(rest)
+        if task_done:
+            styled = f"{MUTED}{styled}{RST}"
+        return [cont_prefix + r for r in wrap_ansi(styled, avail)]
+
+    def _flush_table(self) -> list[str]:
+        if not self._table:
+            return []
+        rows = self._spacer() + render_table(self._table, max_total_width=self.width)
+        self._table = []
+        self._last_blank = False
+        return rows
+
+    def _spacer(self) -> list[str]:
+        if self._emitted_any and not self._last_blank:
+            self._last_blank = True
+            return [""]
+        return []
+
+    def _render_line(self, line: str) -> list[str]:
+        # Inside a fenced code block: everything is literal until the closing fence.
+        if self._fence is not None:
+            ch, n = self._fence
+            st = line.strip()
+            if st and set(st) == {ch} and len(st) >= n:
+                self._fence = None
+                self._lang = ""
+                self._last_blank = False
+                return []
+            return self._code_row(line)
+
+        if self._math is not None:
+            if line.strip() == "$$":
+                rows = self._render_math(self._math)
+                self._math = None
+                return rows
+            self._math.append(line)
+            return []
+
+        st = line.strip()
+        if st.startswith("|") and "|" in st[1:]:
+            self._table.append(st)
+            return []
+        rows = self._flush_table()
+
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = m.group(2)
+            self._fence = (fence[0], len(fence))
+            self._lang = m.group(3)
+            rows += self._spacer()
+            label = normalize_lang(self._lang) and self._lang
+            if label:
+                rows.append(f"{' ' * self.indent}{SUBTLE}{glyph('h') * 2} {MUTED}{label}{RST}")
+            self._last_blank = False
+            self._emitted_any = True
+            return rows
+
+        if st == "$$" or (st.startswith("$$") and st.endswith("$$") and len(st) > 4):
+            if st == "$$":
+                self._math = []
+                return rows
+            return rows + self._render_math([st[2:-2]])
+
+        return rows + self._render_block(line)
+
+    def _code_row(self, line: str) -> list[str]:
+        """Render one code line; lines wider than the block are soft-wrapped with a ↪ marker."""
+        code = line.expandtabs(4)
+        hl = highlight(code, self._lang)
+        avail = max(8, self.width - self.indent - 2)
+        mark = glyph("wrap") + " "
+        first, *rest = hard_wrap_ansi(hl, avail - display_width(mark), first_width=avail)
+        parts = [first] + [f"{MUTED}{mark}{RST}{CODE_BG}{r}" for r in rest]
+        out = []
+        for part in parts:
+            if CODE_BG:
+                fill = max(0, avail - display_width(part))
+                out.append(f"{' ' * self.indent}{CODE_BG}  {part}{CODE_BG}{' ' * fill}{RST}")
+            else:
+                out.append(f"{' ' * (self.indent + 2)}{part}")
+        return out
+
+    def _render_math(self, latex_lines: list[str]) -> list[str]:
+        joined = " ".join(l.strip() for l in latex_lines if l.strip())
+        if not joined:
+            return []
+        rows = self._spacer()
+        for line in latex_to_unicode(joined).split("\n"):
+            rows.append(f"{' ' * (self.indent + 2)}{WARNING}{line}{RST}")
+        self._last_blank = False
+        self._emitted_any = True
+        return rows
+
+    def _render_block(self, line: str) -> list[str]:
+        st = line.strip()
+        base = " " * self.indent
+        if not st:
+            if self._last_blank:
+                return []
+            self._last_blank = True
+            return [""]
+
+        rows: list[str] = []
+        hm = _HEADING_RE.match(line)
+        if hm:
+            level = len(hm.group(1))
+            title = _style_inline(hm.group(2))
+            if self._emitted_any and not self._last_blank:
+                rows.append("")
+            if level == 1:
+                styled = f"{PRIMARY}{BOLD}{title}{RST}"
+                rows += [base + r for r in wrap_ansi(styled, self.width - self.indent)]
+                rows.append(f"{base}{BORDER}{glyph('hh') * min(self.width - self.indent, max(3, display_width(title)))}{RST}")
+            elif level == 2:
+                rows += [base + r for r in wrap_ansi(f"{ACCENT}{BOLD}{title}{RST}", self.width - self.indent)]
+            elif level == 3:
+                rows += [base + r for r in wrap_ansi(f"{BOLD}{TEXT}{title}{RST}", self.width - self.indent)]
+            else:
+                rows += [base + r for r in wrap_ansi(f"{BOLD}{MUTED}{title}{RST}", self.width - self.indent)]
+            self._last_blank = False
+            self._emitted_any = True
+            return rows
+
+        if _HR_RE.match(line):
+            self._last_blank = False
+            self._emitted_any = True
+            return [f"{base}{BORDER}{glyph('h') * max(3, min(self.width - self.indent, 80))}{RST}"]
+
+        tm = _TASK_RE.match(line)
+        bm = None if tm else _BULLET_RE.match(line)
+        nm = None if (tm or bm) else _NUM_RE.match(line)
+        qm = None if (tm or bm or nm) else _QUOTE_RE.match(line)
+        if tm:
+            depth = self._depth(tm.group(1))
+            done = tm.group(2).lower() == "x"
+            marker = f"{SUCCESS}{glyph('task_done')}{RST}" if done else f"{MUTED}{glyph('task_todo')}{RST}"
+            body = _style_inline(tm.group(3))
+            if done:
+                body = f"{MUTED}{body}{RST}"
+            rows = self._hanging(marker, body, depth)
+        elif bm:
+            depth = self._depth(bm.group(1))
+            bullet = glyph(("bullet", "bullet2", "bullet3")[depth % 3])
+            rows = self._hanging(f"{PRIMARY}{bullet}{RST}", _style_inline(bm.group(2)), depth)
+        elif nm:
+            depth = self._depth(nm.group(1))
+            rows = self._hanging(f"{PRIMARY}{nm.group(2)}{nm.group(3)}{RST}", _style_inline(nm.group(4)), depth)
+        elif qm:
+            level = qm.group(1).count(">")
+            content = qm.group(2).strip()
+            bar = f"{BORDER}{glyph('quote')}{RST} " * level
+            cm = re.match(r"^\[!(\w+)\]\s*(.*)$", content)
+            if cm and cm.group(1).upper() in _CALLOUTS:
+                icon, color, label = _CALLOUTS[cm.group(1).upper()]
+                styled = f"{color}{BOLD}{glyph(icon)} {label}:{RST} {_style_inline(cm.group(2))}"
+            else:
+                styled = f"{MUTED}{ITALIC}{_style_inline(content)}{RST}" if content else ""
+            avail = self.width - self.indent - 2 * level
+            rows = [base + bar + r for r in wrap_ansi(styled, max(10, avail))] if styled else [base + bar.rstrip()]
+        else:
+            rows = [base + r for r in wrap_ansi(_style_inline(st), self.width - self.indent)]
+        self._last_blank = False
+        self._emitted_any = True
+        return rows
+
+    @staticmethod
+    def _depth(ws: str) -> int:
+        return min(6, len(ws.expandtabs(4)) // 2)
+
+    def _hanging(self, marker: str, body: str, depth: int) -> list[str]:
+        lead = " " * (self.indent + 2 * depth)
+        mw = display_width(marker) + 1
+        avail = max(10, self.width - len(lead) - mw)
+        wrapped = wrap_ansi(body, avail) if body else [""]
+        rows = [f"{lead}{marker} {wrapped[0]}"]
+        rows += [f"{lead}{' ' * mw}{r}" for r in wrapped[1:]]
+        return rows
+
 
 def format_markdown(text: str, max_width: int | None = None) -> str:
-    """Format markdown text with terminal ANSI aesthetics, tables, code fences, and lists."""
-    if max_width is None:
-        max_width = min(term_width() - 4, 100)
-
-    lines = text.splitlines()
-    out = []
-    in_code_block = False
-    in_math_block = False
-    math_buffer: list[str] = []
-    table_buffer: list[str] = []
-
-    def flush_table():
-        nonlocal table_buffer
-        if table_buffer:
-            out.extend(render_table(table_buffer, max_total_width=max_width))
-            table_buffer = []
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Markdown table detection
-        if not in_code_block and stripped.startswith("|") and ("|" in stripped[1:]):
-            table_buffer.append(stripped)
-            continue
-        else:
-            flush_table()
-
-        # Display math block: $$ ... $$
-        if stripped == "$$" and not in_code_block:
-            if not in_math_block:
-                in_math_block = True
-                math_buffer = []
-            else:
-                in_math_block = False
-                out.extend(_render_math_block(math_buffer))
-                math_buffer = []
-            continue
-
-        if in_math_block:
-            math_buffer.append(stripped)
-            continue
-
-        # Code block fence
-        if stripped.startswith("```"):
-            in_code_block = not in_code_block
-            lang = stripped.lstrip("`").strip()
-            if in_code_block:
-                if lang:
-                    border_w = max(20, min(max_width, 80) - len(lang) - 8)
-                    out.append(f"  {DARK_SLATE}┌── {LBLUE}{lang}{DARK_SLATE} {'─' * border_w}{RST}")
-                else:
-                    border_w = max(26, min(max_width, 80) - 4)
-                    out.append(f"  {DARK_SLATE}┌──{'─' * border_w}{RST}")
-            else:
-                border_w = max(26, min(max_width, 80) - 4)
-                out.append(f"  {DARK_SLATE}└──{'─' * border_w}{RST}")
-            continue
-
-        if in_code_block:
-            out.append(f"  {DARK_SLATE}│{RST} {MINT}{line}{RST}")
-            continue
-
-        # Blank line
-        if not stripped:
-            out.append("")
-            continue
-
-        # Horizontal rule
-        if re.match(r"^(\-{3,}|\*{3,}|_{3,})$", stripped):
-            hr_w = min(max_width - 4, 80)
-            out.append(f"  {DARK_SLATE}{'─' * hr_w}{RST}")
-            continue
-
-        # Headings
-        if stripped.startswith("# "):
-            title_text = _style_inline(stripped[2:].strip())
-            out.append(f"\n  {GOLD}{BOLD}■ {title_text}{RST}")
-        elif stripped.startswith("## "):
-            title_text = _style_inline(stripped[3:].strip())
-            out.append(f"\n  {CYAN}{BOLD}▸ {title_text}{RST}")
-        elif stripped.startswith("### "):
-            title_text = _style_inline(stripped[4:].strip())
-            out.append(f"\n  {TEAL}{BOLD}▫ {title_text}{RST}")
-        # Task lists / Checklists
-        elif re.match(r"^[-*]\s+\[([ xX])\]", stripped):
-            m = re.match(r"^[-*]\s+\[([ xX])\]\s*(.*)", stripped)
-            is_checked = m.group(1).lower() == "x" if m else False
-            content = m.group(2) if m else ""
-            indent = len(line) - len(line.lstrip())
-            box = f"{MINT}☑{RST}" if is_checked else f"{SLATE}☐{RST}"
-            out.append(f"  {' ' * indent}{box} {_style_inline(content)}")
-        # Bullet points
-        elif stripped.startswith(("- ", "* ", "• ")):
-            indent = len(line) - len(line.lstrip())
-            content = stripped[2:]
-            out.append(f"  {' ' * indent}{TEAL}•{RST} {_style_inline(content)}")
-        # Numbered list
-        elif re.match(r"^\d+\.\s+", stripped):
-            m = re.match(r"^(\d+)\.\s+(.*)", stripped)
-            indent = len(line) - len(line.lstrip())
-            num, content = (m.group(1), m.group(2)) if m else ("", stripped)
-            out.append(f"  {' ' * indent}{TEAL}{num}.{RST} {_style_inline(content)}")
-        # Callouts / Blockquotes
-        elif stripped.startswith(">"):
-            content = stripped.lstrip("> ").strip()
-            if content.startswith("[!NOTE]"):
-                out.append(f"  {LBLUE}{BOLD}ℹ Note:{RST} {_style_inline(content[7:].strip())}")
-            elif content.startswith("[!TIP]"):
-                out.append(f"  {MINT}{BOLD}💡 Tip:{RST} {_style_inline(content[6:].strip())}")
-            elif content.startswith("[!IMPORTANT]"):
-                out.append(f"  {AMBER}{BOLD}⚡ Important:{RST} {_style_inline(content[12:].strip())}")
-            elif content.startswith("[!WARNING]"):
-                out.append(f"  {ROSE}{BOLD}⚠️ Warning:{RST} {_style_inline(content[10:].strip())}")
-            else:
-                out.append(f"  {PURPLE}│{RST} {ITALIC}{_style_inline(content)}{RST}")
-        else:
-            out.append(f"  {_style_inline(line)}")
-
-    flush_table()
-    return "\n".join(out)
+    """Render a complete markdown document for the terminal."""
+    if not text:
+        return ""
+    try:
+        stream = MarkdownStream(width=max_width)
+        out = stream.feed(text) + stream.flush()
+    except Exception:  # never let odd input crash the UI
+        return sanitize(text)
+    return out.rstrip("\n")

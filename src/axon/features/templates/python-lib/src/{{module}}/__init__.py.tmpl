@@ -1,0 +1,37 @@
+"""{{title}}: small, typed utilities."""
+from __future__ import annotations
+
+from typing import Iterable, Iterator, TypeVar
+
+__all__ = ["chunked", "slugify"]
+__version__ = "0.1.0"
+
+T = TypeVar("T")
+
+
+def chunked(items: Iterable[T], size: int) -> Iterator[list[T]]:
+    """Yield lists of at most `size` items."""
+    if size < 1:
+        raise ValueError("size must be >= 1")
+    chunk: list[T] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) == size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def slugify(text: str) -> str:
+    """'Hello, World!' -> 'hello-world'."""
+    out: list[str] = []
+    dash = False
+    for ch in text.lower():
+        if ch.isalnum():
+            out.append(ch)
+            dash = False
+        elif not dash and out:
+            out.append("-")
+            dash = True
+    return "".join(out).strip("-")

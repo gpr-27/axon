@@ -40,7 +40,7 @@ def test_local_ollama_zero_key_bypass():
 def test_anthropic_provider_resolution():
     anthropic_preset = get_preset_by_id("anthropic")
     assert anthropic_preset is not None
-    
+
     settings = Settings(
         base_url=anthropic_preset.base_url,
         model="claude-3-7-sonnet-20250219",

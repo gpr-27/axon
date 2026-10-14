@@ -68,7 +68,7 @@ def test_invariant_2_batching_single_message_envelope(agent: Agent):
         stop_reason="tool_use",
     )
     agent.conversation.append_assistant(turn)
-    
+
     results = agent._execute_batch(turn.tool_uses)
     agent.conversation.append_tool_results(results)
 
@@ -107,8 +107,9 @@ def test_invariant_4_errors_as_data_flow(agent: Agent):
 # ─── Context Compaction Ladder Matrix (20 tests) ────────────────────────────
 @pytest.mark.parametrize("oversized_len", [9000, 15000, 30000])
 def test_context_compaction_rung_1_trimming(workspace: Path, oversized_len: str):
-    settings = Settings(workspace=workspace, turn_token_budget=1000, compact_at=0.5)
+    settings = Settings(workspace=workspace, compact_at=0.5)
     cm = ContextManager(settings)
+    cm.context_window = lambda model=None: 2000  # tiny window forces the compaction ladder
     conv = Conversation()
     big_content = "X" * oversized_len
     conv.append_user("big result test")
@@ -118,14 +119,15 @@ def test_context_compaction_rung_1_trimming(workspace: Path, oversized_len: str)
     cm.prepare(conv, [], [], model="claude-opus-5")
     # Verify trimmed
     trimmed_txt = conv.messages[-1]["content"][0]["content"]
-    assert "Truncated by Axon Context Compaction" in trimmed_txt
+    assert "truncated by Axon context compaction" in trimmed_txt
     assert len(trimmed_txt) < oversized_len
 
 def test_context_compaction_rung_2_stale_result_eviction(workspace: Path):
-    settings = Settings(workspace=workspace, turn_token_budget=500, compact_at=0.1)
+    settings = Settings(workspace=workspace, compact_at=0.1)
     cm = ContextManager(settings)
+    cm.context_window = lambda model=None: 1000
     conv = Conversation()
-    
+
     # 6 messages
     for i in range(3):
         conv.append_user(f"Query {i}")

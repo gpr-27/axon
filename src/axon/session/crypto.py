@@ -1,15 +1,17 @@
 """
-Session encryption and authenticated keystream cipher for Axon session transcripts.
-Protects stored conversations and secrets at rest in ~/.axon/sessions/*.jsonl.
-Uses PBKDF2-HMAC-SHA256 key derivation with authenticated AES/HMAC payload envelopes.
+Optional at-rest encryption for session transcript lines (AXON_SESSION_PASSPHRASE).
+
+Stdlib-only construction: PBKDF2-HMAC-SHA256 (100k iterations, random 16-byte salt)
+derives an encryption key and a MAC key; the plaintext is XORed with an
+HMAC-SHA256 counter-mode keystream (random 16-byte nonce) and the envelope is
+authenticated with HMAC-SHA256 (encrypt-then-MAC). Failed decryptions return a
+bracketed marker string, which the store skips as a non-JSON line.
 """
 from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
-from typing import Any
 
 
 def _derive_keys(passphrase: str, salt: bytes) -> tuple[bytes, bytes]:

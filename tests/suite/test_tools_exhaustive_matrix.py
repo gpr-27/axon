@@ -136,14 +136,14 @@ def test_codesymbols_variations(ctx: ToolContext, code_snippet: str, expected_sy
     f = ctx.workspace / "symbols_test.py"
     f.write_text(code_snippet)
     reg = create_default_registry()
-    res = reg.get("CodeSymbols").run({"path": "symbols_test.py"}, ctx)
+    res = reg.get("CodeSearch").run({"action": "symbols", "path": "symbols_test.py"}, ctx)
     assert expected_symbol in res
 
 def test_codesymbols_syntax_error_resilience(ctx: ToolContext):
     f = ctx.workspace / "bad_syntax.py"
     f.write_text("def broken_syntax( { : \n")
     reg = create_default_registry()
-    res = reg.get("CodeSymbols").run({"path": "bad_syntax.py"}, ctx)
+    res = reg.get("CodeSearch").run({"action": "symbols", "path": "bad_syntax.py"}, ctx)
     assert "Syntax error" in res or "No symbols extracted" in res or "error" in res.lower()
 
 # ─── Execution & Shell Tools (15 tests) ─────────────────────────────────────
@@ -156,18 +156,6 @@ def test_bash_commands(ctx: ToolContext, cmd: str, expected_out: str):
     reg = create_default_registry()
     res = reg.get("Bash").run({"command": cmd}, ctx)
     assert expected_out in res
-
-def test_env_list_and_check(ctx: ToolContext):
-    import os
-    os.environ["AXON_TEST_VAR"] = "active_val"
-    reg = create_default_registry()
-    tool = reg.get("Env")
-    res_get = tool.run({"action": "get", "variable": "AXON_TEST_VAR"}, ctx)
-    assert "active_val" in res_get
-    res_check = tool.run({"action": "check", "variable": "AXON_TEST_VAR"}, ctx)
-    assert "SET" in res_check
-    res_list = tool.run({"action": "list"}, ctx)
-    assert len(res_list) > 0
 
 # ─── Planning & Multi-Agent Tools (15 tests) ────────────────────────────────
 @pytest.mark.parametrize("status", ["pending", "in_progress", "completed"])
@@ -183,4 +171,8 @@ def test_task_depth_enforcement(ctx: ToolContext):
     reg = create_default_registry()
     task_tool = reg.get("Task")
     assert task_tool is not None
-    assert task_tool.readonly is True
+    # Task may edit files through its subagent, so it is not read-only; the loop runs Task calls
+    # in parallel explicitly (PARALLEL_SAFE_TOOLS) and subagents never receive the Task tool.
+    assert task_tool.readonly is False
+    from axon.agent.loop import PARALLEL_SAFE_TOOLS
+    assert "Task" in PARALLEL_SAFE_TOOLS

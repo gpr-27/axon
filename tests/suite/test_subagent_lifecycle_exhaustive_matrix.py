@@ -44,7 +44,7 @@ def test_subagent_sibling_switching_and_main_return(workspace: Path):
     store = SessionStore(workspace)
     store.open("sess_multi_sub")
     store.append_user("Build microservices")
-    
+
     turn = AssistantTurn(
         blocks=[
             ToolUseBlock(id="tu_auth", name="Task", input={"prompt": "Build auth service"}),

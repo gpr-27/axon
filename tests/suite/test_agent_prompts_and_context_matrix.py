@@ -16,7 +16,7 @@ def test_system_prompt_structure_across_modes(workspace: Path, mode: str):
     settings = Settings(workspace=workspace, mode=mode)
     tools = create_default_registry()
     blocks = build_system(settings, tools)
-    
+
     assert len(blocks) >= 4
     assert blocks[0]["text"] == IDENTITY
     assert blocks[1]["text"] == OPERATING_RULES

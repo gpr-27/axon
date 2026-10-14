@@ -1,14 +1,14 @@
 """
-Interactive /skills management studio: create, inspect, edit, list, and delete custom skills.
+/skills: list, show, create, edit, delete, install (from GitHub) and reload skills.
 """
 from __future__ import annotations
-import os
-import subprocess
+
+import shutil
 from pathlib import Path
-from axon.skills.manager import Skill, SkillManager
-from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, MINT, RST, ROSE, SLATE, TEAL, UNDER, WHITE,
-)
+
+from axon.storage import axon_home as _axon_home
+from axon.skills.manager import SkillManager
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, DIM, GOLD, MINT, RST, SLATE, TEAL, WHITE
 
 TEMPLATES = {
     "workflow": (
@@ -97,161 +97,164 @@ Probe HTTP endpoints, validate JSON payloads, and verify response contracts.
     ),
 }
 
+
+_SCOPE_TITLES = {
+    "project": (MINT, "Project skills (.axon/skills, .claude/skills)"),
+    "personal": (CYAN, "Personal skills (~/.axon/skills)"),
+    "plugin": (GOLD, "Plugin skills"),
+    "bundled": (TEAL, "Built-in skills"),
+}
+
+USAGE = """  /skills                              list skills
+  /skills show <name>                  instructions and allowed tools
+  /skills create <name> [template] [--global]   templates: workflow, tester, reviewer, api
+  /skills install <github-url|owner/repo/path> [--global] [--force]
+  /skills edit <name>                  open in $EDITOR (built-ins are copied to the project first)
+  /skills delete <name>                remove a project/personal skill
+  /skills reload                       rescan skill folders
+  Run a skill with /<name> [arguments] or /skill:<name> [arguments]."""
+
+
+def _print_list(mgr: SkillManager) -> None:
+    skills = sorted(mgr.skills.values(), key=lambda s: s.name)
+    print(f"\n  {GOLD}{BOLD}Skills{RST}  {SLATE}{len(skills)} available · run with /<name> [args]{RST}")
+    print(f"  {DARK_SLATE}{'─' * 60}{RST}")
+    try:
+        from axon.commands.registry import resolve_builtin
+    except Exception:
+        def resolve_builtin(_n: str) -> None:  # type: ignore[misc]
+            return None
+    for scope in ("project", "personal", "plugin", "bundled"):
+        group = [s for s in skills if s.scope == scope]
+        if not group:
+            continue
+        color, title = _SCOPE_TITLES[scope]
+        print(f"\n  {color}{BOLD}{title}{RST}")
+        for s in group:
+            shadow = f" {GOLD}(use /skill:{s.name}){RST}" if resolve_builtin(s.name) else ""
+            tools = f" {DARK_SLATE}[{', '.join(s.allowed_tools)}]{RST}" if s.allowed_tools else ""
+            from axon.commands.common import clip
+            print(f"    {WHITE}/{s.name:<20}{RST} {SLATE}{clip(s.description or '', 64)}{RST}{tools}{shadow}")
+    print(f"\n  {DIM}/skills show|create|install|edit|delete <name>{RST}\n")
+
+
 def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -> None:
-    parts = arg.strip().split(maxsplit=2)
+    words = arg.split()
+    flags = {w for w in words if w.startswith("--")}
+    parts = [w for w in words if not w.startswith("--")]
     sub = parts[0].lower() if parts else "list"
+    name = parts[1].lstrip("/") if len(parts) > 1 else ""
+    from axon.commands.common import confirm, err, info, is_tty, ok, open_in_editor, usage
 
-    if sub in ("list", ""):
-        skills = sorted(skills_mgr.skills.values(), key=lambda x: (x.scope, x.name))
-        print(f"\n{GOLD}{BOLD}=== Active Skills Studio ({len(skills)} Available) ==={RST}")
-        
-        # Group by scope
-        grouped: dict[str, list[Skill]] = {"project": [], "personal": [], "bundled": []}
-        for s in skills:
-            grouped.setdefault(s.scope, []).append(s)
+    if sub in ("list", "ls"):
+        _print_list(skills_mgr)
+        return
 
-        for scope_name, s_list in grouped.items():
-            if not s_list:
-                continue
-            if scope_name == "project":
-                print(f"\n  {MINT}{BOLD}📁 Project Skills (.axon/skills/){RST}")
-            elif scope_name == "personal":
-                print(f"\n  {CYAN}{BOLD}👤 Personal Skills (~/.axon/skills/){RST}")
-            else:
-                print(f"\n  {TEAL}{BOLD}⚡ Bundled Skills{RST}")
+    if sub == "reload":
+        skills_mgr.discover()
+        ok(f"Reloaded {len(skills_mgr.skills)} skills")
+        return
 
-            for s in s_list:
-                print(f"    {BOLD}/{s.name:<18}{RST} {SLATE}{s.description}{RST}")
-
-        print(f"\n  {DIM}Commands:{RST} {GOLD}/skill create <name>{RST} · {CYAN}/skill edit <name>{RST} · {MINT}/skill show <name>{RST} · {ROSE}/skill delete <name>{RST}\n")
-
-    elif sub in ("create", "new", "creator"):
-        if len(parts) < 2:
-            print(f"\n{GOLD}{BOLD}=== Interactive Skill Creator Wizard ==={RST}")
-            print("  Usage: /skill create <name> [template_type]")
-            print("\n  Available Templates:")
-            for k, (title_t, _) in TEMPLATES.items():
-                print(f"    {CYAN}{k:<12}{RST} - {title_t}")
-            print(f"\n  Example: {WHITE}/skill create deploy-service workflow{RST}\n")
+    if sub in ("show", "info", "inspect"):
+        skill = skills_mgr.get(name) if name else None
+        if skill is None:
+            err(f"Skill '{name}' not found.")
             return
+        print(f"\n  {GOLD}{BOLD}/{skill.name}{RST}  {SLATE}{skill.scope} · {skill.path}{RST}")
+        print(f"  {WHITE}{skill.description}{RST}")
+        if skill.allowed_tools:
+            print(f"  {SLATE}Allowed tools:{RST} {', '.join(skill.allowed_tools)}")
+        if skill.argument_hint:
+            print(f"  {SLATE}Arguments:{RST} {skill.argument_hint}")
+        if skill.model:
+            print(f"  {SLATE}Model:{RST} {skill.model}")
+        print(f"  {DARK_SLATE}{'─' * 60}{RST}")
+        for ln in skill.instructions.splitlines():
+            print(f"  {ln}")
+        print()
+        return
 
-        name = parts[1].lstrip("/")
-        template_key = parts[2].lower() if len(parts) > 2 else "workflow"
-        if template_key not in TEMPLATES:
-            template_key = "workflow"
-
-        _, tmpl_text = TEMPLATES[template_key]
-        title = name.replace("-", " ").replace("_", " ").title()
-        skill_content = tmpl_text.format(name=name, title=title)
-
-        target_dir = workspace / ".axon" / "skills" / name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        skill_file = target_dir / "SKILL.md"
-
+    if sub in ("create", "new"):
+        if not name:
+            usage("/skills create <name> [workflow|tester|reviewer|api] [--global]")
+            return
+        from axon.skills.importer import sanitize_skill_name
+        clean = sanitize_skill_name(name)
+        if not clean:
+            err("Skill names may contain letters, digits, - and _.")
+            return
+        tmpl = parts[2].lower() if len(parts) > 2 and parts[2].lower() in TEMPLATES else "workflow"
+        root = (_axon_home() / "skills") if "--global" in flags else (workspace / ".axon" / "skills")
+        skill_file = root / clean / "SKILL.md"
         if skill_file.exists():
-            print(f"\n  {SLATE}Skill already exists at {skill_file}{RST}\n")
+            err(f"Skill already exists: {skill_file}")
             return
-
-        skill_file.write_text(skill_content, encoding="utf-8")
+        skill_file.parent.mkdir(parents=True, exist_ok=True)
+        title = clean.replace("-", " ").replace("_", " ").title()
+        skill_file.write_text(TEMPLATES[tmpl][1].format(name=clean, title=title), encoding="utf-8")
         skills_mgr.discover()
+        ok(f"Created skill {BOLD}/{clean}{RST} {SLATE}({tmpl}) → {skill_file}{RST}")
+        return
 
-        print(f"\n  {MINT}✓ Successfully created skill {BOLD}/{name}{RST}{MINT}!{RST}")
-        print(f"  {SLATE}Location:{RST} {WHITE}{skill_file}{RST}")
-        print(f"  {DIM}Template: {template_key} · Invoke anytime via /{name} or edit with /skill edit {name}{RST}\n")
-
-    elif sub in ("edit", "modify"):
-        if len(parts) < 2:
-            print(f"\n  {GOLD}Usage:{RST} /skill edit <name>\n")
+    if sub in ("edit", "modify"):
+        skill = skills_mgr.get(name) if name else None
+        if skill is None:
+            err(f"Skill '{name}' not found.")
             return
-        name = parts[1].lstrip("/")
-        skill = skills_mgr.skills.get(name)
-        if not skill:
-            print(f"\n  {ROSE}Skill '{name}' not found in catalog.{RST}\n")
-            return
+        path = skill.path
         if skill.scope == "bundled":
-            # Clone bundled skill to project folder for editing
-            target_dir = workspace / ".axon" / "skills" / name
-            target_dir.mkdir(parents=True, exist_ok=True)
-            skill_file = target_dir / "SKILL.md"
-            if not skill_file.exists():
-                template = f"""---
-description: {skill.description}
----
-
-# {name.title()} Skill
-
-## Step-by-Step Instructions
-{skill.instructions}
-"""
-                skill_file.write_text(template, encoding="utf-8")
+            path = workspace / ".axon" / "skills" / skill.name / "SKILL.md"
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"---\nname: {skill.name}\ndescription: {skill.description}\n---\n\n{skill.instructions}\n", encoding="utf-8")
+                info(f"Copied the built-in skill to {path} (it now overrides the built-in).")
+        if is_tty():
+            open_in_editor(path)
         else:
-            skill_file = skill.path
-
-        editor = os.environ.get("EDITOR") or "nano"
-        print(f"\n  {TEAL}Opening {skill_file} in {editor}...{RST}")
-        subprocess.call([editor, str(skill_file)])
+            info(f"Edit {path} in your editor.")
         skills_mgr.discover()
-        print(f"  {MINT}✓ Reloaded skill /{name}.{RST}\n")
+        return
 
-    elif sub in ("show", "info", "inspect"):
-        if len(parts) < 2:
-            print(f"\n  {GOLD}Usage:{RST} /skill show <name>\n")
+    if sub in ("delete", "rm", "remove"):
+        skill = skills_mgr.get(name) if name else None
+        if skill is None:
+            err(f"Skill '{name}' not found.")
             return
-        name = parts[1].lstrip("/")
-        skill = skills_mgr.skills.get(name)
-        if not skill:
-            print(f"\n  {ROSE}Skill '{name}' not found.{RST}\n")
+        if skill.scope in ("bundled", "plugin"):
+            err(f"'{name}' is a {skill.scope} skill and cannot be deleted here.")
             return
-        scope_badge = f"{MINT}[{skill.scope}]{RST}"
-        print(f"\n{GOLD}{BOLD}=== Skill: /{skill.name} {scope_badge} ==={RST}")
-        print(f"  {SLATE}Path:{RST} {WHITE}{skill.path}{RST}")
-        print(f"  {SLATE}Description:{RST} {WHITE}{skill.description}{RST}\n")
-        print(f"{WHITE}{skill.instructions}{RST}\n")
-
-    elif sub in ("delete", "rm", "remove"):
-        if len(parts) < 2:
-            print(f"\n  {GOLD}Usage:{RST} /skill delete <name>\n")
-            return
-        name = parts[1].lstrip("/")
-        skill = skills_mgr.skills.get(name)
-        if not skill:
-            print(f"\n  {ROSE}Skill '{name}' not found.{RST}\n")
-            return
-        if skill.scope == "bundled":
-            print(f"\n  {ROSE}Cannot delete bundled skill '{name}'.{RST}\n")
+        if not confirm(f"Delete {skill.path.parent}?", default=not is_tty()):
+            info("Cancelled.")
             return
         try:
-            if skill.path.exists():
+            roots = {r.resolve() for r, _ in skills_mgr.skill_roots()}
+            folder = skill.path.parent.resolve()
+            if skill.path.name == "SKILL.md" and folder.parent in roots:
+                shutil.rmtree(folder)  # a skill folder directly under a skills root
+            else:
                 skill.path.unlink()
-                if skill.path.parent.exists() and not list(skill.path.parent.iterdir()):
-                    skill.path.parent.rmdir()
-            skills_mgr.discover()
-            print(f"\n  {TEAL}✓ Removed skill /{name}.{RST}\n")
-        except Exception as e:
-            print(f"\n  ❌ Failed to delete skill: {e}\n")
-
-    elif sub in ("import", "install", "add"):
-        if len(parts) < 2:
-            print(f"\n  {GOLD}Usage:{RST} /skill import <github_repo_or_url>\n")
-            print(f"  {DIM}Example: /skill import anthropics/anthropic-quickstarts/skills/rag{RST}\n")
+        except OSError as e:
+            err(f"Failed to delete: {e}")
             return
-        repo_target = parts[1]
-        from axon.skills.importer import import_skill_from_url
-        print(f"\n  {TEAL}⬇ Fetching remote skill bundle from {repo_target}...{RST}")
-        try:
-            imported = import_skill_from_url(repo_target, workspace)
-            skills_mgr.discover()
-            print(f"  {MINT}✓ Successfully installed skill {BOLD}/{imported.name}{RST}{MINT}!{RST}")
-            print(f"  {SLATE}Description:{RST} {WHITE}{imported.description}{RST}")
-            print(f"  {SLATE}Saved to:{RST} {WHITE}{imported.target_path}{RST}\n")
-        except Exception as e:
-            print(f"  {ROSE}❌ Failed to import skill: {e}{RST}\n")
+        skills_mgr.discover()
+        ok(f"Deleted skill /{skill.name}")
+        return
 
-    else:
-        print(f"\n  {GOLD}Skills Studio Commands:{RST}")
-        print("    /skills                        - Browse catalog of active skills")
-        print("    /skill create <name> [tmpl]    - Scaffold a new skill (workflow, tester, reviewer, api)")
-        print("    /skill import <github_url>     - Import SKILL.md directly from GitHub or skills.sh")
-        print("    /skill edit <name>             - Open skill in $EDITOR")
-        print("    /skill show <name>             - Inspect skill instructions and dynamic directives")
-        print("    /skill delete <name>           - Remove custom skill\n")
+    if sub in ("install", "import", "add"):
+        if not name:
+            usage("/skills install <github-url | owner/repo/path> [--global] [--force]")
+            return
+        from axon.skills.importer import import_skill_from_url
+        root = (_axon_home() / "skills") if "--global" in flags else None
+        print(f"\n  {TEAL}⬇ Fetching {parts[1]}…{RST}")
+        try:
+            imported = import_skill_from_url(parts[1], workspace, target_root=root, overwrite="--force" in flags)
+        except Exception as e:
+            err(f"Install failed: {e}")
+            return
+        skills_mgr.discover()
+        ok(f"Installed {BOLD}/{imported.name}{RST} → {imported.target_path}")
+        print(f"  {GOLD}!{RST} {SLATE}Review it before use; its !`commands` only run after a permission check.{RST}\n")
+        return
+
+    print(f"\n  {GOLD}{BOLD}Skills commands{RST}\n{USAGE}\n")

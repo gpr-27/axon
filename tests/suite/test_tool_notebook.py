@@ -86,6 +86,7 @@ def test_notebook_edit_cell(sample_notebook: Path, tmp_path: Path):
         todos=TodoState(),
         settings=Settings(workspace=tmp_path),
     )
+    ctx.file_state.record_read(sample_notebook)  # NotebookEdit enforces read-before-edit
 
     new_code = "import pandas as pd\ndf = pd.DataFrame({'a': [10, 20]})"
     res = tool.run({
@@ -113,6 +114,7 @@ def test_notebook_insert_cell(sample_notebook: Path, tmp_path: Path):
         todos=TodoState(),
         settings=Settings(workspace=tmp_path),
     )
+    ctx.file_state.record_read(sample_notebook)  # NotebookEdit enforces read-before-edit
 
     res = tool.run({
         "notebook_path": "analysis.ipynb",
@@ -138,6 +140,7 @@ def test_notebook_delete_cell(sample_notebook: Path, tmp_path: Path):
         todos=TodoState(),
         settings=Settings(workspace=tmp_path),
     )
+    ctx.file_state.record_read(sample_notebook)  # NotebookEdit enforces read-before-edit
 
     res = tool.run({
         "notebook_path": "analysis.ipynb",
@@ -160,6 +163,7 @@ def test_notebook_clear_outputs(sample_notebook: Path, tmp_path: Path):
         todos=TodoState(),
         settings=Settings(workspace=tmp_path),
     )
+    ctx.file_state.record_read(sample_notebook)  # NotebookEdit enforces read-before-edit
 
     res = tool.run({
         "notebook_path": "analysis.ipynb",

@@ -1,0 +1,22 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createApp } from "../src/app.js";
+
+test("health and todos", async () => {
+  const server = createApp().listen(0);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    assert.deepEqual(await (await fetch(`${base}/health`)).json(), { status: "ok" });
+    const created = await fetch(`${base}/todos`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "write tests" }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal((await (await fetch(`${base}/todos`)).json()).length, 1);
+    const bad = await fetch(`${base}/todos`, { method: "POST" });
+    assert.equal(bad.status, 400);
+  } finally {
+    server.close();
+  }
+});

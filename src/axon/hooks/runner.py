@@ -1,41 +1,27 @@
 """
-Pre- and post-tool shell hooks runner.
+Backward-compatible hook runner facade over :class:`axon.hooks.manager.HookManager`.
 """
 from __future__ import annotations
-import json
-import subprocess
 from dataclasses import dataclass
 from typing import Any
-from axon.config import Settings
+from axon.hooks.manager import HookManager
+
 
 @dataclass(frozen=True)
 class HookOutcome:
     proceed: bool
     override_output: str | None = None
 
+
 class HookRunner:
-    def __init__(self, settings: Settings) -> None:
+    """Legacy API: ``HookRunner(settings).run(event, payload) -> HookOutcome``."""
+
+    def __init__(self, settings: Any) -> None:
         self.settings = settings
+        self.manager = HookManager(settings, getattr(settings, "workspace", None))
 
     def run(self, event: str, payload: dict[str, Any]) -> HookOutcome:
-        hooks = self.settings.hooks.get(event, [])
-        if not hooks:
+        res = self.manager.run(event, payload)
+        if res.proceed:
             return HookOutcome(proceed=True)
-
-        for h in hooks:
-            try:
-                proc = subprocess.run(
-                    h.command,
-                    shell=True,
-                    input=json.dumps(payload),
-                    text=True,
-                    capture_output=True,
-                    timeout=5,
-                )
-                if proc.returncode == 2:
-                    # Exit code 2 blocks execution and replaces result with stdout
-                    return HookOutcome(proceed=False, override_output=proc.stdout.strip())
-            except Exception:
-                pass
-
-        return HookOutcome(proceed=True)
+        return HookOutcome(proceed=False, override_output=res.message or res.stop_reason)

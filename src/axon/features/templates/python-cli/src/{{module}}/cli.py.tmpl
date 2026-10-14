@@ -1,0 +1,30 @@
+"""Command-line entry point for {{name}}."""
+from __future__ import annotations
+
+import argparse
+from typing import Sequence
+
+from {{module}} import __version__
+
+
+def greet(name: str, shout: bool = False) -> str:
+    message = f"Hello, {name}!"
+    return message.upper() if shout else message
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="{{name}}", description="{{title}} command-line tool")
+    parser.add_argument("name", nargs="?", default="world", help="who to greet")
+    parser.add_argument("--shout", action="store_true", help="print in upper case")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    print(greet(args.name, shout=args.shout))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

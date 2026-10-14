@@ -1,208 +1,1246 @@
 """
-Interactive input reading with raw OS terminal key-handling, live Tab/Shift+Tab mode toggling,
-SIGWINCH auto-resize, history, and interactive scrollable slash-command autocomplete popup.
+Interactive prompt line editor for the Axon REPL.
+
+Features: persistent history (~/.axon/history, prefix-filtered with ↑/↓), multi-line input
+(Shift+Enter / Alt+Enter / Ctrl+J / trailing backslash / paste), slash-command menu (built-in
+and custom commands), @file completion, Shift+Tab mode cycling, wide-character aware wrapping,
+live resize, undo, stash, external editor, and a plain input() fallback when not on a TTY.
+All key handling goes through axon.platform so it behaves the same on Windows consoles,
+macOS and Linux.
 """
 from __future__ import annotations
+
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:
-    import readline
-except ModuleNotFoundError:
-    readline = None  # type: ignore
-
-try:
-    import termios
-    import tty
-    _HAS_TERMIOS = True
-except ModuleNotFoundError:
-    termios = None  # type: ignore
-    tty = None      # type: ignore
-    _HAS_TERMIOS = False
-
+from axon import platform as plat
+from axon.ui.picker import LiveFrame
 from axon.ui.theme import (
-    AMBER,
-    BOLD,
-    CYAN,
-    DARK_SLATE,
-    DIM,
-    GOLD,
-    GRAY_BG,
-    MINT,
-    PURPLE,
-    RST,
-    SLATE,
-    TEAL,
-    UNDER,
-    WHITE,
-    strip_ansi,
+    AMBER, BOLD, CYAN, DARK_SLATE, GOLD, GRAY_BG, MINT, PURPLE, ROSE, RST, SLATE, TEAL, UNDER, WHITE,
     term_width,
 )
 
-MODES_CYCLE = ["default", "acceptEdits", "plan", "bypass"]
+_HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
-# In-memory history across REPL turns in the session
+MODES_CYCLE = ["default", "acceptEdits", "plan", "bypass"]
+SWITCH_SESSION = "__SWITCH_SESSION__"
+HISTORY_LIMIT = 1000
+
+# In-process history of this session (also persisted to ~/.axon/history).
 _SESSION_HISTORY: list[str] = []
 
-def safe_ansi_truncate(text: str, max_w: int) -> str:
-    """Truncates visible width of string to max_w without corrupting ANSI codes."""
-    if len(strip_ansi(text)) <= max_w:
-        return text
-    tokens = re.split(r"(\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;;.*?(?:\x1b\\|\x07))", text)
-    res: list[str] = []
-    vis_count = 0
-    for tok in tokens:
-        if not tok:
-            continue
-        if tok.startswith("\x1b"):
-            res.append(tok)
-        else:
-            remaining = max_w - vis_count
-            if remaining <= 0:
-                break
-            if len(tok) <= remaining:
-                res.append(tok)
-                vis_count += len(tok)
-            else:
-                res.append(tok[:remaining])
-                vis_count += remaining
-                break
-    return "".join(res) + RST
 
-def highlight_prompt_syntax(text: str) -> str:
-    """Highlight prompt keywords, @file mentions, /slash commands, !shell, and quotes with rich ANSI colors."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Styling helpers (public: used by cli/session code and tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_ansi_truncate(text: str, max_w: int) -> str:
+    """Truncate to max_w visible cells without corrupting ANSI codes."""
+    if plat.str_width(text) <= max_w:
+        return text
+    return plat.truncate_ansi(text, max_w, ellipsis="") + RST
+
+
+def highlight_prompt_syntax(text: str, allow_prefix: bool = True) -> str:
+    """Colour @file mentions, /commands, !shell, `code`, quotes and image tokens."""
     if not text:
         return ""
+    if allow_prefix and text.startswith("!"):
+        return f"{AMBER}{BOLD}!{RST}{GOLD}{BOLD}{text[1:]}{RST}"
+    if allow_prefix and text.startswith("#"):
+        return f"{PURPLE}{BOLD}#{RST}{PURPLE}{text[1:]}{RST}"
+    if allow_prefix and text.startswith("/"):
+        name, sep, rest = text.partition(" ")
+        return f"{MINT}{BOLD}{name}{RST}{WHITE}{sep}{rest}{RST}"
+    base = f"{RST}{WHITE}"
+    styled = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{base}", text)
+    styled = re.sub(r"((?<![\w])@[\w\-./\\:]+)", f"{CYAN}{UNDER}\\1{base}", styled)
+    styled = re.sub(r"(`[^`]+`)", f"{TEAL}\\1{base}", styled)
+    styled = re.sub(r"(\"[^\"\n]*\"|'[^'\n]*')", f"{GOLD}\\1{base}", styled)
+    styled = THINK_KEYWORD_RE.sub(lambda m: f"{PURPLE}{BOLD}{m.group(0)}{base}", styled)
+    return f"{WHITE}{styled}{RST}"
 
-    if text.startswith("!"):
-        cmd_part = text[1:]
-        return f"{AMBER}{BOLD}!{RST}{GOLD}{BOLD}{cmd_part}{RST}"
 
-    if text.startswith("/"):
-        parts = text.split(" ", 1)
-        cmd_name = parts[0]
-        rest = f" {parts[1]}" if len(parts) > 1 else ""
-        return f"{MINT}{BOLD}{cmd_name}{RST}{WHITE}{BOLD}{rest}{RST}"
+# Thinking keywords raise the effort for one turn (the agent loop emits ThinkingBoost).
+THINK_KEYWORD_RE = re.compile(r"\b(?:ultrathink|think\s+harder|think\s+hard|megathink)\b", re.IGNORECASE)
+# Zero-width and bidi-control characters that can hide text from the reader.
+INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 
-    # Style @files, quotes, `code`, ;; separators, and image tokens
-    styled = text
-    styled = re.sub(r"(\[Image\s*#\d+\])", f"{CYAN}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
-    styled = re.sub(r"(@[a-zA-Z0-9_\-\./\\]+)", f"{CYAN}{BOLD}{UNDER}\\1{RST}{WHITE}{BOLD}", styled)
-    styled = re.sub(r"(`[^`]+`)", f"{TEAL}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
-    styled = re.sub(r"(\"[^\"]*\"|'[^']*')", f"{GOLD}\\1{RST}{WHITE}{BOLD}", styled)
-    styled = re.sub(r"(;;)", f"{GOLD}{BOLD}\\1{RST}{WHITE}{BOLD}", styled)
 
-    return f"{WHITE}{BOLD}{styled}{RST}"
-
-def format_user_prompt_banner(text: str, subagent_label: str = "", is_bash: bool = False, max_w: int | None = None) -> str:
-    """Format submitted prompt into a sleek, full-width highlighted background banner."""
+def format_user_prompt_banner(text: str, subagent_label: str | None = "", is_bash: bool = False,
+                              max_w: int | None = None) -> str:
+    """Render a submitted prompt as a full-width tinted block (echoed into the transcript)."""
     tw = max_w or term_width()
     width = max(20, tw - 4)
-    lines = text.strip().splitlines() if text.strip() else [""]
-
+    lines = text.strip().splitlines() or [""]
     if is_bash:
-        prefix_char = "! "
+        first = "! "
     elif subagent_label:
-        prefix_char = f"[{subagent_label}] › "
+        first = f"[{subagent_label}] › "
     else:
-        prefix_char = "› "
+        first = "› "
+    out = []
+    for i, line in enumerate(lines):
+        pref = first if i == 0 else "  "
+        body = highlight_prompt_syntax(line, allow_prefix=(i == 0 and not is_bash)).replace(RST, f"{RST}{GRAY_BG}")
+        avail = width - 2 - plat.str_width(pref)
+        if plat.str_width(body) > avail:
+            body = plat.truncate_ansi(body, avail) + GRAY_BG
+        pad = max(0, avail - plat.str_width(body))
+        out.append(f"  {GRAY_BG}{BOLD}{WHITE} {pref}{RST}{GRAY_BG}{body}{' ' * pad} {RST}")
+    return "\n".join(out)
 
-    banner_lines = []
-    for l_idx, line in enumerate(lines):
-        styled_content = highlight_prompt_syntax(line)
-        styled_content_bg = styled_content.replace(RST, f"{RST}{GRAY_BG}")
-        pref = prefix_char if l_idx == 0 else "… "
-        raw_line_len = len(pref) + len(strip_ansi(styled_content))
-        pad_len = max(0, width - raw_line_len - 2)
-        banner_lines.append(f"  {GRAY_BG}{BOLD}{WHITE} {pref}{RST}{GRAY_BG}{styled_content_bg}{' ' * pad_len} {RST}")
 
-    return "\n".join(banner_lines)
-
+# name, kind ("core"/"ext"/"custom"), category, description, takes_args
 ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
-    # ⚙️ Core Configuration & Models
     ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek, GLM)", True),
     ("/provider", "core", "Core & Models", "Connect local or cloud engine (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI)", False),
     ("/keys", "core", "Core & Models", "View and update API keys & environment credentials (/keys <provider>)", True),
     ("/env", "core", "Core & Models", "Inspect runtime environment variables and provider keys", False),
-    ("/effort", "core", "Core & Models", "Adjust neural reasoning tier (reflex, balanced, synapse, quantum)", True),
+    ("/effort", "core", "Core & Models", "Adjust reasoning tier (reflex, balanced, synapse, quantum)", True),
     ("/config", "core", "Core & Models", "View and adjust runtime configuration parameters", True),
-    ("/status", "core", "Core & Models", "View comprehensive live system and agent status", False),
-    ("/permissions", "core", "Core & Models", "Inspect active permission engine rules and mode", False),
+    ("/status", "core", "Core & Models", "View live system and agent status", False),
+    ("/permissions", "core", "Core & Models", "Inspect permission rules and mode", False),
     ("/plan", "core", "Core & Models", "View task checklist or switch to plan mode", True),
-
-    # 📊 Context & Token Budget
     ("/breakdown", "core", "Context & Tokens", "Full input prompt breakdown & token matching", False),
-    ("/context", "core", "Context & Tokens", "View active context token budget and limits", False),
+    ("/context", "core", "Context & Tokens", "View context token budget and limits", False),
     ("/compact", "core", "Context & Tokens", "Compact conversation context while preserving key facts", False),
-    ("/statusbar", "core", "Context & Tokens", "Live real-time token capacity gauge and metrics", False),
+    ("/statusbar", "core", "Context & Tokens", "Live token capacity gauge and metrics", False),
     ("/analytics", "core", "Context & Tokens", "Lifetime workspace analytics and tool insights", False),
     ("/window", "core", "Context & Tokens", "Adjust sliding context window size (e.g. /window 10)", True),
-    ("/cost", "core", "Context & Tokens", "View session billing ledger and prompt cache hits", False),
+    ("/cost", "core", "Context & Tokens", "Session cost ledger and prompt cache hits", False),
+    ("/pricing", "core", "Context & Tokens", "Model pricing matrix & cache discounts", False),
     ("/payload", "core", "Context & Tokens", "Inspect exact prompt payload and tool results", True),
-
-    # 📜 History & File Revisions
-    ("/history", "core", "History & Diff", "View all messages in full conversation history", False),
-    ("/diff", "core", "History & Diff", "View working tree uncommitted git diff", False),
+    ("/history", "core", "History & Diff", "View all messages in the conversation", False),
+    ("/diff", "core", "History & Diff", "View uncommitted git diff", False),
     ("/review", "core", "History & Diff", "Run automated multi-file code review", True),
     ("/rewind", "core", "History & Diff", "Revert file edits made during previous turns", False),
     ("/copy", "core", "History & Diff", "Copy last response, code blocks, or diff to clipboard", True),
     ("/expand", "core", "History & Diff", "View full un-truncated output or expand any file", True),
     ("/export", "core", "History & Diff", "Export session to Markdown or JSON transcript", True),
-
-    # 🤖 Multi-Agent, Tasks & Skills
-    ("/subagents", "core", "Multi-Agent", "Axon subagent matrix & isolated worker transcripts", False),
+    ("/subagents", "core", "Multi-Agent", "Subagent matrix & isolated worker transcripts", False),
+    ("/agents", "core", "Multi-Agent", "List and manage custom subagent definitions", True),
     ("/todos", "core", "Multi-Agent", "View active multi-step task checklist", False),
-    ("/q", "core", "Multi-Agent", "Add/manage sequential prompt queue (/q <text>, /q drop, /q clear)", True),
-    ("/skills", "core", "Multi-Agent", "Browse active skills studio and create new skills", True),
-    ("/mcp", "ext", "Multi-Agent", "Inspect Model Context Protocol servers and tools", False),
-    ("/plugin", "ext", "Multi-Agent", "Inspect installed plugins and extension manifests", True),
-    ("/hooks", "ext", "Multi-Agent", "Inspect active lifecycle and execution hooks", False),
+    ("/q", "core", "Multi-Agent", "Prompt queue (/q <text>, /q drop <id>, /q clear)", True),
+    ("/skills", "core", "Multi-Agent", "Browse skills and create new ones", True),
+    ("/mcp", "ext", "Multi-Agent", "Model Context Protocol servers and tools", True),
+    ("/plugin", "ext", "Multi-Agent", "Installed plugins and extension manifests", True),
+    ("/hooks", "ext", "Multi-Agent", "Lifecycle and tool hooks", True),
     ("/memory", "core", "Multi-Agent", "Manage memory (list, add, delete, view, clear)", True),
     ("/learn", "core", "Multi-Agent", "Teach a new convention to persistent memory", True),
     ("/prompt", "core", "Prompt Engineering", "Optimize rough prompts or load agent templates", True),
-    ("/optimize", "core", "Prompt Engineering", "Enhance simple prompt into high-leverage agent instructions", True),
-    ("/template", "core", "Prompt Engineering", "Load battle-tested prompt templates (bugfix, refactor, testgen)", True),
-
-    # 📁 Sessions & Workspace
-    ("/main", "core", "Sessions & Root", "Switch back to the Main Agent / parent chart session", False),
-    ("/root", "core", "Sessions & Root", "Alias for /main to return to root chart session", False),
-    ("/sessions", "core", "Sessions & Root", "Axon session matrix timeline dashboard", False),
-    ("/rename", "core", "Sessions & Root", "Rename the active session with custom title", True),
-    ("/tag", "core", "Sessions & Root", "Add tag to active session for categorized filtering", True),
-    ("/star", "core", "Sessions & Root", "Star the active session as a favorite", False),
-    ("/resume", "core", "Sessions & Root", "Resume previous session from transcript", True),
-    ("/branch", "core", "Sessions & Root", "Fork current conversation into an independent branch", True),
-    ("/find", "core", "Sessions & Root", "Interactive fuzzy file finder (Ctrl+P)", False),
+    ("/optimize", "core", "Prompt Engineering", "Turn a simple prompt into precise agent instructions", True),
+    ("/template", "core", "Prompt Engineering", "Load prompt templates (bugfix, refactor, testgen)", True),
+    ("/main", "core", "Sessions & Root", "Switch back to the main agent session", False),
+    ("/sessions", "core", "Sessions & Root", "Session switcher dashboard", False),
+    ("/rename", "core", "Sessions & Root", "Rename the active session", True),
+    ("/tag", "core", "Sessions & Root", "Tag the active session", True),
+    ("/star", "core", "Sessions & Root", "Star the active session", False),
+    ("/delete", "core", "Sessions & Root", "Delete a past session (/delete <id> or interactive)", True),
+    ("/resume", "core", "Sessions & Root", "Resume a previous session", True),
+    ("/branch", "core", "Sessions & Root", "Fork the conversation into an independent branch", True),
+    ("/find", "core", "Sessions & Root", "Fuzzy file finder (Ctrl+P)", False),
     ("/test", "core", "Sessions & Root", "Run test suite (pytest, npm test, cargo test)", True),
-    ("/notify", "core", "Sessions & Root", "Test system desktop notification", True),
-    ("/tools", "core", "Sessions & Root", "List all active agent tools, schemas, and permissions", False),
-    ("/doctor", "core", "Sessions & Root", "Run local diagnostics & environment health check", False),
-    ("/init", "ext", "Sessions & Root", "Initialize AGENTS.md conventions file in workspace", False),
-
-    # ⌨️ Session Control & Input
-    ("/btw", "core", "Session Control", "Ask side inquiry with zero context pollution (/btw <q>)", True),
-    ("/voice", "core", "Session Control", "Toggle speech dictation / voice input mode", False),
-    ("/ask", "core", "Session Control", "Ask simultaneous side question in isolated context", True),
+    ("/notify", "core", "Sessions & Root", "Send a test desktop notification", True),
+    ("/tools", "core", "Sessions & Root", "List agent tools, schemas and permissions", False),
+    ("/doctor", "core", "Sessions & Root", "Local diagnostics & environment health check", False),
+    ("/init", "ext", "Sessions & Root", "Create an AGENTS.md conventions file in the workspace", False),
+    ("/faq", "core", "Session Control", "FAQs & error troubleshooting (/faq 402, 400, pricing)", True),
+    ("/btw", "core", "Session Control", "Side question with zero context pollution (/btw <q>)", True),
+    ("/voice", "core", "Session Control", "Toggle voice input mode", False),
     ("/kb", "core", "Session Control", "Keybindings and shortcuts cheat sheet", False),
-    ("/help", "core", "Session Control", "Show categorized command reference and help", False),
-    ("/clear", "core", "Session Control", "Clear active conversation and start fresh session", False),
-    ("/exit", "core", "Session Control", "Save and exit current session", False),
+    ("/help", "core", "Session Control", "Categorized command reference", False),
+    ("/paste", "core", "Session Control", "Enter multiline paste mode", False),
+    ("/thinking", "core", "Session Control", "Toggle reasoning display", True),
+    ("/clear", "core", "Session Control", "Clear the conversation and start fresh", False),
+    ("/exit", "core", "Session Control", "Save and exit", False),
 ]
 
+_MODE_LABELS = {
+    "default": ("manual mode on", SLATE, "⏵"),
+    "acceptEdits": ("auto-accept edits on", TEAL, "⏵⏵"),
+    "plan": ("plan mode on", PURPLE, "⏸"),
+    "bypass": ("bypass permissions on", GOLD, "⚠"),
+}
+
+
 def _get_mode_info(mode: str) -> tuple[str, str]:
-    return {
-        "default": ("manual mode on (Tab to change)", SLATE),
-        "acceptEdits": ("auto-accept edits on (Tab to change)", TEAL),
-        "plan": ("plan mode on (Tab to change)", PURPLE),
-        "bypass": ("bypass permissions on (Tab to change)", GOLD),
-    }.get(mode, (f"{mode} mode (Tab to change)", SLATE))
+    label, color, _icon = _MODE_LABELS.get(mode, (f"{mode} mode", SLATE, "⏵"))
+    return f"{label} (shift+tab to cycle)", color
+
+
+def cycle_mode(mode: str, delta: int = 1) -> str:
+    if mode not in MODES_CYCLE:
+        return MODES_CYCLE[0]
+    return MODES_CYCLE[(MODES_CYCLE.index(mode) + delta) % len(MODES_CYCLE)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History
+# ─────────────────────────────────────────────────────────────────────────────
+
+def history_path() -> Path:
+    """Global prompt history (JSONL records {ts, project, session, display})."""
+    from axon.storage import user_file
+    return user_file("history.jsonl")
+
+
+def _legacy_history_path() -> Path:
+    from axon.storage import user_file
+    return user_file("history")
+
+
+def _read_records(path: Path) -> list[dict[str, Any]]:
+    try:
+        from axon.storage import read_jsonl
+        return read_jsonl(path)
+    except ImportError:
+        out: list[dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict):
+                        out.append(rec)
+        except OSError:
+            pass
+        return out
+
+
+def load_history(limit: int = HISTORY_LIMIT, cwd: str | None = None) -> list[str]:
+    """Oldest-first prompts for this project (records without a project count everywhere),
+    then this session's prompts; duplicates collapse to their most recent position. Entries from
+    the legacy ~/.axon/history file are still read."""
+    here = os.path.normcase(os.path.abspath(cwd or os.getcwd()))
+    entries: list[str] = []
+    for path in (_legacy_history_path(), history_path()):
+        for rec in _read_records(path):
+            text = str(rec.get("display") or rec.get("text") or "")
+            proj = rec.get("project") or rec.get("cwd")
+            if not text or (proj and os.path.normcase(os.path.abspath(str(proj))) != here):
+                continue
+            entries.append(text)
+    entries.extend(_SESSION_HISTORY)
+    seen: set[str] = set()
+    out: list[str] = []
+    for text in reversed(entries):
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+        if len(out) >= limit:
+            break
+    out.reverse()
+    return out
+
+
+def add_history(text: str, session_id: str = "") -> None:
+    """Record a submitted prompt (this module is the only writer of prompt history)."""
+    text = text.strip()
+    if not text:
+        return
+    if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != text:
+        _SESSION_HISTORY.append(text)
+    try:
+        from axon.storage import record_history
+        record_history(Path(os.getcwd()), text, session_id)
+    except ImportError:
+        try:
+            path = history_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"ts": int(time.time()), "project": os.getcwd(), "session": session_id,
+                                    "display": text}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Completion sources
+# ─────────────────────────────────────────────────────────────────────────────
+
+_dyn_cache: dict[str, tuple[float, list[tuple[str, str, str, str, bool]]]] = {}
+
+
+def registered_slash_commands(cwd: Path | None = None) -> list[tuple[str, str, str, str, bool]]:
+    """Commands known to the command registry (custom commands, plugin and feature commands, skills,
+    MCP prompts) that are not in the static built-in table. Cached for a few seconds."""
+    key = str(cwd or os.getcwd())
+    hit = _dyn_cache.get(key)
+    if hit and time.monotonic() - hit[0] < 5.0:
+        return hit[1]
+    out: list[tuple[str, str, str, str, bool]] = []
+    try:
+        try:
+            from axon.commands import list_command_names
+        except ImportError:
+            from axon.commands.registry import list_command_names  # type: ignore[no-redef]
+        known = {c[0] for c in ALL_SLASH_COMMANDS}
+        for name, desc in list_command_names(Path(key)):
+            if name not in known:
+                known.add(name)
+                kind = "mcp" if name.startswith("/mcp__") else "custom"
+                out.append((name, kind, "Custom & Skills", str(desc or "custom command")[:90], True))
+    except Exception:
+        out = []
+    _dyn_cache[key] = (time.monotonic(), out)
+    return out
+
+
+def match_slash_commands(query: str, cwd: Path | None = None) -> list[tuple[str, str, str, str, bool]]:
+    """Commands for the text after '/': exact, prefix, name-substring, then description matches."""
+    q = query.lower().lstrip("/")
+    cmds = ALL_SLASH_COMMANDS + registered_slash_commands(cwd)
+    if not q:
+        return list(cmds)
+    prefix = sorted((c for c in cmds if c[0][1:].lower().startswith(q)), key=lambda c: c[0][1:].lower() != q)
+    sub = [c for c in cmds if c not in prefix and q in c[0].lower()]
+    desc = [c for c in cmds if c not in prefix and c not in sub and q in c[3].lower()]
+    return prefix + sub + desc
+
+
+_res_cache: dict[str, Any] = {"t": 0.0, "items": []}
+
+
+def mcp_resource_mentions(ttl: float = 10.0) -> list[str]:
+    """'server:uri' strings for resources of connected MCP servers (never starts a server)."""
+    now = time.monotonic()
+    if now - _res_cache["t"] < ttl:
+        return list(_res_cache["items"])
+    items: list[str] = []
+    try:
+        from axon.mcp import bridge as _bridge_mod
+        bridge = getattr(_bridge_mod, "_bridge", None)
+        conns = dict(getattr(bridge, "connections", {}) or {}) if bridge is not None else {}
+        for name, conn in sorted(conns.items()):
+            client = getattr(conn, "client", None)
+            if not getattr(conn, "connected", False) or client is None:
+                continue
+            try:
+                if hasattr(client, "has") and not client.has("resources"):
+                    continue
+                for res in client.list_resources(refresh=False)[:200]:
+                    uri = str(res.get("uri") or "") if isinstance(res, dict) else ""
+                    if uri:
+                        items.append(f"{name}:{uri}")
+            except Exception:
+                continue
+    except Exception:
+        items = []
+    _res_cache.update(t=now, items=items)
+    return items
+
+
+def is_resource_mention(item: str) -> bool:
+    return item in _res_cache["items"]
+
+
+def workspace_dirs(files: list[str]) -> list[str]:
+    """Every parent directory of the given relative paths, as 'dir/' (shallow first)."""
+    seen: set[str] = set()
+    for f in files:
+        parts = f.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            seen.add("/".join(parts[:i]) + "/")
+    return sorted(seen, key=lambda d: (d.count("/"), d))
+
+
+def match_files(query: str, cwd: Path | None = None, limit: int = 50) -> list[str]:
+    """@-completion candidates: files and directories ('dir/'), plus 'server:uri' MCP resources."""
+    from axon.ui.fuzzy_picker import list_workspace_files, rank_files
+    resources = mcp_resource_mentions()
+    server = query.split(":", 1)[0] if ":" in query else ""
+    if server and any(r.startswith(server + ":") for r in resources):
+        return rank_files(query, resources, limit=limit)
+    files = list_workspace_files(Path(cwd or os.getcwd()))
+    if query.endswith("/"):
+        under = [f for f in workspace_dirs(files) + files if f.startswith(query) and f != query]
+        children = [f for f in under if "/" not in f[len(query):].rstrip("/")]
+        if children:
+            return children[:limit]
+    ranked = rank_files(query, files + workspace_dirs(files), limit=limit)
+    if resources:
+        extra = rank_files(query, resources, limit=10) if query else resources[:5]
+        ranked = ranked[:max(0, limit - len(extra))] + [r for r in extra if r not in ranked]
+    return ranked
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Editor state (pure logic; rendering and I/O are separate so it is testable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SLASH_RE = re.compile(r"(?:^|\s)/([\w:.-]*)$")
+_AT_RE = re.compile(r"(?:^|\s)@([^\s]*)$")
+PASTE_CHIP_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
+LARGE_PASTE_CHARS = 1200
+LARGE_PASTE_LINES = 12
+
+
+@dataclass
+class Popup:
+    kind: str                  # "slash" | "file"
+    items: list[Any]
+    query: str
+    start: int                 # buffer index where the completed token starts
+    index: int = 0
+
+
+@dataclass
+class EditorState:
+    mode: str = "default"
+    buf: str = ""
+    pos: int = 0
+    history: list[str] = field(default_factory=list)
+    hist_idx: int = -1         # -1 = editing a fresh line
+    hist_prefix: str = ""
+    draft: str = ""
+    undo: list[tuple[str, int]] = field(default_factory=list)
+    stash: str = ""
+    dismissed: bool = False    # popup closed with Esc until the buffer changes
+    popup_index: int = 0
+    last_esc: float = 0.0
+    last_ctrl_d: float = 0.0
+    notice: str = ""
+    cwd: Path = field(default_factory=Path.cwd)
+    kill_ring: list[str] = field(default_factory=list)
+    yank_span: tuple[int, int] | None = None
+    yank_idx: int = 0
+    pastes: dict[int, str] = field(default_factory=dict)
+    search: str | None = None  # Ctrl+R query while searching
+    search_hit: int = -1
+    search_saved: tuple[str, int] = ("", 0)
+    vim: Any = None            # axon.ui.vim.VimState when vim mode is on
+    status_rows: list[str] = field(default_factory=list)  # custom / built-in status line
+
+    # -- editing primitives -------------------------------------------------------------------
+    def _snapshot(self) -> None:
+        if not self.undo or self.undo[-1] != (self.buf, self.pos):
+            self.undo.append((self.buf, self.pos))
+            del self.undo[:-200]
+
+    def _changed(self) -> None:
+        self.dismissed = False
+        self.popup_index = 0
+        self.hist_idx = -1
+        self.yank_span = None
+
+    def insert(self, text: str) -> None:
+        if not text:
+            return
+        self._snapshot()
+        self.buf = self.buf[:self.pos] + text + self.buf[self.pos:]
+        self.pos += len(text)
+        self._changed()
+
+    def insert_paste(self, text: str) -> None:
+        """Insert pasted text; very large pastes collapse into a [Pasted text #N] chip."""
+        lines = text.count("\n") + 1
+        if len(text) >= LARGE_PASTE_CHARS or lines > LARGE_PASTE_LINES:
+            n = max(self.pastes, default=0) + 1
+            self.pastes[n] = text
+            _save_paste(text)
+            self.insert(f"[Pasted text #{n} +{lines} lines]")
+        else:
+            self.insert(text)
+
+    def expanded(self) -> str:
+        """Buffer with paste chips replaced by their full content (what gets submitted)."""
+        return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.buf)
+
+    def backspace(self) -> None:
+        if self.pos > 0:
+            self._snapshot()
+            # Delete a whole paste chip at once.
+            m = None
+            for m in PASTE_CHIP_RE.finditer(self.buf):
+                if m.end() == self.pos:
+                    break
+            else:
+                m = None
+            start = m.start() if m else self.pos - 1
+            self.buf = self.buf[:start] + self.buf[self.pos:]
+            self.pos = start
+            self._changed()
+
+    def delete(self) -> None:
+        if self.pos < len(self.buf):
+            self._snapshot()
+            self.buf = self.buf[:self.pos] + self.buf[self.pos + 1:]
+            self._changed()
+
+    def set_text(self, text: str, pos: int | None = None) -> None:
+        self.buf = text
+        self.pos = len(text) if pos is None else max(0, min(pos, len(text)))
+
+    def clear(self) -> None:
+        if self.buf:
+            self._snapshot()
+            self.draft = ""
+            if self.buf.strip() and (not self.history or self.history[-1] != self.buf):
+                self.history.append(self.buf)  # Up restores the cleared draft
+        self.set_text("")
+        self._changed()
+
+    def word_left(self) -> int:
+        i = self.pos
+        while i > 0 and self.buf[i - 1].isspace():
+            i -= 1
+        while i > 0 and not self.buf[i - 1].isspace():
+            i -= 1
+        return i
+
+    def word_right(self) -> int:
+        i, n = self.pos, len(self.buf)
+        while i < n and self.buf[i].isspace():
+            i += 1
+        while i < n and not self.buf[i].isspace():
+            i += 1
+        return i
+
+    def kill(self, start: int, end: int) -> None:
+        if start < end:
+            self._snapshot()
+            self.kill_ring.append(self.buf[start:end])
+            del self.kill_ring[:-20]
+            self.buf = self.buf[:start] + self.buf[end:]
+            self.pos = start
+            self._changed()
+
+    def yank(self, cycle: bool = False) -> None:
+        """Ctrl+Y pastes the last kill; Alt+Y right after replaces it with older kills."""
+        if not self.kill_ring:
+            return
+        if cycle and self.yank_span is not None:
+            start, end = self.yank_span
+            self.yank_idx = (self.yank_idx + 1) % len(self.kill_ring)
+            text = self.kill_ring[-1 - self.yank_idx]
+            self.buf = self.buf[:start] + text + self.buf[end:]
+            self.pos = start + len(text)
+            self.yank_span = (start, self.pos)
+            return
+        if cycle:
+            return
+        self.yank_idx = 0
+        text = self.kill_ring[-1]
+        start = self.pos
+        self.insert(text)
+        self.yank_span = (start, self.pos)
+
+    def line_bounds(self) -> tuple[int, int]:
+        start = self.buf.rfind("\n", 0, self.pos) + 1
+        end = self.buf.find("\n", self.pos)
+        return start, (len(self.buf) if end == -1 else end)
+
+    def undo_last(self) -> None:
+        if self.undo:
+            self.buf, self.pos = self.undo.pop()
+            self.dismissed = False
+
+    # -- multi-line cursor movement -----------------------------------------------------------
+    def move_vertical(self, delta: int) -> bool:
+        """Move the cursor one logical line up/down keeping the column. False at the edge."""
+        start, _end = self.line_bounds()
+        col = self.pos - start
+        if delta < 0:
+            if start == 0:
+                return False
+            prev_start = self.buf.rfind("\n", 0, start - 1) + 1
+            self.pos = min(prev_start + col, start - 1)
+        else:
+            nxt = self.buf.find("\n", self.pos)
+            if nxt == -1:
+                return False
+            nxt_end = self.buf.find("\n", nxt + 1)
+            nxt_end = len(self.buf) if nxt_end == -1 else nxt_end
+            self.pos = min(nxt + 1 + col, nxt_end)
+        return True
+
+    # -- history ------------------------------------------------------------------------------
+    def history_step(self, delta: int) -> bool:
+        """Navigate history (delta -1 = older). Filters by the text typed before navigating."""
+        if self.hist_idx == -1:
+            self.hist_prefix = self.buf if "\n" not in self.buf else ""
+            self.draft = self.buf
+        matches = [i for i, h in enumerate(self.history) if h.startswith(self.hist_prefix) and h != self.draft]
+        if not matches:
+            return False
+        if self.hist_idx == -1:
+            if delta > 0:
+                return False
+            target = matches[-1]
+        else:
+            cur = matches.index(self.hist_idx) if self.hist_idx in matches else len(matches)
+            nxt = cur + delta
+            if nxt >= len(matches):
+                self.hist_idx = -1
+                self.set_text(self.draft)
+                return True
+            if nxt < 0:
+                return False
+            target = matches[nxt]
+        self.hist_idx = target
+        self.set_text(self.history[target])
+        self.dismissed = True
+        return True
+
+    def search_start(self) -> None:
+        self.search = ""
+        self.search_hit = -1
+        self.search_saved = (self.buf, self.pos)
+
+    def search_update(self, older: bool = False) -> None:
+        """Find the newest (or next older) history entry containing the search query."""
+        q = (self.search or "").lower()
+        start = (self.search_hit - 1) if (older and self.search_hit >= 0) else len(self.history) - 1
+        for i in range(start, -1, -1):
+            if q in self.history[i].lower():
+                self.search_hit = i
+                self.set_text(self.history[i])
+                return
+        if not older:
+            self.search_hit = -1
+            self.set_text(*self.search_saved)
+
+    def search_end(self, accept: bool) -> None:
+        if not accept:
+            self.set_text(*self.search_saved)
+        self.search = None
+        self.dismissed = True
+
+    def shell_history_complete(self) -> bool:
+        """Tab in ! mode: complete from earlier shell commands in this project's history."""
+        prefix = self.buf
+        for h in reversed(self.history):
+            if h.startswith("!") and h.startswith(prefix) and h != prefix:
+                self._snapshot()
+                self.set_text(h)
+                return True
+        return False
+
+    # -- completion ---------------------------------------------------------------------------
+    def popup(self) -> Popup | None:
+        if self.dismissed or self.search is not None or self.buf.startswith("!"):
+            return None
+        before = self.buf[:self.pos]
+        m = _SLASH_RE.search(before)
+        if m and (m.start(1) == 1 or "/" not in m.group(1)):
+            items = match_slash_commands(m.group(1), self.cwd)
+            if items:
+                return Popup("slash", items, m.group(1), m.start(1) - 1, self.popup_index % len(items))
+            return None
+        m = _AT_RE.search(before)
+        if m:
+            items = match_files(m.group(1), self.cwd)
+            if items:
+                return Popup("file", items, m.group(1), self.pos - len(m.group(1)) - 1, self.popup_index % len(items))
+        return None
+
+    def accept_completion(self, pop: Popup, for_submit: bool = False) -> bool:
+        """Insert the selected completion. Returns True when the buffer should be submitted."""
+        if pop.kind == "slash":
+            name, _kind, _cat, _desc, takes_args = pop.items[pop.index]
+            rest = self.buf[self.pos:]
+            head = self.buf[:pop.start]
+            if for_submit and not head.strip():
+                self.set_text(name + rest)
+                return True
+            fill = head + name + (" " if takes_args or rest or head.strip() else "")
+            self._snapshot()
+            self.set_text(fill + rest.lstrip(), len(fill))
+            self.dismissed = True
+            return False
+        path = pop.items[pop.index]
+        drill = path.endswith("/") and not for_submit and not is_resource_mention(path)
+        if " " in path:
+            path = f'"{path}"'
+        self._snapshot()
+        new = self.buf[:pop.start] + "@" + path + ("" if drill else " ")
+        self.set_text(new + self.buf[self.pos:].lstrip(" "), len(new))
+        self.dismissed = not drill   # Tab on a directory keeps the popup open on its contents
+        return False
+
+
+def _save_paste(text: str) -> None:
+    """Keep large pastes in ~/.axon/paste-cache so a session can be inspected later."""
+    try:
+        import hashlib
+        from axon.storage import cache_dir
+        d = cache_dir("paste")
+        (d / f"{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}.txt").write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rendering
+# ─────────────────────────────────────────────────────────────────────────────
+
+def layout_rows(text: str, width: int, pos: int) -> tuple[list[str], int, int]:
+    """Soft-wrap text into rows of at most `width` cells. Returns (rows, cursor_row, cursor_col)."""
+    width = max(4, width)
+    rows: list[str] = [""]
+    row_w = 0
+    cur_row, cur_col = 0, 0
+    for i, ch in enumerate(text):
+        if i == pos:
+            cur_row, cur_col = len(rows) - 1, row_w
+        if ch == "\n":
+            rows.append("")
+            row_w = 0
+            continue
+        w = plat.char_width(ch) if ch != "\t" else 4
+        if row_w + w > width:
+            rows.append("")
+            row_w = 0
+            if i == pos:
+                cur_row, cur_col = len(rows) - 1, 0
+        rows[-1] += ch if ch != "\t" else "    "
+        row_w += w
+    if pos >= len(text):
+        cur_row, cur_col = len(rows) - 1, row_w
+        if cur_col >= width:
+            rows.append("")
+            cur_row, cur_col = len(rows) - 1, 0
+    return rows, cur_row, cur_col
+
+
+@dataclass
+class PromptChrome:
+    effort: str = "high"
+    plan_summary: str | None = None
+    queue_summary: str | None = None
+    subagent_label: str | None = None
+
+
+def status_line(mode: str, chrome: PromptChrome, width: int, vim_label: str = "") -> str:
+    label, color, icon = _MODE_LABELS.get(mode, (f"{mode} mode", SLATE, "⏵"))
+    left = f"{color}{BOLD}{icon} {label}{RST} {DARK_SLATE}(shift+tab to cycle){RST}"
+    if vim_label:
+        vim_color = MINT if "INSERT" in vim_label else GOLD
+        left = f"{vim_color}{BOLD}{vim_label}{RST}  " + left
+    badges = []
+    if chrome.plan_summary:
+        badges.append(f"{MINT}{chrome.plan_summary}{RST}")
+    if chrome.queue_summary:
+        badges.append(f"{CYAN}{chrome.queue_summary}{RST}")
+    if chrome.subagent_label:
+        badges.append(f"{CYAN}{chrome.subagent_label}{RST} {DARK_SLATE}/main to return{RST}")
+    if badges:
+        left += "  " + "  ".join(badges)
+    right_opts = [f"{SLATE}○ {chrome.effort}{RST} {DARK_SLATE}· / commands · @ files · ! shell · ? help{RST}",
+                  f"{SLATE}○ {chrome.effort}{RST} {DARK_SLATE}· / commands{RST}", f"{SLATE}○ {chrome.effort}{RST}", ""]
+    for right in right_opts:
+        gap = width - plat.str_width(left) - plat.str_width(right)
+        if gap >= 2 or not right:
+            return f"  {left}{' ' * max(2, gap)}{right}" if right else f"  {left}"
+    return f"  {left}"
+
+
+def render_popup(pop: Popup, cols: int, max_rows: int) -> list[str]:
+    n = len(pop.items)
+    visible = max(1, min(8, max_rows, n))
+    start = max(0, min(pop.index - visible // 2, n - visible))
+    lines: list[str] = []
+    for i in range(start, start + visible):
+        sel = i == pop.index
+        mark = f"{MINT}{BOLD}❯{RST}" if sel else " "
+        if pop.kind == "slash":
+            name, kind, cat, desc, _args = pop.items[i]
+            name_s = plat.pad_to(name, 16)
+            name_s = f"{BOLD}{WHITE}{name_s}{RST}" if sel else f"{CYAN}{name_s}{RST}"
+            tag = (f"{GOLD}◇{RST}" if kind == "custom" else (f"{PURPLE}◆{RST}" if kind in ("ext", "mcp")
+                   else f"{DARK_SLATE}·{RST}"))
+            body = f"{tag} {name_s} {(WHITE if sel else SLATE)}{desc}{RST}"
+            if cols >= 100:
+                body += f"  {DARK_SLATE}{cat}{RST}"
+        else:
+            path = pop.items[i]
+            if is_resource_mention(path):
+                server, _, uri = path.partition(":")
+                body = (f"{PURPLE}◆{RST} " + (f"{BOLD}{WHITE}{uri}{RST}" if sel else f"{WHITE}{uri}{RST}")
+                        + f"  {DARK_SLATE}mcp:{server}{RST}")
+            else:
+                is_dir = path.endswith("/")
+                parent, _, fname = path.rstrip("/").rpartition("/")
+                fname += "/" if is_dir else ""
+                name_c = CYAN if is_dir else WHITE
+                body = (f"{BOLD}{name_c}{fname}{RST}" if sel else f"{name_c}{fname}{RST}") + (f"  {DARK_SLATE}{parent}/{RST}" if parent else "")
+        lines.append(f"  {mark} {body}")
+    more = []
+    if start > 0:
+        more.append(f"↑ {start}")
+    if start + visible < n:
+        more.append(f"↓ {n - start - visible}")
+    hint = "tab complete · enter " + ("run" if pop.kind == "slash" else "insert") + " · esc dismiss"
+    if pop.kind == "file" and str(pop.items[pop.index]).endswith("/"):
+        hint = "tab open folder · enter mention folder · esc dismiss"
+    lines.append(f"    {DARK_SLATE}{'  '.join(more) + ('  ·  ' if more else '')}{hint}{RST}")
+    return lines
+
+
+def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple[int, int]]:
+    cols, rows_total = plat.term_size()
+    width = max(20, cols - 4)
+    bash = st.buf.startswith("!")
+    if bash:
+        prefix = f"{AMBER}{BOLD}!{RST} "
+        body, pos = st.buf[1:], max(0, st.pos - 1)
+        rule_color = AMBER
+    else:
+        prefix = f"{CYAN}{BOLD}[{chrome.subagent_label}]{RST} {CYAN}{BOLD}❯{RST} " if chrome.subagent_label else f"{CYAN}{BOLD}❯{RST} "
+        body, pos = st.buf, st.pos
+        rule_color = _PROMPT_COLOR or DARK_SLATE
+    pw = plat.str_width(prefix)
+    text_w = max(8, cols - 3 - pw)
+    rows, crow, ccol = layout_rows(body, text_w, pos)
+    max_rows = max(3, rows_total - 6)
+    first = max(0, min(crow - max_rows // 2, len(rows) - max_rows)) if len(rows) > max_rows else 0
+    shown = rows[first:first + max_rows]
+    lines = [f"  {rule_color}{'─' * width}{RST}"]
+    if not body:
+        hint = ("shell mode · type a command (esc to leave)" if bash
+                else "Ask anything · / commands · @ files · ! shell · # memory · ? shortcuts")
+        lines.append(f"  {prefix}{DARK_SLATE}{hint}{RST}")
+    else:
+        for i, row in enumerate(shown):
+            lead = prefix if (first + i) == 0 else " " * pw
+            styled = (f"{GOLD}{row}{RST}" if bash else highlight_prompt_syntax(row, allow_prefix=(first + i) == 0))
+            lines.append(f"  {lead}{styled}")
+    cursor = (1 + crow - first, 2 + pw + ccol)
+    lines.append(f"  {rule_color}{'─' * width}{RST}")
+    lines.append(status_line(st.mode, chrome, width, st.vim.label if st.vim is not None else ""))
+    for row in st.status_rows:
+        lines.append(safe_ansi_truncate(row, cols - 1))
+    if st.search is not None:
+        found = "" if st.search_hit >= 0 or not st.search else f"  {ROSE}no match{RST}"
+        lines.append(f"  {GOLD}reverse-i-search:{RST} {WHITE}{st.search}{RST}{CYAN}▏{RST}{found}  "
+                     f"{DARK_SLATE}ctrl+r older · enter run · tab/esc edit · ctrl+c cancel{RST}")
+    elif st.notice:
+        lines.append(f"  {DARK_SLATE}{st.notice}{RST}")
+    elif INVISIBLE_RE.search(st.buf):
+        n = len(INVISIBLE_RE.findall(st.buf))
+        lines.append(f"  {AMBER}! prompt contains {n} invisible / bidi control character{'s' if n != 1 else ''}{RST}")
+    pop = st.popup()
+    if pop is not None:
+        lines.extend(render_popup(pop, cols, max(1, rows_total - len(lines) - 2)))
+    return lines, cursor
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plain fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _plain_input(mode: str, chrome: PromptChrome) -> tuple[str, str | None, int]:
+    width = max(40, term_width() - 4)
+    sys.stdout.write(f"  {DARK_SLATE}{'─' * width}{RST}\n{status_line(mode, chrome, width)}\n")
+    sys.stdout.flush()
+    label = f"  {CYAN}[{chrome.subagent_label}]{RST} › " if chrome.subagent_label else "  › "
+    try:
+        line = input(label)
+    except EOFError:
+        if plat.IS_WINDOWS:
+            # Ctrl+C at a Windows input() can surface as EOFError followed by KeyboardInterrupt.
+            time.sleep(0.05)
+        return ("/exit", None, 0)
+    if line.strip():
+        add_history(line)
+    return (line.strip(), None, 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive editor
+# ─────────────────────────────────────────────────────────────────────────────
+
+_IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|gif|webp|bmp)\b", re.IGNORECASE)
+
+
+def _paste_text(text: str) -> str:
+    """Normalize pasted text; pasted image file paths become [Image #N] attachment chips."""
+    text = plat.normalize_newlines(text)
+    if _IMAGE_EXT_RE.search(text):
+        try:
+            from axon.agent.images import compact_image_paths
+            compacted, attachments = compact_image_paths(text)
+            if attachments:
+                return compacted
+        except Exception:
+            pass
+    return text
+
+
+def _clipboard_insert() -> str:
+    """Ctrl+V: an image on the clipboard becomes an attachment token, else clipboard text."""
+    try:
+        from axon.agent.images import compact_image_paths, get_images_cache_dir, save_clipboard_image
+        dest = get_images_cache_dir() / f"clip_{time.time_ns()}.png"
+        saved = ""
+        try:
+            if save_clipboard_image(dest):
+                saved = str(dest)
+        except Exception:
+            saved = ""
+        if not saved:  # Linux / BSD: wl-paste or xclip
+            from axon.ui.clipboard import _LAST_IMAGE_PATH, paste_image_to
+            if paste_image_to(dest):
+                saved = _LAST_IMAGE_PATH[0] or str(dest)
+        if saved:
+            chip = compact_image_paths(f"{saved} ")[0]
+            if chip.strip() != saved:
+                return chip
+    except Exception:
+        pass
+    try:
+        from axon.ui.clipboard import paste_from_clipboard
+        return _paste_text(paste_from_clipboard() or "")
+    except Exception:
+        return ""
+
+
+def _edit_externally(text: str) -> str | None:
+    fd, path = tempfile.mkstemp(suffix=".md", prefix="axon_prompt_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        with plat.cooked_terminal():
+            try:
+                subprocess.call(plat.editor_command() + [path])
+            except (FileNotFoundError, OSError):
+                return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().rstrip("\n")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+REWIND = "__REWIND__"
+TRACE_CYCLE = "__TRACE_CYCLE__"
+_last_empty_ctrl_c = 0.0
+
+# Keys that end the prompt and hand a command to the REPL (default bindings; see keybindings.py).
+_SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "ctrl-o": TRACE_CYCLE, "alt-p": "/model", "alt-t": "/thinking"}
+_ACTION_COMMANDS = {"app:todos": "/todos", "app:traceCycle": TRACE_CYCLE, "app:modelPicker": "/model",
+                    "app:thinkingToggle": "/thinking", "app:fastToggle": "/fast"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vim mode / prompt agent (module state set by /vim and Renderer.attach)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VIM_ENABLED = False
+_ACTIVE_EDITOR: "EditorState | None" = None
+_PROMPT_AGENT: Any = None
+
+
+def set_vim_mode(enabled: bool) -> bool:
+    """Turn vim editing on/off for the prompt (takes effect immediately, also mid-prompt)."""
+    global _VIM_ENABLED
+    _VIM_ENABLED = bool(enabled)
+    st = _ACTIVE_EDITOR
+    if st is not None:
+        if _VIM_ENABLED and st.vim is None:
+            from axon.ui.vim import VimState
+            st.vim = VimState()
+        elif not _VIM_ENABLED:
+            st.vim = None
+    return _VIM_ENABLED
+
+
+def vim_mode_enabled() -> bool:
+    return _VIM_ENABLED
+
+
+def vim_mode_label() -> str:
+    """'insert' / 'normal' while vim mode is on (for the status-line JSON), else ''."""
+    if not _VIM_ENABLED:
+        return ""
+    st = _ACTIVE_EDITOR
+    vim = getattr(st, "vim", None) if st is not None else None
+    return getattr(vim, "mode", "insert") if vim is not None else "insert"
+
+
+_PROMPT_COLOR = ""
+_NAMED_PROMPT_COLORS = {"red": 203, "orange": 215, "yellow": 221, "green": 114, "cyan": 80, "blue": 75,
+                        "purple": 141, "pink": 211, "gray": 245, "grey": 245}
+
+
+def set_prompt_color(name: str | None) -> str:
+    """Colour of the prompt's rules (/color). 'default'/None restores the theme colour."""
+    global _PROMPT_COLOR
+    n = str(name or "default").strip().lower()
+    if n in ("", "default", "none"):
+        _PROMPT_COLOR = ""
+    elif n.startswith("\033[") or n.startswith("\x1b["):
+        _PROMPT_COLOR = n
+    elif n in _NAMED_PROMPT_COLORS:
+        from axon.ui.theme import colors_enabled
+        _PROMPT_COLOR = f"\033[38;5;{_NAMED_PROMPT_COLORS[n]}m" if colors_enabled() else ""
+    else:
+        raise ValueError(f"unknown prompt colour {name!r}")
+    return n
+
+
+def set_prompt_agent(agent: Any) -> None:
+    """Agent whose settings feed the status line under the prompt (weakly referenced)."""
+    global _PROMPT_AGENT
+    if agent is None:
+        _PROMPT_AGENT = None
+        return
+    try:
+        import weakref
+        _PROMPT_AGENT = weakref.ref(agent)
+    except TypeError:
+        _PROMPT_AGENT = lambda: agent  # noqa: E731 - objects without weakref support
+
+
+def _prompt_agent() -> Any:
+    ref = _PROMPT_AGENT
+    return ref() if callable(ref) else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Key handling (pure: no terminal I/O, so scripted key sequences can be tested)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PromptEditor:
+    """Applies keys to an EditorState. ``handle`` returns None (keep editing) or an outcome:
+    ("submit", None) · ("finish", value) · ("raise", exc_type) · ("ui", "editor"|"finder"|"redraw"|"suspend")."""
+
+    def __init__(self, st: EditorState, resolver: Any = None) -> None:
+        self.st = st
+        if resolver is None:
+            from axon.ui.keybindings import KeyResolver
+            resolver = KeyResolver()
+        self.resolver = resolver
+
+    def handle(self, key: str) -> tuple[str, Any] | None:
+        global _last_empty_ctrl_c
+        st = self.st
+        st.notice = ""
+        if key != "esc":
+            st.last_esc = 0.0
+        if key != "ctrl-d":
+            st.last_ctrl_d = 0.0
+        if key != "ctrl-c":
+            _last_empty_ctrl_c = 0.0
+        if st.search is not None:
+            return self._search_key(key)
+        if key == "resize":
+            return None
+        if key.startswith(plat.PASTE_PREFIX):
+            if st.vim is not None and st.vim.mode != "insert":
+                st.vim.begin_insert(st)
+            st.insert_paste(_paste_text(key[len(plat.PASTE_PREFIX):]))
+            return None
+        if st.vim is not None and not self.resolver.pending and st.vim.handle(st, key):
+            return None
+        action, raw = self.resolver.feed(key)
+        if action is not None:
+            return self.do(action)
+        for k in raw:
+            if k == "?" and not st.buf:
+                return ("finish", "/kb")
+            if len(k) == 1 and (k >= " " or k == "\t"):
+                st.insert(k)
+        return None
+
+    def _search_key(self, key: str) -> tuple[str, Any] | None:
+        st = self.st
+        assert st.search is not None
+        if key == "ctrl-r":
+            st.search_update(older=True)
+        elif key == "backspace":
+            st.search = st.search[:-1]
+            st.search_update()
+        elif key in ("ctrl-c", "ctrl-g"):
+            st.search_end(accept=False)
+        elif key == "enter":
+            st.search_end(accept=True)
+            return ("submit", None)
+        elif key in ("tab", "esc", "right", "left", "home", "end"):
+            st.search_end(accept=True)
+        elif len(key) == 1 and key >= " ":
+            st.search += key
+            st.search_update()
+        elif key.startswith(plat.PASTE_PREFIX):
+            st.search += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+            st.search_update()
+        elif key != "resize":
+            st.search_end(accept=True)
+        return None
+
+    def do(self, action: str) -> tuple[str, Any] | None:  # noqa: C901 - one flat dispatch table
+        global _last_empty_ctrl_c
+        st = self.st
+        pop = st.popup()
+        bash = st.buf.startswith("!")
+        if action == "chat:submit":
+            if pop is not None:
+                if st.accept_completion(pop, for_submit=True):
+                    return ("submit", None)
+            elif st.pos == len(st.buf) and st.buf.endswith("\\"):
+                st.buf = st.buf[:-1]
+                st.pos -= 1
+                st.insert("\n")
+            else:
+                return ("submit", None)
+        elif action == "chat:newline":
+            st.insert("\n")
+        elif action == "chat:complete":
+            if pop is not None:
+                st.accept_completion(pop)
+            elif bash:
+                st.shell_history_complete()
+            else:
+                st.notice = "shift+tab cycles the permission mode"   # Tab only completes (CC parity)
+        elif action == "chat:cycleMode":
+            st.mode = cycle_mode(st.mode, 1)
+        elif action in ("cursor:up", "cursor:down"):
+            delta = -1 if action == "cursor:up" else 1
+            if pop is not None:
+                st.popup_index = (pop.index + delta) % len(pop.items)
+            elif not st.move_vertical(delta):
+                st.history_step(delta)
+        elif action == "history:prev":
+            st.history_step(-1)
+        elif action == "history:next":
+            st.history_step(1)
+        elif action == "history:search":
+            st.search_start()
+        elif action == "chat:cancel":
+            now = time.monotonic()
+            if pop is not None:
+                st.dismissed = True
+            elif bash and st.buf == "!":
+                st.set_text("")
+            elif now - st.last_esc < 0.6:
+                st.last_esc = 0.0
+                if not st.buf:
+                    return ("finish", REWIND)
+                st.clear()
+                st.notice = "draft cleared · ↑ to restore"
+            else:
+                st.last_esc = now
+                st.notice = "esc again to clear the draft" if st.buf else "esc again to rewind"
+        elif action == "chat:interrupt":
+            if st.buf:
+                st.clear()
+                st.notice = "draft cleared · ↑ to restore · ctrl+c again on an empty prompt to exit"
+            else:
+                now = time.monotonic()
+                if now - _last_empty_ctrl_c < 1.5:
+                    _last_empty_ctrl_c = 0.0
+                    return ("raise", EOFError)
+                _last_empty_ctrl_c = now
+                return ("raise", KeyboardInterrupt)
+        elif action == "chat:exit":
+            if st.buf:
+                st.delete()
+            else:
+                now = time.monotonic()
+                if now - st.last_ctrl_d < 0.8:
+                    return ("raise", EOFError)
+                st.last_ctrl_d = now
+                st.notice = "press ctrl+d again to exit"
+        elif action == "edit:backspace":
+            if bash and st.buf == "!":
+                st.set_text("")
+            else:
+                st.backspace()
+        elif action == "edit:delete":
+            st.delete()
+        elif action == "cursor:left":
+            if not st.buf:
+                return ("finish", SWITCH_SESSION)
+            st.pos = max(0, st.pos - 1)
+        elif action == "cursor:right":
+            if pop is not None and pop.kind == "file" and st.pos == len(st.buf):
+                st.accept_completion(pop)
+            else:
+                st.pos = min(len(st.buf), st.pos + 1)
+        elif action == "cursor:wordLeft":
+            st.pos = st.word_left()
+        elif action == "cursor:wordRight":
+            st.pos = st.word_right()
+        elif action == "cursor:lineStart":
+            st.pos = st.line_bounds()[0]
+        elif action == "cursor:lineEnd":
+            st.pos = st.line_bounds()[1]
+        elif action == "edit:killToEnd":
+            st.kill(st.pos, st.line_bounds()[1])
+        elif action == "edit:killToStart":
+            if bash and st.buf == "!":
+                st.set_text("")
+            else:
+                st.kill(st.line_bounds()[0], st.pos)
+        elif action == "edit:killWord":
+            st.kill(st.word_left(), st.pos)
+        elif action == "edit:killWordForward":
+            st.kill(st.pos, st.word_right())
+        elif action == "edit:yank":
+            st.yank()
+        elif action == "edit:yankPop":
+            st.yank(cycle=True)
+        elif action == "edit:undo":
+            st.undo_last()
+        elif action == "chat:stash":
+            if st.buf:
+                st.stash = st.buf
+                st._snapshot()
+                st.set_text("")
+                st.notice = "prompt stashed · ctrl+s to restore"
+            elif st.stash:
+                st.set_text(st.stash)
+                st.stash = ""
+        elif action == "chat:paste":
+            pasted = _clipboard_insert()
+            if pasted:
+                st.insert_paste(pasted)
+            else:
+                st.notice = "clipboard is empty"
+        elif action == "app:vimToggle":
+            on = set_vim_mode(not vim_mode_enabled())
+            if on and st.vim is None:
+                from axon.ui.vim import VimState
+                st.vim = VimState()
+            elif not on:
+                st.vim = None
+            st.notice = f"vim mode {'on' if on else 'off'}"
+        elif action in _ACTION_COMMANDS:
+            return ("finish", _ACTION_COMMANDS[action])
+        elif action == "chat:externalEditor":
+            return ("ui", "editor")
+        elif action == "app:fileFinder":
+            return ("ui", "finder")
+        elif action == "app:redraw":
+            return ("ui", "redraw")
+        elif action == "app:suspend":
+            return ("ui", "suspend")
+        return None
+
+
+def _status_rows(agent: Any) -> list[str]:
+    if agent is None:
+        return []
+    try:
+        from axon.ui.statusline import prompt_status_rows
+        return prompt_status_rows(agent)
+    except Exception:
+        return []
+
 
 def read_input(
     mode: str = "default",
@@ -215,853 +1253,139 @@ def read_input(
     subagent_label: str | None = None,
     **kwargs: Any,
 ) -> tuple[str, str | None, int]:
+    """Read one prompt. Returns (text, new_mode_if_changed, 0).
+
+    Keyword extras: ``initial`` (prefill the editor, e.g. a recalled queued prompt), ``cwd`` (history + completion scope; defaults to the attached agent's
+    workspace, else the process cwd), ``session_id``, ``agent`` (status line source; defaults to
+    the agent registered by ``set_prompt_agent``), ``vim_mode`` (override).
+
+    While the prompt is empty and idle, setting ``axon.commands.workspace_cmds.LOOP_WAKE`` makes
+    this return ``("", None, 0)`` so the REPL drains ``agent.message_queue`` (e.g. a /loop run).
+
+    Special results: "__SWITCH_SESSION__" (← on empty prompt), "__REWIND__" (Esc Esc on empty
+    prompt), "__TRACE_CYCLE__" (Ctrl+O), "/todos" (Ctrl+T), "/model" (Alt+P), "/thinking"
+    (Alt+T), "/kb" ("?" on empty prompt). Raises KeyboardInterrupt on Ctrl+C with an empty line
+    and EOFError on a second Ctrl+C, or Ctrl+D pressed twice, on an empty line.
     """
-    Read user input with live Tab/Shift+Tab mode switching, dynamic auto-resize,
-    arrow history, clean main view, live plan progress, message queue,
-    and interactive scrollable slash-command autocomplete menu.
-    Returns (user_text, new_mode_if_toggled, 0).
-    """
-    if not sys.stdin.isatty() or not _HAS_TERMIOS:
-        width = max(40, term_width() - 4)
-        label_text, mode_color = _get_mode_info(mode)
-        plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
-        queue_badge = f"  {CYAN}{BOLD}{queue_summary}{RST}" if queue_summary else ""
-        agent_hint = f" · {DARK_SLATE}/main to return{RST}" if subagent_label else ""
-        left_str = f"▮ {label_text}{plan_badge}{queue_badge}{agent_hint}"
-        right_str = f"○ {effort} · /effort · ⌨ /kb · ? shortcuts"
-        pad = max(2, width - len(strip_ansi(left_str)) - len(strip_ansi(right_str)))
-        sys.stdout.write(f"  {DARK_SLATE}{'─' * width}{RST}\n")
-        sys.stdout.write(f"  {mode_color}{BOLD}{left_str}{RST}{' ' * pad}{SLATE}{right_str}{RST}\n")
-        sys.stdout.write(f"  {DARK_SLATE}{'─' * width}{RST}\n")
-        sys.stdout.flush()
-        p_tag = f"  {CYAN}[{subagent_label}]{RST} {BOLD}{WHITE}›{RST} " if subagent_label else f"  {BOLD}{WHITE}›{RST} "
-        try:
-            line = input(p_tag)
-        except EOFError:
-            return ("/exit", None, 0)
-        return (line.strip(), None, 0)
+    global _ACTIVE_EDITOR
+    session_id = str(kwargs.get("session_id") or "")
+    chrome = PromptChrome(effort=effort, plan_summary=plan_summary, queue_summary=queue_summary,
+                          subagent_label=subagent_label)
+    if not plat.is_interactive():
+        return _plain_input(mode, chrome)
 
-    current_mode = mode
-    current_subagent_idx = 0
-    buffer: list[str] = []
-    cursor_pos = 0
+    agent = kwargs.get("agent") or _prompt_agent()
+    cwd_arg = kwargs.get("cwd") or getattr(getattr(agent, "settings", None), "workspace", None)
+    cwd = Path(cwd_arg) if cwd_arg else Path.cwd()
+    plat.setup_console()
+    st = EditorState(mode=mode, history=load_history(cwd=str(cwd)), cwd=cwd)
+    vim_on = kwargs.get("vim_mode")
+    if vim_on if vim_on is not None else _VIM_ENABLED:
+        from axon.ui.vim import VimState
+        st.vim = VimState()
+    st.status_rows = _status_rows(agent)
+    initial = kwargs.get("initial") or prompt
+    try:  # keys typed while the previous turn was finishing are not lost
+        from axon.ui.in_flight import take_type_ahead
+        ahead = take_type_ahead()
+    except (ImportError, AttributeError):
+        ahead = ""
+    if ahead:
+        initial = f"{initial}{ahead}" if initial else ahead
+    if initial:
+        st.set_text(str(initial))
+    editor = PromptEditor(st)
+    wake = _loop_wake_event()
+    frame = LiveFrame()
+    sys.stdout.write("\n")
+    _ACTIVE_EDITOR = st
 
-    # Print clean divider and status header above prompt
-    def _render_status_header(m: str) -> None:
-        tw = term_width()
-        avail_w = max(20, tw - 4)
-        label_text, mode_color = _get_mode_info(m)
-        plan_badge = f"  {MINT}{BOLD}{plan_summary}{RST}" if plan_summary else ""
-        queue_badge = f"  {CYAN}{BOLD}{queue_summary}{RST}" if queue_summary else ""
-        agent_hint = f" · {DARK_SLATE}/main to return · ← sessions{RST}" if subagent_label else f" · {DARK_SLATE}← sessions{RST}"
+    def changed_mode() -> str | None:
+        return st.mode if st.mode != mode else None
 
-        left_styled = f"{mode_color}{BOLD}▮ {label_text}{RST}{plan_badge}{queue_badge}{agent_hint}"
-        left_len = len(strip_ansi(left_styled))
+    def finish(value: str) -> tuple[str, str | None, int]:
+        frame.clear()
+        return (value, changed_mode(), 0)
 
-        # Dynamic right items based on available width
-        if avail_w >= 105:
-            right_styled = f"{SLATE}○ {effort} · /effort · ⌨ /kb · ? shortcuts{RST}"
-        elif avail_w >= 85:
-            right_styled = f"{SLATE}○ {effort} · /effort · /kb{RST}"
-        elif avail_w >= 65:
-            right_styled = f"{SLATE}○ {effort}{RST}"
-        else:
-            right_styled = ""
-
-        right_len = len(strip_ansi(right_styled)) if right_styled else 0
-
-        # If left is still too wide for small terminals, shorten left
-        if left_len + right_len + 2 > avail_w:
-            left_styled = f"{mode_color}{BOLD}▮ {label_text}{RST}"
-            left_len = len(strip_ansi(left_styled))
-            if left_len + right_len + 2 > avail_w:
-                right_styled = ""
-                right_len = 0
-
-        pad = max(1, avail_w - left_len - right_len)
-        line_content = f"  {left_styled}{' ' * pad}{right_styled}"
-        safe_line = safe_ansi_truncate(line_content, tw - 1)
-        sys.stdout.write(f"\r\033[K{safe_line}\n")
-        sys.stdout.flush()
-
-    width = max(10, term_width() - 4)
-    sys.stdout.write(f"\n  {DARK_SLATE}{'─' * width}{RST}\n")
-    sys.stdout.flush()
-    _render_status_header(current_mode)
-
-    # Build history from session store + readline + recent user messages
-    history: list[str] = []
-    for h_item in _SESSION_HISTORY:
-        if h_item and h_item not in history:
-            history.append(h_item)
-    if readline is not None:
-        try:
-            num_hist = readline.get_current_history_length()
-            for i in range(1, num_hist + 1):
-                item = readline.get_history_item(i)
-                if item and item not in history:
-                    history.append(item)
-        except Exception:
-            pass
-
-    if len(history) < 15:
-        try:
-            s_dir = Path.home() / ".axon" / "sessions"
-            if s_dir.exists():
-                latest_sessions = sorted(s_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
-                for s_f in latest_sessions:
-                    with open(s_f, "r", encoding="utf-8", errors="ignore") as f:
-                        for line_json in f:
-                            entry = json.loads(line_json)
-                            if entry.get("type") == "user_message":
-                                u_text = entry.get("data", {}).get("content", "")
-                                if isinstance(u_text, str) and u_text.strip() and u_text.strip() not in history:
-                                    history.insert(0, u_text.strip())
-        except Exception:
-            pass
-
-    history_idx = len(history)
-
-    # Autocomplete state
-    selected_cmd_idx = 0
-    cmd_popup_open = True
-    selected_file_idx = 0
-    file_popup_open = True
-    last_cur_line_idx = 0
-
-    def get_matching_commands(prefix: str) -> list[tuple[str, str, str, str, bool]]:
-        if not prefix.startswith(("/", "\\")):
-            return []
-        p_clean = ("/" + prefix.lstrip("/\\")).split()[0].lower() if " " in prefix else ("/" + prefix.lstrip("/\\")).lower()
-        return [c for c in ALL_SLASH_COMMANDS if c[0].startswith(p_clean)]
-
-    _cached_files_list: list[str] = []
-    _cached_files_time: float = 0.0
-
-    def get_matching_files(query: str) -> list[str]:
-        nonlocal _cached_files_list, _cached_files_time
-        now = time.time()
-        if not _cached_files_list or (now - _cached_files_time > 4.0):
-            cwd = os.getcwd()
-            ignore = {
-                ".git", "__pycache__", ".axon", ".pytest_cache", "node_modules",
-                ".venv", "venv", ".idea", ".vscode", "Library", "Applications",
-                "Developer", ".Trash", "Downloads", "Music", "Movies", "Pictures",
-                ".cache", "build", "dist", ".cargo", ".rustup", ".npm", ".nvm",
-                "Pods", "DerivedData", ".gemini", ".antigravity", ".local"
-            }
-            res = []
-            t_start = time.time()
-            try:
-                for root, dirs, files in os.walk(cwd):
-                    if time.time() - t_start > 0.03:
-                        break
-                    dirs[:] = [d for d in dirs if d not in ignore and not d.startswith(".")]
-                    depth = len(Path(root).relative_to(cwd).parts) if root != cwd else 0
-                    if depth > 3:
-                        dirs.clear()
-                        continue
-                    for f in sorted(files):
-                        if f.startswith("."):
-                            continue
-                        rel = os.path.relpath(os.path.join(root, f), cwd)
-                        res.append(rel)
-                        if len(res) >= 500:
-                            break
-                    if len(res) >= 500:
-                        break
-            except Exception:
-                pass
-            _cached_files_list = res
-            _cached_files_time = now
-
-        q = query.lower().strip()
-        matches = [f for f in _cached_files_list if not q or q in f.lower()]
-        return matches[:8]
-
-    def draw(initial: bool = False):
-        nonlocal last_cur_line_idx
-        tw = term_width()
-        width = max(40, tw - 4)
-        buf_str = "".join(buffer)
-        is_bash = buf_str.startswith("!")
-
-        if is_bash:
-            p_prefix = f"{AMBER}{BOLD}!{RST} "
-        elif subagent_label:
-            p_prefix = f"{CYAN}[{subagent_label}]{RST} {BOLD}{CYAN}❯{RST} "
-        else:
-            p_prefix = f"{BOLD}{CYAN}❯{RST} "
-
-        # Check slash autocomplete
-        matching_cmds: list[tuple[str, str, str, str, bool]] = []
-        if not is_bash and cmd_popup_open and buf_str.startswith(("/", "\\")) and not (" " in buf_str.strip() and not buf_str.endswith(" ")):
-            matching_cmds = get_matching_commands(buf_str)
-
-        # Check file @ autocomplete
-        matching_files: list[str] = []
-        buf_before_cur = "".join(buffer[:cursor_pos])
-        last_at = buf_before_cur.rfind("@")
-        if file_popup_open and not matching_cmds and last_at != -1 and (" " not in buf_before_cur[last_at:]):
-            at_token = buf_before_cur[last_at + 1:]
-            matching_files = get_matching_files(at_token)
-
-        avail_prompt_w = max(10, tw - len(strip_ansi(p_prefix)) - 4)
-        extra_prompt_lines: list[str] = []
-        cur_line_idx = 0
-        if not buffer:
-            disp_body = f"{DARK_SLATE}Ask anything, use / for commands, @ for files, ! for shell...{RST}"
-            col_in_disp = 0
-            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
-        elif is_bash:
-            cmd_body = buf_str[1:]
-            if not cmd_body:
-                disp_body = f"{DARK_SLATE}type bash command (e.g. ls, git status, pytest)...{RST}"
-                col_in_disp = 0
-            else:
-                cursor_in_body = max(0, cursor_pos - 1)
-                if len(cmd_body) > avail_prompt_w:
-                    start_ch = max(0, cursor_in_body - avail_prompt_w + 3)
-                    disp_body = f"{WHITE}{BOLD}{cmd_body[start_ch:start_ch + avail_prompt_w]}{RST}"
-                    col_in_disp = cursor_in_body - start_ch
-                else:
-                    disp_body = f"{WHITE}{BOLD}{cmd_body}{RST}"
-                    col_in_disp = cursor_in_body
-            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
-        elif "\n" in buf_str:
-            lines = buf_str.split("\n")
-            char_count = 0
-            cur_col_in_line = 0
-            for idx, line_text in enumerate(lines):
-                if char_count + len(line_text) >= cursor_pos:
-                    cur_line_idx = idx
-                    cur_col_in_line = cursor_pos - char_count
-                    break
-                char_count += len(line_text) + 1
-            else:
-                cur_line_idx = len(lines) - 1
-                cur_col_in_line = len(lines[-1])
-
-            disp_body = highlight_prompt_syntax(lines[0])
-            extra_prompt_lines = [f"  {DARK_SLATE}…{RST} {highlight_prompt_syntax(l)}" for l in lines[1:]]
-            if cur_line_idx == 0:
-                col_in_disp = cur_col_in_line
-                target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
-            else:
-                col_in_disp = cur_col_in_line
-                target_col = max(1, min(tw - 1, 2 + len(strip_ansi(f"  {DARK_SLATE}…{RST} ")) + col_in_disp + 1))
-        else:
-            if len(buf_str) > avail_prompt_w:
-                start_ch = max(0, cursor_pos - avail_prompt_w + 3)
-                slice_body = buf_str[start_ch:start_ch + avail_prompt_w]
-                col_in_disp = cursor_pos - start_ch
-            else:
-                slice_body = buf_str
-                col_in_disp = cursor_pos
-            disp_body = highlight_prompt_syntax(slice_body)
-            target_col = max(1, min(tw - 1, 2 + len(strip_ansi(p_prefix)) + col_in_disp + 1))
-
-        # Check for popup lines
-        popup_lines: list[str] = []
-        max_visible = 8
-        if matching_cmds:
-            if tw >= 95:
-                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · {MINT}● Built-in{SLATE} · {GOLD}🔌 Config/Ext{SLATE} · ↑/↓ scroll · Tab fill · Enter run)"
-            elif tw >= 65:
-                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)} · ↑/↓ scroll · Tab fill · Enter run)"
-            else:
-                popup_header = f"Commands ({selected_cmd_idx + 1}/{len(matching_cmds)})"
-
-            avail_hdr_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * avail_hdr_w}╮{RST}")
-            start_v = max(0, min(selected_cmd_idx - max_visible // 2, len(matching_cmds) - max_visible))
-            end_v = min(len(matching_cmds), start_v + max_visible)
-            for idx in range(start_v, end_v):
-                c_name, c_kind, c_cat, c_desc, _ = matching_cmds[idx]
-                is_sel = (idx == selected_cmd_idx)
-                prefix = f"{MINT}▶{RST}" if is_sel else " "
-                kind = f"{MINT}●{RST}" if c_kind == "core" else f"{GOLD}🔌{RST}"
-                name = f"{WHITE}{BOLD}{c_name:<12}{RST}" if is_sel else f"{CYAN}{c_name:<12}{RST}"
-                if tw >= 90:
-                    cat = f"{PURPLE}{c_cat:<16}{RST}" if is_sel else f"{DARK_SLATE}{c_cat:<16}{RST}"
-                    max_desc_w = max(10, tw - 46)
-                    desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max_desc_w]
-                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {cat} {desc}")
-                elif tw >= 65:
-                    max_desc_w = max(10, tw - 26)
-                    desc = (f"{WHITE}{c_desc}{RST}" if is_sel else f"{SLATE}{c_desc}{RST}")[:max_desc_w]
-                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name} {desc}")
-                else:
-                    popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} {kind} {name}")
-            popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
-        elif matching_files:
-            if tw >= 75:
-                popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)} · ↑/↓ scroll · Tab fill · Enter select)"
-            else:
-                popup_header = f"Files ({selected_file_idx + 1}/{len(matching_files)})"
-
-            avail_hdr_w = max(4, width - len(strip_ansi(popup_header)) - 7)
-            popup_lines.append(f"  {DARK_SLATE}╭── {SLATE}{popup_header}{DARK_SLATE} {'─' * avail_hdr_w}╮{RST}")
-            start_v = max(0, min(selected_file_idx - max_visible // 2, len(matching_files) - max_visible))
-            end_v = min(len(matching_files), start_v + max_visible)
-            for idx in range(start_v, end_v):
-                f_path = matching_files[idx]
-                is_sel = (idx == selected_file_idx)
-                prefix = f"{MINT}▶{RST}" if is_sel else " "
-                max_f_len = max(10, tw - 16)
-                disp = (f_path if len(f_path) <= max_f_len else "…" + f_path[-(max_f_len - 1):])
-                name = f"{WHITE}{BOLD}{disp}{RST}" if is_sel else f"{SLATE}{disp}{RST}"
-                popup_lines.append(f"  {DARK_SLATE}│{RST} {prefix} 📄 {name}")
-            popup_lines.append(f"  {DARK_SLATE}╰──{'─' * max(10, width - 6)}╯{RST}")
-
-        all_extra = extra_prompt_lines + popup_lines
-
-        # Build output buffer
-        output: list[str] = ["\033[?25l\033[?7l"]
-
-        # If previous frame left the cursor on line > 0, move back up to line 0
-        if last_cur_line_idx > 0:
-            output.append(f"\033[{last_cur_line_idx}A\r")
-        else:
-            output.append("\r")
-
-        output.append(f"\033[K  {p_prefix}{disp_body}")
-        if all_extra:
-            safe_extra = [safe_ansi_truncate(l, max(20, tw - 2)) for l in all_extra]
-            for pl in safe_extra:
-                output.append(f"\n\r\033[K{pl}")
-            output.append("\033[J")
-            lines_up = len(safe_extra) - cur_line_idx
-            if lines_up > 0:
-                output.append(f"\033[{lines_up}A\r\033[{target_col}G\033[?7h\033[?25h")
-            else:
-                output.append(f"\r\033[{target_col}G\033[?7h\033[?25h")
-        else:
-            output.append(f"\033[J\r\033[{target_col}G\033[?7h\033[?25h")
-
-        last_cur_line_idx = cur_line_idx
-        sys.stdout.write("".join(output))
-        sys.stdout.flush()
-
-    fd = sys.stdin.fileno()
-    old_attr = termios.tcgetattr(fd)
-    try:
-        termios.tcflush(fd, termios.TCIFLUSH)
-    except Exception:
-        pass
-    draw(initial=True)
-
-    def handle_sigwinch(signum, frame):
-        try:
-            draw(initial=False)
-        except Exception:
-            pass
-    try:
-        sigwinch = getattr(signal, "SIGWINCH", None)
-        orig_sigwinch = signal.signal(sigwinch, handle_sigwinch) if sigwinch is not None else None
-    except Exception:
-        orig_sigwinch = None
-
-
-    last_esc_time = 0.0
-    stashed_prompt = ""
-    saved_draft = ""
-    undo_stack: list[tuple[list[str], int]] = []
+    def submit() -> tuple[str, str | None, int]:
+        shown = st.buf.strip()
+        text = st.expanded().strip()
+        frame.clear()
+        if text:
+            _echo_submitted(shown, chrome)
+            add_history(text, session_id)
+        return (text, changed_mode(), 0)
 
     try:
-        tty.setcbreak(fd)
-        while True:
-            raw_bytes = os.read(fd, 8192)
-            if not raw_bytes: break
-            buf_str = "".join(buffer)
-            matching_cmds = get_matching_commands(buf_str) if (cmd_popup_open and buf_str.startswith(("/", "\\"))) else []
-            buf_before_cur = "".join(buffer[:cursor_pos])
-            last_at = buf_before_cur.rfind("@")
-            matching_files = get_matching_files(buf_before_cur[last_at + 1:]) if (file_popup_open and not matching_cmds and last_at != -1 and " " not in buf_before_cur[last_at:]) else []
-
-            if raw_bytes in (b"\t", b"\x09"):
-                if matching_files:
-                    new_before = buf_before_cur[:last_at + 1] + matching_files[selected_file_idx % len(matching_files)] + " "
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = list(new_before + "".join(buffer[cursor_pos:]))
-                    cursor_pos = len(new_before)
-                    draw()
-                elif matching_cmds:
-                    item = matching_cmds[selected_cmd_idx % len(matching_cmds)]
-                    fill = f"{item[0]} " if item[-1] else item[0]
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer, cursor_pos = list(fill), len(fill)
-                    draw()
-                else:
-                    idx = (MODES_CYCLE.index(current_mode) + 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
-                    current_mode = MODES_CYCLE[idx]
-                    lines_up_to_header = last_cur_line_idx + 1
-                    sys.stdout.write(f"\033[{lines_up_to_header}A\r")
-                    _render_status_header(current_mode)
-                    draw()
-                continue
-
-            # Shift+Tab variations -> Cycle modes backward across all 4 modes
-            if any(raw_bytes.startswith(k) for k in (b"\x1b[Z", b"\x1b\t", b"\x1b\x09", b"\x1b[27;2;9~", b"\x1b[9;2u", b"\x1b[24~", b"\x1b[1;2Z", b"\x1bOZ")):
-                idx = (MODES_CYCLE.index(current_mode) - 1) % len(MODES_CYCLE) if current_mode in MODES_CYCLE else 0
-                current_mode = MODES_CYCLE[idx]
-                lines_up_to_header = last_cur_line_idx + 1
-                sys.stdout.write(f"\033[{lines_up_to_header}A\r")
-                _render_status_header(current_mode)
-                draw()
-                continue
-
-            def _clean_exit():
-                if last_cur_line_idx > 0:
-                    sys.stdout.write(f"\033[{last_cur_line_idx}A\r\033[J")
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-
-            # Ctrl+T (0x14) -> Toggle tasks / checklist (/todos)
-            if raw_bytes == b"\x14":
-                _clean_exit()
-                return ("/todos", current_mode if current_mode != mode else None, current_subagent_idx)
-
-            # Ctrl+O (0x0f) -> Show full verbose output (/output)
-            if raw_bytes == b"\x0f":
-                _clean_exit()
-                return ("/output", current_mode if current_mode != mode else None, current_subagent_idx)
-
-            # Ctrl+Z (0x1a) -> Suspend process cleanly
-            if raw_bytes == b"\x1a":
-                if termios is not None and hasattr(signal, "SIGTSTP"):
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                    os.kill(os.getpid(), signal.SIGTSTP)
-                    tty.setcbreak(fd)
-                    draw()
-                continue
-
-            # Opt+P / Alt+P (b"\x1bp", b"\xcf\x80") -> Switch model
-            if raw_bytes in (b"\x1bp", b"\xcf\x80"):
-                _clean_exit()
-                return ("/model", current_mode if current_mode != mode else None, current_subagent_idx)
-
-
-
-            # Down Arrow -> Navigate command popup forward or command history forward
-            if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                if matching_files and file_popup_open and ("@" in buf_str):
-                    selected_file_idx = (selected_file_idx + 1) % len(matching_files)
-                    draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith(("/", "\\")):
-                    selected_cmd_idx = (selected_cmd_idx + 1) % len(matching_cmds)
-                    draw()
-                elif history_idx < len(history) - 1:
-                    history_idx += 1
-                    buffer = list(history[history_idx])
-                    cursor_pos = len(buffer)
-                    cmd_popup_open = False
-                    file_popup_open = False
-                    draw()
-                elif history_idx == len(history) - 1:
-                    history_idx = len(history)
-                    buffer = list(saved_draft)
-                    cursor_pos = len(buffer)
-                    cmd_popup_open = True
-                    file_popup_open = True
-                    draw()
-                continue
-
-            # Up Arrow -> Navigate command popup backward (wrap to last entry) or command history backward
-            if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                if matching_files and file_popup_open and ("@" in buf_str):
-                    selected_file_idx = (selected_file_idx - 1) % len(matching_files)
-                    draw()
-                elif matching_cmds and cmd_popup_open and buf_str.startswith(("/", "\\")):
-                    selected_cmd_idx = (selected_cmd_idx - 1) % len(matching_cmds)
-                    draw()
-                elif history and history_idx > 0:
-                    if history_idx == len(history):
-                        saved_draft = "".join(buffer)
-                    history_idx -= 1
-                    buffer = list(history[history_idx])
-                    cursor_pos = len(buffer)
-                    cmd_popup_open = False
-                    file_popup_open = False
-                    draw()
-                continue
-
-            # Esc -> Dismiss popup, or double tap Esc to clear input
-            if raw_bytes == b"\x1b":
-                if (matching_cmds and cmd_popup_open) or (matching_files and file_popup_open):
-                    cmd_popup_open = False
-                    file_popup_open = False
-                    draw()
-                    continue
-                now_t = time.time()
-                if now_t - last_esc_time < 0.45:
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = []
-                    cursor_pos = 0
-                    cmd_popup_open = True
-                    draw()
-                    last_esc_time = 0.0
-                    continue
-                last_esc_time = now_t
-
-            # Ctrl+S (0x13) -> Stash prompt / Restore stashed prompt
-            if raw_bytes == b"\x13":
-                if buffer:
-                    stashed_prompt = "".join(buffer)
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = []
-                    cursor_pos = 0
-                    draw()
-                elif stashed_prompt:
-                    buffer = list(stashed_prompt)
-                    cursor_pos = len(buffer)
-                    stashed_prompt = ""
-                    draw()
-                continue
-
-            # Ctrl+G (0x07) -> Edit in $EDITOR (nano/vim)
-            if raw_bytes == b"\x07":
-                import tempfile
-                editor = os.environ.get("EDITOR") or "nano"
-                with tempfile.NamedTemporaryFile(suffix=".md", delete=False, mode="w+", encoding="utf-8") as tf:
-                    tf.write("".join(buffer))
-                    tf_path = tf.name
+        with plat.raw_terminal(isig=False, bracketed_paste=True):
+            frame.render(*build_frame(st, chrome))
+            while True:
                 try:
-                    if termios is not None:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                    subprocess.call([editor, tf_path])
-                    with open(tf_path, "r", encoding="utf-8") as tf_read:
-                        new_text = tf_read.read()
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = list(new_text.strip())
-                    cursor_pos = len(buffer)
-                finally:
-                    try:
-                        os.remove(tf_path)
-                    except Exception:
-                        pass
-                    if tty is not None:
-                        tty.setcbreak(fd)
-                    draw()
-                continue
-
-            # Ctrl+A (0x01) -> Move cursor to start of prompt (Emacs/Vim)
-            if raw_bytes == b"\x01":
-                cursor_pos = 0
-                draw()
-                continue
-
-            # Ctrl+E (0x05) -> Move cursor to end of prompt (Emacs/Vim)
-            if raw_bytes == b"\x05":
-                cursor_pos = len(buffer)
-                draw()
-                continue
-
-            # Ctrl+K (0x0b) -> Kill text to end of line
-            if raw_bytes == b"\x0b":
-                if cursor_pos < len(buffer):
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = buffer[:cursor_pos]
-                    draw()
-                continue
-
-            # Ctrl+U (0x15) -> Kill text to start of line
-            if raw_bytes == b"\x15":
-                if cursor_pos > 0:
-                    undo_stack.append((list(buffer), cursor_pos))
-                    buffer = buffer[cursor_pos:]
-                    cursor_pos = 0
-                    draw()
-                continue
-
-            # Ctrl+W (0x17) -> Delete word backward
-            if raw_bytes == b"\x17":
-                if cursor_pos > 0:
-                    undo_stack.append((list(buffer), cursor_pos))
-                    idx = cursor_pos
-                    # Skip trailing whitespace
-                    while idx > 0 and buffer[idx - 1] == " ":
-                        idx -= 1
-                    # Skip word chars
-                    while idx > 0 and buffer[idx - 1] != " ":
-                        idx -= 1
-                    buffer = buffer[:idx] + buffer[cursor_pos:]
-                    cursor_pos = idx
-                    draw()
-                continue
-
-            # Alt+B / Opt+Left -> Move word backward
-            if raw_bytes in (b"\x1bb", b"\x1b[1;3D", b"\x1b[1;5D", b"\x1b\x1b[D"):
-                idx = cursor_pos
-                while idx > 0 and buffer[idx - 1] == " ":
-                    idx -= 1
-                while idx > 0 and buffer[idx - 1] != " ":
-                    idx -= 1
-                cursor_pos = max(0, idx)
-                draw()
-                continue
-
-            # Alt+F / Opt+Right -> Move word forward
-            if raw_bytes in (b"\x1bf", b"\x1b[1;3C", b"\x1b[1;5C", b"\x1b\x1b[C"):
-                idx = cursor_pos
-                while idx < len(buffer) and buffer[idx] != " ":
-                    idx += 1
-                while idx < len(buffer) and buffer[idx] == " ":
-                    idx += 1
-                cursor_pos = min(len(buffer), idx)
-                draw()
-                continue
-
-            # Ctrl+P (0x10) -> Interactive Fuzzy File Finder
-            if raw_bytes == b"\x10":
-                from axon.ui.fuzzy_picker import run_fuzzy_file_finder
-                if termios is not None:
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                chosen_file = run_fuzzy_file_finder(Path.cwd())
-                if tty is not None:
-                    tty.setcbreak(fd)
-                if chosen_file:
-                    undo_stack.append((list(buffer), cursor_pos))
-                    ins = f"@{chosen_file} "
-                    for ch in ins:
-                        buffer.insert(cursor_pos, ch)
-                        cursor_pos += 1
-                draw(initial=True)
-                continue
-
-
-            # Ctrl+V (0x16) -> Paste clipboard content / image data instantly (< 40ms)
-            if raw_bytes == b"\x16":
-                clip_text = ""
-                # 1. Try to extract image from clipboard instantly with Cocoa helper
-                try:
-                    import uuid
-                    img_temp = Path(f"/tmp/axon_clip_{time.time_ns()}_{uuid.uuid4().hex[:6]}.png")
-                    from axon.agent.images import save_clipboard_image, compact_image_paths
-                    if save_clipboard_image(img_temp):
-                        clip_text = f"[Image: {img_temp}] "
-                except Exception:
-                    pass
-
-                # 2. Fallback to text clipboard if no binary image
-                if not clip_text:
-                    try:
-                        p = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=0.2)
-                        if p.returncode == 0 and p.stdout:
-                            clip_text = p.stdout
-                    except Exception:
-                        pass
-
-                if clip_text:
-                    from axon.agent.images import compact_image_paths
-                    compacted_clip, _ = compact_image_paths(clip_text)
-                    undo_stack.append((list(buffer), cursor_pos))
-                    for ch in compacted_clip:
-                        buffer.insert(cursor_pos, ch)
-                        cursor_pos += 1
-                    draw()
-                continue
-
-            # Ctrl+Shift+_ / Undo (0x1f)
-            if raw_bytes in (b"\x1f", b"\x1b[31;2~"):
-                if undo_stack:
-                    prev_buf, prev_pos = undo_stack.pop()
-                    buffer = prev_buf
-                    cursor_pos = min(len(buffer), prev_pos)
-                    draw()
-                continue
-
-            # Right Arrow
-            if raw_bytes.startswith((b"\x1b[C", b"\x1bOC")):
-                if cursor_pos < len(buffer):
-                    cursor_pos += 1
-                    draw()
-                continue
-
-            # Left Arrow -> Switch to session switcher if buffer is empty, else move cursor left
-            if raw_bytes.startswith((b"\x1b[D", b"\x1bOD")):
-                if not buffer:
-                    _clean_exit()
-                    return ("__SWITCH_SESSION__", current_mode if current_mode != mode else None, current_subagent_idx)
-                if cursor_pos > 0:
-                    cursor_pos -= 1
-                    draw()
-                continue
-
-            # Home key
-            if raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x1bOH"):
-                cursor_pos = 0
-                draw()
-                continue
-
-            # End key
-            if raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x1bOF"):
-                cursor_pos = len(buffer)
-                draw()
-                continue
-
-            # Delete key
-            if raw_bytes in (b"\x1b[3~", b"\x1b[3;5~"):
-                if 0 <= cursor_pos < len(buffer):
-                    buffer.pop(cursor_pos)
-                    draw()
-                continue
-
-            # Shift+Enter / Alt+Enter / Option+Enter / Ctrl+Enter / Shift+End -> Insert Newline
-            is_shift_enter = (
-                raw_bytes in (
-                    b"\x1b[13;2u", b"\x1b[27;2;13~", b"\x1b[13;2~",
-                    b"\x1b[10;2u", b"\x1b[27;2;10~", b"\x1b[1;2R",
-                    b"\x1b\r", b"\x1b\n", b"\x1b[13;3u", b"\x1b[27;3;13~",
-                    b"\x1b[10;3u", b"\x1b[27;3;10~", b"\x1b[13;5u",
-                    b"\x1b[27;5;13~", b"\x1b[10;5u", b"\x1b[27;5;10~",
-                    b"\x1b[13;4u", b"\x1b[13;6u",
-                    # Shift+End variations
-                    b"\x1b[1;2F", b"\x1b[4;2~", b"\x1b[8;2~", b"\x1b[1;2End",
-                )
-                or (raw_bytes.startswith(b"\x1b[13;") and raw_bytes.endswith((b"u", b"~")))
-                or (raw_bytes.startswith(b"\x1b[27;") and raw_bytes.endswith((b"u", b"~")))
-                or (raw_bytes.startswith(b"\x1b[10;") and raw_bytes.endswith((b"u", b"~")))
-            )
-            if is_shift_enter:
-                undo_stack.append((list(buffer), cursor_pos))
-                buffer.insert(cursor_pos, "\n")
-                cursor_pos += 1
-                draw()
-                continue
-
-            # Regular Enter (Return / newline / keypad enter) -> Submit prompt, complete slash command, or complete @file
-            if raw_bytes in (b"\r", b"\n", b"\r\n", b"\x1bOM"):
-                buf_text = "".join(buffer).strip()
-
-                # If @file autocomplete popup was open and user hit Enter on a partial prefix
-                if matching_files and file_popup_open:
-                    chosen_file = matching_files[selected_file_idx % len(matching_files)]
-                    at_token = buf_before_cur[last_at + 1:].strip()
-                    if at_token != chosen_file:
-                        new_before = buf_before_cur[:last_at + 1] + chosen_file + " "
-                        undo_stack.append((list(buffer), cursor_pos))
-                        buffer = list(new_before + "".join(buffer[cursor_pos:]))
-                        cursor_pos = len(new_before)
-                        file_popup_open = False
-                        draw()
-                        continue
-
-                # If slash command popup was open on a bare slash command prefix
-                if matching_cmds and cmd_popup_open and not (" " in buf_text):
-                    chosen_cmd = matching_cmds[selected_cmd_idx % len(matching_cmds)][0]
-                    if buf_text != chosen_cmd:
-                        buffer = list(chosen_cmd)
-                        cursor_pos = len(buffer)
-                        cmd_popup_open = False
-                        draw()
-                        continue
-
-                if buffer and buffer[-1] == "\\":
-                    buffer.pop()
-                    buffer.append("\n")
-                    cursor_pos = len(buffer)
-                    draw()
+                    key = plat.read_key(timeout=0.25 if wake is not None else None)
+                except EOFError:
+                    frame.clear()
+                    raise
+                if key is None:
+                    if wake is not None and wake.is_set() and not st.buf:
+                        wake.clear()
+                        return finish("")
                     continue
-                buf_str_final = "".join(buffer).strip()
-                if last_cur_line_idx > 0:
-                    sys.stdout.write(f"\033[{last_cur_line_idx}A\r")
-                banner = format_user_prompt_banner(buf_str_final, subagent_label=subagent_label, is_bash=buf_str_final.startswith("!"))
-                sys.stdout.write(f"\r\033[K{banner}\n\n\033[J\033[?7h\033[?25h")
-                sys.stdout.flush()
-                break
-
-            # Backspace
-            if raw_bytes in (b"\x7f", b"\x08"):
-                cursor_pos = max(0, min(cursor_pos, len(buffer)))
-                if cursor_pos > 0 and len(buffer) >= cursor_pos:
-                    buffer.pop(cursor_pos - 1)
-                    cursor_pos -= 1
-                    history_idx = len(history)
-                    selected_cmd_idx = 0
-                    selected_file_idx = 0
-                    cmd_popup_open = True
-                    file_popup_open = True
-                    draw()
-                continue
-
-            # Ctrl+C
-            if raw_bytes == b"\x03":
-                sys.stdout.write("\n")
-                raise KeyboardInterrupt
-
-            # Ctrl+D
-            if raw_bytes == b"\x04":
-                if not buffer:
-                    sys.stdout.write("\n")
-                    raise EOFError
-                if 0 <= cursor_pos < len(buffer):
-                    buffer.pop(cursor_pos)
-                    draw()
-                continue
-
-            # Skip unknown escape sequences
-            if raw_bytes.startswith(b"\x1b"):
-                continue
-
-            # Printable characters & Paste text
-            try:
-                decoded = raw_bytes.decode("utf-8")
-                if len(decoded) > 3:
-                    undo_stack.append((list(buffer), cursor_pos))
-                    from axon.agent.images import compact_image_paths
-                    compacted_decoded, _ = compact_image_paths(decoded)
-                    decoded = compacted_decoded
-                for ch in decoded:
-                    if ch in ("\r", "\n"):
-                        buffer.insert(cursor_pos, " ")
-                    elif ord(ch) >= 32 or ch == "\t":
-                        buffer.insert(cursor_pos, ch)
-                    cursor_pos += 1
-                history_idx = len(history)
-                cmd_popup_open = True
-                file_popup_open = True
-
-                # Check if buffer now contains an uncompacted image path
-                buf_full = "".join(buffer)
-                if any(ext in buf_full.lower() for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
-                    from axon.agent.images import compact_image_paths
-                    comp_buf, _ = compact_image_paths(buf_full)
-                    if comp_buf != buf_full:
-                        buffer = list(comp_buf)
-                        cursor_pos = min(cursor_pos, len(buffer))
-
-                selected_cmd_idx = 0
-                selected_file_idx = 0
-                cmd_popup_open = True
-                file_popup_open = True
-                draw()
-            except Exception:
-                pass
-
+                outcome = editor.handle(key)
+                if outcome is not None:
+                    kind, value = outcome
+                    if kind == "submit":
+                        return submit()
+                    if kind == "finish":
+                        return finish(value)
+                    if kind == "raise":
+                        frame.clear()
+                        raise value
+                    frame = _run_ui_action(value, st, frame)
+                frame.render(*build_frame(st, chrome))
     finally:
-        sys.stdout.write("\033[?7h\033[?25h")
-        if orig_sigwinch is not None and hasattr(signal, "SIGWINCH"):
-            try:
-                signal.signal(signal.SIGWINCH, orig_sigwinch)
-            except Exception:
-                pass
-        if termios is not None:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-            except Exception:
-                pass
+        _ACTIVE_EDITOR = None
 
-    line = "".join(buffer).strip()
-    if line:
-        if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != line:
-            _SESSION_HISTORY.append(line)
-        if readline is not None:
-            try:
-                readline.add_history(line)
-            except Exception:
-                pass
 
-    toggled_mode = current_mode if current_mode != mode else None
-    return (line, toggled_mode, current_subagent_idx)
+def _loop_wake_event() -> Any:
+    """The /loop wake-up event (threading.Event) or None when the commands package is unavailable."""
+    try:
+        from axon.commands.workspace_cmds import LOOP_WAKE
+        return LOOP_WAKE
+    except (ImportError, AttributeError):
+        return None
 
+
+def _run_ui_action(name: str, st: EditorState, frame: LiveFrame) -> LiveFrame:
+    """Actions that leave the prompt frame (editor, finder, redraw, suspend). Returns a new frame."""
+    if name == "redraw":
+        sys.stdout.write("\033[H\033[2J")
+        return LiveFrame()
+    if name == "editor":
+        frame.clear()
+        edited = _edit_externally(st.buf)
+        if edited is None:
+            st.notice = f"could not start editor ({' '.join(plat.editor_command())}); set $EDITOR"
+        else:
+            st._snapshot()
+            st.set_text(edited)
+            st._changed()
+        return LiveFrame()
+    if name == "finder":
+        frame.clear()
+        from axon.ui.fuzzy_picker import run_fuzzy_file_finder
+        chosen = run_fuzzy_file_finder(st.cwd)
+        if chosen:
+            st.insert(f"@{chosen} ")
+        return LiveFrame()
+    if name == "suspend" and not plat.IS_WINDOWS and hasattr(signal, "SIGTSTP"):
+        frame.clear()
+        with plat.cooked_terminal():
+            os.kill(os.getpid(), signal.SIGTSTP)
+        return LiveFrame()
+    return frame
+
+
+def _echo_submitted(text: str, chrome: PromptChrome) -> None:
+    sys.stdout.write(format_user_prompt_banner(text, subagent_label=chrome.subagent_label,
+                                               is_bash=text.startswith("!")) + "\n\n")
+    sys.stdout.flush()

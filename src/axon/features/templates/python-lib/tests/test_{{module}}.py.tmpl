@@ -1,0 +1,14 @@
+import pytest
+
+from {{module}} import chunked, slugify
+
+
+def test_chunked() -> None:
+    assert list(chunked(range(5), 2)) == [[0, 1], [2, 3], [4]]
+    with pytest.raises(ValueError):
+        list(chunked([1], 0))
+
+
+def test_slugify() -> None:
+    assert slugify("Hello, World!") == "hello-world"
+    assert slugify("  many   spaces ") == "many-spaces"

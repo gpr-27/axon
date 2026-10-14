@@ -218,9 +218,9 @@ def test_mcp_tool_wrapper_structure():
         }
     }
     wrapper = MCPToolWrapper("test_server", tool_spec, conn)
-    assert wrapper.name == "mcp_test_server_search_db"
+    assert wrapper.name == "mcp__test_server__search_db"
     assert "[MCP:test_server]" in wrapper.description
-    assert wrapper.readonly is True
+    assert wrapper.readonly is False  # no readOnlyHint annotation
     assert wrapper.schema["type"] == "object"
 
 
@@ -254,8 +254,9 @@ def test_context_manager_rung3_summarization():
     from axon.agent.state import Conversation
     from axon.providers.base import AssistantTurn, TextBlock
 
-    settings = Settings(turn_token_budget=100, compact_at=0.1)
+    settings = Settings(compact_at=0.1)
     cm = ContextManager(settings)
+    cm.context_window = lambda model=None: 1000  # tiny window forces summarization
 
     conv = Conversation()
     # Populate with 8 turns (16 messages) with long text
@@ -268,7 +269,10 @@ def test_context_manager_rung3_summarization():
     # Should summarize older turns and keep latest turns
     assert len(conv.messages) < 16
     first_msg = conv.messages[0].get("content", "")
-    assert "Prior Conversation Summary" in first_msg
+    assert "Summary of the earlier conversation" in first_msg
+    # Cut happens on a genuine user turn, keeping strict role alternation.
+    roles = [m["role"] for m in conv.messages]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
 
 
 # ─── 7. Clipboard and Auto-Skill Tests ────────────────────────────────────

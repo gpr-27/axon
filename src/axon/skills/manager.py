@@ -1,14 +1,42 @@
 """
-Skills management for Axon: Discovery from ~/.axon/skills and .axon/skills,
-YAML frontmatter parsing, dynamic context injection (!`cmd`), and on-demand execution.
+Skills: folders containing a SKILL.md (YAML frontmatter + markdown instructions).
+
+Discovery (later sources override earlier ones with the same name):
+  bundled  ->  plugins (<plugin>/skills/*)  ->  ~/.axon/skills  ->  ~/.claude/skills
+           ->  <ws>/.claude/skills  ->  <ws>/.axon/skills
+
+Frontmatter keys: ``name``, ``description``, ``when_to_use``, ``allowed-tools`` /
+``disallowed-tools`` (comma separated or a YAML list), ``argument-hint``, ``arguments``
+(named arguments: ``$name`` / ``${name}`` in the body), ``model``, ``effort``, ``paths``
+(globs the skill applies to), ``context`` (``fork``), ``agent``, ``disable-model-invocation``
+(only the user can run it) and ``user-invocable: false`` (hidden from slash commands).
+
+Only the name + description of every skill goes into the system prompt
+(:func:`skills_prompt_section`); the body is loaded on demand with
+:func:`skill_content` / :meth:`SkillManager.execute_skill`.
+
+Body features:
+  ``$ARGUMENTS`` / ``$1`` ``$2`` ...   argument substitution
+  ``!`cmd```                          shell output injection - executed ONLY when the
+                                      caller passes an ``allow_shell`` callback that
+                                      approves the command (permission engine).
 """
 from __future__ import annotations
+
 import os
 import re
+import shlex
+import shutil
 import subprocess
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Callable
+from axon.storage import axon_home as _axon_home
+
+ShellGate = Callable[[str], bool]
+_SHELL_RE = re.compile(r"!`([^`\n]+)`")
+
 
 @dataclass
 class Skill:
@@ -16,41 +44,234 @@ class Skill:
     description: str
     instructions: str
     path: Path
-    scope: str  # "personal", "project"
+    scope: str  # "bundled", "plugin", "personal", "project"
+    allowed_tools: list[str] = field(default_factory=list)
+    argument_hint: str = ""
+    model: str | None = None
+    when_to_use: str = ""
+    disallowed_tools: list[str] = field(default_factory=list)
+    arguments: list[str] = field(default_factory=list)
+    effort: str | None = None
+    paths: list[str] = field(default_factory=list)
+    context: str = ""
+    agent: str | None = None
+    disable_model_invocation: bool = False
+    user_invocable: bool = True
+
+    @property
+    def base_dir(self) -> Path | None:
+        return None if self.scope == "bundled" else self.path.parent
+
+
+# ─── Frontmatter ────────────────────────────────────────────────────────────
+
+def parse_frontmatter(text: str) -> tuple[dict[str, str | list[str]], str]:
+    """Split ``---`` frontmatter from the body. Supports scalars, quoted strings,
+    block scalars (``|`` ``>`` ``|-`` ``>-``) and ``- item`` lists."""
+    if not text.startswith("---"):
+        return {}, text
+    lines = text.splitlines()
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return {}, text
+    fm_lines = lines[1:end]
+    body = "\n".join(lines[end + 1:]).strip()
+
+    result: dict[str, str | list[str]] = {}
+    key: str | None = None
+    buf: list[str] = []
+    items: list[str] = []
+    block = False
+
+    def flush() -> None:
+        if key is None:
+            return
+        if items:
+            result[key] = [_unquote(x) for x in items]
+        else:
+            joined = ("\n" if block == "|" else " ").join(buf).strip()
+            result[key] = _unquote(joined)
+
+    for line in fm_lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[:1].isspace() and ":" in line and not line.lstrip().startswith("- "):
+            flush()
+            k, _, v = line.partition(":")
+            key, buf, items, block = k.strip(), [], [], False
+            v = v.strip()
+            if v in ("|", "|-", ">", ">-"):
+                block = "|" if v.startswith("|") else True  # type: ignore[assignment]
+            elif v.startswith("[") and v.endswith("]"):
+                items = [x.strip() for x in _split_top(v[1:-1]) if x.strip()]
+            elif v:
+                buf.append(v)
+        elif key is not None:
+            s = line.strip()
+            if s.startswith("- ") and not block:
+                items.append(s[2:].strip())
+            else:
+                buf.append(s)
+    flush()
+    return result, body
+
+
+def _split_top(s: str) -> list[str]:
+    """Split on commas that are not inside parentheses or quotes."""
+    out, depth, cur, quote = [], 0, [], None
+    for ch in s:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def _unquote(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and v[0] in "\"'" and v[-1] == v[0]:
+        return v[1:-1]
+    return v
+
+
+def as_list(v: str | list[str] | None) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [x.strip() for x in v if x.strip()]
+    return [x.strip() for x in _split_top(v) if x.strip()]
+
+
+# ─── Argument substitution & shell injection (shared with custom commands) ──
+
+def substitute_arguments(body: str, arguments: str, names: list[str] | None = None) -> str:
+    """Replace $ARGUMENTS, positional $1..$9 and named ``$name`` / ``${name}`` (``names`` in
+    order map onto the positional words; the last name takes the rest). If the body has no
+    placeholder and arguments were given, append them so they are never silently dropped."""
+    try:
+        positional = shlex.split(arguments) if arguments else []
+    except ValueError:
+        positional = arguments.split()
+    used = "$ARGUMENTS" in body or re.search(r"\$[1-9]\b", body) is not None
+    out = body
+    for i, name in enumerate(names or []):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            continue
+        val = (" ".join(positional[i:]) if i == len(names or []) - 1 else (positional[i] if i < len(positional) else "")) if positional else ""
+        pat = re.compile(r"\$\{" + name + r"\}|\$" + name + r"\b")
+        if pat.search(out):
+            used = True
+            out = pat.sub(lambda _m: val, out)
+    out = out.replace("$ARGUMENTS", arguments)
+    out = re.sub(r"\$([1-9])\b", lambda m: positional[int(m.group(1)) - 1] if int(m.group(1)) <= len(positional) else "", out)
+    if arguments and not used:
+        out = f"{out.rstrip()}\n\nARGUMENTS: {arguments}"
+    return out
+
+
+def shell_argv(command: str) -> list[str]:
+    """argv that runs a command string in the platform shell."""
+    try:
+        from axon.platform import default_shell  # type: ignore[import-not-found]
+        prefix = list(default_shell())
+        if prefix:
+            return prefix + [command]
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        ps = shutil.which("pwsh") or shutil.which("powershell")
+        if ps:
+            return [ps, "-NoProfile", "-NonInteractive", "-Command", command]
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
+    sh = shutil.which("bash") or shutil.which("sh") or "sh"
+    return [sh, "-c", command]
+
+
+def run_shell_capture(command: str, cwd: Path, timeout: float = 15.0) -> tuple[int, str]:
+    """Run a command in the platform shell; return (exit code, combined output)."""
+    try:
+        proc = subprocess.run(
+            shell_argv(command), cwd=str(cwd), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
+        )
+        out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr and proc.stderr.strip() else "")
+        return proc.returncode, out.strip()
+    except subprocess.TimeoutExpired:
+        return 124, f"[timed out after {timeout:.0f}s]"
+    except OSError as e:
+        return 127, f"[failed to start shell: {e}]"
+
+
+def expand_shell_injections(body: str, cwd: Path, allow_shell: ShellGate | None) -> str:
+    """Replace !`cmd` with its output when ``allow_shell(cmd)`` approves, else a notice."""
+    def repl(m: re.Match[str]) -> str:
+        cmd = m.group(1).strip()
+        if allow_shell is None or not allow_shell(cmd):
+            return f"[shell context `{cmd}` not run: not permitted]"
+        code, out = run_shell_capture(cmd, cwd)
+        suffix = "" if code == 0 else f"\n[exit code {code}]"
+        return f"\n```\n$ {cmd}\n{out[:20000]}{suffix}\n```\n"
+    return _SHELL_RE.sub(repl, body)
+
+
+# ─── Manager ────────────────────────────────────────────────────────────────
+
+def _plugin_skill_roots(workspace: Path) -> list[Path]:
+    try:
+        from axon.commands.plugins import plugin_dirs
+        return [d / "skills" for d in plugin_dirs(workspace) if (d / "skills").is_dir()]
+    except Exception:
+        return []
+
 
 class SkillManager:
     def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace)
         self.skills: dict[str, Skill] = {}
         self.discover()
 
+    def skill_roots(self) -> list[tuple[Path, str]]:
+        home = Path.home()
+        roots: list[tuple[Path, str]] = [(r, "plugin") for r in _plugin_skill_roots(self.workspace)]
+        roots += [
+            (_axon_home() / "skills", "personal"),
+            (home / ".claude" / "skills", "personal"),
+            (self.workspace / ".claude" / "skills", "project"),
+            (self.workspace / ".axon" / "skills", "project"),
+        ]
+        return roots
+
     def discover(self) -> dict[str, Skill]:
-        """Discover skills from ~/.axon/skills and .axon/skills (project overrides personal)."""
         self.skills.clear()
-
-        # 1. Personal skills: ~/.axon/skills/<name>/SKILL.md
-        personal_root = Path.home() / ".axon" / "skills"
-        if personal_root.exists() and personal_root.is_dir():
-            for p in personal_root.glob("*/SKILL.md"):
-                s = self._load_skill(p, scope="personal")
-                if s:
-                    self.skills[s.name] = s
-
-        # 2. Project skills: .axon/skills/<name>/SKILL.md
-        proj_root = self.workspace / ".axon" / "skills"
-        if proj_root.exists() and proj_root.is_dir():
-            for p in proj_root.glob("*/SKILL.md"):
-                s = self._load_skill(p, scope="project")
-                if s:
-                    self.skills[s.name] = s
-
-        # 3. Built-in bundled skills
         self._register_bundled_skills()
-
+        for root, scope in self.skill_roots():
+            if not root.is_dir():
+                continue
+            for p in sorted(root.glob("*/SKILL.md")):
+                s = self._load_skill(p, scope)
+                if s:
+                    self.skills[s.name] = s
         return self.skills
 
     def _register_bundled_skills(self) -> None:
-        """Register default bundled skills covering reviews, debugging, subagent fan-out, refactoring, security, and tests."""
+        """Built-in prompt skills (overridable by a user skill of the same name)."""
         bundled = [
             Skill(
                 name="code-review",
@@ -111,14 +332,14 @@ class SkillManager:
             Skill(
                 name="deep-research",
                 description="Multi-round iterative deep research with sub-query planning, source crawling, and matrix synthesis.",
-                instructions="Deconstruct the complex topic into sub-topics. Use `DeepResearch` and `WebSearch` to investigate each angle. Build a comprehensive report with executive summary, comparative analysis tables, and verified citations.",
+                instructions="Deconstruct the complex topic into sub-topics. Use `WebSearch` to find sources and `WebFetch` to read them for each angle. Build a comprehensive report with executive summary, comparative analysis tables, and verified citations.",
                 path=Path("bundled://deep-research"),
                 scope="bundled",
             ),
             Skill(
                 name="table-search",
                 description="High-speed structured table scanning and matrix extraction across Markdown, CSV, and JSON data.",
-                instructions="Use `TableSearch` to locate, filter, and extract structured comparative tables, CSV datasets, and JSON records matching given keywords and column patterns.",
+                instructions="Use `Grep` and `CodeSearch` to locate Markdown tables, CSV datasets and JSON records matching the keywords, then `Read` them to filter and extract the matching rows and columns.",
                 path=Path("bundled://table-search"),
                 scope="bundled",
             ),
@@ -132,7 +353,7 @@ class SkillManager:
             Skill(
                 name="git-workflow",
                 description="Conventional commits, automated changelog entries, and branch management.",
-                instructions="Inspect recent changes via `Git(status)` and `Git(diff)`. Draft conventional commit messages (feat:, fix:, refactor:, test:) and update CHANGELOG.md.",
+                instructions="Inspect recent changes via `Bash` (`git status`, `git diff`). Draft conventional commit messages (feat:, fix:, refactor:, test:) and update CHANGELOG.md.",
                 path=Path("bundled://git-workflow"),
                 scope="bundled",
             ),
@@ -146,7 +367,7 @@ class SkillManager:
             Skill(
                 name="api-tester",
                 description="Automated HTTP/REST endpoint probing, payload validation, and latency benchmarking.",
-                instructions="Analyze API routes and schemas. Use `Http` to send GET/POST/PUT/DELETE requests, validate response codes, verify JSON schemas, and check status headers.",
+                instructions="Analyze API routes and schemas. Use `Bash` (curl or the project's HTTP client) to send GET/POST/PUT/DELETE requests, and `WebFetch` for public endpoints; validate response codes, JSON schemas and status headers.",
                 path=Path("bundled://api-tester"),
                 scope="bundled",
             ),
@@ -180,102 +401,86 @@ class SkillManager:
             ),
         ]
         for b in bundled:
-            if b.name not in self.skills:
-                self.skills[b.name] = b
+            self.skills[b.name] = b
 
     def _load_skill(self, path: Path, scope: str) -> Skill | None:
         try:
-            content = path.read_text(encoding="utf-8")
-            name = path.parent.name
-            desc = ""
-            body = content
-
-            # Parse YAML frontmatter
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    fm = parts[1]
-                    body = parts[2].strip()
-                    fm_data = self._parse_frontmatter(fm)
-                    name = fm_data.get("name", name) or name
-                    desc = fm_data.get("description", "")
-
-            return Skill(name=name, description=desc, instructions=body, path=path, scope=scope)
-        except Exception:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             return None
+        fm, body = parse_frontmatter(content)
+        raw_name = fm.get("name") if isinstance(fm.get("name"), str) else ""
+        name = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(raw_name or path.parent.name)).strip("-") or path.parent.name
+        desc = fm.get("description", "")
+        model = fm.get("model")
+
+        def flag(key: str, default: bool) -> bool:
+            v = fm.get(key, fm.get(key.replace("-", "_")))
+            return default if v is None else str(v).strip().lower() in ("true", "yes", "1", "on")
+
+        def text(key: str) -> str:
+            v = fm.get(key, fm.get(key.replace("_", "-"), ""))
+            return v if isinstance(v, str) else " ".join(v)
+
+        effort = text("effort")
+        agent_name = text("agent")
+        return Skill(
+            name=name,
+            description=desc if isinstance(desc, str) else " ".join(desc),
+            instructions=body,
+            path=path,
+            scope=scope,
+            allowed_tools=as_list(fm.get("allowed-tools") or fm.get("allowed_tools")),
+            argument_hint=_raw_hint(fm.get("argument-hint")),
+            model=model if isinstance(model, str) and model and model != "inherit" else None,
+            when_to_use=text("when_to_use"),
+            disallowed_tools=as_list(fm.get("disallowed-tools") or fm.get("disallowed_tools")),
+            arguments=as_list(fm.get("arguments")),
+            effort=effort or None,
+            paths=as_list(fm.get("paths")),
+            context=text("context").lower(),
+            agent=agent_name or None,
+            disable_model_invocation=flag("disable-model-invocation", False),
+            user_invocable=flag("user-invocable", True),
+        )
 
     @staticmethod
     def _parse_frontmatter(fm_text: str) -> dict[str, str]:
-        """Parse simple YAML frontmatter including multi-line block scalars (>-, |-, >, |)."""
-        result: dict[str, str] = {}
-        lines = fm_text.splitlines()
-        current_key: str | None = None
-        current_value_lines: list[str] = []
-        is_block_scalar = False
+        """Backward-compatible helper: parse a frontmatter block (without --- fences)."""
+        data, _ = parse_frontmatter(f"---\n{fm_text}\n---\n")
+        return {k: (v if isinstance(v, str) else ", ".join(v)) for k, v in data.items()}
 
-        def _flush() -> None:
-            if current_key is not None:
-                joined = " ".join(current_value_lines).strip()
-                # Strip surrounding quotes
-                if len(joined) >= 2 and joined[0] in ("'", '"') and joined[-1] == joined[0]:
-                    joined = joined[1:-1]
-                result[current_key] = joined
+    def get(self, name: str) -> Skill | None:
+        n = name.lstrip("/")
+        if n in self.skills:
+            return self.skills[n]
+        low = n.lower()
+        for k, v in self.skills.items():
+            if k.lower() == low:
+                return v
+        return None
 
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
+    def render(self, skill: Skill, arguments: str = "", allow_shell: ShellGate | None = None) -> str:
+        body = substitute_arguments(skill.instructions, arguments, getattr(skill, "arguments", None))
+        cwd = self.workspace
+        body = expand_shell_injections(body, cwd, allow_shell)
+        header = f"## Skill: /{skill.name}"
+        if skill.base_dir is not None:
+            header += f"\nBase directory for this skill: {skill.base_dir}"
+        return f"{header}\n\n{body}"
 
-            # Check if this is a new top-level key (not indented, contains colon)
-            if not line[0:1].isspace() and ":" in stripped:
-                _flush()
-                key, _, val = stripped.partition(":")
-                key = key.strip()
-                val = val.strip()
-                current_key = key
-                current_value_lines = []
-                is_block_scalar = False
-
-                if val in (">-", "|-", ">", "|"):
-                    # Block scalar indicator — value comes on subsequent indented lines
-                    is_block_scalar = True
-                elif val:
-                    current_value_lines.append(val)
-            elif current_key is not None and (is_block_scalar or line[0:1].isspace()):
-                # Continuation line for block scalar or multi-line value
-                current_value_lines.append(stripped)
-
-        _flush()
-        return result
-
-    def execute_skill(self, name: str) -> str:
-        """Resolve skill, inject dynamic context (!`cmd`), and return ready instructions."""
-        skill = self.skills.get(name)
+    def execute_skill(self, name: str, arguments: str = "", allow_shell: ShellGate | None = None) -> str:
+        """Resolve a skill and return its ready-to-send instructions."""
+        skill = self.get(name)
         if not skill:
             raise KeyError(f"Skill '{name}' not found.")
-
-        instructions = skill.instructions
-
-        # Dynamic context injection: replace !`command` with command stdout
-        def _replace_dyn(match: re.Match) -> str:
-            cmd = match.group(1)
-            try:
-                out = subprocess.check_output(cmd, shell=True, cwd=self.workspace, text=True, timeout=10)
-                return f"\n```\n{out.strip()}\n```\n"
-            except Exception as e:
-                return f"[Failed to execute `{cmd}`: {e}]"
-
-        rendered = re.sub(r"!`([^`]+)`", _replace_dyn, instructions)
-        return f"## Skill: /{skill.name}\n\n{rendered}"
+        return self.render(skill, arguments, allow_shell)
 
     def auto_match(self, user_input: str) -> list[Skill]:
-        """Automatically match and activate skills based on user intent keywords in prompt."""
+        """Suggest skills whose intent keywords appear in the prompt."""
         if not user_input or not user_input.strip():
             return []
-
         text = user_input.lower()
-        matched: list[Skill] = []
-
         intent_keywords = {
             "code-review": ("review", "audit code", "code review", "pr review", "inspect changes"),
             "debug": ("debug", "traceback", "fix error", "fix bug", "exception", "crash", "segfault"),
@@ -286,16 +491,72 @@ class SkillManager:
             "refactor": ("refactor", "clean up code", "redesign architecture", "technical debt"),
             "security-audit": ("security audit", "vulnerability", "sql injection", "xss", "cve"),
         }
-
+        matched: list[Skill] = []
         for skill_name, keywords in intent_keywords.items():
-            if skill_name in self.skills:
-                if any(kw in text for kw in keywords):
-                    matched.append(self.skills[skill_name])
-
-        # Also match explicit skill names (e.g. "use my-skill")
+            if skill_name in self.skills and any(kw in text for kw in keywords):
+                matched.append(self.skills[skill_name])
         for name, skill in self.skills.items():
-            if f"/{name}" in text or f"skill {name}" in text:
-                if skill not in matched:
-                    matched.append(skill)
-
+            if (f"/{name}" in text or f"skill {name}" in text) and skill not in matched:
+                matched.append(skill)
         return matched
+
+
+# ─── Agent-facing helpers ───────────────────────────────────────────────────
+
+_managers: dict[str, SkillManager] = {}
+
+
+def _manager_for(workspace: Path | None) -> SkillManager:
+    ws = Path(workspace or Path.cwd()).resolve()
+    key = str(ws)
+    mgr = _managers.get(key)
+    if mgr is None:
+        mgr = SkillManager(ws)
+        _managers[key] = mgr
+    return mgr
+
+
+def skills_prompt_section(skills: list[Skill]) -> str:
+    """System-prompt block listing skills (name + description only)."""
+    if not skills:
+        return ""
+    lines = [
+        "## Available Skills",
+        "Skills are task playbooks. When one is relevant, load its full instructions with the "
+        "Skill tool (or the user can run /<name>) before acting.",
+    ]
+    for s in sorted(skills, key=lambda x: x.name):
+        if getattr(s, "disable_model_invocation", False):
+            continue  # user-only skills are not advertised to the model
+        desc = " ".join((s.description or "").split())[:240]
+        when = " ".join((getattr(s, "when_to_use", "") or "").split())[:160]
+        if when:
+            desc = f"{desc} Use when: {when}" if desc else f"Use when: {when}"
+        paths = getattr(s, "paths", None) or []
+        if paths:
+            desc += f" (applies to {', '.join(paths[:4])})"
+        lines.append(f"- {s.name}: {desc}" if desc else f"- {s.name}")
+    return "\n".join(lines)
+
+
+def skill_content(name: str, workspace: Path | None = None, arguments: str = "") -> str:
+    """Full instructions of a skill for the agent's Skill tool. Shell injections are
+    not executed here (the agent can run commands itself, through permissions)."""
+    mgr = _manager_for(workspace)
+    skill = mgr.get(name)
+    if skill is None:
+        mgr.discover()
+        skill = mgr.get(name)
+    if skill is None:
+        available = ", ".join(sorted(k for k, v in mgr.skills.items() if not getattr(v, "disable_model_invocation", False))) or "none"
+        return f"Unknown skill '{name}'. Available skills: {available}"
+    if getattr(skill, "disable_model_invocation", False):
+        return f"Skill '{skill.name}' can only be run by the user (/{skill.name}); it is not available to the model."
+    return mgr.render(skill, arguments, allow_shell=None)
+
+
+def _raw_hint(value: object) -> str:
+    """``argument-hint: [env]`` is a hint string, not a YAML list: show it verbatim as "[env]"."""
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(str(v) for v in value) + "]"
+    return str(value or "")

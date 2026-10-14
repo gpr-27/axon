@@ -20,6 +20,9 @@ class ToolUseBlock:
     id: str
     name: str
     input: dict[str, Any]  # ALWAYS a parsed dict
+    # Set when the model emitted arguments that are not a JSON object; `input` then holds {"raw": ...}.
+    # The agent loop should answer such a call with an error tool_result instead of running it.
+    parse_error: str | None = field(default=None, compare=False)
 
 @dataclass(frozen=True)
 class ToolResultBlock:
@@ -38,6 +41,8 @@ class Usage:
     cache_read: int = 0
     cache_write: int = 0
     reasoning: int = 0
+    # Portion of cache_write written with the 1-hour TTL (billed higher than 5-minute writes).
+    cache_write_1h: int = 0
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
@@ -46,6 +51,7 @@ class Usage:
             cache_read=self.cache_read + other.cache_read,
             cache_write=self.cache_write + other.cache_write,
             reasoning=self.reasoning + other.reasoning,
+            cache_write_1h=self.cache_write_1h + getattr(other, "cache_write_1h", 0),
         )
 
 @dataclass
@@ -54,6 +60,7 @@ class AssistantTurn:
     stop_reason: StopReason = "end_turn"
     usage: Usage = field(default_factory=Usage)
     native: Any = None  # Provider-native payload replayed verbatim (ADR-003)
+    model: str | None = None  # model that actually produced the turn (differs from settings.model after failover)
 
     @property
     def tool_uses(self) -> list[ToolUseBlock]:
@@ -94,12 +101,18 @@ class ToolUseComplete:
 class ToolBatchStart:
     total_count: int
     tools: list[ToolUseBlock]
+    user_prompt: str = ""
+    mode: str = ""
 
 @dataclass(frozen=True)
 class ToolExecutionStart:
     id: str
     name: str
     input: dict[str, Any]
+    mode: str = ""
+    user_prompt: str = ""
+    rationale: str = ""          # the model's own words just before this call (never invented)
+    rationale_source: str = ""   # where the rationale came from: "text" | "thinking" | ""
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
@@ -121,6 +134,9 @@ class LLMCallStart:
     model: str
     message_count: int
     tokens_in: int = 0
+    tools_ingested: list[dict[str, Any]] = field(default_factory=list)
+    user_prompt: str = ""
+    mode: str = ""
 
 StreamEvent = (
     TextDelta
@@ -134,6 +150,79 @@ StreamEvent = (
     | ToolExecutionResult
     | TurnComplete
 )
+
+@dataclass(frozen=True)
+class ProviderRetry:
+    """Fallback retry/failover notice, used when axon.agent.trace.RetryEvent is unavailable.
+    Same fields as RetryEvent so trace consumers can treat both alike."""
+    attempt: int
+    max_attempts: int
+    delay_s: float
+    error: str
+    iteration: int = 0
+
+
+def retry_event(attempt: int, max_attempts: int, delay_s: float, error: str) -> Any:
+    """Build the trace's RetryEvent (preferred) or the local ProviderRetry equivalent."""
+    try:
+        from axon.agent.trace import RetryEvent  # CORE-owned event class
+        return RetryEvent(attempt=attempt, max_attempts=max_attempts, delay_s=delay_s, error=error)
+    except Exception:
+        return ProviderRetry(attempt=attempt, max_attempts=max_attempts, delay_s=delay_s, error=error)
+
+
+# ─── Shared helpers ───────────────────────────────────────────────────────
+def parse_tool_arguments(raw: str | dict[str, Any] | None) -> tuple[dict[str, Any], str | None]:
+    """Parse streamed tool-call arguments. Returns (input_dict, parse_error)."""
+    import json
+
+    if isinstance(raw, dict):
+        return raw, None
+    text = (raw or "").strip()
+    if not text:
+        return {}, None
+    try:
+        val = json.loads(text)
+    except (ValueError, TypeError) as e:
+        return {"raw": text}, f"Tool arguments are not valid JSON ({e})"
+    if not isinstance(val, dict):
+        return {"raw": text}, f"Tool arguments must be a JSON object, got {type(val).__name__}"
+    return val, None
+
+
+class StreamState:
+    """Per-stream accumulator. finalize() uses it to return a consistent turn even when the stream
+    was interrupted (KeyboardInterrupt / GeneratorExit / error) before completing."""
+
+    def __init__(self) -> None:
+        self.text_parts: list[str] = []
+        self.thinking_parts: list[str] = []
+        self.usage: Usage = Usage()
+        self.turn: AssistantTurn | None = None
+
+    @property
+    def text(self) -> str:
+        return "".join(self.text_parts)
+
+    @property
+    def thinking(self) -> str:
+        return "".join(self.thinking_parts)
+
+    def partial_turn(self, native_style: str) -> AssistantTurn:
+        """Turn built from what streamed so far. Never contains tool_use blocks (they would dangle)."""
+        text = self.text
+        blocks: list[Block] = []
+        if self.thinking:
+            blocks.append(ThinkingBlock(text=self.thinking))
+        if text:
+            blocks.append(TextBlock(text=text))
+        native: Any
+        if native_style == "anthropic":
+            native = [{"type": "text", "text": text}] if text else [{"type": "text", "text": "[interrupted]"}]
+        else:
+            native = {"role": "assistant", "content": text or "[interrupted]"}
+        return AssistantTurn(blocks=blocks, stop_reason="end_turn", usage=self.usage, native=native)
+
 
 # ─── Provider Protocol ────────────────────────────────────────────────────
 class Provider(Protocol):
@@ -164,3 +253,103 @@ class Provider(Protocol):
     def supports(self, feature: str) -> bool:
         """Check whether provider/model supports a given feature."""
         ...
+
+
+# ─── Cancellation of an in-flight HTTP stream ──────────────────────────────
+
+def abort_http_response(resp: Any) -> None:
+    """Abort a streaming HTTP response from *another* thread, waking a blocked socket read.
+
+    Closing an httpx response alone does not reliably interrupt a ``recv()`` blocked in a different
+    thread, so the underlying socket is shut down first (the read then returns immediately).
+    Accepts an ``httpx.Response`` or an object exposing one as ``.response`` (SDK stream wrappers).
+    """
+    import socket as _socket
+
+    target = getattr(resp, "response", None) if not hasattr(resp, "extensions") else resp
+    for obj in (target, resp):
+        try:
+            ns = (getattr(obj, "extensions", None) or {}).get("network_stream")
+            sock = ns.get_extra_info("socket") if ns is not None else None
+            if sock is not None:
+                sock.shutdown(_socket.SHUT_RDWR)
+                break
+        except Exception:
+            continue
+    for obj in (resp, target):
+        close = getattr(obj, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+class StreamCanceller:
+    """Per-thread registry of active streaming responses so ``cancel()`` can abort them.
+
+    Providers call :meth:`begin` when a stream starts, wrap each HTTP response in :meth:`track`
+    and call :meth:`check` after transport errors; :meth:`cancel` (from any thread) aborts the
+    blocked read and makes the streaming thread raise ``KeyboardInterrupt``.
+    """
+
+    def __init__(self) -> None:
+        import threading as _threading
+        self._lock = _threading.Lock()
+        self._active: dict[int, Any] = {}
+        self._cancelled: set[int] = set()
+
+    @staticmethod
+    def _me() -> int:
+        import threading as _threading
+        return _threading.get_ident()
+
+    def begin(self) -> None:
+        with self._lock:
+            self._cancelled.discard(self._me())
+
+    def check(self) -> None:
+        """Raise KeyboardInterrupt in the streaming thread when its stream was cancelled."""
+        me = self._me()
+        with self._lock:
+            hit = me in self._cancelled
+            self._cancelled.discard(me)
+        if hit:
+            raise KeyboardInterrupt
+
+    def track(self, resp: Any) -> "_Tracked":
+        return _Tracked(self, resp)
+
+    def cancel(self, thread_ident: int | None = None) -> bool:
+        """Abort the stream of *thread_ident* (default: every active stream). True if one was hit."""
+        with self._lock:
+            idents = [thread_ident] if thread_ident is not None else list(self._active)
+            hits = [(i, self._active.get(i)) for i in idents]
+            for i in idents:
+                if i is not None:
+                    self._cancelled.add(i)
+        aborted = False
+        for _, resp in hits:
+            if resp is not None:
+                abort_http_response(resp)
+                aborted = True
+        return aborted
+
+
+class _Tracked:
+    def __init__(self, owner: StreamCanceller, resp: Any) -> None:
+        self.owner, self.resp = owner, resp
+
+    def __enter__(self) -> Any:
+        me = self.owner._me()
+        with self.owner._lock:
+            self.owner._active[me] = self.resp
+            cancelled = me in self.owner._cancelled
+        if cancelled:  # cancelled while connecting
+            abort_http_response(self.resp)
+            self.owner.check()
+        return self.resp
+
+    def __exit__(self, *exc: Any) -> None:
+        with self.owner._lock:
+            self.owner._active.pop(self.owner._me(), None)

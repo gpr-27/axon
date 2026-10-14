@@ -1,0 +1,19 @@
+package main
+
+import "testing"
+
+func TestGreet(t *testing.T) {
+	cases := []struct {
+		name  string
+		shout bool
+		want  string
+	}{
+		{"Ada", false, "Hello, Ada!"},
+		{"Ada", true, "HELLO, ADA!"},
+	}
+	for _, c := range cases {
+		if got := Greet(c.name, c.shout); got != c.want {
+			t.Errorf("Greet(%q, %v) = %q, want %q", c.name, c.shout, got, c.want)
+		}
+	}
+}

@@ -56,7 +56,7 @@ def test_render_ui_boxes():
     from axon.agent.state import MessageQueue
     q = MessageQueue()
     q.push("Check migrations")
-    
+
     q_box = render_queue_box(q)
     assert "Check migrations" in q_box or "Pending" in q_box or "Queue" in q_box
 

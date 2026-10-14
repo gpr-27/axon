@@ -3,20 +3,16 @@ Real-time Token Status Bar and Live Metrics Visualizer for Axon.
 Renders visual token gauges, sparklines, latency metrics, and budget trackers.
 """
 from __future__ import annotations
-import math
-import sys
-import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, GREEN, ITALIC, LBLUE, MINT,
-    PURPLE, RED, ROSE, RST, SLATE, TEAL, WHITE, strip_ansi, term_width,
+    CYAN, DARK_SLATE, GOLD, LBLUE, MINT,
+    PURPLE, RED, RST, SLATE, TEAL, term_width,
 )
+from axon.platform import str_width
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
-    from axon.providers.base import Usage
 
 _SPARKLINE_CHARS = (" ", "▂", "▃", "▄", "▅", "▆", "▇", "█")
 
@@ -88,6 +84,7 @@ class StatusBar:
         subagent_count: int = 0,
         total_tokens: int | None = None,
         cost: float | None = None,
+        trace_level: str = "",
     ) -> str:
         """Construct the full styled Axon status line."""
         actual_tokens = context_tokens if context_tokens is not None else (total_tokens if total_tokens is not None else 0)
@@ -99,26 +96,30 @@ class StatusBar:
         gauge = cls.render_gauge(actual_tokens, context_capacity, width=10)
         spark = generate_sparkline(cls._token_history) if len(cls._token_history) >= 2 else ""
         spark_str = f" {CYAN}{spark}{RST}" if spark else ""
+        pct = 100.0 * actual_tokens / max(1, context_capacity)
+        extras = []
+        if tool_count > 0:
+            extras.append(f"{MINT}⏺ {tool_count} tools{RST}")
+        if subagent_count > 0:
+            extras.append(f"{LBLUE}{subagent_count} subagents{RST}")
+        extra_str = (f" {DARK_SLATE}·{RST} " + f" {DARK_SLATE}·{RST} ".join(extras)) if extras else ""
+        try:
+            from axon.ui.render import render_status_line  # shared status-line format
+            core = render_status_line(model, mode=mode, context_pct=pct, session_cost=actual_cost,
+                                      trace_level=trace_level, width=w)
+        except (ImportError, AttributeError, TypeError):
+            core = (f"{TEAL}{model}{RST} {DARK_SLATE}·{RST} {PURPLE}{mode}{RST} {DARK_SLATE}·{RST} "
+                    f"ctx {pct:.0f}% {DARK_SLATE}·{RST} {GOLD}${actual_cost:.4f}{RST}")
+        left_side = f"  {DARK_SLATE}│{RST} {core} {DARK_SLATE}·{RST} {SLATE}{effort}{RST}{extra_str}"
+        right_side = f"{SLATE}{tok_str}/{cap_str}{RST} {gauge}{spark_str} {DARK_SLATE}│{RST}"
 
-        cost_str = f"{GOLD}${actual_cost:.4f}{RST}"
-        mode_str = f"{PURPLE}{mode}{RST}"
-        model_str = f"{TEAL}{model}{RST}"
-        effort_str = f"{SLATE}{effort}{RST}"
-
-        sub_part = f" · {LBLUE}🤖 {subagent_count}{RST}" if subagent_count > 0 else ""
-        tools_part = f" · {MINT}⏺ {tool_count}{RST}" if tool_count > 0 else ""
-
-        left_side = f"  {DARK_SLATE}│{RST} {model_str} {DARK_SLATE}•{RST} {effort_str} {DARK_SLATE}•{RST} {mode_str}{tools_part}{sub_part}"
-        right_side = f"Context: {tok_str}/{cap_str} {gauge}{spark_str} {DARK_SLATE}│{RST} {cost_str} {DARK_SLATE}│{RST}"
-
-        left_len = len(strip_ansi(left_side))
-        right_len = len(strip_ansi(right_side))
+        left_len = str_width(left_side)
+        right_len = str_width(right_side)
         spacing = max(2, w - left_len - right_len)
-
-        top_border = f"  {DARK_SLATE}┌{'─' * (w - 2)}┐{RST}"
+        inner = max(2, left_len + spacing + right_len - 4)
+        top_border = f"  {DARK_SLATE}┌{'─' * inner}┐{RST}"
         mid_line = f"{left_side}{' ' * spacing}{right_side}"
-        bot_border = f"  {DARK_SLATE}└{'─' * (w - 2)}┘{RST}"
-
+        bot_border = f"  {DARK_SLATE}└{'─' * inner}┘{RST}"
         return f"\n{top_border}\n{mid_line}\n{bot_border}\n"
 
     @classmethod
@@ -137,8 +138,11 @@ class StatusBar:
             active_context_tok = agent.conversation.token_estimate() + 7200
 
         cls.record_tokens(active_context_tok)
-        from axon.providers.registry import get_context_window
-        cap = get_context_window(agent.settings.model)
+        try:
+            from axon.providers.registry import get_context_window
+            cap = get_context_window(agent.settings.model)
+        except (ImportError, AttributeError):
+            cap = 200_000
         sub_count = len(agent.subagents.all_tasks()) if hasattr(agent, "subagents") and agent.subagents else 0
         bar = cls.format_bar(
             model=agent.settings.model,
@@ -148,5 +152,6 @@ class StatusBar:
             context_capacity=cap,
             session_cost=float(agent.ledger.total()),
             subagent_count=sub_count,
+            trace_level=str(getattr(getattr(agent, "renderer", None), "trace_level", "") or ""),
         )
         print(bar)

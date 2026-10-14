@@ -1,0 +1,15 @@
+import { describe, expect, it } from "vitest";
+import { renderToString } from "react-dom/server";
+import App, { nextCount } from "./App.jsx";
+
+describe("App", () => {
+  it("renders the title and counter", () => {
+    const html = renderToString(<App />);
+    expect(html).toContain("{{title}}");
+    expect(html).toContain("count is");
+  });
+
+  it("increments", () => {
+    expect(nextCount(1)).toBe(2);
+  });
+});

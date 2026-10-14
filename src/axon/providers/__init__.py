@@ -21,7 +21,9 @@ from axon.providers.base import (
 )
 from axon.providers.anthropic import AnthropicProvider
 from axon.providers.openai_compat import OpenAICompatProvider
-from axon.providers.registry import provider_for, known_models, PRICING
+from axon.providers.registry import provider_for, known_models, PRICING, resolve_api_key, resolve_route
+from axon.providers.pricing import cost_for, cost_details, price_for
+from axon.providers.failover import FailoverProvider
 
 __all__ = [
     "Block",
@@ -45,4 +47,10 @@ __all__ = [
     "provider_for",
     "known_models",
     "PRICING",
+    "resolve_api_key",
+    "resolve_route",
+    "cost_for",
+    "cost_details",
+    "price_for",
+    "FailoverProvider",
 ]

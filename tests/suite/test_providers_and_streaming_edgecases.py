@@ -26,7 +26,7 @@ from axon.providers.openai_compat import OpenAICompatProvider
     ("claude-sonnet-4", 200_000),
     ("claude-3-7-sonnet-20250219", 200_000),
     ("gpt-5.6-sol", 1_000_000),
-    ("gpt-5-mini", 1_000_000),
+    ("gpt-5-mini", 400_000),  # OpenAI gpt-5 family: 400k context
     ("gpt-4o", 128_000),
     ("deepseek-v4-flash", 1_000_000),
     ("deepseek-r1", 128_000),
@@ -90,7 +90,8 @@ def test_usage_prompt_caching_normalization():
     assert (usage.cache_read / usage.input * 100) > 96.0
 
 def test_turn_footer_tokens_rendered():
-    import io, sys
+    import io
+    import sys
     from axon.ui.render import Renderer
     r = Renderer()
     usage = Usage(input=6835, output=52, cache_read=6600)
@@ -107,7 +108,8 @@ def test_turn_footer_tokens_rendered():
     assert "52 out" in out
 
 def test_handle_breakdown_command(workspace):
-    import io, sys
+    import io
+    import sys
     from unittest.mock import MagicMock
     from axon.agent.state import Conversation
     from axon.commands.builtin import handle_breakdown, dispatch_command
@@ -349,4 +351,47 @@ def test_gpt6_astra_error_recovery_to_responses(workspace):
         assert call_count == 2
         turn = provider.finalize()
         assert turn.text == "Recovered via Response protocol"
+
+def test_openai_streaming_null_fields_resilience():
+    """Verify that chunks with delta=None or function=None never raise 'NoneType' object has no attribute 'get'."""
+    from unittest.mock import MagicMock, patch
+    from axon.config import Settings
+    from axon.providers.openai_compat import OpenAICompatProvider
+
+    settings = Settings(base_url="https://agentrouter.org", api_key="test_key")
+    provider = OpenAICompatProvider(settings)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.iter_lines.return_value = [
+        'data: null',
+        'data: {"choices": [{"index": 0, "delta": {"reasoning_content": "Thinking step"}}]}',
+        'data: {"choices": [{"index": 0, "delta": null, "finish_reason": null}]}',
+        'data: {"choices": [{"index": 0, "delta": {"content": "Hello there"}}]}',
+        'data: {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": null}]}}]}',
+        r'data: {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "Ls", "arguments": "{\"path\": \".\"}"}}]}}]}',
+        'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}',
+        'data: {"usage": {"prompt_tokens": 20, "completion_tokens": 10, "prompt_tokens_details": null, "completion_tokens_details": null}}',
+        'data: [DONE]',
+    ]
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = mock_resp
+
+    with patch("httpx.stream", return_value=mock_ctx):
+        events = list(provider.stream(
+            model="deepseek-v4-flash",
+            system=[],
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+            max_tokens=1000,
+        ))
+
+    turn = provider.finalize()
+    assert turn.text == "Hello there"
+    assert turn.stop_reason == "tool_use"
+    assert len(turn.tool_uses) == 1
+    assert turn.tool_uses[0].name == "Ls"
+    assert turn.usage.input == 20
+
 

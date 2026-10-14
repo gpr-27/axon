@@ -1,595 +1,236 @@
 """
-Interactive Session & Chat Switcher Dashboard (matching Claude Code UI).
-100% flicker-free in-place terminal redraws with arrow navigation.
+Interactive session switcher (Left arrow on an empty prompt, or /sessions).
+
+Built on the shared Selector; session data comes from axon.session.store.
 """
 from __future__ import annotations
-import json
-import os
-import signal
-import sys
+
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
-try:
-    import termios
-    import tty
-    _HAS_TERMIOS = True
-except ModuleNotFoundError:
-    termios = None  # type: ignore
-    tty = None      # type: ignore
-    _HAS_TERMIOS = False
-
-from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, MINT, RST, ROSE, SLATE, TEAL, UNDER, WHITE,
-    strip_ansi, term_width,
-)
+from axon import platform as plat
+from axon.session.store import DashboardSession, clean_session_topic, load_dashboard_sessions
+from axon.ui.picker import SelectItem, Selector
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, WHITE
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
+_HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
+_clean_session_topic = clean_session_topic
+NEW_SESSION_PREFIX = "__NEW_SESSION__:"
+
+__all__ = ["DashboardSession", "categorize_session_time", "format_time_ago", "load_dashboard_sessions",
+           "run_session_dashboard", "_clean_session_topic"]
+
+
 def format_time_ago(ts: float) -> str:
-    """Format timestamp into human-readable relative string (24s, 3m, 2h, 11d)."""
+    """Compact relative time: 24s, 3m, 2h, 11d."""
     diff = max(0, time.time() - ts)
     if diff < 60:
         return f"{int(diff)}s"
-    elif diff < 3600:
+    if diff < 3600:
         return f"{int(diff // 60)}m"
-    elif diff < 86400:
+    if diff < 86400:
         return f"{int(diff // 3600)}h"
-    else:
-        return f"{int(diff // 86400)}d"
+    return f"{int(diff // 86400)}d"
+
 
 def categorize_session_time(ts: float) -> str:
-    """Group timestamps into Today, Yesterday, Previous 7 Days, and Older."""
-    from datetime import datetime
-    now = time.time()
-    dt_now = datetime.fromtimestamp(now)
-    dt_ts = datetime.fromtimestamp(ts)
-    diff_days = (dt_now.date() - dt_ts.date()).days
+    """Today, Yesterday, Previous 7 Days or Older."""
+    diff_days = (datetime.now().date() - datetime.fromtimestamp(ts).date()).days
     if diff_days <= 0:
         return "Today"
-    elif diff_days == 1:
+    if diff_days == 1:
         return "Yesterday"
-    elif 2 <= diff_days <= 7:
+    if diff_days <= 7:
         return "Previous 7 Days"
-    else:
-        return "Older"
-
-def _clean_session_topic(text: str) -> str:
-    """Extract clean, human-friendly topic string from prompt text."""
-    import re
-    t = re.sub(r'```[\s\S]*?```', '', text)
-    t = re.sub(r'`[^`]*`', '', t)
-    t = re.sub(r'[*_#~>]', '', t)
-    t = re.sub(r'^[!\/@\-\*\d\.\s]+', '', t).strip()
-    t = " ".join(t.split())
-    if not t:
-        return ""
-    return t[0].upper() + t[1:]
-
-from dataclasses import dataclass, field
-
-@dataclass
-class DashboardSession:
-    id: str
-    title: str
-    last_message: str
-    status: str  # "needs_input", "working", "completed"
-    updated_at: float
-    is_current: bool
-    path: Path
-    total_tokens: int = 0
-    message_count: int = 0
-    tags: list[str] = field(default_factory=list)
-    is_starred: bool = False
-
-def load_dashboard_sessions(workspace: Path, active_id: str, limit: int | None = None, session_dir: Path | None = None) -> list[DashboardSession]:
-    """Scan all session JSONL files and subagents to build structured session list."""
-    from datetime import datetime
-    if session_dir is not None:
-        target_session_dir = session_dir
-    elif str(workspace).startswith(("/tmp", "/var/folders", "/private/var")):
-        target_session_dir = workspace.parent / ".global_axon" / "sessions"
-    else:
-        target_session_dir = Path.home() / ".axon" / "sessions"
-
-    target_session_dir.mkdir(parents=True, exist_ok=True)
-    all_files = sorted(target_session_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    # Exclude sub-agent sessions (_sub_*) — they are only viewable via /subagents
-    files = [f for f in all_files if "_sub_" not in f.stem]
-
-    sessions: list[DashboardSession] = []
-    target_files = files[:limit] if limit is not None else files
-    
-    for f in target_files:
-        sid = f.stem
-        is_curr = (sid == active_id)
-        mtime = f.stat().st_mtime
-        title = ""
-        custom_title: str | None = None
-        last_msg = ""
-        user_prompts: list[str] = []
-        assistant_texts: list[str] = []
-        session_tags: list[str] = []
-        is_starred: bool = False
-        total_tokens = 0
-        line_count = 0
-        
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as s_file:
-                for line in s_file:
-                    if not line.strip():
-                        continue
-                    line_count += 1
-                    try:
-                        entry = json.loads(line)
-                        t = entry.get("type")
-                        data = entry.get("data", {})
-                        if t == "session_rename":
-                            r_title = data.get("title")
-                            if r_title:
-                                custom_title = r_title.strip()
-                        elif t == "session_tag":
-                            tg = data.get("tag")
-                            if tg and tg not in session_tags:
-                                session_tags.append(tg)
-                        elif t == "session_star":
-                            is_starred = bool(data.get("starred", True))
-                        elif t == "user_message":
-                            txt = data.get("content", "")
-                            if isinstance(txt, str) and txt.strip():
-                                user_prompts.append(txt.strip())
-                                last_msg = txt.splitlines()[-1].strip()[:65]
-                            elif isinstance(txt, list):
-                                for blk in txt:
-                                    if isinstance(blk, dict) and blk.get("text"):
-                                        user_prompts.append(blk["text"].strip())
-                                        last_msg = blk["text"].splitlines()[-1].strip()[:65]
-                        elif t == "assistant_turn":
-                            txt = data.get("text", "")
-                            if txt and isinstance(txt, str):
-                                assistant_texts.append(txt.strip())
-                                last_msg = txt.splitlines()[0].strip()[:65]
-                            u = data.get("usage")
-                            if u and isinstance(u, dict):
-                                total_tokens += int(u.get("input", 0)) + int(u.get("output", 0))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # Generate intelligent, meaningful topic title
-        if custom_title:
-            title = custom_title[:28]
-        elif user_prompts:
-            # Pick first substantial user prompt
-            for p in user_prompts:
-                p_clean = _clean_session_topic(p)
-                if len(p_clean) > 3 and p_clean.lower() not in ("hi", "hello", "hey", "test"):
-                    title = p_clean[:28]
-                    break
-            if not title:
-                title = _clean_session_topic(user_prompts[0])[:28]
-        elif assistant_texts:
-            title = _clean_session_topic(assistant_texts[0])[:28]
-
-        if not title:
-            dt = datetime.fromtimestamp(mtime)
-            title = f"New Session ({dt.strftime('%I:%M %p').lstrip('0')})"
-
-        if is_curr and not last_msg:
-            last_msg = "Active workspace session"
-
-        # Determine status
-        status = "needs_input"
-        if "completed" in last_msg.lower() or "done" in last_msg.lower() or "binary search" in title.lower():
-            status = "completed"
-
-        sessions.append(
-            DashboardSession(
-                id=sid,
-                title=title,
-                last_message=last_msg or "Ready for prompt",
-                status=status,
-                updated_at=mtime,
-                is_current=is_curr,
-                path=f,
-                total_tokens=total_tokens,
-                message_count=line_count,
-                tags=session_tags,
-                is_starred=is_starred,
-            )
-        )
-
-    return sessions
+    return "Older"
 
 
-def run_session_dashboard(agent: Agent) -> str | None:
-    """
-    Renders interactive 100% flicker-free session switcher matching Claude Code UI.
-    Returns target session_id to switch to, or a new user prompt string, or None if cancelled.
-    """
-    if not sys.stdin.isatty():
-        return None
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
-    workspace = agent.settings.workspace
-    active_id = agent.session.active_session_id
-    raw_sessions = load_dashboard_sessions(workspace, active_id)
 
-    # Determine last message and title for current session from memory or disk
-    curr_found = next((s for s in raw_sessions if s.id == active_id), None)
-    last_m = "Active workspace session"
-    curr_title = curr_found.title if (curr_found and curr_found.title) else "New Session"
-    if agent.conversation.messages:
-        for m in reversed(agent.conversation.messages):
-            c = m.get("content", "")
-            if isinstance(c, str) and c.strip():
-                last_m = c.splitlines()[-1].strip()[:65]
+def _current_entry(agent: Agent, found: DashboardSession | None) -> DashboardSession:
+    """Merge on-disk data for the active session with live in-memory state."""
+    messages = list(getattr(getattr(agent, "conversation", None), "messages", []) or [])
+    title = found.title if found and found.title else ""
+    if not title or title.startswith("New Session"):
+        for m in messages:
+            c = m.get("content", "") if isinstance(m, dict) else ""
+            if m.get("role") == "user" and isinstance(c, str) and c.strip():
+                title = clean_session_topic(c)[:32] or title
                 break
-        for m in agent.conversation.messages:
-            if m.get("role") == "user":
-                c = m.get("content", "")
-                if isinstance(c, str) and c.strip():
-                    p_clean = c.splitlines()[0].strip()
-                    if len(p_clean) > 3 and p_clean.lower() not in ("hi", "hello", "hey", "test"):
-                        curr_title = p_clean[:32]
-                        break
-                    elif curr_title == "New Session":
-                        curr_title = p_clean[:32]
-    elif curr_found and curr_found.last_message:
-        last_m = curr_found.last_message
-
-    mem_tokens = agent.ledger.total_input_tokens + agent.ledger.total_output_tokens
-    curr_tokens = max(curr_found.total_tokens if curr_found else 0, mem_tokens)
-    curr_msg_count = max(curr_found.message_count if curr_found else 0, len(agent.conversation.messages))
-
-    curr_entry = DashboardSession(
-        id=active_id,
-        title=curr_title,
-        last_message=last_m,
+    last = found.last_message if found else ""
+    for m in reversed(messages):
+        c = m.get("content", "") if isinstance(m, dict) else ""
+        if isinstance(c, str) and c.strip():
+            last = c.strip().splitlines()[-1][:80]
+            break
+    ledger = getattr(agent, "ledger", None)
+    mem_tokens = int(getattr(ledger, "total_input_tokens", 0) or 0) + int(getattr(ledger, "total_output_tokens", 0) or 0)
+    try:
+        cost = float(agent.get_combined_cost()) if hasattr(agent, "get_combined_cost") else float(ledger.total())
+    except Exception:
+        cost = 0.0
+    return DashboardSession(
+        id=agent.session.active_session_id,
+        title=title or "New Session",
+        last_message=last or "Active session",
         status="needs_input",
         updated_at=time.time(),
         is_current=True,
-        path=curr_found.path if curr_found else agent.session.active_file,
-        total_tokens=curr_tokens,
-        message_count=curr_msg_count,
+        path=found.path if found else agent.session.active_file,
+        total_tokens=max(found.total_tokens if found else 0, mem_tokens),
+        message_count=max(found.message_count if found else 0, len(messages)),
+        tags=list(found.tags) if found else [],
+        is_starred=found.is_starred if found else False,
+        total_cost=max(found.total_cost if found else 0.0, cost),
     )
 
-    # Guarantee current session is strictly at top (index 0)
-    sessions = [curr_entry] + [s for s in raw_sessions if s.id != active_id]
 
-    selected_idx = 0
-    buffer: list[str] = []
-    cursor_pos = 0
+def _session_row(s: DashboardSession) -> Any:
+    def render(selected: bool, width: int) -> str:
+        star = f"{GOLD}★{RST}" if s.is_starred else f"{DARK_SLATE}☆{RST}"
+        dot = f"{MINT}●{RST}" if s.is_current else " "
+        title = " ".join(s.title.split())
+        title_s = plat.pad_to(plat.truncate_ansi(title, 26), 26)
+        title_s = f"{BOLD}{WHITE}{title_s}{RST}" if selected else (f"{MINT}{title_s}{RST}" if s.is_current else f"{WHITE}{title_s}{RST}")
+        tag = f"{CYAN}#{s.tags[0][:10]}{RST}" if s.tags else ""
+        tag_s = plat.pad_to(tag, 12)
+        cost = f"{GOLD}${s.total_cost:.4f}{RST}" if s.total_cost > 0 else f"{DARK_SLATE}$0.0000{RST}"
+        meta = f"{cost} {DARK_SLATE}·{RST} {SLATE}{_fmt_tokens(s.total_tokens)} tok · {format_time_ago(s.updated_at)}{RST}"
+        left = f"{dot} {star} {title_s} {tag_s} "
+        room = width - plat.str_width(left) - plat.str_width(meta) - 2
+        preview = plat.truncate_ansi(" ".join(s.last_message.split()), max(0, room)) if room > 8 else ""
+        gap = max(1, width - plat.str_width(left) - plat.str_width(preview) - plat.str_width(meta))
+        return f"{left}{SLATE}{preview}{RST}{' ' * gap}{meta}"
+    return render
 
-    # All sessions list
-    flat_list = sessions
 
-    rendered_lines = 0
-
-    if not sys.stdin.isatty() or not _HAS_TERMIOS or termios is None:
+def run_session_dashboard(agent: Agent) -> str | None:
+    """Show the switcher. Returns a session id to switch to, "__NEW_SESSION__:<prompt>" to start
+    a new chat (optionally with a first prompt), or None to stay in the current session."""
+    if not plat.is_interactive():
         return None
 
-    fd = sys.stdin.fileno()
-    old_attr = termios.tcgetattr(fd)
+    workspace = agent.settings.workspace
+    state: dict[str, Any] = {"active": agent.session.active_session_id, "buffer": ""}
 
-    # Clean screen for fixed full-viewport dashboard
-    if sys.stdin.isatty():
-        sys.stdout.write("\033[3J\033[H\033[2J")
-        sys.stdout.flush()
+    def load() -> list[DashboardSession]:
+        raw = load_dashboard_sessions(workspace, state["active"])
+        found = next((s for s in raw if s.id == state["active"]), None)
+        return [_current_entry(agent, found)] + [s for s in raw if s.id != state["active"]]
 
+    sessions = load()
 
-    def draw(initial: bool = False):
-        nonlocal rendered_lines
-        tw = term_width()
-        width = max(50, tw - 4)
-        
-        lines_out: list[str] = []
-        
-        # Clean title banner
-        lines_out.append("")
-        lines_out.append(f"  {TEAL}▲{CYAN}█{MINT}▲  {BOLD}{WHITE}Previous Chats{RST} {SLATE}· {len(flat_list)} chats · ↑/↓ navigate · Enter open · (r)ename · (t)ag · (s)tar · Esc return{RST}")
-        lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
+    def build_items() -> list[SelectItem]:
+        items = [SelectItem(label=s.title, value=s, group=categorize_session_time(s.updated_at), render=_session_row(s))
+                 for s in sessions]
 
-        # Render scrollable list of all previous chats with categorized time headers
-        max_visible = 12
-        start_v = max(0, min(selected_idx - max_visible // 2, max(0, len(flat_list) - max_visible)))
-        end_v = min(len(flat_list), start_v + max_visible)
+        def render_new(selected: bool, width: int) -> str:
+            buf = state["buffer"]
+            if buf:
+                return f"{CYAN}{BOLD}＋ New chat:{RST} {WHITE}{buf}{RST}{CYAN}▏{RST}"
+            label = "＋ Start a new chat" + ("  (type a first prompt)" if selected else "")
+            return f"{CYAN}{BOLD}{label}{RST}" if selected else f"{SLATE}{label}{RST}"
+        items.append(SelectItem(label="new", value="__new__", group=" ", render=render_new))
+        return items
 
-        current_category: str | None = None
+    def subtitle() -> str:
+        total = sum(s.total_cost for s in sessions)
+        toks = sum(s.total_tokens for s in sessions)
+        return f"{len(sessions)} chats · ${total:.4f} · {_fmt_tokens(toks)} tok"
 
-        for idx in range(start_v, end_v):
-            s = flat_list[idx]
-            cat = categorize_session_time(s.updated_at)
-            if cat != current_category:
-                current_category = cat
-                lines_out.append(f"  {GOLD}{BOLD}{cat}{RST}")
+    def refresh(sel: Selector) -> None:
+        nonlocal sessions
+        sessions = load()
+        sel.subtitle = subtitle()
+        sel.set_items(build_items())
 
-            is_sel = (idx == selected_idx)
-            cursor_mark = f"{MINT}▶{RST}" if is_sel else " "
-            clean_title = " ".join(s.title.split())[:20]
-            tag_badge = f" {CYAN}#{s.tags[0]}{RST}" if s.tags else ""
+    def on_key(sel: Selector, key: str) -> bool:
+        cur = sel.current()
+        on_new = cur is not None and cur.value == "__new__"
+        session: DashboardSession | None = cur.value if (cur is not None and not on_new) else None
+        if on_new:
+            if key == "enter":
+                sel.finish(NEW_SESSION_PREFIX + state["buffer"].strip())
+                return True
+            if key == "backspace":
+                state["buffer"] = state["buffer"][:-1]
+                return True
+            if key.startswith(plat.PASTE_PREFIX):
+                state["buffer"] += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+                return True
+            if len(key) == 1 and key >= " ":
+                state["buffer"] += key
+                return True
+            if key == "esc" and state["buffer"]:
+                state["buffer"] = ""
+                return True
+            return False
+        if key == "enter":
+            if session is not None:
+                sel.finish(None if session.is_current else session.id)
+            return True
+        if key in ("left", "esc"):
+            sel.finish(None)
+            return True
+        if key in ("n", "/", "end"):
+            sel.index = len(sel.items) - 1
+            return True
+        if session is None:
+            return False
+        if key in ("s", "*"):
+            starred = agent.session.star_session(session.id)
+            session.is_starred = bool(starred)
+            sel.flash(f"★ {'Starred' if starred else 'Unstarred'} “{session.title}”", GOLD)
+            return True
+        if key == "r":
+            new_title = sel.prompt_line(f"{GOLD}Rename “{session.title}” to:{RST} ")
+            if new_title:
+                agent.session.rename_session(new_title, session.id)
+                session.title = new_title
+                sel.flash(f"✓ Renamed to “{new_title}”")
+            return True
+        if key == "t":
+            tag = sel.prompt_line(f"{CYAN}Tag (empty removes):{RST} ", default=session.tags[0] if session.tags else "",
+                                  allow_empty=True)
+            if tag is not None:
+                clean = tag.strip().lstrip("#")
+                agent.session.tag_session(clean if clean and clean != "-" else "", session.id)
+                session.tags = [clean] if clean and clean != "-" else []
+                sel.flash(f"✓ Tag set to #{clean}" if session.tags else "✓ Tag removed")
+            return True
+        if key in ("d", "delete"):
+            if sel.confirm(f"Delete chat “{session.title}” permanently?"):
+                agent.session.delete_session(session.id)
+                state["active"] = agent.session.active_session_id
+                refresh(sel)
+                sel.flash("✓ Chat deleted")
+            return True
+        if key == "D":
+            if sel.confirm(f"Delete ALL {len(sessions)} chats permanently?"):
+                count = agent.session.delete_all_sessions()
+                state["active"] = agent.session.active_session_id
+                refresh(sel)
+                sel.flash(f"✓ Deleted {count} chats")
+            return True
+        return False
 
-            if s.is_starred:
-                star = f"{GOLD}★{RST}"
-            elif s.is_current:
-                star = f"{MINT}●{RST}"
-            else:
-                star = f"{DARK_SLATE}•{RST}"
-
-            if s.is_current:
-                t_str = f"{MINT}{BOLD}{clean_title:<20}{RST}{tag_badge}" if not is_sel else f"{MINT}{BOLD}{UNDER}{clean_title:<20}{RST}{tag_badge}"
-            else:
-                t_str = f"{WHITE}{clean_title:<20}{RST}{tag_badge}" if not is_sel else f"{WHITE}{BOLD}{UNDER}{clean_title:<20}{RST}{tag_badge}"
-
-            if s.total_tokens >= 1000:
-                tok_part = f" ({s.total_tokens / 1000:.1f}k tok)"
-            elif s.total_tokens > 0:
-                tok_part = f" ({s.total_tokens} tok)"
-            else:
-                tok_part = ""
-
-            time_str = f"current · {format_time_ago(s.updated_at)}{tok_part}" if s.is_current else f"{format_time_ago(s.updated_at)}{tok_part}"
-            max_msg = max(8, width - 42 - len(strip_ansi(time_str)) - len(strip_ansi(tag_badge)))
-            msg_preview = " ".join(s.last_message.split())[:max_msg]
-            pad = max(2, width - 28 - len(msg_preview) - len(strip_ansi(time_str)) - len(strip_ansi(tag_badge)))
-
-            if is_sel:
-                line_str = f"  {cursor_mark} {star} {t_str} {SLATE}{msg_preview}{' ' * pad}{SLATE}{time_str}{RST}"
-            else:
-                line_str = f"    {star} {t_str} {SLATE}{msg_preview}{' ' * pad}{SLATE}{time_str}{RST}"
-            lines_out.append(line_str)
-
-        lines_out.append(f"  {DARK_SLATE}{'─' * width}{RST}")
-        if len(flat_list) > max_visible:
-            lines_out.append(f"  {SLATE}(Showing {start_v + 1}–{end_v} of {len(flat_list)} chats · scroll with ↑/↓){RST}")
-
-        # New chat option at the bottom
-        is_new_sel = (selected_idx == len(flat_list))
-        cursor_new = f"{MINT}▶{RST}" if is_new_sel else " "
-        buf_str = "".join(buffer)
-        if buf_str:
-            t_new = f"{CYAN}{BOLD}➕ Start a new chat:{RST} {WHITE}{BOLD}{buf_str}{RST}"
-            desc_new = f"{MINT}↵ Send prompt{RST}"
-        else:
-            t_new = f"{CYAN}{BOLD}➕ Start a new chat{RST}" if is_new_sel else f"{SLATE}➕ Start a new chat{RST}"
-            desc_new = f"{DARK_SLATE}↵ Open fresh session{RST}"
-
-
-        pad_new = max(2, width - len(strip_ansi(t_new)) - len(strip_ansi(desc_new)) - 6)
-        if is_new_sel:
-            lines_out.append(f"  {cursor_new} {t_new}{' ' * pad_new}{desc_new}")
-        else:
-            lines_out.append(f"    {t_new}{' ' * pad_new}{desc_new}")
-
-        # Absolute origin fixed terminal write
-        sys.stdout.write("\033[H")
-        output_str = "\n".join([f"\033[2K\r{l}" for l in lines_out])
-        sys.stdout.write(output_str + "\n\033[J")
-        sys.stdout.flush()
-        rendered_lines = len(lines_out)
-
-    try:
-        tty.setcbreak(fd)
-        draw(initial=True)
-        
-        while True:
-            raw_bytes = os.read(fd, 1024)
-            if not raw_bytes:
-                break
-
-            total_items = len(flat_list) + 1
-
-            # Esc -> Return back to active session
-            if raw_bytes == b"\x1b":
-                return None
-
-            # Ctrl+C -> Quit dashboard
-            if raw_bytes == b"\x03":
-                return None
-
-            # Down Arrow
-            if raw_bytes.startswith((b"\x1b[B", b"\x1bOB")):
-                selected_idx = (selected_idx + 1) % total_items
-                draw()
-                continue
-
-            # Up Arrow
-            if raw_bytes.startswith((b"\x1b[A", b"\x1bOA")):
-                selected_idx = (selected_idx - 1) % total_items
-                draw()
-                continue
-
-            # Left Arrow
-            if raw_bytes.startswith((b"\x1b[D", b"\x1bOD")):
-                if buffer:
-                    if cursor_pos > 0:
-                        cursor_pos -= 1
-                        draw()
-                else:
-                    # Return back to active session cleanly
-                    return None
-                continue
-
-            # Right Arrow
-            if raw_bytes.startswith((b"\x1b[C", b"\x1bOC")):
-                if buffer:
-                    if cursor_pos < len(buffer):
-                        cursor_pos += 1
-                        draw()
-                else:
-                    # Return back to active session cleanly
-                    return None
-                continue
-
-            # Page Up
-            if raw_bytes.startswith(b"\x1b[5~"):
-                selected_idx = max(0, selected_idx - 10)
-                draw()
-                continue
-
-            # Page Down
-            if raw_bytes.startswith(b"\x1b[6~"):
-                selected_idx = min(total_items - 1, selected_idx + 10)
-                draw()
-                continue
-
-            # Home key
-            if raw_bytes in (b"\x1b[H", b"\x1b[1~", b"\x01", b"\x1bOH"):
-                if buffer:
-                    cursor_pos = 0
-                else:
-                    selected_idx = 0
-                draw()
-                continue
-
-            # End key
-            if raw_bytes in (b"\x1b[F", b"\x1b[4~", b"\x05", b"\x1bOF"):
-                if buffer:
-                    cursor_pos = len(buffer)
-                else:
-                    selected_idx = total_items - 1
-                draw()
-                continue
-
-            # Delete key
-            if raw_bytes in (b"\x1b[3~", b"\x1b[3;5~"):
-                if cursor_pos < len(buffer):
-                    buffer.pop(cursor_pos)
-                    draw()
-                continue
-
-            # Ctrl+U (Clear input)
-            if raw_bytes == b"\x15":
-                buffer.clear()
-                cursor_pos = 0
-                draw()
-                continue
-
-            # Enter Key
-            if raw_bytes in (b"\r", b"\n", b"\r\n"):
-                buf_str = "".join(buffer).strip()
-                if selected_idx == len(flat_list) or buf_str:
-                    return f"__NEW_SESSION__:{buf_str}"
-                elif selected_idx < len(flat_list):
-                    chosen = flat_list[selected_idx]
-                    if chosen.is_current or chosen.id == active_id:
-                        return None
-                    return chosen.id
-                return None
-
-            # Space Key when buffer is empty -> Select & Open
-            if raw_bytes == b" " and not buffer:
-                if selected_idx == len(flat_list):
-                    return "__NEW_SESSION__:"
-                elif selected_idx < len(flat_list):
-                    chosen = flat_list[selected_idx]
-                    if chosen.is_current or chosen.id == active_id:
-                        return None
-                    return chosen.id
-
-            # 's' or '*' -> Toggle Star / Favorite
-            if (raw_bytes.lower() in (b"s", b"*")) and not buffer and flat_list:
-                if selected_idx < len(flat_list):
-                    target_s = flat_list[selected_idx]
-                    new_st = agent.session.star_session(target_s.id)
-                    target_s.is_starred = new_st
-                    draw()
-                continue
-
-            # 'r' or 'm' -> Rename / Modify session title
-            if (raw_bytes.lower() in (b"r", b"m")) and not buffer and flat_list:
-                if selected_idx < len(flat_list):
-                    target_s = flat_list[selected_idx]
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                    sys.stdout.write(f"\n\r  {GOLD}✏️  Enter new title for session:{RST} ")
-                    sys.stdout.flush()
-                    try:
-                        new_t = sys.stdin.readline().strip()
-                        if new_t:
-                            agent.session.rename_session(new_t, target_s.id)
-                            target_s.title = new_t
-                    except Exception:
-                        pass
-                    tty.setcbreak(fd)
-                    draw()
-                continue
-
-            # 't' -> Add tag to session
-            if (raw_bytes.lower() == b"t") and not buffer and flat_list:
-                if selected_idx < len(flat_list):
-                    target_s = flat_list[selected_idx]
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-                    sys.stdout.write(f"\n\r  {CYAN}🏷️  Enter tag name (e.g. best, bugfix, docs):{RST} ")
-                    sys.stdout.flush()
-                    try:
-                        new_tg = sys.stdin.readline().strip().lstrip("#")
-                        if new_tg:
-                            agent.session.tag_session(new_tg, target_s.id)
-                            if new_tg not in target_s.tags:
-                                target_s.tags.append(new_tg)
-                    except Exception:
-                        pass
-                    tty.setcbreak(fd)
-                    draw()
-                continue
-
-            # Ctrl+X or 'd' (Delete session) when buffer is empty
-            if (raw_bytes in (b"\x18",) or (raw_bytes == b"d" and not buffer)) and flat_list:
-                if selected_idx < len(flat_list):
-                    chosen = flat_list[selected_idx]
-                    if not chosen.is_current and chosen.path.exists():
-                        try:
-                            chosen.path.unlink()
-                        except Exception:
-                            pass
-                        raw_s = load_dashboard_sessions(workspace, active_id)
-                        curr_entry = next((s for s in raw_s if s.id == active_id), None)
-                        sessions = ([curr_entry] if curr_entry else []) + [s for s in raw_s if s.id != active_id]
-                        flat_list = sessions
-                        selected_idx = min(selected_idx, len(flat_list))
-                        draw()
-                continue
-
-            # Backspace
-            if raw_bytes in (b"\x7f", b"\x08"):
-                if cursor_pos > 0:
-                    buffer.pop(cursor_pos - 1)
-                    cursor_pos -= 1
-                    draw()
-                continue
-
-            # Skip any unhandled escape sequences to prevent noise leaking into input buffer
-            if raw_bytes.startswith(b"\x1b"):
-                continue
-
-            # Printable characters
-            try:
-                decoded = raw_bytes.decode("utf-8")
-                for ch in decoded:
-                    if ord(ch) >= 32:
-                        buffer.insert(cursor_pos, ch)
-                        cursor_pos += 1
-                        selected_idx = len(flat_list)
-                draw()
-            except Exception:
-                pass
-
-    finally:
-        if termios is not None:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-            except Exception:
-                pass
-        if rendered_lines > 0:
-
-            # Cleanly clear the dashboard lines so the terminal is crisp
-            sys.stdout.write(f"\033[{rendered_lines}A\r")
-            for _ in range(rendered_lines):
-                sys.stdout.write("\033[2K\n")
-            sys.stdout.write(f"\033[{rendered_lines}A\r")
-            sys.stdout.flush()
-
+    sel = Selector(
+        build_items(),
+        title="Previous chats",
+        subtitle=subtitle(),
+        fullscreen=True,
+        max_visible=14,
+        on_key=on_key,
+        footer="↑↓ move · enter open · s star · r rename · t tag · d delete · D delete all · n new chat · esc back",
+    )
+    result = sel.run()
+    if isinstance(result, str) or result is None:
+        return result
     return None
+

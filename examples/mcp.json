@@ -1,0 +1,34 @@
+{
+  "_comment": "MCP servers. Copy to ~/.axon/mcp.json (all projects), <project>/.mcp.json (shared, Claude Code compatible) or <project>/.axon/mcp.json (just you). ${VAR} and ${VAR:-default} are expanded from your environment when the server starts, so secrets stay out of this file. Manage with /mcp or `axon mcp`.",
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${AXON_PROJECT_DIR:-.}"]
+    },
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "timeout": 60
+    },
+    "docs-search": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DOCS_MCP_TOKEN}",
+        "X-Team": "${TEAM_NAME:-platform}"
+      },
+      "timeout": 30
+    },
+    "sqlite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "${SQLITE_DB:-./data.db}"],
+      "disabled": true
+    }
+  }
+}

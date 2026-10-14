@@ -1,0 +1,10 @@
+{
+  "description": "Flask web app (app factory) with a pytest test",
+  "language": "Python",
+  "next": [
+    "python -m venv .venv",
+    "pip install -r requirements.txt",
+    "flask --app app run --debug",
+    "pytest"
+  ]
+}

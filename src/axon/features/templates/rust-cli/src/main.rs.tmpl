@@ -1,0 +1,36 @@
+use std::env;
+
+fn greet(name: &str, shout: bool) -> String {
+    let msg = format!("Hello, {}!", name);
+    if shout {
+        msg.to_uppercase()
+    } else {
+        msg
+    }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: {{name}} [name] [--shout]");
+        return;
+    }
+    let shout = args.iter().any(|a| a == "--shout");
+    let name = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str)
+        .unwrap_or("world");
+    println!("{}", greet(name, shout));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::greet;
+
+    #[test]
+    fn greets() {
+        assert_eq!(greet("Ada", false), "Hello, Ada!");
+        assert_eq!(greet("Ada", true), "HELLO, ADA!");
+    }
+}

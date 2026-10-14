@@ -19,10 +19,9 @@ def permissions(workspace: Path) -> PermissionEngine:
 @pytest.mark.parametrize("tool_name,mode,expected_outcome", [
     ("Read", "default", "allow"),
     ("Ls", "default", "allow"),
-    ("FileTree", "default", "allow"),
+    ("CodeSearch", "default", "allow"),
     ("Glob", "default", "allow"),
     ("Grep", "default", "allow"),
-    ("CodeSymbols", "default", "allow"),
     ("Doctor", "default", "allow"),
     ("Write", "default", "ask"),
     ("Edit", "default", "ask"),
@@ -38,7 +37,7 @@ def permissions(workspace: Path) -> PermissionEngine:
     # bypass mode
     ("Write", "bypass", "allow"),
     ("Bash", "bypass", "allow"),
-    ("Git", "bypass", "allow"),
+    ("NotebookEdit", "bypass", "allow"),
 ])
 def test_permission_mode_outcomes(permissions: PermissionEngine, tool_name: str, mode: str, expected_outcome: str):
     reg = create_default_registry()
@@ -48,7 +47,7 @@ def test_permission_mode_outcomes(permissions: PermissionEngine, tool_name: str,
 
 # ─── Plan Mode Read-Only Enforcement (15 tests) ─────────────────────────────
 @pytest.mark.parametrize("tool_name", [
-    "Write", "Edit", "MultiEdit", "Patch", "Bash", "Git"
+    "Write", "Edit", "MultiEdit", "Patch", "Bash", "NotebookEdit"
 ])
 def test_plan_mode_denies_mutating_tools(permissions: PermissionEngine, tool_name: str):
     reg = create_default_registry()
@@ -58,7 +57,7 @@ def test_plan_mode_denies_mutating_tools(permissions: PermissionEngine, tool_nam
     assert "plan mode prevents" in decision.reason.lower()
 
 @pytest.mark.parametrize("tool_name", [
-    "Read", "Ls", "FileTree", "Glob", "Grep", "CodeSymbols", "ExitPlanMode", "Doctor", "Process"
+    "Read", "Ls", "Glob", "Grep", "CodeSearch", "ExitPlanMode", "Doctor"
 ])
 def test_plan_mode_allows_readonly_and_exit(permissions: PermissionEngine, tool_name: str):
     reg = create_default_registry()
@@ -92,14 +91,14 @@ def test_path_jail_accepts_valid(workspace: Path, good_path: str):
 def test_persistent_rule_grant(permissions: PermissionEngine, workspace: Path):
     reg = create_default_registry()
     write_tool = reg.get("Write")
-    
+
     # Initially "ask" in default mode
     d1 = permissions.check(write_tool, {"path": "gen/output.py", "content": ""}, mode="default")
     assert d1.outcome == "ask"
 
     # Grant persistent rule for gen/*
     permissions.grant_persistent(Rule(tool="Write", pattern="gen/*"), workspace)
-    
+
     d2 = permissions.check(write_tool, {"path": "gen/output.py", "content": ""}, mode="default")
     assert d2.outcome == "allow"
 

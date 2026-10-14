@@ -6,7 +6,6 @@ this uses an inline coordination approach: the bar renders at the current cursor
 position and gets temporarily cleared before each output write, then redrawn
 after — keeping it always at the visual bottom without fragmentation.
 
-This is the same approach used by Claude Code and similar CLI tools.
 """
 from __future__ import annotations
 
@@ -14,7 +13,8 @@ import sys
 import threading
 from typing import Any
 
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, WHITE, strip_ansi, term_width
+from axon.platform import str_width
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, RST, term_width
 
 
 # Global reference to the active bar for renderer coordination
@@ -51,6 +51,7 @@ class FixedBottomBar:
         self._prompt_text = ""
         self._bar_visible = False  # Whether bar lines are currently rendered
         self._bar_lines = 0       # Number of lines the bar occupies
+        self._content_col = 0     # Cursor column at the end of the content above the bar
 
     def __enter__(self) -> FixedBottomBar:
         global _active_bar
@@ -97,26 +98,36 @@ class FixedBottomBar:
                 self._draw()
 
     def _clear(self) -> None:
-        """Erase bar lines from terminal and move cursor back up."""
+        """Erase the bar and put the cursor back at the end of the content above it."""
         if not self._bar_visible or self._bar_lines == 0:
             return
-        # Move up bar_lines, clear each line
-        for _ in range(self._bar_lines):
-            sys.stdout.write("\033[A\r\033[2K")
+        seq = "\r\033[2K" + "\033[A\r\033[2K" * (self._bar_lines - 1) + "\033[A\r"
+        if self._content_col > 0:
+            seq += f"\033[{self._content_col}C"
+        sys.stdout.write(seq)
         sys.stdout.flush()
         self._bar_visible = False
+
+    def note_written(self, text: str) -> None:
+        """Track the cursor column of the content so the bar can be removed precisely."""
+        if "\n" in text:
+            self._content_col = str_width(text.rsplit("\n", 1)[1])
+        else:
+            self._content_col += str_width(text)
 
     def _draw(self) -> None:
         """Draw bar at the current cursor position."""
         if not self._active:
             return
 
+        if not sys.stdout.isatty():
+            return
         width = max(40, term_width() - 4)
         lines: list[str] = []
 
         # Status line with separator and queue badge
         if self._queue_summary:
-            badge = f"  {DARK_SLATE}{'─' * 3}{RST} {CYAN}{self._queue_summary}{RST} {DARK_SLATE}{'─' * max(4, width - len(strip_ansi(self._queue_summary)) - 8)}{RST}"
+            badge = f"  {DARK_SLATE}{'─' * 3}{RST} {CYAN}{self._queue_summary}{RST} {DARK_SLATE}{'─' * max(4, width - str_width(self._queue_summary) - 8)}{RST}"
             lines.append(badge)
         else:
             lines.append(f"  {DARK_SLATE}{'─' * width}{RST}")
@@ -145,6 +156,7 @@ def write_output(text: str, flush: bool = True) -> None:
     if bar is not None and bar.is_active:
         bar.temporarily_clear()
         sys.stdout.write(text)
+        bar.note_written(text)
         if flush:
             sys.stdout.flush()
         bar.restore()

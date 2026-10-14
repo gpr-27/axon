@@ -1,0 +1,15 @@
+export function greet(name = "world", { shout = false } = {}) {
+  const message = `Hello, ${name}!`;
+  return shout ? message.toUpperCase() : message;
+}
+
+export function run(argv, out = console.log) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    out("Usage: {{name}} [name] [--shout]");
+    return 0;
+  }
+  const shout = argv.includes("--shout");
+  const name = argv.find((a) => !a.startsWith("-")) ?? "world";
+  out(greet(name, { shout }));
+  return 0;
+}

@@ -75,176 +75,121 @@ def test_format_markdown_checklists_and_callouts():
 def test_renderer_user_message_and_footer(capsys):
     renderer = Renderer()
     renderer.render_user_message("hello world")
-    captured = capsys.readouterr()
-    assert "› hello world" in strip_ansi(captured.out)
+    assert "› hello world" in strip_ansi(capsys.readouterr().out)
 
     usage = Usage(input=1000, output=200, cache_read=500)
     renderer.turn_footer(tool_count=2, usage=usage, cost=0.0123, elapsed=1.5, llm_calls=1)
-    captured2 = capsys.readouterr()
-    plain2 = strip_ansi(captured2.out)
-    assert "Worked for 1.5s" in plain2
+    plain2 = strip_ansi(capsys.readouterr().out)
+    assert "Done · 1.5s" in plain2
     assert "2 tool calls" in plain2
     assert "1 LLM call" in plain2
     assert "$0.0123" in plain2
 
-def test_file_icons_and_diff():
-    assert get_file_icon("main.py") == "🐍"
-    assert get_file_icon("config.toml") == "⚙️"
-    assert get_file_icon("solution.cpp") == "⚡"
-    assert get_file_icon("README.md") == "📄"
-    assert get_file_icon("app/src") == "📁"
+
+def test_file_icons_and_diff(monkeypatch):
+    monkeypatch.delenv("AXON_EMOJI", raising=False)
+    assert get_file_icon("main.py") == ""  # single-width design: no emoji unless AXON_EMOJI=1
 
     diff_str = render_diff_box("line1\nline2", "line1\nline2_edited\nline3", filename="test.py")
     plain_diff = strip_ansi(diff_str)
-    assert "┌── Diff · 🐍 test.py (+2 / -1 lines)" in plain_diff
-    assert "+line2_edited" in plain_diff
-    assert "-line2" in plain_diff
+    assert "Diff · test.py +2 -1" in plain_diff
+    assert "2 + line2_edited" in plain_diff
+    assert "2 - line2" in plain_diff
+    assert "3 + line3" in plain_diff
+
 
 def test_specialized_boxes():
-    # Read box
-    read_box = render_read_box("test.py", "     1→import os\n     2→print(os.getcwd())")
-    plain_read = strip_ansi(read_box)
-    assert "File Content · 🐍 test.py (2 lines" in plain_read
+    plain_read = strip_ansi(render_read_box("test.py", "     1→import os\n     2→print(os.getcwd())"))
+    assert "test.py 2 lines" in plain_read
     assert "1 │ import os" in plain_read
     assert "Read 2 lines" in plain_read
 
-    # Ls box
-    ls_box = render_ls_box("src", ".axon/\naxon/\nREADME.md\nmain.py")
-    plain_ls = strip_ansi(ls_box)
-    assert "Directory Listing · 📁 src (4 items)" in plain_ls
-    assert "📁 .axon/" in plain_ls
-    assert "🐍 main.py" in plain_ls  # 4 items <= head(4)+tail(4), all visible
+    plain_ls = strip_ansi(render_ls_box("src", ".axon/\naxon/\nREADME.md\nmain.py"))
+    assert "src 4 items" in plain_ls
+    assert ".axon/" in plain_ls and "main.py" in plain_ls
     assert "Found 4 items" in plain_ls
 
-
-
-    # Grep box
-    grep_box = render_grep_box("run_turn", "src/loop.py:78:def run_turn(self):")
-    plain_grep = strip_ansi(grep_box)
-    assert "Grep Matches · \"run_turn\" (1 matches)" in plain_grep
+    plain_grep = strip_ansi(render_grep_box("run_turn", "src/loop.py:78:def run_turn(self):"))
+    assert 'grep "run_turn" 1 match' in plain_grep
     assert "src/loop.py:78" in plain_grep
-    assert "Found 1 matches" in plain_grep
 
-    # Glob box
-    glob_box = render_glob_box("*.py", "main.py\nsetup.py")
-    plain_glob = strip_ansi(glob_box)
-    assert "Glob Matches · 📁 *.py (2 files)" in plain_glob
-    assert "🐍 main.py" in plain_glob
-    assert "Found 2 items" in plain_glob
+    plain_glob = strip_ansi(render_glob_box("*.py", "main.py\nsetup.py"))
+    assert "glob *.py 2 files" in plain_glob and "main.py" in plain_glob
 
-    # Write box
-    write_box = render_write_box("new_file.py", "import sys\nprint('hi')")
-    plain_write = strip_ansi(write_box)
-    assert "Created File · 🐍 new_file.py" in plain_write
+    plain_write = strip_ansi(render_write_box("new_file.py", "import sys\nprint('hi')"))
+    assert "new_file.py 2 lines" in plain_write
     assert "Saved new_file.py" in plain_write
 
-    # Bash box
-    bash_box = render_bash_box("total 136\ndrwxr-xr-x  11 gpr  staff  352")
-    plain_bash = strip_ansi(bash_box)
-    assert "Output · 2 lines" in plain_bash
-    assert "drwxr-xr-x" in plain_bash
+    plain_bash = strip_ansi(render_bash_box("total 136\ndrwxr-xr-x  11 gpr  staff  352"))
+    assert "Output 2 lines" in plain_bash and "drwxr-xr-x" in plain_bash
 
-    # Doctor box
-    doc_box = render_doctor_box("Python Version : 3.14.5\nStatus : Healthy")
-    plain_doc = strip_ansi(doc_box)
-    assert "Axon System Diagnostics" in plain_doc
-    assert "Python Version" in plain_doc
+    plain_doc = strip_ansi(render_doctor_box("Python Version : 3.14.5\nStatus : Healthy"))
+    assert "Axon System Diagnostics" in plain_doc and "Python Version" in plain_doc
 
-    # Todo box
-    todo_box = render_todo_box("[✓] 1. First item\n[▶] 2. Second item\n[ ] 3. Third item")
-    plain_todo = strip_ansi(todo_box)
+    plain_todo = strip_ansi(render_todo_box("[✓] 1. First item\n[▶] 2. Second item\n[ ] 3. Third item"))
     assert "Task Plan" in plain_todo
     assert "1/3 completed (33%)" in plain_todo
     assert "First item" in plain_todo
 
-    # WebSearch badge
-    search_box = render_web_search_box("python docs", "1. Python Documentation\n   URL: https://docs.python.org\n   Snippet: Official docs")
-    plain_search = strip_ansi(search_box)
-    assert "Found 1 search result" in plain_search
-    assert "python docs" in plain_search
+    plain_search = strip_ansi(render_web_search_box("python docs", "1. Python Documentation\n   URL: https://docs.python.org"))
+    assert "Found 1 search result" in plain_search and "python docs" in plain_search
 
-    # WebFetch badge
-    fetch_box = render_web_fetch_box("https://docs.python.org", "[WebFetch Result from https://docs.python.org]:\n\nWelcome to Python documentation.\nPython is a programming language.")
-    plain_fetch = strip_ansi(fetch_box)
-    assert "Fetched" in plain_fetch
-    assert "docs.python.org" in plain_fetch
+    plain_fetch = strip_ansi(render_web_fetch_box("https://docs.python.org", "Welcome to Python documentation."))
+    assert "Fetched" in plain_fetch and "docs.python.org" in plain_fetch
 
-    # Git box
-    git_box = render_git_box("status", "## main...origin/main\n M src/axon/ui/render.py\n?? tests/new_test.py")
-    plain_git = strip_ansi(git_box)
-    assert "Git status" in plain_git
-    assert "## main" in plain_git
+    plain_git = strip_ansi(render_git_box("status", "## main...origin/main\n M src/axon/ui/render.py\n?? tests/new_test.py"))
+    assert "Git status" in plain_git and "## main" in plain_git
 
-    # Symbols box
-    sym_box = render_symbols_box("models.py", "📄 models.py:\n  class User [L1-10]\n  • def save() [L5-8]")
-    plain_sym = strip_ansi(sym_box)
-    assert "Code Symbols · models.py" in plain_sym
-    assert "class User" in plain_sym
+    plain_sym = strip_ansi(render_symbols_box("models.py", "models.py:\n  class User [L1-10]\n  • def save() [L5-8]"))
+    assert "Code Symbols models.py" in plain_sym and "class User" in plain_sym
 
-    # Tree box
-    tree_box = render_tree_box("axon/\n├── agent/\n└── ui/")
-    plain_tree = strip_ansi(tree_box)
-    assert "Directory Tree" in plain_tree
-    assert "agent/" in plain_tree
+    plain_tree = strip_ansi(render_tree_box("axon/\n├── agent/\n└── ui/"))
+    assert "Directory Tree" in plain_tree and "agent/" in plain_tree
 
-    # HTTP badge
-    http_box = render_http_box("GET", "https://api.github.com/zen", "HTTP 200 OK\nKeep it logically awesome.")
-    plain_http = strip_ansi(http_box)
-    assert "HTTP GET" in plain_http
-    assert "api.github.com" in plain_http
+    plain_http = strip_ansi(render_http_box("GET", "https://api.github.com/zen", "HTTP 200 OK\nKeep it logically awesome."))
+    assert "HTTP GET" in plain_http and "api.github.com" in plain_http
 
-    # Process box
-    proc_box = render_process_box("ports", "Listening TCP Ports:\npython 8000 LISTEN")
-    plain_proc = strip_ansi(proc_box)
-    assert "Process Info · ports" in plain_proc
+    assert "Process Info · ports" in strip_ansi(render_process_box("ports", "python 8000 LISTEN"))
+    assert "Successfully applied patch" in strip_ansi(render_patch_box("main.py", "Successfully applied patch to main.py."))
+    assert "HOME" in strip_ansi(render_env_box("list", "HOME=/x"))
+    assert "+a" in strip_ansi(render_diff_tool_box("--- a\n+++ b\n+a\n-b"))
+    assert "boom" in strip_ansi(render_error_box("Bash", "boom"))
 
-    # Patch box
-    patch_box = render_patch_box("main.py", "Successfully applied patch to main.py.")
-    plain_patch = strip_ansi(patch_box)
-    assert "Successfully applied patch" in plain_patch
 
 def test_renderer_tool_execution_events(capsys):
-    renderer = Renderer()
-
-    # Turn iteration 1 start
+    renderer = Renderer(trace_level="normal")
     renderer.on_event(LLMCallStart(iteration=1, max_iterations=25, model="deepseek-v4-flash", message_count=5))
-    captured = capsys.readouterr()
-    assert "LLM Call [1st]" in strip_ansi(captured.out)
+    plain0 = strip_ansi(capsys.readouterr().out)
+    assert "Turn" in plain0 and "Step 1  LLM call · deepseek-v4-flash · 5 messages" in plain0
 
-    # 1st Tool Call
     renderer.on_event(ToolExecutionStart(id="t1", name="Ls", input={"path": "."}))
     renderer.on_event(ToolExecutionResult(id="t1", name="Ls", input={"path": "."}, content="axon/\ncheck_models.py"))
-    captured1 = capsys.readouterr()
-    plain1 = strip_ansi(captured1.out)
-    assert "Tool Action [1st] · Ls ❯ Listing directory: 📁 ." in plain1
-    assert "Directory Listing · 📁 . (2 items)" in plain1
-    assert "🐍 check_models.py" in plain1
+    plain1 = strip_ansi(capsys.readouterr().out)
+    assert "● Ls  ." in plain1
+    assert "⎿" in plain1 and "→ step 2" in plain1
 
-    # 2nd Tool Call (Bash)
     renderer.on_event(ToolExecutionStart(id="t2", name="Bash", input={"command": "python3 -m pytest"}))
     renderer.on_event(ToolExecutionResult(id="t2", name="Bash", input={"command": "python3 -m pytest"}, content="14 passed in 0.1s"))
-    captured2 = capsys.readouterr()
-    plain2 = strip_ansi(captured2.out)
-    assert "Tool Action [2nd] · Bash ❯ Executing: $ python3 -m pytest" in plain2
-    assert "14 passed in 0.1s" in plain2
-    assert "┌── Output" in plain2
+    plain2 = strip_ansi(capsys.readouterr().out)
+    assert "● Bash  python3 -m pytest" in plain2
 
-    # 3rd Tool Call (Read)
     renderer.on_event(ToolExecutionStart(id="t3", name="Read", input={"path": "src/axon/ui/render.py", "offset": 1, "limit": 100}))
-    renderer.on_event(ToolExecutionResult(id="t3", name="Read", input={"path": "src/axon/ui/render.py"}, content="     1→line\n"*100))
-    captured3 = capsys.readouterr()
-    plain3 = strip_ansi(captured3.out)
-    assert "Tool Action [3rd] · Read ❯ Inspecting file: 🐍 src/axon/ui/render.py #L1-100" in plain3
-    assert "File Content · 🐍 render.py (100 lines" in plain3
-    assert "Read 100 lines" in plain3
-
-    # Output persistence
+    renderer.on_event(ToolExecutionResult(id="t3", name="Read", input={"path": "src/axon/ui/render.py"}, content="     1→line\n" * 100))
+    plain3 = strip_ansi(capsys.readouterr().out)
+    assert "● Read  src/axon/ui/render.py · lines 1-100" in plain3
+    assert "100 lines" in plain3
     assert "line" in get_last_tool_output()
 
-    # 2nd LLM Call
     renderer.on_event(LLMCallStart(iteration=2, max_iterations=25, model="deepseek-v4-flash", message_count=8))
-    captured5 = capsys.readouterr()
-    plain5 = strip_ansi(captured5.out)
-    assert "LLM Call [2nd]" in plain5
-    assert "deepseek-v4-flash" in plain5
+    assert "Step 2  LLM call" in strip_ansi(capsys.readouterr().out)
 
+
+def test_renderer_compact_level(capsys):
+    renderer = Renderer(trace_level="compact")
+    renderer.on_event(LLMCallStart(iteration=1, max_iterations=25, model="m", message_count=1))
+    assert "Step 1" not in strip_ansi(capsys.readouterr().out)
+    renderer.on_event(ToolExecutionStart(id="t1", name="Glob", input={"pattern": "*.py"}))
+    renderer.on_event(ToolExecutionResult(id="t1", name="Glob", input={}, content="a.py\nb.py"))
+    out = strip_ansi(capsys.readouterr().out)
+    assert "● Glob(*.py)" in out
+    assert "→ step" not in out

@@ -1,0 +1,9 @@
+{
+  "description": "Python library package (src layout, typed, pytest)",
+  "language": "Python",
+  "next": [
+    "python -m venv .venv",
+    "pip install -e \".[dev]\"",
+    "pytest"
+  ]
+}

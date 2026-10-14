@@ -2,10 +2,8 @@
 State management: Conversation, FileState, TodoState.
 """
 from __future__ import annotations
-import base64
 import hashlib
-import mimetypes
-import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -51,6 +49,40 @@ def _extract_images_and_text(text: str) -> list[dict[str, Any]] | str:
         blocks.append({"type": "text", "text": f"Analyze attached image:\n\n{context_prefix}"})
 
     return blocks
+
+_LEDGER_LOCK = threading.RLock()
+
+
+def record_usage(ledger: Any, model: str, usage: Any, source: str = "main") -> Any:
+    """Thread-safe ``ledger.record`` honoring the ``source=`` contract, with fallbacks
+    for the older ``tag=`` keyword and the bare positional signature."""
+    if ledger is None or usage is None:
+        return None
+    with _LEDGER_LOCK:
+        try:
+            return ledger.record(model, usage, source=source)
+        except TypeError:
+            pass
+        try:
+            return ledger.record(model, usage, tag=source)
+        except TypeError:
+            return ledger.record(model, usage)
+
+
+def is_tool_result_message(m: dict[str, Any]) -> bool:
+    """True for messages that carry tool results (Anthropic tool_result blocks or OpenAI role=tool)."""
+    if m.get("role") == "tool":
+        return True
+    content = m.get("content")
+    if m.get("role") == "user" and isinstance(content, list):
+        return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+    return False
+
+
+def is_turn_start(m: dict[str, Any]) -> bool:
+    """A safe cut point: a genuine user message (not a tool result)."""
+    return m.get("role") == "user" and not is_tool_result_message(m)
+
 
 def estimate_content_tokens(content: Any) -> int:
     """Accurately estimate tokens for strings, tool blocks, and multimodal image blocks."""
@@ -141,8 +173,73 @@ class Conversation:
             raise ValueError(f"Unpaired tool_use blocks remaining: {pending_ids}")
 
     def token_estimate(self) -> int:
-        """Estimate tokens across conversation, accurately accounting for text and multimodal image blocks."""
-        return sum(estimate_content_tokens(m.get("content", "")) for m in self.messages)
+        """Estimate tokens across conversation, accounting for text, images and OpenAI tool_calls."""
+        total = 0
+        for m in self.messages:
+            total += estimate_content_tokens(m.get("content") or "")
+            if m.get("tool_calls"):
+                total += estimate_content_tokens(str(m["tool_calls"]))
+        return total
+
+    def repair(self) -> int:
+        """Restore API validity: close dangling tool_use blocks with error results and
+        drop empty assistant messages. Returns the number of fixes applied."""
+        fixes = 0
+        cleaned: list[dict[str, Any]] = []
+        for m in self.messages:
+            if m.get("role") == "assistant":
+                content = m.get("content")
+                empty = (content is None or content == [] or content == "") and not m.get("tool_calls")
+                if empty:
+                    fixes += 1
+                    continue
+            cleaned.append(m)
+        self.messages = cleaned
+
+        answered: set[str] = set()
+        for m in self.messages:
+            if m.get("role") == "tool" and m.get("tool_call_id"):
+                answered.add(str(m["tool_call_id"]))
+            content = m.get("content")
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        answered.add(str(b.get("tool_use_id")))
+
+        out: list[dict[str, Any]] = []
+        for idx, m in enumerate(self.messages):
+            out.append(m)
+            if m.get("role") != "assistant":
+                continue
+            ids: list[str] = []
+            content = m.get("content")
+            if isinstance(content, list):
+                ids += [str(b.get("id")) for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            openai_style = bool(m.get("tool_calls"))
+            for tc in m.get("tool_calls") or []:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id:
+                    ids.append(str(tc_id))
+            missing = [i for i in ids if i not in answered]
+            if not missing:
+                continue
+            fixes += len(missing)
+            if openai_style:
+                for i in missing:
+                    out.append({"role": "tool", "tool_call_id": i, "content": "Tool call was interrupted and did not run."})
+            else:
+                blocks = [
+                    {"type": "tool_result", "tool_use_id": i, "content": "Tool call was interrupted and did not run.", "is_error": True}
+                    for i in missing
+                ]
+                nxt = self.messages[idx + 1] if idx + 1 < len(self.messages) else None
+                if nxt is not None and is_tool_result_message(nxt) and isinstance(nxt.get("content"), list):
+                    nxt["content"] = list(nxt["content"]) + blocks
+                else:
+                    out.append({"role": "user", "content": blocks})
+            answered.update(missing)
+        self.messages = out
+        return fixes
 
 
 class FileState:
@@ -191,23 +288,131 @@ class Todo:
     id: str
     content: str
     status: str  # "pending", "in_progress", "completed"
+    active_form: str = ""
+
 
 class TodoState:
-    """Maintains task todo list with constraint of at most one in_progress."""
+    """Maintains task todo list with constraint of at most one in_progress.
+
+    Once :meth:`bind` is called with the workspace and a session-id getter, every
+    :meth:`replace` is persisted to ``axon.storage.todos_dir(ws)/<session_id>.json`` and the
+    list is (re)loaded lazily whenever the active session id changes (``--continue``,
+    ``--resume``, ``/resume``), so a resumed session gets its checklist back."""
+
     def __init__(self) -> None:
-        self.items: list[Todo] = []
+        self._items: list[Todo] = []
+        self._workspace: Path | None = None
+        self._sid_fn: Callable[[], str] | None = None
+        self._loaded_sid: str | None = None
+        self._lock = threading.RLock()
+
+    # ── persistence ──
+    def bind(self, workspace: Path | str, session_id: "Callable[[], str] | str") -> "TodoState":
+        """Attach persistence. ``session_id`` is a string or a zero-arg callable returning the
+        current id. Items set before binding (and not yet persisted) are kept."""
+        with self._lock:
+            self._workspace = Path(workspace)
+            self._sid_fn = session_id if callable(session_id) else (lambda sid=str(session_id): sid)
+            if self._items and self._loaded_sid is None:
+                self._loaded_sid = self._sid()
+                self._save()
+        return self
+
+    @property
+    def bound(self) -> bool:
+        return self._workspace is not None and self._sid_fn is not None
+
+    def _sid(self) -> str:
+        try:
+            sid = str(self._sid_fn() or "") if self._sid_fn else ""
+        except Exception:  # noqa: BLE001 - a broken getter must never break the agent
+            return ""
+        import re
+        return sid if re.fullmatch(r"[A-Za-z0-9_.\-]+", sid) and sid not in (".", "..") else ""
+
+    def path(self) -> Path | None:
+        sid = self._sid()
+        if not (self._workspace and sid):
+            return None
+        try:
+            from axon.storage import todos_dir
+            return todos_dir(self._workspace) / f"{sid}.json"
+        except (ImportError, AttributeError, OSError):
+            return None
+
+    def _sync(self) -> None:
+        """Reload from disk when the active session changed since the last load/save."""
+        if not self.bound:
+            return
+        sid = self._sid()
+        if sid == self._loaded_sid:
+            return
+        self._loaded_sid = sid
+        self._items = []
+        p = self.path()
+        if p is None or not p.is_file():
+            return
+        try:
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        raw = data.get("todos") if isinstance(data, dict) else data
+        if isinstance(raw, list):
+            self._items = [
+                Todo(id=str(it.get("id", i)), content=str(it.get("content", "")),
+                     status=str(it.get("status", "pending")), active_form=str(it.get("activeForm", "") or ""))
+                for i, it in enumerate(raw, 1) if isinstance(it, dict) and it.get("content")
+            ]
+
+    def _save(self) -> None:
+        p = self.path()
+        if p is None:
+            return
+        import json
+        payload = [{"id": t.id, "content": t.content, "status": t.status,
+                    **({"activeForm": t.active_form} if t.active_form else {})} for t in self._items]
+        try:
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            import os
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+    # ── list API ──
+    @property
+    def items(self) -> list[Todo]:
+        with self._lock:
+            self._sync()
+            return self._items
+
+    @items.setter
+    def items(self, value: list[Todo]) -> None:
+        with self._lock:
+            self._sync()
+            self._items = list(value)
 
     def clear(self) -> None:
-        self.items.clear()
+        """Clear the in-memory list (the persisted file of the session is left untouched)."""
+        with self._lock:
+            self._sync()
+            self._items = []
 
     def replace(self, items: list[dict[str, Any]]) -> None:
         in_prog_count = sum(1 for it in items if it.get("status") == "in_progress")
         if in_prog_count > 1:
             raise ValueError("At most one todo item can be 'in_progress' at any time.")
-        self.items = [
-            Todo(id=str(it.get("id", i)), content=it.get("content", ""), status=it.get("status", "pending"))
-            for i, it in enumerate(items)
-        ]
+        with self._lock:
+            self._sync()
+            self._items = [
+                Todo(id=str(it.get("id", i)), content=it.get("content", ""), status=it.get("status", "pending"),
+                     active_form=str(it.get("activeForm") or it.get("active_form") or ""))
+                for i, it in enumerate(items)
+            ]
+            if self.bound:
+                self._loaded_sid = self._sid()
+                self._save()
 
     def progress(self) -> tuple[int, int, int]:
         """Returns (completed_count, total_count, percentage)."""
@@ -253,18 +458,32 @@ class TodoState:
 class QueuedMessage:
     id: int
     text: str
+    steer: bool = False   # typed mid-turn: delivered inside the running turn between tool rounds
 
 class MessageQueue:
     """Manages sequential user prompt queue for batching and autonomous turns."""
-    def __init__(self) -> None:
-        self.items: list[QueuedMessage] = []
-        self._counter: int = 0
+    items: list[QueuedMessage]
 
-    def push(self, text: str) -> QueuedMessage:
-        self._counter += 1
-        item = QueuedMessage(id=self._counter, text=text.strip())
-        self.items.append(item)
-        return item
+    def __init__(self) -> None:
+        self.items = []
+        self._counter = 0
+        import threading
+        self._lock = threading.RLock()
+
+    def push(self, text: str, steer: bool = False) -> QueuedMessage:
+        with self._lock:
+            self._counter += 1
+            item = QueuedMessage(id=self._counter, text=text.strip(), steer=bool(steer))
+            self.items.append(item)
+            return item
+
+    def drain_steer(self) -> list[QueuedMessage]:
+        """Remove and return every steer-flagged item (in order); plain queued prompts stay."""
+        with self._lock:
+            steer = [it for it in self.items if getattr(it, "steer", False)]
+            if steer:
+                self.items = [it for it in self.items if not getattr(it, "steer", False)]
+            return steer
 
     def pop(self) -> QueuedMessage | None:
         if self.items:

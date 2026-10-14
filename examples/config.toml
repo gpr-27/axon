@@ -1,0 +1,48 @@
+# Axon user configuration -> copy to ~/.axon/config.toml  (or run `axon setup`, which writes it for you)
+# A project can override non-secret values in <project>/.axon/config.toml.
+# Precedence (low -> high): this file, project config.toml, settings.json files, .env files,
+# AXON_* environment variables, command-line flags.
+#
+# API keys do NOT belong here: put them in ~/.axon/.env (e.g. ANTHROPIC_API_KEY="sk-ant-...")
+# or in your environment. Each provider reads its own variable (OPENAI_API_KEY, GEMINI_API_KEY, ...).
+
+# ── Provider and model ────────────────────────────────────────────────────
+provider = "anthropic"                      # anthropic | openai | openrouter | gemini | ollama | lmstudio | ...
+base_url = "https://api.anthropic.com"      # local Ollama: "http://localhost:11434/v1"
+model = "claude-sonnet-4-5"                 # default model for the main agent
+small_model = "claude-haiku-4-5"            # cheap model for compaction / background tasks
+effort = "balanced"                         # reflex | balanced | synapse | quantum
+thinking = true                             # show/allow extended reasoning where supported
+
+# ── Behaviour ─────────────────────────────────────────────────────────────
+mode = "default"                            # default (ask) | acceptEdits | plan (read-only) | bypass (never ask)
+trace_level = "normal"                      # compact | normal | detailed | debug   (Ctrl+O cycles)
+max_iterations = 50                         # tool-use rounds per turn
+parallel_tools = 6                          # read-only tools that may run concurrently
+bash_timeout_s = 180
+compact_at = 0.85                           # auto-compact when the context window is 85% full
+auto_memory = true                          # per-project notes in ~/.axon/projects/<project>/memory/
+
+# ── Spending guard (USD) ──────────────────────────────────────────────────
+session_cost_ceiling = "25.00"              # hard stop for one session
+budget_turn_usd = 1.0                       # projected cost check before every request
+budget_session_usd = 10.0
+budget_action = "warn"                      # warn | stop | downgrade (switch to small_model)
+
+# Extra instructions appended to the system prompt in every session.
+append_system_prompt = "Prefer small, reviewable diffs. Run the tests after changing code."
+
+# ── Permission rules (same syntax as settings.json) ───────────────────────
+[permissions]
+allow = ["Read", "Grep", "Glob", "Bash(git status:*)", "Bash(git diff:*)"]
+deny = ["Read(./.env)", "Read(~/.ssh/**)", "Bash(rm -rf:*)"]
+
+# ── Hooks (TOML form of the settings.json "hooks" section) ────────────────
+[[hooks.PreToolUse]]
+matcher = "Bash"
+hooks = [{ type = "command", command = "python .axon/hooks/block-dangerous-bash.py", timeout = 10 }]
+
+# ── Extra models offered in /model for a provider ─────────────────────────
+[[custom_models]]
+provider = "openrouter"
+model = "qwen/qwen3-coder"

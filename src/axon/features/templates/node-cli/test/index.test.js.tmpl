@@ -1,0 +1,14 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { greet, run } from "../src/index.js";
+
+test("greet", () => {
+  assert.equal(greet("Ada"), "Hello, Ada!");
+  assert.equal(greet("Ada", { shout: true }), "HELLO, ADA!");
+});
+
+test("run prints the greeting", () => {
+  const lines = [];
+  assert.equal(run(["Ada"], (l) => lines.push(l)), 0);
+  assert.deepEqual(lines, ["Hello, Ada!"]);
+});

@@ -257,6 +257,46 @@ def test_openai_message_sanitization():
     assert len(sanitized_orphans) == 1
     assert sanitized_orphans[0]["role"] == "user"
 
+    # Consecutive user messages should be merged into one
+    consecutive_user_msgs = [
+        {"role": "user", "content": "First instruction"},
+        {"role": "user", "content": "ok"},
+    ]
+    sanitized_users = sanitize_openai_messages(consecutive_user_msgs)
+    assert len(sanitized_users) == 1
+    assert sanitized_users[0]["role"] == "user"
+    assert "First instruction\n\nok" in sanitized_users[0]["content"]
+
+    # Assistant message with Anthropic tool_use blocks converted to OpenAI tool_calls
+    anthropic_assistant_msgs = [
+        {"role": "user", "content": "find files"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Searching..."},
+                {"type": "tool_use", "id": "call_99", "name": "Ls", "input": {"path": "."}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_99", "content": "file1.txt"},
+    ]
+    sanitized_anthropic = sanitize_openai_messages(anthropic_assistant_msgs)
+    assert sanitized_anthropic[1]["role"] == "assistant"
+    assert sanitized_anthropic[1]["content"] == "Searching..."
+    assert len(sanitized_anthropic[1]["tool_calls"]) == 1
+    assert sanitized_anthropic[1]["tool_calls"][0]["id"] == "call_99"
+
+    # Empty assistant turns should be dropped
+    empty_assistant_msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "how are you?"},
+    ]
+    sanitized_empty = sanitize_openai_messages(empty_assistant_msgs)
+    # The empty assistant is dropped, and the consecutive user messages merge
+    assert len(sanitized_empty) == 1
+    assert sanitized_empty[0]["role"] == "user"
+    assert "hello\n\nhow are you?" in sanitized_empty[0]["content"]
+
 def test_message_queue():
     """Verify MessageQueue operations and /queue command handling."""
     from axon.agent.state import MessageQueue

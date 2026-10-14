@@ -1,0 +1,7 @@
+from app import create_app
+
+
+def test_index_and_health() -> None:
+    client = create_app().test_client()
+    assert b"Hello, Ada!" in client.get("/?name=Ada").data
+    assert client.get("/api/health").get_json() == {"status": "ok"}

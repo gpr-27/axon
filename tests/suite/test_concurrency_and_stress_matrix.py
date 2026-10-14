@@ -52,7 +52,7 @@ def test_message_queue_peek_and_drop():
     q.push("Item A")
     q.push("Item B")
     q.push("Item C")
-    
+
     first = q.peek()
     assert first is not None
     assert first.text == "Item A"

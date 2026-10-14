@@ -1,0 +1,30 @@
+"""{{title}} Flask app."""
+from __future__ import annotations
+
+from flask import Flask, jsonify, render_template_string, request
+
+PAGE = """<!doctype html>
+<title>{{title}}</title>
+<h1>{{title}}</h1>
+<p>Hello, {{ name }}!</p>
+"""
+
+
+def create_app() -> Flask:
+    app = Flask(__name__)
+
+    @app.get("/")
+    def index() -> str:
+        return render_template_string(PAGE, name=request.args.get("name", "world"))
+
+    @app.get("/api/health")
+    def health():
+        return jsonify(status="ok")
+
+    return app
+
+
+app = create_app()
+
+if __name__ == "__main__":
+    app.run(debug=True)

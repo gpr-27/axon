@@ -122,18 +122,18 @@ def calculate_metric(values: list[float]) -> float:
     return sum(values) / len(values)
 """, encoding="utf-8")
 
-    from axon.tools.code_symbols import CodeSymbolsTool
-    from axon.tools.file_tree import FileTreeTool
+    from axon.tools.code_graph import CodeSearchTool
+    from axon.tools.search import LsTool
 
-    symbols_tool = CodeSymbolsTool()
-    res = symbols_tool.run({"path": "models.py"}, ctx)
+    symbols_tool = CodeSearchTool()
+    res = symbols_tool.run({"action": "symbols", "path": "models.py"}, ctx)
     assert "class UserProfile" in res
     assert "def __init__(self, username)" in res
     assert "def get_display_name(self)" in res
     assert "def calculate_metric(values)" in res
 
-    tree_tool = FileTreeTool()
-    tree_res = tree_tool.run({"path": "."}, ctx)
+    tree_tool = LsTool()
+    tree_res = tree_tool.run({"path": ".", "depth": 3}, ctx)
     assert "models.py" in tree_res
     assert "directories" in tree_res
 
@@ -162,52 +162,6 @@ def test_patch_tool_lifecycle(workspace: Path, settings):
     res = patch_tool.run({"path": "script.py", "patch": patch_str}, ctx)
     assert "Successfully applied patch" in res
     assert target_file.read_text(encoding="utf-8") == "def run():\n    print('new_axon')\n"
-
-def test_git_and_process_and_web_search(workspace: Path, settings):
-    file_state = FileState()
-    todos = TodoState()
-    ctx = ToolContext(workspace=workspace, file_state=file_state, todos=todos, settings=settings)
-
-    from axon.tools.git import GitTool
-    from axon.tools.process_tool import ProcessTool
-    from axon.tools.web_search import WebSearchTool
-
-    git_tool = GitTool()
-    git_res = git_tool.run({"subcommand": "status"}, ctx)
-    assert "Git" in git_res or "status" in git_res or "not a git repository" in git_res
-
-    proc_tool = ProcessTool()
-    proc_res = proc_tool.run({"action": "list"}, ctx)
-    assert "PID" in proc_res or "%CPU" in proc_res or "COMMAND" in proc_res
-
-    web_tool = WebSearchTool()
-    web_res = web_tool.run({"query": "python async await"}, ctx)
-    assert "web" in web_res.lower() or "python" in web_res.lower() or "search" in web_res.lower()
-
-def test_env_and_diff_tools(workspace: Path, settings):
-    file_state = FileState()
-    todos = TodoState()
-    ctx = ToolContext(workspace=workspace, file_state=file_state, todos=todos, settings=settings)
-
-    from axon.tools.env_tool import EnvTool
-    from axon.tools.diff_tool import DiffTool
-
-    env_tool = EnvTool()
-    res_list = env_tool.run({"action": "list"}, ctx)
-    assert "PATH=" in res_list or "HOME=" in res_list
-
-    res_check = env_tool.run({"action": "check", "variable": "PATH"}, ctx)
-    assert "SET" in res_check
-
-    fa = workspace / "a.txt"
-    fb = workspace / "b.txt"
-    fa.write_text("line1\nline2\n", encoding="utf-8")
-    fb.write_text("line1\nline2_mod\nline3\n", encoding="utf-8")
-
-    diff_tool = DiffTool()
-    diff_res = diff_tool.run({"path_a": "a.txt", "path_b": "b.txt"}, ctx)
-    assert "+line2_mod" in diff_res
-    assert "-line2" in diff_res
 
 def test_bundled_skills_catalog(workspace: Path):
     from axon.skills.manager import SkillManager
@@ -238,37 +192,6 @@ def test_bundled_skills_catalog(workspace: Path):
     handle_skills_command(mgr, workspace, "delete my-custom-skill")
     assert "my-custom-skill" not in mgr.skills
 
-def test_deep_research_and_table_search_tools(workspace: Path, settings):
-    file_state = FileState()
-    todos = TodoState()
-    ctx = ToolContext(workspace=workspace, file_state=file_state, todos=todos, settings=settings)
-
-    from axon.tools.deep_research import DeepResearchTool
-    from axon.tools.table_search import TableSearchTool
-
-    # Test DeepResearchTool
-    dr_tool = DeepResearchTool()
-    res_dr = dr_tool.run({"query": "DFA vs NFA algorithms", "depth": "deep", "max_sources": 3, "save_report": True}, ctx)
-    assert "Deep Research Completed" in res_dr
-    assert "Executive Summary" in res_dr
-    assert "Comparative Analysis" in res_dr
-
-    # Test TableSearchTool on markdown table
-    doc_path = workspace / "comparison.md"
-    doc_path.write_text("""
-# Comparison
-| Algorithm | Time Complexity | Space Complexity |
-|---|---|---|
-| QuickSort | O(N log N) | O(log N) |
-| MergeSort | O(N log N) | O(N) |
-| BubbleSort | O(N^2) | O(1) |
-""", encoding="utf-8")
-
-    ts_tool = TableSearchTool()
-    res_ts = ts_tool.run({"query": "MergeSort", "path": "comparison.md"}, ctx)
-    assert "MergeSort" in res_ts
-    assert "Time Complexity" in res_ts
-
 def test_memory_store_and_skill_importer(workspace: Path):
     from axon.agent.memory import MemoryStore
     from axon.skills.importer import parse_github_skill_url
@@ -294,3 +217,14 @@ def test_memory_store_and_skill_importer(workspace: Path):
     assert repo == "anthropic-quickstarts"
     assert subpath == "skills/rag"
 
+def test_openai_tool_schemas_compliance():
+    """Verify all tool schemas for OpenAI/DeepSeek provider have valid object type and required list."""
+    from axon.tools import create_default_registry
+    registry = create_default_registry()
+    schemas = registry.schemas(provider_style="openai")
+    for s in schemas:
+        fn = s["function"]
+        params = fn["parameters"]
+        assert params["type"] == "object"
+        assert isinstance(params["properties"], dict)
+        assert isinstance(params["required"], list), f"{fn['name']} parameters.required must be a list"

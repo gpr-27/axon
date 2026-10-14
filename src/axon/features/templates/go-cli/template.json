@@ -1,0 +1,9 @@
+{
+  "description": "Go command-line app (flag package) with go test",
+  "language": "Go",
+  "next": [
+    "go run . -name Ada",
+    "go test ./...",
+    "go build"
+  ]
+}

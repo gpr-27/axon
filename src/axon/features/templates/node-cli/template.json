@@ -1,0 +1,9 @@
+{
+  "description": "Node.js CLI, zero dependencies, node:test tests",
+  "language": "JavaScript",
+  "next": [
+    "npm test",
+    "node bin/cli.js Ada --shout",
+    "npm link   # optional: install the command globally"
+  ]
+}

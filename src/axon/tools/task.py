@@ -9,29 +9,43 @@ from axon.tools.base import Tool, ToolContext
 class TaskTool(Tool):
     name: ClassVar[str] = "Task"
     description: ClassVar[str] = (
-        "Spawn a sub-agent with isolated context to explore unfamiliar code, search, or answer questions. "
-        "Returns only the subagent's final conclusions, saving parent context."
+        "Delegate a task to a subagent with its own isolated context and returns only its final report. "
+        "Choose subagent_type from the subagents listed in the system prompt (general-purpose, explore, plan, "
+        "code-reviewer, test-runner, or a custom agent). Independent Task calls in one turn run in parallel. "
+        "Give the subagent a complete, self-contained prompt: it cannot see this conversation."
     )
     schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
-            "prompt": {"type": "string", "description": "The specific research prompt for the subagent"},
+            "description": {"type": "string", "description": "A short (3-6 word) label for the task"},
+            "prompt": {"type": "string", "description": "The complete task for the subagent to perform"},
+            "subagent_type": {
+                "type": "string",
+                "description": "Agent type to use (default: general-purpose)",
+            },
         },
         "required": ["prompt"],
         "additionalProperties": False,
     }
-    readonly: ClassVar[bool] = True
+    # Not read-only: subagents may edit files. The agent loop decides explicitly that
+    # Task calls may run in parallel, and each subagent tool call is permission-checked.
+    readonly: ClassVar[bool] = False
     default_permission: ClassVar[str] = "allow"
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        prompt = args.get("prompt", "")
+        prompt = str(args.get("prompt") or args.get("subtask") or "").strip()
         if not prompt:
             raise ToolError("Task tool requires 'prompt'.")
         if ctx.agent is None:
             raise ToolError("Subagent execution requires parent agent context.")
 
         from axon.agent.subagent import run_subagent
-        return run_subagent(prompt, parent=ctx.agent)
+        return run_subagent(
+            prompt,
+            parent=ctx.agent,
+            subagent_type=str(args.get("subagent_type") or "general-purpose"),
+            description=str(args.get("description") or ""),
+        )
 
 
 class ExitPlanModeTool(Tool):

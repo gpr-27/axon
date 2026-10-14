@@ -1,0 +1,9 @@
+{
+  "description": "Rust command-line app (std only) with cargo test",
+  "language": "Rust",
+  "next": [
+    "cargo run -- Ada --shout",
+    "cargo test",
+    "cargo build --release"
+  ]
+}

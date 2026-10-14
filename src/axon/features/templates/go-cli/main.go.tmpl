@@ -1,0 +1,14 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+)
+
+func main() {
+	name := flag.String("name", "world", "who to greet")
+	shout := flag.Bool("shout", false, "print in upper case")
+	flag.Parse()
+	fmt.Fprintln(os.Stdout, Greet(*name, *shout))
+}

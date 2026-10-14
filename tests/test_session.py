@@ -48,7 +48,7 @@ def test_dashboard_sessions_and_time_formatting(workspace: Path):
     store = SessionStore(workspace=workspace)
     store.open("sess_a")
     store.append_user("Build a REST API in FastAPI")
-    
+
     store.open("sess_b")
     store.append_user("Binary search FIA in C++")
 
@@ -156,7 +156,7 @@ def test_subagent_per_session_synchronization(workspace: Path):
 
     mock_agent = MagicMock()
     mock_agent.subagents = SubagentManager()
-    
+
     # Session 1 with 2 subagent tasks recorded in conversation
     mock_agent.conversation = Conversation([
         {"role": "user", "content": "Analyze project architecture"},
@@ -482,6 +482,62 @@ def test_workspace_lifetime_ledger_incorporates_subagents_and_counts_normal_chat
     assert ws_ledger.total_input_tokens == expected_input
     assert ws_ledger.total_output_tokens == expected_output
     assert float(ws_ledger.total_cost) > 0.0
+
+def test_session_store_delete_and_cost_tracking(tmp_path: Path):
+    """Test session deletion, associated subagent removal, checkpoint cleanup, and cost tracking."""
+    s_dir = tmp_path / "sessions"
+    s_dir.mkdir(parents=True, exist_ok=True)
+
+    f1 = s_dir / "sess_del_1.jsonl"
+    f1.write_text(
+        '{"type": "user_message", "data": {"content": "Task 1"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Done", "usage": {"input": 10000, "output": 2000}}}\n'
+    )
+    f1_sub = s_dir / "sess_del_1_sub_1.jsonl"
+    f1_sub.write_text(
+        '{"type": "user_message", "data": {"content": "Sub 1"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Sub done", "usage": {"input": 5000, "output": 1000}}}\n'
+    )
+
+    f2 = s_dir / "sess_del_2.jsonl"
+    f2.write_text(
+        '{"type": "user_message", "data": {"content": "Task 2"}}\n'
+        '{"type": "assistant_turn", "data": {"text": "Done 2", "usage": {"input": 4000, "output": 800}}}\n'
+    )
+
+    # Create dummy checkpoint
+    cp_dir = tmp_path / ".axon" / "checkpoints" / "sess_del_1"
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    (cp_dir / "state.json").write_text("{}")
+
+    store = SessionStore(workspace=tmp_path, session_dir=s_dir)
+    store.open("sess_del_1")
+
+    # 1. Verify list_recent accurately computes total_cost
+    recent = store.list_recent()
+    assert len(recent) == 2
+    r_map = {m.session_id: m for m in recent}
+    assert r_map["sess_del_1"].total_cost > 0.0
+    assert r_map["sess_del_2"].total_cost > 0.0
+    # Sess 1 includes subagent (15,000 in, 3,000 out)
+    assert r_map["sess_del_1"].total_tokens == 18000
+
+    # 2. Delete sess_del_1
+    deleted = store.delete_session("sess_del_1")
+    assert deleted is True
+    assert not f1.exists()
+    assert not f1_sub.exists()
+    assert not cp_dir.exists()
+    # Active session was deleted, so store should automatically have opened a fresh ID
+    assert store.active_session_id != "sess_del_1"
+
+    # Remaining session
+    assert len(store.list_recent()) == 1
+
+    # 3. Test bulk delete_all_sessions
+    cleared = store.delete_all_sessions()
+    assert cleared >= 1
+    assert len(store.list_recent()) == 0
 
 
 

@@ -1,0 +1,12 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { chunk, slugify } from "./index.js";
+
+test("chunk", () => {
+  assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  assert.throws(() => chunk([1], 0), RangeError);
+});
+
+test("slugify", () => {
+  assert.equal(slugify("Hello, World!"), "hello-world");
+});

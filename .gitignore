@@ -1,16 +1,57 @@
+# ── Secrets & local configuration ──────────────────────────────────────────
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Axon local state (sessions, traces, memory, settings.local.json) ────────
 .axon/
 sessions/
+
+# ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.egg-info/
-.coverage
+*.egg
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ── Test, lint & type-check caches ─────────────────────────────────────────
 .pytest_cache/
-.DS_Store
-._*
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ── Editors & IDEs ─────────────────────────────────────────────────────────
+.idea/
+.vscode/
 *.swp
 *.swo
-dist/
-build/
-dsa_beginners/
+*~
 
+# ── OS files ───────────────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log

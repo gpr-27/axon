@@ -1,223 +1,265 @@
 """
-Interactive /resume, /sessions, /history, and /branch session management.
+Interactive session management: /sessions listing, deletion, /resume, /branch and
+rendering of a restored transcript.
 """
 from __future__ import annotations
+
 import datetime
-from pathlib import Path
-from typing import TYPE_CHECKING
+import re
+import sys
+from typing import TYPE_CHECKING, Any
+
 from axon.session.store import SessionStore
-from axon.ui.markdown import format_markdown
 from axon.ui.picker import pick
-from axon.ui.theme import (
-    BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, LBLUE, MINT, RST, ROSE, SLATE, TEAL, WHITE, term_width,
-)
+from axon.ui.theme import BOLD, DARK_SLATE, DIM, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE, term_width
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
+
+def _fmt_ts(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
 def handle_sessions_list(store: SessionStore) -> None:
     recent = store.list_recent(limit=None)
     if not recent:
-        print(f"\n  {SLATE}No saved sessions found in {store.session_dir}.{RST}\n")
+        print(f"\n  {SLATE}No saved sessions for this workspace (store: {store.session_dir}).{RST}\n")
         return
 
+    from axon.ui.markdown import format_markdown
     table_lines = [
-        "### Saved Axon Sessions",
+        "### Saved Sessions",
         "",
-        "| Session ID | Timestamp | First Task / Summary | Entries | Tokens | Status |",
-        "|---|---|---|---|---|---|",
+        "| Session | Updated | Title | Msgs | Tokens | Cost | |",
+        "|---|---|---|---|---|---|---|",
     ]
-
     for meta in recent:
-        dt = datetime.datetime.fromtimestamp(meta.created_at).strftime("%Y-%m-%d %H:%M")
-        is_active = meta.session_id == store.active_session_id
-        status = "🟢 Active" if is_active else "Saved"
+        flags = []
+        if meta.session_id == store.active_session_id:
+            flags.append("active")
+        if meta.is_starred:
+            flags.append("★")
         summary = meta.first_prompt.replace("|", "/")
-        tok_str = f"{meta.total_tokens:,}" if meta.total_tokens > 0 else "0"
-        table_lines.append(f"| `{meta.session_id}` | {dt} | {summary} | {meta.message_count} | {tok_str} | {status} |")
-
-    table_lines.append("")
-    table_lines.append("> Use `/resume <session_id>` to switch or restore any session.")
+        if meta.tags:
+            summary += f" `#{meta.tags[0]}`"
+        table_lines.append(
+            f"| `{meta.session_id}` | {_fmt_ts(meta.created_at)} | {summary} | {meta.message_count} | "
+            f"{meta.total_tokens:,} | ${meta.total_cost:.4f} | {' '.join(flags)} |"
+        )
+    total_spend = sum(m.total_cost for m in recent)
+    total_tokens = sum(m.total_tokens for m in recent)
+    table_lines += [
+        "",
+        f"**Total:** `${total_spend:.4f}` across `{len(recent)}` sessions (`{total_tokens:,}` tokens)",
+        "",
+        "> `/resume <id>` to switch · `/sessions delete <id>` to remove · `←` opens the switcher",
+    ]
     print(format_markdown("\n".join(table_lines)))
 
-def handle_history(agent: Agent) -> None:
-    """Display chronological task history of the current active session."""
-    msgs = agent.conversation.messages
-    if not msgs:
-        print(f"\n  {SLATE}Current session is empty. No tasks executed yet.{RST}\n")
+
+def _match_session(ids: list[str], arg: str) -> tuple[str | None, list[str]]:
+    if arg in ids:
+        return arg, []
+    matches = [s for s in ids if s.startswith(arg)] or [s for s in ids if arg in s]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
+def handle_session_delete(store: SessionStore, session_id: str = "") -> None:
+    """Delete one session (id, unique prefix, or picker) or all with --all."""
+    recent = store.list_recent(limit=None)
+    if not recent:
+        print(f"\n  {SLATE}No saved sessions found to delete.{RST}\n")
         return
 
-    print(f"\n{GOLD}{BOLD}=== Active Session Task Timeline ({len(msgs)} messages) ==={RST}\n")
-    turn_num = 1
-    for m in msgs:
-        role = m.get("role")
-        content = m.get("content", "")
-        if role == "user":
-            if isinstance(content, list):
-                # Tool result blocks
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                        c_text = blk.get("content", "").splitlines()
-                        summary = c_text[0][:60] if c_text else "Done"
-                        is_err = "❌" if blk.get("is_error") else "✔"
-                        print(f"    {SLATE}└─ {is_err} Result: {summary}{RST}")
+    clean_arg = session_id.strip()
+    if clean_arg in ("--all", "-a", "all", "clear"):
+        count = store.delete_all_sessions()
+        print(f"\n  {MINT}✓ Deleted {count} session(s) for this workspace.{RST}\n")
+        return
+
+    ids = [m.session_id for m in recent]
+    chosen_id: str | None = None
+    if clean_arg:
+        chosen_id, candidates = _match_session(ids, clean_arg)
+        if not chosen_id:
+            if candidates:
+                print(f"\n  {GOLD}'{clean_arg}' matches {len(candidates)} sessions - be more specific:{RST}")
+                for c in candidates[:8]:
+                    print(f"    {SLATE}{c}{RST}")
+                print()
             else:
-                print(f"  {TEAL}{BOLD}[Turn {turn_num}]{RST} {WHITE}{BOLD}User Request:{RST}")
-                for line in str(content).splitlines()[:4]:
-                    print(f"    {MINT}› {line}{RST}")
-                turn_num += 1
-        elif role == "assistant":
-            if isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "tool_use":
-                        t_name = blk.get("name", "tool")
-                        t_inp = blk.get("input", {})
-                        arg_summary = t_inp.get("command") or t_inp.get("path") or t_inp.get("pattern") or ""
-                        print(f"    {LBLUE}⏺ Action:{RST} {BOLD}{t_name}{RST} {WHITE}{arg_summary}{RST}")
-                    elif isinstance(blk, dict) and blk.get("type") == "text":
-                        txt = blk.get("text", "").strip().splitlines()
-                        if txt:
-                            print(f"    {SLATE}💬 Response: {txt[0][:70]}...{RST}")
-            elif isinstance(content, str) and content.strip():
-                txt = content.strip().splitlines()
-                print(f"    {SLATE}💬 Response: {txt[0][:70]}...{RST}")
-    print()
+                print(f"\n  {ROSE}✗ Session not found: {clean_arg}{RST}\n")
+            return
+    else:
+        picker_options = [f"{m.session_id}  (${m.total_cost:.4f} · {m.first_prompt[:25]})" for m in recent]
+        chosen = pick(picker_options, title="Select Session to Delete")
+        if not chosen:
+            print(f"\n  {SLATE}(Delete cancelled){RST}\n")
+            return
+        chosen_id = chosen.split()[0]
+
+    if store.delete_session(chosen_id):
+        print(f"\n  {MINT}✓ Deleted session {BOLD}{chosen_id}{RST}\n")
+    else:
+        print(f"\n  {ROSE}✗ Failed to delete session {chosen_id}{RST}\n")
+
 
 def render_restored_conversation(conversation: Any, session_id: str, ledger: Any = None) -> None:
-    """Renders the full restored chat history with syntax highlighting, action badges, and token/cost metrics."""
-    import sys
-    from axon.ui.theme import (
-        BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, LBLUE, MINT, RST, ROSE, SLATE, TEAL, WHITE, term_width,
-    )
+    """Render a restored transcript with tool badges and its recorded token/cost usage."""
     from axon.ui.markdown import format_markdown
+
     msgs = getattr(conversation, "messages", [])
     if not msgs:
         print(f"\n  {SLATE}(Restored session is empty){RST}\n")
         return
 
     width = max(40, term_width() - 4)
+    in_tok = int(getattr(ledger, "total_input_tokens", 0) or 0) if ledger is not None else 0
+    out_tok = int(getattr(ledger, "total_output_tokens", 0) or 0) if ledger is not None else 0
+    tot_tok = in_tok + out_tok
+    cost_val = float(getattr(ledger, "total_cost", 0.0) or 0.0) if ledger is not None else 0.0
+    hdr_metrics = f" · {tot_tok:,} tokens · ${cost_val:.5f}" if tot_tok > 0 else ""
 
-    # Metrics summary for header
-    tot_tok = (getattr(ledger, "total_input_tokens", 0) or 0) + (getattr(ledger, "total_output_tokens", 0) or 0) if ledger else 0
-    cost_val = float(getattr(ledger, "total_cost", 0.0) or 0.0) if ledger else 0.0
-
-    if ledger is not None and tot_tok == 0 and len(msgs) > 0:
-        from axon.agent.state import estimate_content_tokens
-        est_in = 0
-        est_out = 0
-        for m in msgs:
-            c = m.get("content", "")
-            r = m.get("role")
-            if r == "user":
-                est_in += estimate_content_tokens(c)
-            elif r == "assistant":
-                est_out += estimate_content_tokens(c)
-        if est_in > 0 or est_out > 0:
-            from axon.providers.base import Usage
-            ledger.record("claude-opus-5", Usage(input=max(100, est_in), output=max(20, est_out)))
-            tot_tok = ledger.total_input_tokens + ledger.total_output_tokens
-            cost_val = float(ledger.total_cost)
-
-    hdr_metrics = f" · {tot_tok:,} tokens · ${cost_val:.5f}" if ledger and tot_tok > 0 else ""
-
-    print(f"\n  {DARK_SLATE}╭── {TEAL}📂 Restored Chat Session:{RST} {BOLD}{WHITE}{session_id}{RST} {SLATE}({len(msgs)} messages{hdr_metrics}){DARK_SLATE} {'─' * max(2, width - len(session_id) - len(hdr_metrics) - 45)}╮{RST}\n")
+    fill = max(2, width - len(session_id) - len(hdr_metrics) - 45)
+    print(f"\n  {DARK_SLATE}╭── {TEAL}Restored Chat Session:{RST} {BOLD}{WHITE}{session_id}{RST} "
+          f"{SLATE}({len(msgs)} messages{hdr_metrics}){DARK_SLATE} {'─' * fill}╮{RST}\n")
 
     for m in msgs:
         role = m.get("role")
         content = m.get("content")
-
         if role == "user":
             if isinstance(content, str):
-                clean_text = content.strip()
-                from axon.ui.input import format_user_prompt_banner
-                sys.stdout.write(f"{format_user_prompt_banner(clean_text, max_w=width)}\n\n")
+                try:
+                    from axon.ui.input import format_user_prompt_banner
+                    sys.stdout.write(f"{format_user_prompt_banner(content.strip(), max_w=width)}\n\n")
+                except Exception:
+                    print(f"  {TEAL}›{RST} {content.strip()}\n")
             elif isinstance(content, list):
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                        c_text = str(blk.get("content", "")).strip()
-                        lines = c_text.splitlines()
-                        is_err = blk.get("is_error")
-                        icon = f"{ROSE}❌" if is_err else f"{MINT}✓"
-                        preview = lines[0][:80] if lines else "Completed"
-                        print(f"    {icon} {SLATE}{preview}{RST}")
+                        lines = str(blk.get("content", "")).strip().splitlines()
+                        icon = f"{ROSE}✗" if blk.get("is_error") else f"{MINT}✓"
+                        print(f"    {icon} {SLATE}{(lines[0][:80] if lines else 'Completed')}{RST}")
                         if len(lines) > 1:
-                            print(f"      {DIM}... (+{len(lines)-1} lines of output){RST}")
+                            print(f"      {DIM}... (+{len(lines) - 1} lines of output){RST}")
+                    elif isinstance(blk, dict) and blk.get("type") == "text":
+                        print(f"  {TEAL}›{RST} {blk.get('text', '')}")
                 print()
-
+        elif role == "tool":
+            lines = str(content or "").strip().splitlines()
+            print(f"    {MINT}✓ {SLATE}{(lines[0][:80] if lines else 'Completed')}{RST}")
         elif role == "assistant":
-            if isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict):
-                        b_type = blk.get("type")
-                        if b_type == "tool_use":
-                            t_name = blk.get("name", "tool")
-                            t_inp = blk.get("input", {})
-                            arg_summary = t_inp.get("command") or t_inp.get("path") or t_inp.get("pattern") or t_inp.get("query") or ""
-                            print(f"  {MINT}⚡ Tool Action:{RST} {GOLD}{BOLD}🛠️ {t_name}{RST} {WHITE}{arg_summary}{RST}")
-                        elif b_type == "text":
-                            txt = blk.get("text", "")
-                            if txt.strip():
-                                rendered = format_markdown(txt.strip(), max_width=width)
-                                print(f"{rendered}\n")
-            elif isinstance(content, str) and content.strip():
-                rendered = format_markdown(content.strip(), max_width=width)
-                print(f"{rendered}\n")
+            blocks = content if isinstance(content, list) else []
+            for tc in m.get("tool_calls") or []:
+                fn = (tc or {}).get("function", {}) if isinstance(tc, dict) else {}
+                print(f"  {MINT}⚡ Tool:{RST} {GOLD}{BOLD}{fn.get('name', 'tool')}{RST}")
+            for blk in blocks:
+                if not isinstance(blk, dict):
+                    continue
+                if blk.get("type") == "tool_use":
+                    inp = blk.get("input", {}) or {}
+                    arg = inp.get("command") or inp.get("path") or inp.get("pattern") or inp.get("query") or "" if isinstance(inp, dict) else ""
+                    print(f"  {MINT}⚡ Tool:{RST} {GOLD}{BOLD}{blk.get('name', 'tool')}{RST} {WHITE}{arg}{RST}")
+                elif blk.get("type") == "text" and str(blk.get("text", "")).strip():
+                    print(f"{format_markdown(str(blk['text']).strip(), max_width=width)}\n")
+            if isinstance(content, str) and content.strip():
+                print(f"{format_markdown(content.strip(), max_width=width)}\n")
 
-    # Render prominent cost & token usage summary
     if ledger is not None:
-        in_tok = getattr(ledger, "total_input_tokens", 0) or 0
-        out_tok = getattr(ledger, "total_output_tokens", 0) or 0
-        reason_tok = getattr(ledger, "total_reasoning_tokens", 0) or 0
+        reason_tok = int(getattr(ledger, "total_reasoning_tokens", 0) or 0)
         reason_info = f" · reasoning: {reason_tok:,}" if reason_tok > 0 else ""
-        
-        print(
-            f"  {DARK_SLATE}├── {TEAL}{BOLD}📊 Restored Session Usage:{RST} "
-            f"{WHITE}{BOLD}{tot_tok:,}{RST} {SLATE}tokens{RST} "
-            f"{SLATE}(in: {in_tok:,} · out: {out_tok:,}{reason_info}){RST} "
-            f"{DARK_SLATE}·{RST} {GOLD}{BOLD}Total Cost: ${cost_val:.5f}{RST}"
-        )
-
+        usage_txt = f"{WHITE}{BOLD}{tot_tok:,}{RST} {SLATE}tokens (in: {in_tok:,} · out: {out_tok:,}{reason_info}){RST}" if tot_tok else f"{SLATE}no usage recorded{RST}"
+        print(f"  {DARK_SLATE}├── {TEAL}{BOLD}Session usage:{RST} {usage_txt} {DARK_SLATE}·{RST} {GOLD}{BOLD}Total Cost: ${cost_val:.5f}{RST}")
     print(f"  {DARK_SLATE}╰──{'─' * max(2, width - 4)}╯{RST}\n")
 
+
+def pick_session(recent: list[Any], active_id: str = "") -> str | None:
+    """Searchable session picker (type to filter by title, id, tag or model). Non-TTY: numbered menu."""
+    from axon import platform as plat
+    if not plat.is_interactive():
+        labels = {f"{m.session_id}  · {m.first_prompt[:40]}": m.session_id for m in recent}
+        sel = pick(list(labels), title="Select Session to Resume")
+        return labels.get(sel) if sel else None
+    from axon.ui.picker import SelectItem, Selector
+    items = []
+    for m in recent:
+        star = f"{GOLD}★{RST}" if getattr(m, "is_starred", False) else " "
+        tags = " ".join(f"#{t}" for t in getattr(m, "tags", []) or [])
+        hint = f"{_fmt_ts(m.created_at)} · {m.message_count} msgs · ${float(getattr(m, 'total_cost', 0.0)):.4f}"
+        items.append(SelectItem(label=(m.first_prompt or m.session_id)[:70], value=m.session_id, hint=hint, badge=star,
+                                search=f"{m.session_id} {tags} {m.model}"))
+    chosen = Selector(items, title="Resume session", subtitle=f"{len(recent)} saved · type to search",
+                      filterable=True, placeholder="search title, id, #tag or model", max_visible=12).run()
+    value = getattr(chosen, "value", None)
+    return str(value) if value else None
+
+
 def handle_resume(agent: Agent, session_id: str = "") -> None:
-    recent = agent.session.list_recent(limit=None)
+    store = agent.session
+    recent = store.list_recent(limit=None)
     if not recent:
         print(f"\n  {SLATE}No past sessions found to resume.{RST}\n")
         return
 
-    options = [m.session_id for m in recent]
-
-    if session_id and session_id in options:
-        chosen = session_id
-    elif session_id:
-        matches = [s for s in options if s.startswith(session_id)]
-        chosen = matches[0] if matches else None
+    ids = [m.session_id for m in recent]
+    arg = session_id.strip()
+    chosen: str | None
+    if arg:
+        chosen, candidates = _match_session(ids, arg)
+        if not chosen and candidates:
+            print(f"\n  {GOLD}'{arg}' matches {len(candidates)} sessions - be more specific.{RST}\n")
+            return
+        if not chosen:
+            print(f"\n  {ROSE}✗ Session not found: {arg}{RST}\n")
+            return
     else:
-        chosen = pick(options, title="Select Session to Resume", current=agent.session.active_session_id)
+        chosen = pick_session(recent, store.active_session_id)
 
-    if chosen:
-        agent.session.open(chosen)
-        agent.conversation = agent.session.load(chosen)
-        agent.ledger = agent.session.load_ledger(chosen, agent.settings.model)
-        if hasattr(agent, "subagents"):
-            from axon.agent.subagent import sync_subagents_for_session
-            sync_subagents_for_session(agent)
-        render_restored_conversation(agent.conversation, chosen, ledger=agent.ledger)
-    else:
-        print(f"\n  {SLATE}(Session unchanged: {agent.session.active_session_id}){RST}\n")
+    if not chosen:
+        print(f"\n  {SLATE}(Session unchanged: {store.active_session_id}){RST}\n")
+        return
+    agent.conversation = store.load(chosen)
+    agent.ledger = store.load_ledger(chosen, agent.settings.model)
+    cp = getattr(agent, "checkpoints", None)
+    if cp is not None and hasattr(cp, "set_session"):
+        try:
+            cp.set_session(chosen)  # /rewind keeps working on the resumed session's file snapshots
+        except Exception:
+            pass
+    try:
+        from axon.agent.subagent import sync_subagents_for_session
+        sync_subagents_for_session(agent)
+    except Exception:
+        pass
+    render_restored_conversation(agent.conversation, chosen, ledger=agent.ledger)
+
 
 def handle_branch(agent: Agent, name: str = "") -> None:
-    old_id = agent.session.active_session_id
-    new_id = f"{old_id}_branch_{int(datetime.datetime.now().timestamp())}" if not name else f"session_{name}"
-    agent.session.open(new_id)
-
+    """Fork the current conversation into a new session (the original is untouched)."""
+    store = agent.session
+    old_id = store.active_session_id
+    clean = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-")[:40]
+    if clean:
+        new_id = f"{old_id.split('_sub_')[0]}_branch_{clean}"
+    else:
+        new_id = f"{old_id}_branch_{int(datetime.datetime.now().timestamp())}"
+    n = 2
+    base = new_id
+    while (store.session_dir / f"{new_id}.jsonl").exists():
+        new_id = f"{base}-{n}"
+        n += 1
+    store.open(new_id)
     for m in agent.conversation.messages:
         role = m.get("role")
         if role == "user":
-            agent.session.append("user_message", m)
+            store.append("user_message", {"role": "user", "content": m.get("content", "")})
         elif role == "assistant":
-            agent.session.append("assistant_turn", {"native": m.get("content")})
+            store.append("assistant_turn", {"native": dict(m), "text": "", "tool_uses": [], "usage": None})
         elif role == "tool":
-            agent.session.append("tool_results", [m])
-
-    print(f"\n  {TEAL}✓ Branched session into {BOLD}{new_id}{RST}{TEAL}. Original {old_id} preserved.{RST}\n")
+            store.append("tool_results", [dict(m)])
+    if clean:
+        store.rename_session(name.strip())
+    print(f"\n  {TEAL}✓ Branched into {BOLD}{new_id}{RST}{TEAL} · original {old_id} preserved.{RST}\n")
