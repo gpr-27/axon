@@ -60,6 +60,10 @@ class HookSpec(BaseModel):
 HookConfig = HookSpec
 
 
+# Keys a Claude Code .claude/settings*.json may not set for Axon (model choice belongs to Axon's config).
+_CLAUDE_MODEL_KEYS = ("model", "small_model", "fallback_model", "effort")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AXON_",
@@ -82,7 +86,7 @@ class Settings(BaseSettings):
     turn_token_budget: int = 2_000_000
     max_history_turns: int = 0  # Sliding context window in turns (0 = unlimited)
     session_cost_ceiling: Decimal = Decimal("50.00")
-    compact_at: float = 0.85
+    compact_at: float = 0.75            # auto-compact at this share of the context limit
     parallel_tools: int = 6
     bash_timeout_s: int = 180
     tool_output_cap: int = 150_000
@@ -113,15 +117,26 @@ class Settings(BaseSettings):
     status_line: dict[str, Any] | None = None
     vim_mode: bool = False
     theme: str = "auto"
-    cleanup_period_days: int = 30
+    cleanup_period_days: int = 0         # 0 = keep everything forever; N > 0 prunes sessions/traces/todos older than N days
     verify_commands: list[Any] = Field(default_factory=list)
     verify_timeout: int = 900
     repo_map: bool = False
     repo_map_tokens: int = 1500
     suggestions: bool = True
+    # Usage tips (spinner line / after turns). AXON_NO_TIPS=1 turns them off regardless.
+    tips: bool = True
+    tips_llm: bool = True                # model-written contextual tips (False: derived from the command registry)
+    tips_refresh_turns: int = 5          # min turns between LLM tip refreshes
+    context_limit: int = 128_000         # tokens of the model's window Axon uses (128k, 256k, 1M; 0 = model max)
+    max_width: int = 0                   # cap output width in columns (0 = use the whole terminal)
+    screen_log: bool = True              # keep a plain-text copy of everything shown (projects/<p>/screen/)
+    mouse_click_expand: bool = False     # capture clicks at the prompt to expand blocks (wheel/drag then go to Axon)
+    notifications: str = "important"     # desktop notifications: important | all | off
+    notify_after_seconds: float = 30.0   # "important": notify a finished turn only if it ran this long
+    tips_refresh_minutes: float = 15.0   # min minutes between LLM tip refreshes
     auto_title: bool = True
     # `!cmd` output is added to the conversation; when true the model also replies to it.
-    respond_to_bash_commands: bool = False
+    respond_to_bash_commands: bool = True     # `!cmd`: the model responds to the output
     disable_all_hooks: bool = False
     prompt_color: str | None = None     # /color, settings.json promptColor
     goal: str | None = None             # /goal: session goal (prompt section + one bounded Stop check)
@@ -129,10 +144,11 @@ class Settings(BaseSettings):
     @field_validator("cleanup_period_days", mode="before")
     @classmethod
     def _min_cleanup(cls, v: Any) -> int:
+        """0 (or negative / invalid) keeps every session forever; N > 0 opts in to pruning."""
         try:
-            return max(1, int(v))
+            return max(0, int(v))
         except (TypeError, ValueError):
-            return 30
+            return 0
 
     @field_validator("additional_dirs", mode="before")
     @classmethod
@@ -191,6 +207,13 @@ class Settings(BaseSettings):
         user_cfg = _axon_home() / "config.toml"
         user_data = _load_toml(user_cfg, fatal=True)
         merged.update(user_data)
+        # 1a. [endpoints.*] (user config only): preset base-URL overrides and custom endpoints.
+        try:
+            from axon.providers.endpoints import apply_endpoint_overrides
+            endpoints_table = user_data.get("endpoints")
+            apply_endpoint_overrides(endpoints_table if isinstance(endpoints_table, dict) else {})
+        except Exception:
+            pass
 
         # 2. Workspace project config <ws>/.axon/config.toml (non-fatal)
         ws = Path(cli_overrides.get("workspace") or Path.cwd()).resolve()
@@ -222,9 +245,22 @@ class Settings(BaseSettings):
         #     ~/.axon/settings.json, <ws>/.claude/settings.json, <ws>/.axon/settings.json,
         #     <ws>/.claude/settings.local.json, <ws>/.axon/settings.local.json, --settings <file|json>
         json_layers: list[tuple[str, Any]] = [("user", _axon_home() / "settings.json")]
+
+        def _same_dir(a: Path, b: Path) -> bool:
+            try:
+                return a.resolve() == b.resolve()
+            except OSError:
+                return False
+
+        # Opened in the home folder: ~/.claude is Claude Code's own user config and ~/.axon is Axon's,
+        # neither is a project's settings folder.
+        claude_is_home = _same_dir(ws / ".claude", Path.home() / ".claude")
+        axon_is_home = _same_dir(ws / ".axon", _axon_home())
         for name in ("settings.json", "settings.local.json"):
-            json_layers.append(("project", ws / ".claude" / name))
-            json_layers.append(("project", ws / ".axon" / name))
+            if not claude_is_home:
+                json_layers.append(("project-claude", ws / ".claude" / name))
+            if not axon_is_home:
+                json_layers.append(("project", ws / ".axon" / name))
         if extra_settings:
             json_layers.append(("cli", extra_settings))
         for level, src in json_layers:
@@ -232,6 +268,15 @@ class Settings(BaseSettings):
             if not data:
                 continue
             mapped = map_json_settings(data)
+            if level == "project-claude":
+                # Claude Code's model names ("opus", "sonnet") pick Anthropic models; they must never switch
+                # the model chosen in Axon's own config (that silently moved a DeepSeek user onto Opus).
+                for key in _CLAUDE_MODEL_KEYS:
+                    if key in mapped:
+                        warnings.append(f"Ignoring '{key}' = {mapped[key]!r} from Claude Code settings {src}; "
+                                        "Axon's model comes from ~/.axon/config.toml or /model.")
+                        mapped.pop(key)
+                level = "project"
             if level == "project":
                 for blocked in ("api_key", "base_url"):
                     if blocked in mapped:
@@ -314,11 +359,18 @@ _JSON_KEY_MAP = {
     "verifyTimeout": "verify_timeout", "verify_timeout": "verify_timeout",
     "repoMap": "repo_map", "repo_map": "repo_map", "repoMapTokens": "repo_map_tokens", "repo_map_tokens": "repo_map_tokens",
     "suggestions": "suggestions", "promptSuggestionEnabled": "suggestions",
+    "contextLimit": "context_limit", "context_limit": "context_limit",
+    "notifications": "notifications", "preferredNotifChannel": "notifications",
+    "notifyAfterSeconds": "notify_after_seconds", "notify_after_seconds": "notify_after_seconds",
+    "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
+    "tipsRefreshTurns": "tips_refresh_turns", "tips_refresh_turns": "tips_refresh_turns",
+    "tipsRefreshMinutes": "tips_refresh_minutes", "tips_refresh_minutes": "tips_refresh_minutes",
     "autoTitle": "auto_title", "auto_title": "auto_title",
     "respondToBashCommands": "respond_to_bash_commands", "disableAllHooks": "disable_all_hooks",
     "vimMode": "vim_mode", "vim_mode": "vim_mode", "additionalDirectories": "additional_dirs",
     "systemPrompt": "system_prompt_override",
     "promptColor": "prompt_color", "prompt_color": "prompt_color",
+    "mouseClickExpand": "mouse_click_expand", "mouse_click_expand": "mouse_click_expand",
 }
 _MODE_MAP = {"bypassPermissions": "bypass", "bypass": "bypass", "acceptEdits": "acceptEdits", "plan": "plan",
              "default": "default", "manual": "default"}

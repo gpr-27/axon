@@ -230,8 +230,9 @@ def axon_lines(settings: Any, workspace: Path) -> list[str]:
     try:
         from axon import storage
         total = sum(int(r.get("bytes", 0)) for r in storage.storage_summary())
-        lines.append(_row("Storage", f"{ah} ({total / 1_048_576:.1f} MB, cleanup after "
-                                     f"{int(getattr(settings, 'cleanup_period_days', 30) or 30)} days)"))
+        days = int(getattr(settings, "cleanup_period_days", 0) or 0)
+        keep = f"cleanup after {days} days" if days > 0 else "kept forever"
+        lines.append(_row("Storage", f"{ah} ({total / 1_048_576:.1f} MB, {keep})"))
     except Exception:
         pass
     return lines

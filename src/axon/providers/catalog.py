@@ -73,11 +73,12 @@ PROVIDER_PRESETS: list[ProviderPreset] = [
     ProviderPreset(
         id="agentrouter",
         name="AgentRouter",
-        description="High performance proxy · DeepSeek, Claude Opus, GPT-5",
+        description="High performance proxy · DeepSeek V4, Claude Opus 5.5, GPT-6",
         category="Popular Cloud",
         base_url="https://agentrouter.org",
         default_model="deepseek-v4-flash",
-        models=["deepseek-v4-flash", "gpt-5.6-sol", "gpt-6-astra", "claude-opus-5", "claude-opus-4-8"],
+        # The models AgentRouter serves today (its /api/pricing feed, 2026-10-16).
+        models=["deepseek-v4-flash", "claude-opus-5-5", "gpt-6.1-sol", "gpt-6-astra"],
         env_var="AXON_API_KEY",
         env_vars=("AXON_API_KEY", "AGENTROUTER_API_KEY"),
         docs_url="https://agentrouter.org/console",

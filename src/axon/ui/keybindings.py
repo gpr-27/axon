@@ -61,6 +61,9 @@ ACTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "app:fileFinder": ("Fuzzy file finder (inserts @path)", ("ctrl-p",)),
     "app:todos": ("Show the task list", ("ctrl-t",)),
     "app:traceCycle": ("Cycle trace level compact → normal → detailed → debug", ("ctrl-o",)),
+    "app:transcript": ("Full-screen transcript: click/enter expands a tool call", ("ctrl-f",)),
+    "app:clickExpand": ("Mouse: click a block above the prompt to expand it · wheel up scrolls history "
+                        "(⌥/shift+drag selects text; setting mouse_click_expand)", ("click",)),
     "app:modelPicker": ("Open the model picker", ("alt-p",)),
     "app:thinkingToggle": ("Toggle reasoning display", ("alt-t",)),
     "app:suspend": ("Suspend Axon (POSIX job control)", ("ctrl-z",)),

@@ -6,32 +6,61 @@ Axon also works there and in Git Bash.
 
 ## Install
 
-1. Install **Python 3.10+** from [python.org](https://www.python.org/downloads/windows/) and tick
-   **"Add python.exe to PATH"**. The `python` command that opens the Microsoft Store is only a stub,
-   and the installers detect and skip it.
-2. Clone the repository and run one of the installers from its folder:
+One line in PowerShell (5.1 or 7). No clone and no execution-policy change is needed:
 
-   ```powershell
-   # PowerShell (5.1 or 7)
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-   ```
+```powershell
+irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+```
 
-   ```bat
-   :: Command Prompt, or double-click the file in Explorer
-   install.bat
-   ```
+From Command Prompt:
 
-3. Open a **new** terminal window so it picks up the updated PATH, then run `axon setup`.
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex"
+```
 
-The installer creates `.venv\` in the repository, installs Axon into it in editable mode, writes the
-launcher `%USERPROFILE%\.axon\bin\axon.cmd`, and adds that folder to your **user** PATH (no admin
-rights needed). Pass `-NoPath` or `-NoShim` to `install.ps1`, or `--no-path` or `--no-shim` to
-`install.bat`, to skip those steps.
+The installer uses `uv tool install` when [uv](https://docs.astral.sh/uv/) is on PATH, then
+`pipx install` when pipx is, and otherwise creates a private virtual environment in
+`%USERPROFILE%\.axon\venv` with the launcher `%USERPROFILE%\.axon\bin\axon.cmd`. It adds the
+launcher folder to your **user** PATH (no admin rights needed) and to the current window, so
+`axon setup` works straight away. Without uv, it needs **Python 3.10+** from
+[python.org](https://www.python.org/downloads/windows/) with **"Add python.exe to PATH"** ticked. The
+`python` command that opens the Microsoft Store is only a stub, and the installer skips it.
 
-**Why `-ExecutionPolicy Bypass`?** Windows blocks unsigned `.ps1` scripts by default, with the error
+Options are environment variables set before the one-liner, or parameters passed through a script
+block:
+
+```powershell
+$env:AXON_INSTALL_REF = "v0.28.0"            # a branch, tag or commit instead of main
+$env:AXON_INSTALL_METHOD = "venv"            # auto (default), uv, pipx or venv
+irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+
+# Upgrade: run the one-liner again.
+# Uninstall (settings and sessions in %USERPROFILE%\.axon are kept):
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1))) -Uninstall
+```
+
+### From a clone (for development)
+
+```powershell
+# PowerShell (5.1 or 7)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+```bat
+:: Command Prompt, or double-click the file in Explorer
+install.bat
+```
+
+Then open a **new** terminal window and run `axon setup`. In a clone the installer creates `.venv\`
+in the repository, installs Axon into it in editable mode, writes the launcher
+`%USERPROFILE%\.axon\bin\axon.cmd`, and adds that folder to your user PATH. Pass `-NoPath` or
+`-NoShim` to `install.ps1`, or `--no-path` or `--no-shim` to `install.bat`, to skip those steps.
+`-Standalone` installs from GitHub instead, as the one-liner does.
+
+**Why `-ExecutionPolicy Bypass`?** Windows blocks unsigned `.ps1` files by default, with the error
 "running scripts is disabled on this system". The flag allows this one script for this one process
-and changes no machine setting. If you prefer not to use it, run `install.bat`, which does the same
-thing without PowerShell.
+and changes no machine setting. `irm ... | iex` is not affected by the policy. If you prefer not to
+use the flag, run `install.bat`, which does the same thing.
 
 ## API keys
 
@@ -81,7 +110,8 @@ process tree, so a hung `npm` or `python` child process does not outlive the too
 
 | Symptom | Fix |
 |---|---|
-| `axon` is not recognised | Open a new terminal after installing. Check that `%USERPROFILE%\.axon\bin` is on your user PATH, or run `.venv\Scripts\python.exe -m axon`. |
+| `axon` is not recognised | Open a new terminal after installing. Check that `%USERPROFILE%\.axon\bin` (venv method) or `%USERPROFILE%\.local\bin` (uv, pipx) is on your user PATH. |
+| `irm` fails with a TLS or SSL error | Old Windows PowerShell 5.1 builds default to TLS 1.0. Run `[Net.ServicePointManager]::SecurityProtocol = 'Tls12'` first. |
 | "Python 3.10 or newer was not found" | Install Python from python.org with "Add to PATH" ticked, or disable the Store aliases in *Settings → Apps → Advanced app settings → App execution aliases*. |
 | "running scripts is disabled on this system" | Use `-ExecutionPolicy Bypass` as shown above, or run `install.bat`. |
 | Garbled box characters | Use Windows Terminal, or set a TrueType font such as Cascadia Mono in the console. Axon's ASCII fallback covers the rest. |

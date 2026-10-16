@@ -157,7 +157,9 @@ def test_render_suggestions() -> None:
     assert sg.render_suggestions([]) == ""
     line = strip_ansi(sg.render_suggestions([sg.Suggestion("/verify", "/verify", "r"),
                                              sg.Suggestion("/commit", "/commit", "r")]))
-    assert line.strip() == f"Next: [1] /verify {glyph('dot')} [2] /commit"
+    rows = [r.strip() for r in line.splitlines()]
+    assert rows[0] == f"{glyph('arrow')} Suggested next  (/next <n> runs one)"
+    assert rows[1:] == ["1. /verify  r", "2. /commit  r"]
 
 
 def test_run_suggestion_prompt_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,3 +188,15 @@ def test_next_command_runs_numbered_choice(ws: Path, monkeypatch: pytest.MonkeyP
 
 def test_feature_contract() -> None:
     assert [c.name for c in sg.COMMANDS] == ["/next"]
+
+
+def test_next_step_becomes_the_single_tip_and_is_not_repeated(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(sg, "suggest_next", lambda agent, res=None: calls.append(1) or [
+        sg.Suggestion("/verify", "/verify", "2 file(s) edited but no tests were run")])
+    agent = SimpleNamespace(settings=SimpleNamespace(suggestions=True))
+    sg._LAST_TIP[0] = ""
+    assert sg.next_step_tip(agent) == "2 file(s) edited but no tests were run — /verify"
+    assert sg.next_step_tip(agent) == ""                    # same advice is not shown again
+    agent.settings.suggestions = False
+    assert sg.next_step_tip(agent) == ""

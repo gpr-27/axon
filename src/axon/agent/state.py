@@ -460,6 +460,15 @@ class QueuedMessage:
     text: str
     steer: bool = False   # typed mid-turn: delivered inside the running turn between tool rounds
 
+def _journal_queue(action: str, **data: Any) -> None:
+    """Every queue change goes to the activity journal (nothing typed is ever silently lost)."""
+    try:
+        from axon.session import activity
+        activity.record("queue", {"action": action, **data})
+    except Exception:
+        pass
+
+
 class MessageQueue:
     """Manages sequential user prompt queue for batching and autonomous turns."""
     items: list[QueuedMessage]
@@ -475,7 +484,8 @@ class MessageQueue:
             self._counter += 1
             item = QueuedMessage(id=self._counter, text=text.strip(), steer=bool(steer))
             self.items.append(item)
-            return item
+        _journal_queue("push", id=item.id, text=item.text, steer=item.steer, pending=len(self.items))
+        return item
 
     def drain_steer(self) -> list[QueuedMessage]:
         """Remove and return every steer-flagged item (in order); plain queued prompts stay."""
@@ -499,16 +509,21 @@ class MessageQueue:
         for i, it in enumerate(self.items):
             if it.id == item_id:
                 self.items.pop(i)
+                _journal_queue("remove", id=it.id, text=it.text)
                 return True
         return False
 
     def remove_by_index(self, idx: int) -> QueuedMessage | None:
         """Remove a queued message by its 1-based positional index. Returns the removed item or None."""
         if 1 <= idx <= len(self.items):
-            return self.items.pop(idx - 1)
+            it = self.items.pop(idx - 1)
+            _journal_queue("remove", id=it.id, text=it.text)
+            return it
         return None
 
     def clear(self) -> None:
+        if self.items:
+            _journal_queue("clear", texts=[it.text for it in self.items], count=len(self.items))
         self.items.clear()
 
     def __len__(self) -> int:

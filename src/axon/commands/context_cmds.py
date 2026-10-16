@@ -50,18 +50,27 @@ def _schema_name(s: dict[str, Any]) -> str:
     return str(s.get("name") or s.get("function", {}).get("name", "?"))
 
 
-def _budget(agent: Any) -> tuple[int, int]:
+def _budget(agent: Any) -> tuple[int, int, int]:
+    """(context window, auto-compact threshold, reply reserve) for the active model.
+
+    The window is the model's full context window, the same figure the per-step context gauge shows
+    (LLMCallEnd.context_window). The part of it held back for the reply is reported separately; the
+    auto-compact threshold is computed on what is left (ContextManager.threshold)."""
     ctx = getattr(agent, "context", None)
     model = agent.settings.model
     try:
-        window = int(ctx.get_effective_budget(model))
+        window = int(ctx.context_window(model))
     except Exception:
         window = 200_000
     try:
+        usable = int(ctx.get_effective_budget(model))
+    except Exception:
+        usable = window
+    try:
         threshold = int(ctx.threshold(model))
     except Exception:
-        threshold = int(window * float(getattr(agent.settings, "compact_at", 0.85)))
-    return window, threshold
+        threshold = int(usable * float(getattr(agent.settings, "compact_at", 0.85)))
+    return window, threshold, max(0, window - usable)
 
 
 def _context_why(agent: Any) -> CommandResult:
@@ -161,12 +170,62 @@ def context_grid(parts: list[tuple[int, str]], window: int, threshold: int, lege
     return out
 
 
-@command("context", category=CAT, description="Context usage by category; --why explains each block",
-         aliases=("tokens",), usage="/context          coloured usage grid + breakdown by category\n/context --why    every injected block, its trigger and tokens\n/context all      include per-tool token sizes")
+def _limit_label(n: int) -> str:
+    return "model maximum" if not n else fmt_tokens(n)
+
+
+def handle_context_limit(agent: Any, arg: str) -> CommandResult:
+    """/context limit [128k|256k|1m|max]: how much of the model's window Axon uses (picker when bare)."""
+    from axon.providers.registry import CONTEXT_LIMIT_CHOICES, get_context_window, parse_token_count
+    from axon.commands.common import is_tty, update_settings_file
+    model_max = get_context_window(agent.settings.model)
+    current = int(getattr(agent.settings, "context_limit", 0) or 0)
+    value = arg.strip()
+    if not value:
+        if not is_tty():
+            header("Context limit", f"{agent.settings.model} supports {fmt_tokens(model_max)}")
+            kv("Using", f"{_limit_label(current)} (auto-compact near 75% of it)")
+            hint("    /context limit 128k | 256k | 1m | max")
+            print()
+            return CommandResult(handled=True)
+        from axon.ui.picker import pick
+        labels = {f"{fmt_tokens(n)} tokens" + (" (default)" if n == 128_000 else "")
+                  + ("" if n <= model_max else f" — this model stops at {fmt_tokens(model_max)}"): n
+                  for n in CONTEXT_LIMIT_CHOICES}
+        labels[f"Model maximum ({fmt_tokens(model_max)})"] = 0
+        cur = next((k for k, v in labels.items() if v == current), None)
+        choice = pick(list(labels), title="Context limit: how much of the model's window to use", current=cur)
+        if not choice:
+            info("Context limit unchanged.")
+            return CommandResult(handled=True)
+        limit = labels[choice]
+    else:
+        try:
+            limit = parse_token_count(value)
+        except ValueError as e:
+            usage(f"/context limit 128k | 256k | 1m | max   ({e})")
+            return CommandResult(handled=True)
+    update_settings(agent, context_limit=limit)
+    try:
+        from axon.commands.common import ws_of
+        update_settings_file({"contextLimit": limit}, workspace=ws_of(agent))
+    except Exception:
+        pass
+    window, threshold, _ = _budget(agent)
+    capped = f" (this model stops at {fmt_tokens(model_max)})" if limit and limit > model_max else ""
+    ok(f"Context limit {_limit_label(limit)}{capped}: using {fmt_tokens(window)} tokens, auto-compact at "
+       f"{fmt_tokens(threshold)} ({threshold * 100 // max(1, window)}%). Saved as your default.")
+    return CommandResult(handled=True)
+
+
+@command("context", category=CAT, description="Context usage by category; --why explains each block; limit sets the window size",
+         aliases=("tokens",), usage="/context          coloured usage grid + breakdown by category\n/context --why    every injected block, its trigger and tokens\n/context all      include per-tool token sizes\n/context limit    how much of the model's window to use: 128k (default), 256k, 1m or max")
 def handle_context(agent: Any, arg: str) -> CommandResult:
     a = arg.strip().lower()
     if a in ("--why", "why", "xray", "--xray"):
         return _context_why(agent)
+    if a.split(maxsplit=1)[:1] in (["limit"], ["size"], ["window"]):
+        return handle_context_limit(agent, a.split(maxsplit=1)[1] if " " in a else "")
     blocks = _system_blocks(agent)
     parts: Counter[str] = Counter()
     for b in blocks:
@@ -177,10 +236,14 @@ def handle_context(agent: Any, arg: str) -> CommandResult:
     msgs = list(agent.conversation.messages)
     msg_tok = sum(estimate_tokens(m.get("content", "")) for m in msgs)
     total = sum(parts.values()) + tool_tok + msg_tok
-    window, threshold = _budget(agent)
+    window, threshold, reserve = _budget(agent)
     pct = total / window if window else 0.0
 
-    header("Context usage", f"{agent.settings.model} · window {fmt_tokens(window)}")
+    from axon.providers.registry import get_context_window
+    model_max = get_context_window(agent.settings.model)
+    limit_note = (f" (limit; model max {fmt_tokens(model_max)} · /context limit to change)"
+                  if window < model_max else "")
+    header("Context usage", f"{agent.settings.model} · window {fmt_tokens(window)}{limit_note}")
     rows = [
         ("System prompt", parts["system"] + parts["agents"], TEAL, f"{sum(1 for b in blocks if _block_kind(str(b.get('text',''))) in ('system','agents'))} blocks"),
         ("Memory files", parts["memory"], LBLUE, "AXON.md / AGENTS.md / CLAUDE.md + saved memories"),
@@ -207,6 +270,8 @@ def handle_context(agent: Any, arg: str) -> CommandResult:
     print()
     compact_pct = int(round(threshold / window * 100)) if window else 0
     kv("Auto-compact at", f"{fmt_tokens(threshold)} ({compact_pct}% of window)")
+    if reserve:
+        kv("Reply reserve", f"{fmt_tokens(reserve)} (usable for the prompt: {fmt_tokens(window - reserve)})")
     turns = getattr(agent.settings, "max_history_turns", 0) or 0
     kv("Sliding window", f"{turns} turns" if turns else "unlimited")
     last = getattr(getattr(agent, "ledger", None), "last_usage", None)
@@ -314,7 +379,10 @@ def handle_payload(agent: Any, arg: str = "") -> CommandResult:
     line(f"{SLATE}{'Estimated total':<18}{RST} {WHITE}{BOLD}~{total:,}{RST}", GOLD)
     last_u = getattr(getattr(agent, "ledger", None), "last_usage", None)
     if last_u is not None and isinstance(getattr(last_u, "input", None), int) and last_u.input > 0:
-        line(f"{MINT}{'Last billed input':<18}{RST} {WHITE}{BOLD}{last_u.input:,}{RST} {SLATE}(provider-reported){RST}", GOLD)
+        line(f"{MINT}{'Last billed input':<18}{RST} {WHITE}{BOLD}{last_u.input:,}{RST} {SLATE}exact count the provider "
+             f"returned (usage.prompt_tokens) for the previous request{RST}", GOLD)
+        line(f"{SLATE}{'':<18} the ~ figures above are estimates (characters / 4) of the request as it would be "
+             f"sent now; the provider's tokenizer usually counts code and JSON as fewer tokens{RST}", GOLD)
     end(GOLD)
     if not full:
         hint("  /payload full shows every line")
@@ -641,7 +709,7 @@ def _faq_cards() -> dict[str, tuple[str, str]]:
             f"  {MINT}Batch 1:{RST} 00:00 Beijing Time {SLATE}(16:00 UTC){RST}",
             f"  {MINT}Batch 2:{RST} 08:00 Beijing Time {SLATE}(00:00 UTC){RST}",
             f"  {MINT}Batch 3:{RST} 16:00 Beijing Time {SLATE}(08:00 UTC){RST}",
-            f"{WHITE}Fix:{RST} switch to {CYAN}/model deepseek-v4-flash{RST} or a GLM model, or wait for the next batch.",
+            f"{WHITE}Fix:{RST} switch to {CYAN}/model deepseek-v4-flash{RST} (not in the shared pool), or wait for the next batch.",
         ])),
         "400": ("400 Content Blocked (Language Restriction)", card(ROSE, "400 Content Blocked (Language Restriction)", [
             f"{WHITE}Cause:{RST} the upstream filter only accepts {MINT}Chinese (中文), English, French, German, Russian{RST}.",

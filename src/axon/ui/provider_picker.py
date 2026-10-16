@@ -206,12 +206,45 @@ def run_provider_picker(agent: Agent) -> bool:
     return _configure_and_apply_preset(agent, chosen.value)
 
 
+def _existing_key_menu(preset: ProviderPreset, env_var: str, key: str) -> str | None:
+    """A key is already set: use it, test it, or replace it. Returns the key to use ('' = enter a new
+    one) or None when cancelled."""
+    try:
+        from axon.providers import keystore as ks
+        masked = ks.mask_key(key)
+        where = ks.key_status(env_var).source_label or "environment"
+    except Exception:
+        ks, masked, where = None, "set", "environment"
+    from axon.ui.picker import choose
+    while True:
+        action = choose([("Use the existing key", "use", f"{env_var} {masked} · {where}"),
+                         ("Test it", "test", "live 5-token request"),
+                         ("Replace it with a new key", "replace", "hidden input, verified before saving"),
+                         ("Cancel", None, "")], title=f"{preset.name}: API key", index=0)
+        if action is None:
+            return None
+        if action == "use":
+            return key
+        if action == "replace":
+            return ""
+        if ks is not None:
+            res = ks.test_key(preset, key)
+            ks.record_check(env_var, key, res.ok, res.latency_s)
+            mark = f"{MINT}✓ works{RST} {SLATE}· {res.summary()}" if res.ok else f"{ROSE}✗ {res.message}"
+            print(f"  {mark}{RST}")
+
+
 def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
     print(f"\n  {GOLD}◆{RST} {BOLD}Connecting to {preset.name}{RST}  {SLATE}{preset.base_url}{RST}")
     api_key: str | None = None
     if preset.requires_key:
         api_key = find_key(preset)
         env_var = preset_env_vars(preset)[0]
+        if api_key and plat.is_interactive():
+            api_key = _existing_key_menu(preset, env_var, api_key)
+            if api_key is None:
+                print(f"\n  {SLATE}Connection cancelled.{RST}\n")
+                return False
         if api_key:
             print(f"  {MINT}✓ Using existing API key ({env_var}){RST}")
         else:

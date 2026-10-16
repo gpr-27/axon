@@ -47,7 +47,7 @@ def _json_hook(tmp: Path, payload: dict[str, Any]) -> str:
 def test_new_settings_fields_and_json_mapping(workspace: Path) -> None:
     s = make_settings(workspace)
     for name, default in (("fallback_model", None), ("additional_dirs", []), ("output_style", "default"),
-                          ("status_line", None), ("vim_mode", False), ("cleanup_period_days", 30),
+                          ("status_line", None), ("vim_mode", False), ("cleanup_period_days", 0),
                           ("verify_commands", []), ("verify_timeout", 900), ("repo_map", False),
                           ("repo_map_tokens", 1500), ("theme", "auto"), ("suggestions", True), ("auto_title", True)):
         assert getattr(s, name) == default, name
@@ -59,7 +59,7 @@ def test_new_settings_fields_and_json_mapping(workspace: Path) -> None:
     assert m["fallback_model"] == "a,b" and m["vim_mode"] is True and m["cleanup_period_days"] == 7
     assert m["permissions"]["ask"] == ["Bash(git push:*)"] and m["mode"] == "bypass"
     assert m["additional_dirs"] == ["/tmp"] and m["verify_commands"] == ["pytest"]
-    assert Settings(workspace=workspace, cleanup_period_days=0).cleanup_period_days == 1
+    assert Settings(workspace=workspace, cleanup_period_days=-5).cleanup_period_days == 0  # 0 = keep forever
     assert normalize_mode("bypassPermissions") == "bypass" and normalize_mode("MANUAL") == "default"
     assert normalize_mode("nonsense") is None
 

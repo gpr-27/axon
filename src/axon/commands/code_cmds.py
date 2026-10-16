@@ -1,4 +1,4 @@
-"""Code & review commands: /diff /review /test /copy /output /find /paste /todos /queue /btw."""
+"""Code & review commands: /diff /review /test /copy /output /transcript /find /paste /todos /queue /btw."""
 from __future__ import annotations
 
 import difflib
@@ -399,14 +399,58 @@ def handle_copy(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
-@command("output", category=CAT, description="Full output of the last tool, or a workspace file",
-         aliases=("expand", "view", "more"), usage="/output [path] [pager]")
+def _recorded_outputs(agent: Any) -> list[dict[str, Any]]:
+    """Tool outputs saved in the session transcript (+ full-output files): used after a resume, when
+    the in-memory store of this process is empty."""
+    fn = getattr(getattr(agent, "session", None), "recorded_tool_outputs", None)
+    try:
+        return list(fn()) if callable(fn) else []
+    except Exception:
+        return []
+
+
+@command("output", category=CAT, description="Full output of a tool call (/output 7), the last one, or a workspace file",
+         aliases=("expand", "view", "more"), usage="/output [n | list | path] [pager]\n/output list saved   tool outputs recorded in this session (also after a resume)")
 def handle_output(agent: Any, arg: str) -> CommandResult:
-    from axon.ui.render import get_last_tool_output, highlight_code
+    from axon.ui.render import get_last_tool_output, get_tool_output, highlight_code, list_tool_outputs
     words = arg.split()
     use_pager = "pager" in words
     target = " ".join(w for w in words if w != "pager").strip()
     out, title = "", "Last tool output"
+    if target in ("list", "ls", "saved", "list saved"):
+        rows = list_tool_outputs() if target in ("list", "ls") else []
+        if not rows:
+            saved = _recorded_outputs(agent)
+            if saved:
+                header("Tool outputs saved in this session", "/output <n> shows one in full")
+                for r in saved[-40:]:
+                    count = len(str(r["content"]).splitlines())
+                    print(f"  {DARK_SLATE}{r['n']:>5}{RST}  {WHITE}{r['name']}{RST}  {SLATE}{r['target'][:70]} · {count} lines{RST}")
+                print()
+                return CommandResult(handled=True)
+        if not rows:
+            info("No tool output yet.")
+            return CommandResult(handled=True)
+        header("Recent tool outputs", "/output <n> shows one in full")
+        for n, name, tgt, count in rows:
+            print(f"  {DARK_SLATE}{n:>5}{RST}  {WHITE}{name}{RST}  {SLATE}{tgt[:70]} · {count} lines{RST}")
+        print()
+        return CommandResult(handled=True)
+    if target.lstrip("#").isdigit() and not (ws_of(agent) / target).is_file():
+        item = get_tool_output(int(target.lstrip("#")))
+        if item is None and not list_tool_outputs():
+            rec = next((r for r in _recorded_outputs(agent) if r["n"] == int(target.lstrip("#"))), None)
+            if rec is not None:
+                item = (rec["name"], rec["target"], rec["content"])
+        if item is None:
+            err(f"No tool output #{target.lstrip('#')} (it may be too old). /output list shows what is kept.")
+            return CommandResult(handled=True)
+        name, tgt, out = item
+        title = f"#{target.lstrip('#')} {name} {tgt}".strip()
+        if not out:
+            info("That tool call produced no output.")
+            return CommandResult(handled=True)
+        target = ""
     if target:
         from axon.permissions.paths import is_protected_path, is_within
         ws = ws_of(agent)
@@ -420,8 +464,13 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
             return CommandResult(handled=True)
         out = p.read_text(encoding="utf-8", errors="replace")
         title = target
-    else:
-        out = get_last_tool_output()
+    elif not out:
+        out = get_last_tool_output() if list_tool_outputs() else ""
+        if not out:
+            saved = _recorded_outputs(agent)
+            if saved:
+                out = str(saved[-1]["content"])
+                title = f"#{saved[-1]['n']} {saved[-1]['name']} {saved[-1]['target']}".strip()
     if not out:
         info("No tool output yet.")
         return CommandResult(handled=True)
@@ -430,19 +479,33 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
         import pydoc
         pydoc.pager("\n".join(f"{i:5d}  {ln}" for i, ln in enumerate(lines, 1)))
         return CommandResult(handled=True)
-    header(title, f"{len(lines)} lines · {len(out):,} chars")
+    header(title, f"{len(lines)} lines · {len(out):,} chars · /transcript (Ctrl+F) expands any tool call")
     for i, ln in enumerate(lines, 1):
         print(f"  {DARK_SLATE}{i:5d} │{RST} {highlight_code(ln)}")
     print()
     return CommandResult(handled=True)
 
 
-@command("find", category=CAT, description="Fuzzy-find a workspace file (Ctrl+P while typing)", aliases=("fuzzy",))
+@command("transcript", category=CAT,
+         description="Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+F)",
+         aliases=("tr", "scrollback"),
+         usage="/transcript   (keys: click/enter expand · e/c all · t turns · / search · n/N · y copy · q close)")
+def handle_transcript(agent: Any, arg: str) -> CommandResult:
+    from axon.ui.transcript_view import open_transcript_viewer
+    open_transcript_viewer(agent)
+    return CommandResult(handled=True)
+
+
+@command("find", category=CAT, description="Fuzzy-find a workspace file (Ctrl+P while typing)", aliases=("fuzzy",),
+         usage="/find [query]")
 def handle_find(agent: Any, arg: str) -> CommandResult:
     from axon.ui.fuzzy_picker import run_fuzzy_file_finder
-    chosen = run_fuzzy_file_finder(ws_of(agent))
+    query = arg.strip()
+    chosen = run_fuzzy_file_finder(ws_of(agent), query)
     if chosen:
         print(f"\n  {MINT}✓{RST} {WHITE}{chosen}{RST}  {SLATE}mention it as {BOLD}@{chosen}{RST}\n")
+    elif query:
+        info(f"No workspace file matches '{query}'.")
     return CommandResult(handled=True)
 
 
@@ -591,10 +654,13 @@ def handle_btw(agent: Any, arg: str) -> CommandResult:
     print(f"\n  {CYAN}⚡ Side question:{RST} {WHITE}{question}{RST}{note}\n")
     prompt = (f"<session_context>\n{context[0]}\n</session_context>\n\nSide question (answer it; do not continue the task): {question}"
               if context[1] else question)
+    from axon.session.activity import record_side_question
     try:
         answer = one_shot(agent, _BTW_SYSTEM, prompt, max_tokens=800, source="side_question") or "(no answer)"
     except Exception as e:
+        record_side_question(agent, question, error=f"{type(e).__name__}: {e}", source="btw")
         err(f"Side question failed: {e}")
         return CommandResult(handled=True)
+    record_side_question(agent, question, answer, source="btw")
     print(f"{render_side_question_box(question, answer)}\n")
     return CommandResult(handled=True)

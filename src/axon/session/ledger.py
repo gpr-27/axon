@@ -23,6 +23,7 @@ SOURCE_LABELS = {
     "memory_learn": "Memory Extraction (/learn)",
     "doctor_ping": "Diagnostics Ping (/doctor)",
     "compaction": "Context Compaction",
+    "tips": "Usage Tips (/tips)",
 }
 
 

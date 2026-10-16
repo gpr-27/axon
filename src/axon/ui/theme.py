@@ -120,6 +120,8 @@ _DARK: dict[str, tuple[tuple[int, int, int], int]] = {
     "LAVENDER": ((210, 200, 255), 189), "INDIGO": ((160, 130, 255), 141), "SKY": ((130, 200, 255), 117),
     "BLUE_PILL_BG": ((30, 70, 120), 24), "GREEN_PILL_BG": ((30, 100, 50), 28), "GOLD_PILL_BG": ((100, 80, 20), 58),
     "GRAY_PILL_BG": ((58, 60, 68), 237), "GRAY_PILL_FG": ((200, 200, 205), 250),
+    # cards: intra-line diff words, search-match highlight
+    "DIFF_ADD_WORD_BG": ((44, 110, 62), 28), "DIFF_DEL_WORD_BG": ((128, 44, 52), 88), "MATCH_BG": ((92, 74, 18), 58),
 }
 _LIGHT = {
     "PRIMARY": ((0, 128, 120), 30), "ACCENT": ((110, 70, 200), 98), "SUCCESS": ((20, 130, 50), 28),
@@ -132,6 +134,7 @@ _LIGHT = {
     "AMBER": ((175, 105, 0), 136), "EMERALD": ((0, 140, 80), 29), "CORAL": ((200, 50, 90), 161),
     "LAVENDER": ((100, 80, 180), 61), "INDIGO": ((90, 60, 200), 62), "SKY": ((30, 110, 190), 25),
     "GRAY_PILL_BG": ((220, 222, 228), 253), "GRAY_PILL_FG": ((50, 52, 60), 238),
+    "DIFF_ADD_WORD_BG": ((160, 228, 172), 151), "DIFF_DEL_WORD_BG": ((246, 178, 178), 217), "MATCH_BG": ((255, 230, 140), 229),
 }
 _HIGH_CONTRAST = {
     "PRIMARY": ((0, 255, 255), 51), "ACCENT": ((255, 135, 255), 213), "SUCCESS": ((0, 255, 95), 47),
@@ -141,6 +144,7 @@ _HIGH_CONTRAST = {
     "DIFF_ADD": ((0, 255, 95), 47), "DIFF_DEL": ((255, 70, 70), 203),
     "DIFF_ADD_BG": ((0, 95, 0), 22), "DIFF_DEL_BG": ((115, 0, 0), 52), "LINK": ((95, 175, 255), 75),
     "CYAN": ((0, 255, 255), 51), "AMBER": ((255, 175, 0), 214), "SKY": ((95, 215, 255), 81),
+    "DIFF_ADD_WORD_BG": ((0, 150, 0), 28), "DIFF_DEL_WORD_BG": ((175, 0, 0), 124), "MATCH_BG": ((135, 95, 0), 94),
 }
 THEMES: tuple[str, ...] = ("auto", "dark", "light", "high-contrast", "mono")
 _THEME_SPECS = {"dark": {}, "light": _LIGHT, "high-contrast": _HIGH_CONTRAST}
@@ -509,6 +513,28 @@ def term_width() -> int:
             return 88
 
 
+_MAX_LAYOUT_WIDTH = 0     # 0 = use the whole terminal width (setting max_width / AXON_MAX_WIDTH)
+
+
+def set_max_layout_width(cols: int | None) -> None:
+    global _MAX_LAYOUT_WIDTH
+    try:
+        _MAX_LAYOUT_WIDTH = max(0, int(cols or 0))
+    except (TypeError, ValueError):
+        _MAX_LAYOUT_WIDTH = 0
+
+
+def layout_width(margin: int = 2) -> int:
+    """Columns available to Axon's output: the full window (minus a small margin, so the terminal never
+    has to re-wrap a row), optionally capped by the max_width setting."""
+    cols = term_width() - margin
+    cap = _MAX_LAYOUT_WIDTH
+    env = os.environ.get("AXON_MAX_WIDTH", "")
+    if env.isdigit() and int(env) > 0:
+        cap = int(env)
+    return max(20, min(cols, cap) if cap > 0 else cols)
+
+
 def term_height() -> int:
     try:
         lines = os.get_terminal_size().lines
@@ -571,6 +597,17 @@ GLYPHS: dict[str, tuple[str, str]] = {
     "logo_mid": ("█⚡█", "|A|"),
     "logo_bot": ("▼█▼", "\\_/"),
     "spinner": ("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "|/-\\"),
+    # cards (tool results, code blocks, charts)
+    "created": ("✚", "+"),
+    "edited": ("✎", "~"),
+    "overwrote": ("⟳", "*"),
+    "minus": ("−", "-"),
+    "chip": ("■", ""),
+    "hunk": ("┈", "-"),
+    "fail_cell": ("▒", "x"),
+    "eighths": ("▏▎▍▌▋▊▉█", "########"),
+    "spark": ("▁▂▃▄▅▆▇█", "_.-:=+*#"),
+    "dir_mark": ("▸", ">"),
 }
 
 # Emoji glyphs: only on terminals known to render them (falls back to plain text otherwise).

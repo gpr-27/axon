@@ -42,6 +42,7 @@ OPERATING_RULES = """## How you work
 - The user reads a terminal. Be concise: no preamble, no restating the request, no narrating each tool call.
 - When you finish, say what changed and anything the user must know (decisions, risks, follow-ups). Refer to files as `path/to/file.py:42`.
 - Use GitHub-flavored markdown sparingly: short paragraphs, bullet lists, fenced code with a language tag, and tables only for genuinely tabular data.
+- The terminal renders your files, edits and fenced code with syntax highlighting, line numbers and diffs, so never paste a file you just wrote or edited back into your reply; cite `path:line` and show at most a short excerpt. For a numeric comparison you may add a ```chart block (`label: value` lines, an optional `title: ...` first line, or CSV); ```sparkline draws a trend from a list of numbers.
 - If the request is ambiguous in a way that changes the outcome, ask one focused question instead of guessing.
 
 ## Axon configuration locations

@@ -27,9 +27,14 @@ _MILLION = Decimal("1000000")
 # These come from AgentRouter's live deduction log / console table and are what the gateway
 # actually bills. The /api/pricing ratio feed is only used to fill in models missing here.
 AGENTROUTER_PRICING: dict[str, dict[str, float]] = {
+    # Served today ($/1M tokens, from the gateway's ratios on 2026-10-16: ratio 1 = $2 input,
+    # output = input x completion ratio, cache read = 0.2 x input).
     "deepseek-v4-flash": {"input": 4.00, "output": 12.00, "cache_read": 0.80, "cache_write": 0.0},
+    "claude-opus-5-5":   {"input": 12.00, "output": 12.00, "cache_read": 2.40, "cache_write": 15.00},
+    "gpt-6.1-sol":       {"input": 4.00, "output": 20.00, "cache_read": 0.80},
+    "gpt-6-astra":       {"input": 8.00, "output": 40.00, "cache_read": 1.60},
+    # Retired from AgentRouter; kept so the cost of older sessions stays correct.
     "gpt-5.6-sol":       {"input": 3.00, "output": 15.00, "cache_read": 0.60},
-    "gpt-6-astra":       {"input": 3.00, "output": 15.00, "cache_read": 0.60},
     "claude-opus-5":     {"input": 6.00, "output": 30.00, "cache_read": 1.20, "cache_write": 7.50},
     "claude-opus-4-8":   {"input": 8.00, "output": 40.00, "cache_read": 1.60, "cache_write": 10.00},
 }

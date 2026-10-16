@@ -164,7 +164,7 @@ def render_demo(color: bool) -> str:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AXON_", "NO_COLOR", "FORCE_COLOR", "COLORTERM"))}
     home = tempfile.mkdtemp(prefix="axon-docs-")
     env.update({"PYTHONPATH": str(SRC), "PYTHONIOENCODING": "utf-8", "AXON_THEME": "dark",
-                "AXON_NO_HYPERLINKS": "1", "AXON_HOME": home})
+                "AXON_NO_HYPERLINKS": "1", "AXON_NO_TIPS": "1", "AXON_HOME": home})
     if color:
         env.update({"AXON_FORCE_COLOR": "truecolor", "COLORTERM": "truecolor", "TERM": "xterm-256color"})
     else:

@@ -137,7 +137,7 @@ def test_process_line_shell_memory_and_queue(workspace: Path, monkeypatch: pytes
     ran: list[str] = []
     monkeypatch.setattr(cli, "run_shell_shortcut", lambda c, sink=None: ran.append(c) or (sink.append("hi\n") if sink is not None else None) or 0)
     prov = FakeProvider(scripted("a1", "a2"))
-    agent = make_agent(prov, workspace)
+    agent = make_agent(prov, workspace, respond_to_bash_commands=False)   # shell context only, no reply turn
 
     class R:
         def turn_footer(self, **kw: Any) -> None:
@@ -187,3 +187,46 @@ def test_doctor_runs_without_api_key(capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert "Axon doctor" in out and "API key" in out
     assert code in (0, 1)
+
+
+def test_claude_code_settings_never_switch_axons_model(tmp_path, monkeypatch) -> None:
+    """Opened in the home folder, ~/.claude/settings.json is Claude Code's own config ("model": "opus");
+    it must not override the model in ~/.axon/config.toml (it silently moved a DeepSeek user onto Opus)."""
+    import json
+    from axon.config import Settings
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"model": "opus", "effortLevel": "low"}), encoding="utf-8")
+    axon_home = home / ".axon"
+    axon_home.mkdir()
+    (axon_home / "config.toml").write_text('model = "deepseek-v4-flash"\n', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AXON_HOME", str(axon_home))
+    for var in ("AXON_MODEL", "AXON_EFFORT"):
+        monkeypatch.delenv(var, raising=False)
+    s = Settings.load({"workspace": str(home)}, require_api_key=False)
+    assert s.model == "deepseek-v4-flash"
+    # a real project's .claude/settings.json still contributes permissions, but not the model
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(
+        json.dumps({"model": "sonnet", "permissions": {"allow": ["Bash(git status)"]}}), encoding="utf-8")
+    s2 = Settings.load({"workspace": str(proj)}, require_api_key=False)
+    assert s2.model == "deepseek-v4-flash"
+    assert "Bash(git status)" in (s2.permissions.allow if hasattr(s2.permissions, "allow") else s2.permissions["allow"])
+
+
+def test_context_limit_defaults_to_128k_and_caps_the_model_window(tmp_path) -> None:
+    from types import SimpleNamespace
+    from axon.config import Settings
+    from axon.agent.context import ContextManager
+    from axon.providers.registry import effective_context_window, parse_token_count
+    s = Settings(workspace=tmp_path, model="deepseek-v4-flash")
+    assert s.context_limit == 128_000
+    ctx = ContextManager(s)
+    assert ctx.context_window() == 128_000                       # 1M model, 128k used by default
+    assert 0.70 <= ctx.threshold() / ctx.context_window() <= 0.80  # auto-compact near 75%
+    assert ContextManager(s.model_copy(update={"context_limit": 256_000})).context_window() == 256_000
+    assert ContextManager(s.model_copy(update={"context_limit": 0})).context_window() == 1_000_000
+    assert effective_context_window("gpt-4o", SimpleNamespace(context_limit=1_000_000)) == 128_000  # never above the model
+    assert [parse_token_count(x) for x in ("128k", "256K", "1m", "max")] == [128_000, 256_000, 1_000_000, 0]

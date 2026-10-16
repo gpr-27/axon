@@ -21,12 +21,13 @@ All output goes through ``theme.OUTPUT_LOCK`` so background threads never interl
 """
 from __future__ import annotations
 
-import difflib
 import os
 import re
 import sys
 import threading
 import time
+import itertools
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -42,6 +43,7 @@ from axon.providers.base import (
     ToolUseStart,
     TurnComplete,
 )
+from axon.ui import cards as _cards
 from axon.ui.markdown import (
     MarkdownStream,
     file_uri,
@@ -56,9 +58,7 @@ from axon.ui.theme import (
     BORDER,
     CYAN,
     DIFF_ADD,
-    DIFF_ADD_BG,
     DIFF_DEL,
-    DIFF_DEL_BG,
     DIM,
     ERROR,
     GRAY_BG,
@@ -82,6 +82,8 @@ from axon.ui.theme import (
     sanitize,
     strip_ansi,
     supports_emoji,
+    layout_width,
+    term_height,
     term_width,
     truncate,
     wrap_ansi,
@@ -133,7 +135,9 @@ def _write(text: str) -> None:
 
 
 def _width(cap: int = 100) -> int:
-    return max(30, min(cap, term_width() - 2))
+    """Width for a block of output: the whole terminal (the old per-block caps left half of a wide
+    window empty); the max_width setting can narrow everything at once."""
+    return max(30, layout_width())
 
 
 # ─── Small helpers ─────────────────────────────────────────────────────────
@@ -192,7 +196,8 @@ def highlight_code(line: str, lang: str = "") -> str:
 
 
 def _lang_for(path: str) -> str:
-    return Path(path).suffix.lstrip(".").lower() if path else ""
+    from axon.ui.markdown import lang_for_path
+    return lang_for_path(path) if path else ""
 
 
 def _short_path(p: str) -> str:
@@ -285,72 +290,30 @@ def box(
 
 # ─── Diff rendering ────────────────────────────────────────────────────────
 
-def _locate_line(path: str, snippet: str) -> int:
-    """1-based line where *snippet* starts in *path* (after an edit), or 1 when unknown."""
+def _locate_line(path: str, snippet: str, unknown: int = 1) -> int:
+    """1-based line where *snippet* starts in *path* (after an edit), or *unknown* when it can't be found."""
     if not path or not snippet:
-        return 1
+        return unknown
     try:
         p = Path(path).expanduser()
         if not p.is_file() or p.stat().st_size > 4_000_000:
-            return 1
+            return unknown
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return 1
+        return unknown
     idx = text.find(snippet)
-    return text.count("\n", 0, idx) + 1 if idx >= 0 else 1
+    return text.count("\n", 0, idx) + 1 if idx >= 0 else unknown
 
 
 def diff_rows(old_text: str, new_text: str, start_line: int = 1, width: int | None = None,
               lang: str = "", context: int = 2, max_rows: int = 60) -> list[str]:
-    """Unified diff rows with line numbers and tinted add/remove backgrounds."""
-    width = width or _width(140)
-    old_lines = old_text.splitlines()
-    new_lines = new_text.splitlines()
-    sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
-    last = start_line + max(len(old_lines), len(new_lines))
-    num_w = max(3, len(str(last)))
-    text_w = max(10, width - num_w - 4)
-    rows: list[str] = []
-
-    def row(num: int, sign: str, text: str) -> str:
-        code = text.expandtabs(4)
-        if sign == "+":
-            body = truncate(code, text_w)
-            line = f"{DIFF_ADD_BG}{DIFF_ADD}{num:>{num_w}} + {body}"
-            return line + (" " * max(0, text_w - display_width(body)) if DIFF_ADD_BG else "") + RST
-        if sign == "-":
-            body = truncate(code, text_w)
-            line = f"{DIFF_DEL_BG}{DIFF_DEL}{num:>{num_w}} - {body}"
-            return line + (" " * max(0, text_w - display_width(body)) if DIFF_DEL_BG else "") + RST
-        return f"{SUBTLE}{num:>{num_w}}{RST}   {truncate(highlight(code, lang), text_w)}"
-
-    groups = list(sm.get_grouped_opcodes(context))
-    for gi, group in enumerate(groups):
-        if gi:
-            rows.append(f"{SUBTLE}{' ' * num_w} {glyph('ellipsis')}{RST}")
-        for tag, i1, i2, j1, j2 in group:
-            if tag == "equal":
-                for k in range(i2 - i1):
-                    rows.append(row(start_line + j1 + k, " ", new_lines[j1 + k]))
-            if tag in ("replace", "delete"):
-                for k in range(i1, i2):
-                    rows.append(row(start_line + k, "-", old_lines[k]))
-            if tag in ("replace", "insert"):
-                for k in range(j1, j2):
-                    rows.append(row(start_line + k, "+", new_lines[k]))
-    if len(rows) > max_rows:
-        rows = elide(rows, max_rows - 10, 8)
-    return rows
+    """Unified diff rows: real line numbers, hunk separators, tinted +/- rows with intra-line word
+    highlights; long lines wrap with the gutter kept (see ``axon.ui.cards.diff_rows``)."""
+    return _cards.diff_rows(old_text, new_text, start_line, width or _width(140), lang, context, max_rows, _MORE_HINT)
 
 
 def _diff_counts(old_text: str, new_text: str) -> tuple[int, int]:
-    added = removed = 0
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old_text.splitlines(), b=new_text.splitlines(), autojunk=False).get_opcodes():
-        if tag in ("replace", "delete"):
-            removed += i2 - i1
-        if tag in ("replace", "insert"):
-            added += j2 - j1
-    return added, removed
+    return _cards.diff_counts(old_text, new_text)
 
 
 def render_diff_box(old_text: str, new_text: str, filename: str = "", max_width: int = 88, max_show: int = 3) -> str:
@@ -448,14 +411,7 @@ def stream_write_box(p: str, content_written: str, max_show: int = 60, max_width
 
 
 def _classify_output_line(l: str) -> str:
-    low = l.lower()
-    if any(w in low for w in ("error", "failed", "exception", "traceback")):
-        return f"{ERROR}{l}{RST}"
-    if "warn" in low:
-        return f"{WARNING}{l}{RST}"
-    if any(w in low for w in ("passed", "success", "completed")):
-        return f"{SUCCESS}{l}{RST}"
-    return f"{TEXT}{l}{RST}"
+    return _cards.classify_output_line(l)
 
 
 def render_bash_box(content: str, max_show: int = 2, max_width: int = 88) -> str:
@@ -593,14 +549,16 @@ def render_shortcuts_footer(max_width: int = 88) -> str:
         f"{WARNING}/btw{RST} for side question",
         f"{CYAN}ctrl + s{RST} to stash prompt",
         f"{WARNING}?{RST} or {WARNING}/kb{RST} for shortcuts",
+        f"{CYAN}ctrl + f{RST} for transcript",
     ]
     col2 = [
         f"{CYAN}tab{RST} to cycle modes",
         f"{CYAN}double esc{RST} to clear input",
-        f"{CYAN}ctrl + o{RST} for verbose output",
+        f"{CYAN}ctrl + o{RST} to cycle trace detail",
         f"{CYAN}ctrl + t{RST} to toggle tasks",
         f"{CYAN}ctrl + g{RST} to edit in $EDITOR",
         f"{CYAN}\\{glyph('enter')}{RST} for newline",
+        f"{MUTED}type while it works{RST} to queue",
     ]
     if max_width < 60:
         return "\n".join(f"  {c}" for c in col1 + col2)
@@ -708,17 +666,125 @@ def render_error_box(tool_name: str, content: str, max_width: int = 88) -> str:
                color=ERROR, wrap=True, head=12, tail=4)
 
 
-# ─── Last tool output (for /output and ctrl+o) ─────────────────────────────
+# ─── Tool outputs of the session (for /output and /output <n>) ─────────────
 _LAST_TOOL_OUTPUT = ""
+_TOOL_OUTPUTS: "dict[int, tuple[str, str, str]]" = {}   # n -> (tool name, target, full output)
+_TOOL_OUTPUT_SEQ = 0
+_TOOL_OUTPUT_KEEP = 200
+# Hint appended to elided previews ("… +12 more lines · /output 7"); set per tool result.
+_MORE_HINT = "/output"
 
 
 def get_last_tool_output() -> str:
     return _LAST_TOOL_OUTPUT
 
 
-def _save_tool_output(content: str) -> None:
-    global _LAST_TOOL_OUTPUT
+def get_tool_output(n: int) -> tuple[str, str, str] | None:
+    """(name, target, full output) of tool call #n of this session, if still kept."""
+    return _TOOL_OUTPUTS.get(int(n))
+
+
+def list_tool_outputs(limit: int = 20) -> list[tuple[int, str, str, int]]:
+    """Most recent tool outputs: (n, name, target, line count), newest last."""
+    items = sorted(_TOOL_OUTPUTS.items())[-limit:]
+    return [(n, name, target, len(out.splitlines())) for n, (name, target, out) in items]
+
+
+def _output_file(n: int, content: str) -> str:
+    """Write a full tool output to a temp file and return its file:// URL (for clickable hints)."""
+    try:
+        import tempfile
+
+        folder = Path(tempfile.gettempdir()) / f"axon-outputs-{os.getpid()}"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"output-{n}.txt"
+        path.write_text(content, encoding="utf-8", errors="replace")
+        return path.as_uri()
+    except OSError:
+        return ""
+
+
+def _save_tool_output(content: str, name: str = "", target: str = "") -> int:
+    """Remember a tool's full output; returns its session-wide number (shown as '/output <n>')."""
+    global _LAST_TOOL_OUTPUT, _TOOL_OUTPUT_SEQ
     _LAST_TOOL_OUTPUT = content
+    _TOOL_OUTPUT_SEQ += 1
+    _TOOL_OUTPUTS[_TOOL_OUTPUT_SEQ] = (name, target, content or "")
+    for old in sorted(_TOOL_OUTPUTS)[:-_TOOL_OUTPUT_KEEP]:
+        del _TOOL_OUTPUTS[old]
+    return _TOOL_OUTPUT_SEQ
+
+
+# ─── Session transcript (structured; read by the expandable transcript viewer) ─
+
+@dataclass
+class TranscriptEntry:
+    """One block of the session as the user saw it, kept in full (plain text, no ANSI).
+
+    kind: "turn" | "step" | "thinking" | "text" | "tool" | "note"."""
+    kind: str
+    turn: int
+    step: int = 0
+    title: str = ""          # 'Turn 3 · "fix the test"', 'Step 2 · gpt-4o', 'Bash  git status'
+    summary: str = ""        # one-line result / stats
+    body: str = ""           # full tool output, response text or thinking
+    detail: str = ""         # tool input as JSON
+    status: str = "ok"       # ok | error | running
+    started_at: float = 0.0
+    duration: float | None = None
+    id: str = ""             # tool call id
+    output_no: int = 0       # '/output <n>' number of a tool result
+    why: str = ""            # why the model called the tool (its own words before the call)
+    uid: int = field(default_factory=lambda: next(_UIDS))   # stable id: screen rows are tagged with it
+
+
+_UIDS = itertools.count(1)
+
+
+def _click_expand_on(settings: Any = None) -> bool:
+    try:
+        from axon.ui.screen_log import click_expand_enabled
+        return click_expand_enabled(settings) and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _tag_rows(uid: int | None) -> None:
+    """Rows printed from now on belong to transcript entry ``uid`` (click-to-expand at the prompt)."""
+    try:
+        from axon.ui.screen_log import set_tag
+        set_tag(uid)
+    except Exception:
+        pass
+
+
+_TRANSCRIPT: list[TranscriptEntry] = []
+_TRANSCRIPT_LOCK = threading.RLock()
+_TRANSCRIPT_KEEP = 4000
+
+
+def get_transcript() -> list[TranscriptEntry]:
+    """Snapshot of the session transcript (entries may still be updated while a tool runs)."""
+    with _TRANSCRIPT_LOCK:
+        return list(_TRANSCRIPT)
+
+
+def clear_transcript() -> None:
+    with _TRANSCRIPT_LOCK:
+        _TRANSCRIPT.clear()
+
+
+def _record(entry: TranscriptEntry) -> TranscriptEntry:
+    _tag_rows(entry.uid)
+    with _TRANSCRIPT_LOCK:
+        _TRANSCRIPT.append(entry)
+        if len(_TRANSCRIPT) > _TRANSCRIPT_KEEP:
+            del _TRANSCRIPT[: len(_TRANSCRIPT) - _TRANSCRIPT_KEEP]
+    return entry
+
+
+def _plain(text: Any) -> str:
+    return strip_ansi(str(text or ""))
 
 
 # ─── Argument formatting ───────────────────────────────────────────────────
@@ -774,14 +840,14 @@ def _get(obj: Any, *names: str, default: Any = None) -> Any:
 
 
 def _usage_line(usage: Any, *, duration: float | None = None, cost: Any = None, stop: str = "") -> str:
-    """'12.4k in (9.8k cached 79%) · 412 out · 1.9s · $0.0031 · end_turn'."""
+    """'12.4k in (79% cached) · 412 out · 1.9s · $0.0031 · end_turn'."""
     dot = f" {glyph('dot')} "
     inp = int(_get(usage, "input", "input_tokens", default=0) or 0)
     out = int(_get(usage, "output", "output_tokens", default=0) or 0)
     cr = int(_get(usage, "cache_read", "cache_read_tokens", default=0) or 0)
     cw = int(_get(usage, "cache_write", "cache_write_tokens", default=0) or 0)
     reasoning = int(_get(usage, "reasoning", default=0) or 0)
-    parts = [f"{_fmt_tokens(inp)} in" + (f" ({_fmt_tokens(cr)} cached {int(cr * 100 / inp) if inp else 0}%)" if cr else "")]
+    parts = [f"{_fmt_tokens(inp)} in" + (f" ({int(cr * 100 / inp) if inp else 0}% cached)" if cr else "")]
     if cw:
         parts.append(f"{_fmt_tokens(cw)} cache write")
     parts.append(f"{_fmt_tokens(out)} out" + (f" ({_fmt_tokens(reasoning)} reasoning)" if reasoning else ""))
@@ -819,7 +885,7 @@ def context_gauge(used: int, window: int, cells: int = 8, compact: bool = False)
         return f"{MUTED}ctx{RST} {color}{pct:.0f}%{RST}{MUTED}/{_fmt_tokens(window)}{RST}"
     filled = min(cells, max(1, round(ratio * cells)))
     bar = f"{color}{glyph('block') * filled}{SUBTLE}{glyph('shade') * (cells - filled)}{RST}"
-    return f"{MUTED}ctx{RST} {bar} {color}{pct:.0f}%{RST}{MUTED} of {_fmt_tokens(window)}{RST}"
+    return f"{MUTED}context{RST} {bar} {color}{pct:.0f}%{RST}{MUTED} of {_fmt_tokens(window)}{RST}"
 
 
 TRACE_LEVELS = ("compact", "normal", "detailed", "debug")
@@ -911,7 +977,7 @@ def _tool_target(name: str, inp: dict[str, Any]) -> str:
             pass
         return path
     if name in BASH_TOOLS:
-        return _one_line(_first(inp, "command", "CommandLine"), 120)
+        return _one_line(_strip_cd_prefix(str(_first(inp, "command", "CommandLine"))), 600)   # shown in full (wraps)
     if name in WRITE_TOOLS | EDIT_TOOLS | MULTI_EDIT_TOOLS or name in ("Patch", "CodeSymbols"):
         return path
     if name in LS_TOOLS or name == "FileTree":
@@ -945,6 +1011,51 @@ def _tool_target(name: str, inp: dict[str, Any]) -> str:
     return ""
 
 
+_TOOL_PURPOSE = {
+    "Read": "reads a file", "Write": "writes a file", "Edit": "edits a file", "MultiEdit": "makes several edits to a file",
+    "Bash": "runs a shell command", "BashOutput": "reads a background command's output", "KillShell": "stops a background command",
+    "Grep": "searches inside files", "Glob": "finds files by name", "Ls": "lists a folder", "FileTree": "shows the folder tree",
+    "WebSearch": "searches the web", "WebFetch": "fetches a web page", "Task": "hands work to a subagent",
+    "TodoWrite": "updates the task plan", "AskUserQuestion": "asks you a question", "Git": "runs a git command",
+    "Patch": "applies a patch", "NotebookEdit": "edits a notebook cell", "CodeSymbols": "lists code symbols",
+    "Http": "sends an HTTP request", "ExitPlanMode": "proposes a plan for your approval", "Diff": "compares two files",
+    "DeepResearch": "researches a question on the web", "TableSearch": "searches tabular data",
+    "Process": "inspects running processes", "Env": "reads environment variables", "Doctor": "checks the setup",
+}
+
+
+def tool_purpose(name: str, registry: Any = None) -> str:
+    """What a tool does, in a few plain words ('runs a shell command'), for the line under its header."""
+    if name in _TOOL_PURPOSE:
+        return _TOOL_PURPOSE[name]
+    if name.startswith("mcp__"):
+        parts = name.split("__")
+        return f"MCP tool from {parts[1]}" if len(parts) > 2 else "MCP tool"
+    try:
+        desc = str(getattr(registry.get(name), "description", "") or "") if registry is not None else ""
+    except Exception:
+        desc = ""
+    first = re.split(r"(?<=[.!?])\s|\n", desc.strip(), maxsplit=1)[0].rstrip(".") if desc.strip() else ""
+    return _one_line(first[:1].lower() + first[1:], 60) if first else ""
+
+
+_CD_PREFIX_RE = re.compile(r"""^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)\s*""")
+
+
+def _strip_cd_prefix(command: str) -> str:
+    """Drop a leading 'cd <current dir> &&' (models add it to every command; it hides the real one)."""
+    m = _CD_PREFIX_RE.match(command or "")
+    if not m:
+        return command
+    target = m.group(1) or m.group(2) or m.group(3) or ""
+    try:
+        if Path(os.path.expanduser(target)).resolve() == Path.cwd().resolve():
+            return command[m.end():]
+    except (OSError, ValueError):
+        pass
+    return command
+
+
 def _count_lines(content: str) -> int:
     return len([l for l in content.splitlines() if l.strip()])
 
@@ -952,7 +1063,7 @@ def _count_lines(content: str) -> int:
 def _preview(lines: list[str], keep: int = 4) -> list[str]:
     if len(lines) <= keep + 1:
         return lines
-    return lines[:keep] + [f"{SUBTLE}{glyph('ellipsis')} +{len(lines) - keep} lines (ctrl+o to expand){RST}"]
+    return lines[:keep] + [f"{SUBTLE}{glyph('ellipsis')} +{len(lines) - keep} more lines {glyph('dot')} {_MORE_HINT} to view all{RST}"]
 
 
 _DEFAULT_REGISTRY: Any = None
@@ -975,6 +1086,13 @@ def _tool_summary(registry: Any, name: str, inp: dict[str, Any], content: str, i
         return ""
     try:
         tool = reg.get(name)
+        try:
+            from axon.tools.base import Tool as _BaseTool
+
+            if getattr(type(tool), "summarize", None) is _BaseTool.summarize:
+                return ""   # the generic 'first line · N lines' summary; the renderer's own rows are clearer
+        except ImportError:
+            pass
         fn = getattr(tool, "summarize", None)
         text = fn(inp or {}, content or "", is_error) if callable(fn) else ""
         return sanitize(str(text or "")).strip().splitlines()[0] if text else ""
@@ -983,11 +1101,14 @@ def _tool_summary(registry: Any, name: str, inp: dict[str, Any], content: str, i
 
 
 def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: bool = False,
-                     width: int | None = None, registry: Any = None) -> list[str]:
-    """Result rows: the tool's own one-line summary (when it provides one) + rendered body."""
-    rows = summarize_tool_result(name, inp, content, is_error, width)
-    if not is_error and name in EDIT_TOOLS | MULTI_EDIT_TOOLS | WRITE_TOOLS | {"TodoWrite", "Task"}:
-        return rows  # diff / plan / subagent rendering already carries an exact summary
+                     width: int | None = None, registry: Any = None, detail: int = 1, link: str = "") -> list[str]:
+    """Result rows: the tool's own one-line summary (when it provides one) + rendered body.
+
+    *detail* follows the trace level (0 compact: the summary row only, 1 normal, 2+ detailed: longer
+    previews); *link* (a file:// URI of the full output) makes the summary row an OSC 8 hyperlink."""
+    rows = summarize_tool_result(name, inp, content, is_error, width, detail=detail)
+    if not is_error and name in _CARD_HEADER_TOOLS | {"TodoWrite", "Task"}:
+        return rows  # file / diff / plan / subagent cards already carry an exact summary
     summary = _tool_summary(registry, name, inp, content, is_error)
     if summary:
         first = f"{ERROR}{summary}{RST}" if is_error else summary
@@ -995,17 +1116,71 @@ def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: boo
             rows = [first] + rows[1:] if rows and strip_ansi(rows[0]).strip() in summary else [first] + rows
         else:
             rows = [first] + rows[1:]
+    if link and rows and "\x1b]8;" not in rows[0]:
+        rows[0] = hyperlink(link, rows[0])
     return rows
 
 
+# Tools whose first row is a file / diff card header (it links to the file itself, not the output).
+_CARD_HEADER_TOOLS = WRITE_TOOLS | EDIT_TOOLS | MULTI_EDIT_TOOLS | {"Patch", "NotebookEdit"}
+# Tools drawn as cards: the detailed trace shows a longer card instead of the raw output preview.
+CARD_TOOLS = _CARD_HEADER_TOOLS | READ_TOOLS | BASH_TOOLS | LS_TOOLS | GREP_TOOLS | {
+    "Glob", "Task", "TodoWrite", "WebFetch", "Http", "Git", "Diff"}
+
+# trace detail -> preview sizes (compact, normal, detailed, full: the transcript viewer's expanded view)
+_FULL = 200_000
+_CODE_LINES = (0, 30, 120, _FULL)
+_DIFF_ROWS = (0, 60, 240, _FULL)
+_READ_LINES = (0, 5, 30, _FULL)
+_LIST_ROWS = (0, 6, 24, _FULL)
+_GREP_ROWS = (0, 12, 40, _FULL)
+_JSON_LINES = (0, 12, 40, _FULL)
+_OUT_HEAD_TAIL = ((0, 0), (4, 2), (20, 6), (_FULL, 0))
+# tools whose expanded transcript entry is drawn with the live card (others: numbered raw output)
+_TRANSCRIPT_CARDS = _CARD_HEADER_TOOLS | READ_TOOLS | GREP_TOOLS | {"Glob", "WebFetch", "Http"}
+
+
+def transcript_card_rows(name: str, detail_json: str, body: str, width: int) -> list[str] | None:
+    """Full card body (without its summary row) for an expanded tool entry of the transcript viewer,
+    so history looks like the live timeline; None when the tool has no card (raw output is shown)."""
+    if not body.strip() and name not in _CARD_HEADER_TOOLS:
+        return None
+    if name not in _TRANSCRIPT_CARDS and not (name.startswith("mcp__") and _cards.find_json(body)):
+        return None
+    try:
+        import json as _json
+        inp = _json.loads(detail_json) if detail_json else {}
+        rows = tool_result_rows(name, inp if isinstance(inp, dict) else {}, body, False, width, detail=3)
+    except Exception:
+        return None
+    if name in _CARD_HEADER_TOOLS:
+        return rows            # the header row says what changed
+    return rows[1:] or None
+
+
+def _lim(table: tuple, detail: int) -> Any:
+    return table[max(0, min(len(table) - 1, detail))]
+
+
 def summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_error: bool = False,
-                          width: int | None = None) -> list[str]:
+                          width: int | None = None, detail: int = 1) -> list[str]:
     """Rows printed under a tool header (first row follows the '⎿' marker)."""
-    width = width or _width(160)
+    width = width or _width(160) - 8
+    rows = _summarize_tool_result(name, inp or {}, content, is_error, width, detail)
+    if detail <= 0 and not is_error and name not in ("Task", "TodoWrite", "ExitPlanMode") and len(rows) > 1:
+        # compact: one row per tool (a file / diff card keeps just its header row)
+        n = len(sanitize(content or "").strip().splitlines())
+        rows = rows[:1] + ([] if name in _CARD_HEADER_TOOLS or n <= 1 else [_cards.more_row(n, _MORE_HINT)])
+    return rows
+
+
+def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_error: bool, width: int,
+                           detail: int) -> list[str]:
     content = sanitize(content or "")
     text = content.strip()
     lines = text.splitlines()
-    path = _short_path(str(_first(inp, "path", "file_path", "AbsolutePath", "TargetFile")))
+    path = _short_path(str(_first(inp, "path", "file_path", "AbsolutePath", "TargetFile", "notebook_path")))
+    dot = f" {SUBTLE}{glyph('dot')}{RST} "
 
     if is_error:
         rows = [f"{ERROR}{l}{RST}" for l in (lines or ["Tool failed"])]
@@ -1013,11 +1188,43 @@ def summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_error
 
     if name in READ_TOOLS:
         n = len(lines)
-        return [f"Read {BOLD}{n}{RST} {'line' if n == 1 else 'lines'}"]
+        head = f"Read {BOLD}{n}{RST} {'line' if n == 1 else 'lines'}"
+        numbered = [m for m in (re.match(r"^\s*(\d+)→(.*)$", l) for l in lines) if m]
+        keep = _lim(_READ_LINES, detail)
+        if numbered and len(numbered) >= len(lines) // 2:
+            shown = numbered[:keep]
+            last = int(numbered[-1].group(1))
+            body = _cards.numbered_rows([m.group(2) for m in shown], _lang_for(path), width,
+                                        int(shown[0].group(1)) if shown else 1, max(2, len(str(last))))
+            if len(lines) > len(shown):
+                body.append(_cards.more_row(len(lines) - len(shown), _MORE_HINT))
+            return [head] + body
+        import textwrap
+        body = textwrap.dedent(content.rstrip().lstrip("\n")).splitlines()     # keep the line-number column aligned
+        return [head] + _preview([f"{DIM}{l}{RST}" for l in body], 3)
     if name in BASH_TOOLS:
         if not text or text == "(Command completed with exit code 0 and no output)":
-            return [f"{MUTED}(no output){RST}"]
-        return _preview([_classify_output_line(l) for l in lines], 4)
+            return [f"{MUTED}finished, no output{RST}"]
+        head = ""
+        lines = content.rstrip().lstrip("\n").splitlines()      # keep leading spaces (git status columns)
+        m = re.match(r"Command exited with non-zero code (\d+)\.?\s*", text)
+        if m:
+            head = f"{WARNING}exit code {m.group(1)}{RST}"
+            lines = [l for l in text[m.end():].splitlines() if l.strip() not in ("Output:", "")]
+        n = len(lines)
+        summary = _cards.test_summary(content)
+        if summary:
+            bar = _cards.test_bar(summary)
+            took = re.search(r"\bin ([\d.]+m?s)\b", "\n".join(lines[-3:]))
+            if n == 1 and not head:
+                return [bar + (f"{dot}{MUTED}{took.group(1)}{RST}" if took else "")]
+            first = bar + dot + (head + dot if head else "") + f"{MUTED}{_plural(n, 'line')} of output{RST}"
+        else:
+            if n == 1 and not head:
+                return [_classify_output_line(lines[0])]          # one line: show it, not a count
+            first = (head + f" {glyph('dot')} " if head else "") + (f"{_plural(n, 'line')} of output" if n else "no output")
+        h, t = _lim(_OUT_HEAD_TAIL, detail)
+        return [first] + _cards.output_rows(lines, width, h, t, _MORE_HINT)
     if name in EDIT_TOOLS | MULTI_EDIT_TOOLS:
         if name in MULTI_EDIT_TOOLS:
             pairs = [(e.get("old_string", ""), e.get("new_string", "")) for e in (inp.get("edits") or []) if isinstance(e, dict)]
@@ -1025,66 +1232,127 @@ def summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_error
             pairs = [(str(inp.get("old_string", "") or ""), str(inp.get("new_string", "") or ""))]
         added = removed = 0
         body: list[str] = []
+        budget = _lim(_DIFF_ROWS, detail)
         for k, (old_s, new_s) in enumerate(pairs):
             a, r = _diff_counts(old_s, new_s)
             added, removed = added + a, removed + r
+            if detail <= 0 or len(body) >= budget:
+                continue
             if k:
-                body.append(f"{SUBTLE}    {glyph('ellipsis')}{RST}")
-            start = _locate_line(path, new_s) if new_s else _locate_line(path, old_s.splitlines()[0] if old_s.strip() else "")
-            body += ["  " + r for r in diff_rows(old_s, new_s, start, width - 7, _lang_for(path))]
+                body.append(f"{SUBTLE}{' ' * 3}  {glyph('hunk') * 3} edit {k + 1}{RST}")
+            start = (_locate_line(path, new_s, 0) if new_s else
+                     _locate_line(path, old_s.splitlines()[0] if old_s.strip() else "", 0))   # 0: unknown, no numbers
+            body += diff_rows(old_s, new_s, start, width, _lang_for(path), max_rows=max(4, budget - len(body)))
         if not pairs or (not added and not removed):
             return [text.splitlines()[0] if text else f"Updated {path}"]
-        summary = (f"Updated {BOLD}{path}{RST} with {SUCCESS}{_plural(added, 'addition')}{RST}"
-                   f" and {ERROR}{_plural(removed, 'removal')}{RST}")
-        return [summary] + body
+        extra = _plural(len(pairs), "edit") if len(pairs) > 1 else ""
+        return [_cards.diff_header(path, added, removed, "Edited", extra)] + body
     if name in WRITE_TOOLS:
         code = str(_first(inp, "content", "CodeContent"))
-        clines = code.splitlines()
-        lang = _lang_for(path)
-        rows = [f"Wrote {BOLD}{_plural(len(clines), 'line')}{RST} to {BOLD}{path}{RST}"]
-        prev = [f"{SUBTLE}{i:>4}{RST}  {highlight(l, lang)}" for i, l in enumerate(clines[:8], 1)]
-        if len(clines) > 8:
-            prev.append(f"{SUBTLE}{glyph('ellipsis')} +{len(clines) - 8} lines{RST}")
-        return rows + prev
+        prev = inp.get("_prev_content")
+        if isinstance(prev, str):
+            if prev == code:
+                return [_cards.code_card_header(path, code, "Overwrote") + f"{dot}{MUTED}no changes{RST}"]
+            a, r = _diff_counts(prev, code)
+            if a + r < max(8, len(code.splitlines()) * 0.8):     # a real edit: show what changed
+                header = _cards.diff_header(path, a, r, "Overwrote", _plural(_cards.count_lines(code), "line"))
+                if detail <= 0:
+                    return [header]
+                return [header] + diff_rows(prev, code, 1, width, _lang_for(path), max_rows=_lim(_DIFF_ROWS, detail))
+        verb = "Overwrote" if isinstance(prev, str) or "Overwrote" in text else "Created"
+        return _cards.code_card(path, code, width, _lim(_CODE_LINES, detail), _MORE_HINT, verb)
+    if name == "Patch":
+        patch = str(inp.get("patch") or "")
+        files, body = _cards.patch_rows(patch, width, _lim(_DIFF_ROWS, detail), _MORE_HINT)
+        if files:
+            a, r = sum(f["added"] for f in files), sum(f["removed"] for f in files)
+            if len(files) == 1:
+                header = _cards.diff_header(files[0]["path"] or path, a, r, "Patched", _plural(len(files[0]["hunks"]), "hunk"))
+            else:
+                header = f"{INFO}{glyph('edited')} Patched{RST} {BOLD}{_plural(len(files), 'file')}{RST}{dot}{_cards.change_badge(a, r)}"
+            return [header] + body
+        return [f"{SUCCESS}{text}{RST}" if text else "Patch applied"]
+    if name == "NotebookEdit":
+        mode = str(inp.get("edit_mode") or "replace")
+        new_s = "" if mode == "delete" else str(inp.get("new_source") or "")
+        old_s = "" if mode == "insert" else str(inp.get("_prev_content") or "")
+        if mode in ("replace", "insert", "delete") and (old_s or new_s) and old_s != new_s:
+            a, r = _diff_counts(old_s, new_s)
+            cell = inp.get("cell_id") or inp.get("cell_index")
+            header = _cards.diff_header(path, a, r, "Edited", f"cell {cell}" if cell not in (None, "") else mode)
+            if detail <= 0:
+                return [header]
+            lang = "markdown" if str(inp.get("cell_type") or "") == "markdown" else "python"
+            return [header] + diff_rows(old_s, new_s, 1, width, lang, max_rows=_lim(_DIFF_ROWS, detail))
+        return [f"{TEXT}{lines[0]}{RST}" if lines else "notebook updated"]
     if name in LS_TOOLS:
         n = _count_lines(text) if text != "(Empty directory)" else 0
-        return [f"Listed {BOLD}{n}{RST} {'path' if n == 1 else 'paths'}"]
+        head = f"Listed {BOLD}{n}{RST} {'path' if n == 1 else 'paths'}"
+        if not n:
+            return [head]
+        entries = [l for l in lines if l.strip() and not l.startswith(("...", "(")) and not re.match(r"^\(\d+ dir", l)]
+        if any(("├" in l or "└" in l or "|--" in l) for l in entries):
+            tree = [f"{PRIMARY}{BOLD}{l}{RST}" if l.rstrip().endswith("/") else f"{TEXT}{l}{RST}" for l in entries]
+            return [head] + _preview(tree, _lim(_LIST_ROWS, detail))
+        base = str(_first(inp, "path", default="")) or ""
+        return [head] + _cards.column_rows([re.sub(r" \([\d.]+ ?[KMG]?B\)$", "", l.strip()) for l in entries], width, _lim(_LIST_ROWS, detail), _MORE_HINT, base)
     if name == "Glob":
         n = 0 if text.startswith("No files") else _count_lines(text)
-        return [f"Found {BOLD}{n}{RST} {'file' if n == 1 else 'files'}"]
+        head = f"Found {BOLD}{n}{RST} {'file' if n == 1 else 'files'}"
+        if not n:
+            return [head]
+        paths = [l for l in lines if l.strip() and not l.startswith("[")]
+        return [head] + _cards.column_rows(paths, width, _lim(_LIST_ROWS, detail), _MORE_HINT)
     if name in GREP_TOOLS:
         if not text or text.startswith("No matches"):
             return [f"{MUTED}No matches{RST}"]
-        n = _count_lines(text)
-        return [f"Found {BOLD}{n}{RST} {'match' if n == 1 else 'matches'}"]
+        hits, files, body = _cards.grep_rows(content, str(_first(inp, "pattern", "Query")), width,
+                                             _lim(_GREP_ROWS, detail), _MORE_HINT, bool(inp.get("-i")))
+        n = hits or _count_lines(text)
+        return [f"Found {BOLD}{n}{RST} {'match' if n == 1 else 'matches'}"
+                + (f" in {_plural(files, 'file')}" if files > 1 else "")] + body
     if name == "FileTree":
         return [f"{BOLD}{_count_lines(text)}{RST} entries"]
     if name == "CodeSymbols":
         return [f"{BOLD}{_count_lines(text)}{RST} symbol lines"]
     if name == "WebSearch":
         return [strip_ansi(render_web_search_box(str(_first(inp, "query")), content)).strip()]
-    if name == "WebFetch":
-        return [strip_ansi(render_web_fetch_box(str(_first(inp, "url")), content)).strip()]
-    if name == "Http":
-        size_kb = len(content.encode("utf-8", errors="replace")) / 1024
-        return [f"{lines[0] if lines else '(empty)'} {MUTED}{glyph('dot')} {size_kb:.1f} KB{RST}"]
+    if name in ("WebFetch", "Http"):
+        if name == "WebFetch":
+            first = strip_ansi(render_web_fetch_box(str(_first(inp, "url")), content)).strip()
+        else:
+            size_kb = len(content.encode("utf-8", errors="replace")) / 1024
+            first = f"{lines[0] if lines else '(empty)'} {MUTED}{glyph('dot')} {size_kb:.1f} KB{RST}"
+        found = _cards.find_json(content)
+        if found and detail > 0:
+            return [first] + _cards.json_rows(found[1], width, _lim(_JSON_LINES, detail), _MORE_HINT)
+        return [first]
     if name == "Git":
         return _preview([_git_line(l) for l in lines if l.strip()] or [f"{MUTED}(no output){RST}"], 6)
     if name == "TodoWrite":
         return _todo_summary(content)
     if name == "Task":
-        return [r[2:] for r in render_subagent_result_card(content, width=width - 6).splitlines()]
+        return [r[2:] for r in render_subagent_result_card(content, width=width).splitlines()]
     if name == "ExitPlanMode":
-        return [f"{ACCENT}{BOLD}Plan proposed for approval{RST}"] + format_markdown(content, max_width=width - 6).splitlines()
+        return [f"{ACCENT}{BOLD}Plan proposed for approval{RST}"] + format_markdown(content, max_width=width).splitlines()
     if name == "Diff":
         return _preview([highlight(l, "diff") for l in lines], 20)
     if name == "Doctor":
         return _doctor_rows(content) or [f"{MUTED}(no output){RST}"]
-    if name == "Patch":
-        return [f"{SUCCESS}{text}{RST}" if text else "Patch applied"]
+    if name == "AskUserQuestion":
+        answers = re.findall(r"->\s*(.+)$", text, re.MULTILINE)
+        if answers:
+            return [f"{SUCCESS}answered:{RST} {TEXT}{_one_line('; '.join(answers), 120)}{RST}"]
     if not text:
         return [f"{MUTED}(no output){RST}"]
-    return _preview([f"{TEXT}{l}{RST}" for l in lines], 3)
+    if len(lines) == 1:
+        return [f"{TEXT}{lines[0]}{RST}"]
+    found = _cards.find_json(content)
+    if found:
+        head, pretty = found
+        first = head.splitlines()[0] if head else f"JSON {glyph('dot')} {_plural(len(pretty.splitlines()), 'line')}"
+        return [first] + _cards.json_rows(pretty, width, _lim(_JSON_LINES, detail) if detail > 0 else 0, _MORE_HINT)
+    return [f"{_plural(len(lines), 'line')} of output"] + _preview([f"{TEXT}{l}{RST}" for l in lines], 3)
 
 
 # ─── Spinner ───────────────────────────────────────────────────────────────
@@ -1150,6 +1418,8 @@ class Spinner:
         self._proxy: _SpinnerAwareStdout | None = None
         self._frame = 0
         self._paused = 0
+        self._rows = 1          # rows the visible spinner occupies (spinner + optional hint row)
+        self._phase_t0 = 0.0
         self.prefix = "  "
         self.started_at = 0.0
 
@@ -1169,10 +1439,12 @@ class Spinner:
         return self._thread is not None
 
     def set_label(self, label: str) -> None:
+        if label != self._label:
+            self._phase_t0 = time.time()     # live timer of the current activity (this tool, this step)
         self._label = label
 
     def start(self, label: str = "Thinking") -> None:
-        self._label = label
+        self.set_label(label)
         if self._thread is not None or not self.enabled():
             return
         with OUTPUT_LOCK:
@@ -1207,10 +1479,32 @@ class Spinner:
     def _erase_locked(self) -> None:
         if self._visible and self._real is not None:
             try:
-                self._real.write("\r\033[2K")
+                # the hint row sits under the spinner row: clear it, then go back up and clear the spinner
+                self._real.write("\r\033[2K" + "\033[A\r\033[2K" * (self._rows - 1))
             except Exception:
                 pass
             self._visible = False
+            self._rows = 1
+
+    def hint_line(self) -> str:
+        """Second row under the spinner: a contextual tip, or how to talk to the agent while it works."""
+        if os.environ.get("AXON_NO_TIPS") or term_height() < 12:
+            return ""
+        elapsed = time.time() - (self.started_at or time.time())
+        tip = ""
+        if Spinner.draft_provider is not None and elapsed < 6:
+            tip = "Type a message to queue it for the agent (sent between steps) · /btw asks a side question"
+        else:
+            try:
+                from axon.features.tips import tip_engine
+
+                tip = tip_engine().spinner_tip() or ""
+            except Exception:
+                tip = ""
+        if not tip:
+            return ""
+        lead = self.prefix.rstrip() + ("  " if self.prefix.strip() else "  ")
+        return truncate(f"{lead}{SUBTLE}{glyph('result')} {RST}{MUTED}Tip: {sanitize(tip)}{RST}", max(10, term_width() - 1))
 
     def _run(self) -> None:
         frames = glyph("spinner")
@@ -1222,10 +1516,13 @@ class Spinner:
                     continue
                 self._frame = (self._frame + 1) % len(frames)
                 line = self.render_line(frames[self._frame])
+                hint = self.hint_line()
                 try:
-                    self._real.write("\r\033[2K" + line)
+                    self._erase_locked()
+                    self._real.write("\r\033[2K" + line + (f"\n\033[2K{hint}" if hint else ""))
                     self._real.flush()
                     self._visible = True
+                    self._rows = 2 if hint else 1
                 except Exception:
                     break
 
@@ -1234,7 +1531,9 @@ class Spinner:
         extra = self._status() if self._status else ""
         frame = frame or glyph("spinner")[0]
         dot = f" {glyph('dot')} "
-        detail = f"{elapsed:.1f}s" + (f"{dot}{extra}" if extra else "") + f"{dot}{Renderer.interrupt_hint}"
+        phase = max(0.0, time.time() - (self._phase_t0 or self.started_at or time.time()))
+        clock = f"{phase:.1f}s" + (f" (turn {elapsed:.0f}s)" if elapsed - phase >= 1.0 else "")
+        detail = clock + (f"{dot}{extra}" if extra else "") + f"{dot}{Renderer.interrupt_hint}"
         line = f"{self.prefix}{ACCENT}{frame}{RST} {TEXT}{self._label}{glyph('ellipsis')}{RST} {SUBTLE}{detail}{RST}"
         width = max(10, term_width() - 1)
         draft = ""
@@ -1333,6 +1632,11 @@ class Renderer:
         self._active_tools: dict[str, dict[str, Any]] = {}
         self._last_header_id = ""
         self._turn_no = 0
+        self._agent: Any = None
+        self._t_turn: TranscriptEntry | None = None
+        self._t_step: TranscriptEntry | None = None
+        self._t_tools: dict[str, TranscriptEntry] = {}
+        self._resp_raw: list[str] = []
         self._turn_open = False
         self._step = 0
         self._step_t0 = 0.0
@@ -1341,6 +1645,10 @@ class Renderer:
         self._pending_stats: tuple[Any, str] | None = None
         self._pending_perm: dict[str, list[str]] = {}
         self._pending_why: dict[str, str] = {}
+        self._batch_order: list[str] = []          # tool ids of the current batch, in call order
+        self._batch_blocks: dict[str, dict[str, Any]] = {}
+        self._batch_next = 0
+        self._batch_parallel = False
         self._text_in_step = False
         self._turn_cost = 0.0
         self._turn_cost_known = False
@@ -1351,13 +1659,20 @@ class Renderer:
         self._current_user_prompt = ""
         self._current_permission_mode = "bypass"
         self._out_chars = 0
+        self._turn_text = False                    # the model wrote response text this turn
         self.last_context: tuple[int, int] = (0, 0)   # (tokens in context, window) of the last LLM call
         self._step_context: tuple[int, int] = (0, 0)
 
     def attach(self, agent: Any) -> None:
         """Bind to an agent: its tool registry supplies result summaries; trace level from settings."""
         self.registry = getattr(agent, "registry", None) or getattr(agent, "tools", None) or self.registry
+        self._agent = agent
         settings = getattr(agent, "settings", None)
+        try:
+            from axon.ui.theme import set_max_layout_width
+            set_max_layout_width(getattr(settings, "max_width", 0))
+        except Exception:
+            pass
         level = getattr(settings, "trace_level", None)
         if level:
             self.set_trace_level(level)
@@ -1450,9 +1765,17 @@ class Renderer:
         self._out("".join((lead if i == 0 else cont) + r + "\n" for i, r in enumerate(rows)))
 
     def _lines(self, rows: Iterable[str], extra: str = "") -> None:
-        width = max(20, term_width() - 1)
-        text = "".join(truncate(self._rail(extra) + r, width) + "\n" for r in rows)
-        self._out(text)
+        """Write rows under the current block. A row wider than the terminal wraps (with a hanging indent
+        that keeps it inside the block) instead of being cut off, and never fills the last column, so
+        the terminal has nothing to re-wrap when the window is resized."""
+        lead = self._rail(extra)
+        cont = self._rail(extra + "  ")
+        avail = max(10, term_width() - 1 - max(display_width(lead), display_width(cont)))
+        out = []
+        for r in rows:
+            for i, piece in enumerate(wrap_ansi(r, avail) or [""]):
+                out.append((lead if i == 0 else cont) + piece + "\n")
+        self._out("".join(out))
 
     # ── banner / user message / errors ────────────────────────────────────
     def print_banner(self, version: str = "", model: str = "", effort: str = "", workspace: str = "",
@@ -1476,10 +1799,19 @@ class Renderer:
         model = model or "(no model)"
         provider = _provider_label(model, base_url)
         dot = glyph("dot")
+        project, data_row = "", ""
+        try:   # which project this is and where its data (sessions, memory, logs) is kept
+            from axon.session.layout import project_info
+            info = project_info(Path(workspace) if workspace else Path.cwd())
+            data = hyperlink(Path(info["data_dir"]).as_uri(), str(info["data_dir_display"]))
+            project = f"{TEXT}{info['name']}{RST} {MUTED}{dot} {w_path}{RST}"
+            data_row = f"{MUTED}project data: {data}{RST}"
+        except Exception:
+            project = f"{MUTED}{w_path}{RST}"
         lines = [
             (f"{PRIMARY}{glyph('logo_top')}{RST}", f"{BOLD}{TEXT}Axon{RST} {MUTED}{v_str}{RST}"),
             (f"{CYAN}{glyph('logo_mid')}{RST}", f"{TEXT}{model}{RST}" + (f" {MUTED}{dot} {effort} effort{RST}" if effort else "") + f" {MUTED}{dot} {provider}{RST}"),
-            (f"{ACCENT}{glyph('logo_bot')}{RST}", f"{MUTED}{w_path}{RST}"),
+            (f"{ACCENT}{glyph('logo_bot')}{RST}", project),
         ]
         mode_s = f"{WARNING}{mode}{RST} {MUTED}mode{RST}" if mode else ""
         trace_s = f"{MUTED}trace {self.trace_level} (ctrl+o){RST}"
@@ -1493,14 +1825,30 @@ class Renderer:
             out.append(f"  {mode_s}" if mode_s else "")
             return "\n".join(truncate(r, width - 1) for r in out) + "\n"
         rows = [f"{logo}  {text}" for logo, text in lines]
+        if data_row:
+            rows.append(data_row)
         rows.append("")
         rows.append(f"{mode_s}{f' {MUTED}{dot}{RST} ' if mode_s else ''}{trace_s}")
         rows.append(tips)
+        rows.append(f"{MUTED}type while Axon works to queue a message {dot} esc interrupts {dot} /btw side question{RST}")
+        if _click_expand_on(getattr(getattr(self, "_agent", None), "settings", None)):
+            sel = "⌥/shift+drag" if glyph("dot") == "·" else "alt/shift+drag"
+            rows.append(f"{MUTED}click a block to expand {dot} {sel} selects text{RST}")
+        tip = ""
+        if not os.environ.get("AXON_NO_TIPS"):
+            try:
+                from axon.features.tips import tip_engine
+
+                tip = sanitize(tip_engine().spinner_tip() or "")
+            except Exception:
+                tip = ""
+        if tip:
+            rows += ["", f"{INFO}{glyph('info')} Tip:{RST} {MUTED}{tip}{RST}"]
         return "\n" + box("", rows, min(width - 2, 84), color=BORDER, wrap=True) + "\n"
 
     def render_user_message(self, text: str) -> None:
         """Echo the user's message as a shaded bar (wraps long / multi-line input)."""
-        width = max(20, min(term_width() - 4, 120))
+        width = max(20, layout_width(4))
         clean = sanitize(text.strip())
         rows: list[str] = []
         for i, para in enumerate(clean.splitlines() or [""]):
@@ -1532,9 +1880,40 @@ class Renderer:
                 self._out(f"  {ERROR}[render error: {type(exc).__name__}: {exc}]{RST}\n")
 
     # Turn / LLM call -----------------------------------------------------
+    _SHELL_CTX_RE = re.compile(r"<bash-input>.*?\(The user ran this command in the terminal; its output is shown for context\.\)\s*",
+                               re.DOTALL)
+
+    def _provider_for(self, model: str) -> str:
+        """Which provider serves *model* ('AgentRouter', 'Anthropic', ...) - '' without an attached agent."""
+        agent = getattr(self, "_agent", None)
+        if agent is None:
+            return ""
+        settings = getattr(agent, "settings", None)
+        base = str(getattr(settings, "base_url", "") or "")
+        pid = str(getattr(settings, "provider", "") or "")
+        try:
+            if pid:          # an explicit provider preset names itself
+                from axon.providers.catalog import PROVIDER_PRESETS
+                preset = next((x for x in PROVIDER_PRESETS if getattr(x, "id", "") == pid), None)
+                if preset is not None and getattr(preset, "name", ""):
+                    return _one_line(preset.name, 40)
+            label = _provider_label(model or "", base)
+        except Exception:
+            return ""
+        return "" if label in ("", "API") else _one_line(label, 40)
+
     def _open_turn(self, prompt: str, model: str, mode: str) -> None:
-        self._turn_no += 1
+        # `!cmd` output travels with the next prompt as context; the header shows what the user asked
+        prompt = self._SHELL_CTX_RE.sub("", prompt or "").strip()
+        # Number turns like the session does (/clear and /resume start over); count locally otherwise.
+        traces = getattr(getattr(self, "_agent", None), "traces", None)
+        self._turn_no = len(traces) if isinstance(traces, list) and traces else self._turn_no + 1
+        self._t_turn = _record(TranscriptEntry("turn", self._turn_no, title=f'Turn {self._turn_no}' + (f' · "{_one_line(prompt, 80)}"' if prompt else ""),
+                                               summary=f"{model}" + (f" · {mode} mode" if mode else ""), body=_plain(prompt),
+                                               started_at=time.time(), status="running"))
+        self._t_step = None
         self._turn_open = True
+        self._turn_text = False
         self._turn_cost = 0.0
         self._turn_cost_known = False
         if self.level < 1:
@@ -1544,13 +1923,15 @@ class Renderer:
         left = f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {self._turn_no}{RST}"
         if prompt:
             left += f" {MUTED}{dot}{RST} {TEXT}\"{_one_line(prompt, 60)}\"{RST}"
-        right = f"{MUTED}{model}" + (f" {dot} {mode}" if mode else "") + f"{RST}"
-        width = max(30, term_width() - 1)
+        prov = self._provider_for(model)
+        right = f"{MUTED}{model}" + (f" via {prov}" if prov else "") + (f" {dot} {mode} mode" if mode else "") + f"{RST}"
+        width = max(30, layout_width(1))
         gap = width - display_width(left) - display_width(right)
         line = left + " " * max(2, gap) + right if gap >= 2 else left
         self._out(truncate(line, width) + "\n")
 
     def _on_llm_call(self, e: LLMCallStart) -> None:
+        self._flush_blocks(force=True)
         self._finish_stream()
         self._close_step_stats()
         if e.user_prompt:
@@ -1570,11 +1951,24 @@ class Renderer:
         self._step_model = e.model
         self._step_stats_done = False
         self._text_in_step = False
+        self._t_step = _record(TranscriptEntry("step", self._turn_no, e.iteration, title=f"Step {e.iteration} · {e.model}",
+                                               summary=f"reads {_plural(e.message_count, 'message')}", started_at=time.time(),
+                                               status="running"))
         if self.level >= 1:
             dot = glyph("dot")
-            ctx = f" {MUTED}{dot} ~{_fmt_tokens(e.tokens_in)} ctx{RST}" if e.tokens_in else ""
-            self._line(f"{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {e.iteration}{RST}  {TEXT}LLM call{RST} "
-                       f"{MUTED}{dot} {e.model} {dot} {_plural(e.message_count, 'message')}{RST}{ctx}")
+            if e.iteration > 1:
+                self._line("")          # air between steps
+            size = f" (~{_fmt_tokens(e.tokens_in)} tokens)" if e.tokens_in else ""
+            prov = self._provider_for(e.model)
+
+            def step_row(with_prov: bool) -> str:
+                return (f"{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {e.iteration}{RST}  {TEXT}LLM call{RST} {MUTED}{dot}{RST} "
+                        f"{TEXT}{e.model}{RST}" + (f" {MUTED}({prov}){RST}" if with_prov and prov else "")
+                        + f" {MUTED}{dot} reads {_plural(e.message_count, 'message')}{size}{RST}")
+            row = step_row(True)
+            if prov and display_width(self._rail() + row) > term_width() - 1:
+                row = step_row(False)          # narrow window: the turn header already names the provider
+            self._line(row)
             self._render_fed_back(e)
             if self.level >= 3:
                 self._render_debug_fields(e, skip={"iteration", "model", "message_count", "tokens_in", "tools_ingested", "user_prompt"})
@@ -1589,8 +1983,8 @@ class Renderer:
         total_bytes = sum(int(t.get("bytes", 0) or 0) for t in items)
         total_tok = sum(int(t.get("tokens", 0) or 0) for t in items)
         errors = sum(1 for t in items if t.get("is_error"))
-        summary = (f"{glyph('arrow')} fed back {_plural(len(items), 'tool result')} from step {e.iteration - 1}: "
-                   f"{_fmt_bytes(total_bytes)} {glyph('dot')} ~{_fmt_tokens(total_tok)} tokens")
+        summary = (f"{glyph('arrow')} includes {_plural(len(items), 'tool result')} from step {e.iteration - 1} "
+                   f"({_fmt_bytes(total_bytes)} {glyph('dot')} ~{_fmt_tokens(total_tok)} tokens)")
         if errors:
             summary += f" {glyph('dot')} {ERROR}{_plural(errors, 'error')}{RST}{MUTED}"
         self._line(f"{MUTED}{summary}{RST}", "  ")
@@ -1618,6 +2012,10 @@ class Renderer:
             return  # nothing known yet; a later TurnComplete / LLMCallEnd will close the step
         self._pending_stats = None
         self._step_stats_done = True
+        if self._t_step is not None:
+            dur_s = duration if duration is not None else max(0.0, time.time() - self._step_t0)
+            self._t_step.summary = _plain(f"replied in {dur_s:.1f}s · " + _usage_line(usage, cost=cost))
+            self._t_step.duration, self._t_step.status = dur_s, "ok"
         if cost is None:
             cost = _cost_for(self._step_model, usage)
         if cost is not None:
@@ -1630,14 +2028,14 @@ class Renderer:
             return
         dur = duration if duration is not None else max(0.0, time.time() - self._step_t0)
         show_stop = stop if (self.level >= 2 or stop not in ("end_turn", "tool_use", "")) else ""
-        label = f"step {self._step}: " if self._text_in_step else ""
         sep = f" {MUTED}{glyph('dot')}{RST} "
-        stats = f"{SUBTLE}{glyph('result')}{RST} {MUTED}{label}{_usage_line(usage, duration=dur, cost=cost, stop=show_stop)}{RST}"
+        stats = (f"{SUBTLE}{glyph('wrap')}{RST} {MUTED}replied in {dur:.1f}s {glyph('dot')} "
+                 f"{_usage_line(usage, cost=cost, stop=show_stop)}{RST}")
         gauge = context_gauge(*context) if context else ""
         if gauge and display_width(stats + sep + gauge) > term_width() - 1 - display_width(self._rail("    ")):
             gauge = context_gauge(*context, compact=True)
         self._line(stats + (sep + gauge if gauge else ""), "  ", atomic=True)
-        if miss_cause:
+        if miss_cause and self.level >= 2:
             self._line(f"{WARNING}{glyph('warn')} cache miss: {miss_cause}{RST}", "    ")
         if self.level >= 2:
             split = _cost_split(self._step_model, usage)
@@ -1661,20 +2059,25 @@ class Renderer:
         if not self._thinking_active:
             self._finish_markdown()
             self._thinking_active = True
+            self._thinking_uid = next(_UIDS)
+            _tag_rows(self._thinking_uid)
             self._thinking_lines = []
             self._thinking_start_time = time.time()
             self._think_col = -1
             self._think_word = ""
         self._thinking_lines.append(e.text)
+        if self._think_full and len(self._thinking_lines) == 1:
+            # thinking is its own block, set apart from tool calls and the response
+            self._line(f"{SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}", "  ")
         if self._think_full:
             self._think_stream(sanitize(e.text))
 
     @property
     def _think_full(self) -> bool:
-        return self.show_thinking and self.level >= 2
+        return self.show_thinking and self.level >= 1
 
     def _think_stream(self, text: str) -> None:
-        avail = max(20, min(term_width() - 10, 100))
+        avail = max(20, layout_width(10))
         out: list[str] = []
         lead = self._rail("  ") + f"{SUBTLE}{glyph('thinking_bar')}{RST} {DIM}{ITALIC}"
 
@@ -1720,6 +2123,11 @@ class Renderer:
             return
         self._thinking_active = False
         elapsed = max(0.1, time.time() - self._thinking_start_time)
+        full_text = "".join(self._thinking_lines).strip()
+        if full_text:
+            _record(TranscriptEntry("thinking", self._turn_no, self._step, title=f"Thought for {elapsed:.1f}s",
+                                    summary=_one_line(full_text, 120), body=full_text, duration=elapsed,
+                                    uid=getattr(self, "_thinking_uid", 0) or next(_UIDS)))
         if self._think_full:
             if self._think_word:
                 self._think_stream(" ")
@@ -1747,21 +2155,25 @@ class Renderer:
             # On the timeline the response keeps the rail: its rows are drawn 2 columns narrower.
             self._md_railed = self._railed
             self._md = MarkdownStream(width=_width(110) - (2 if self._md_railed else 0))
+            self._text_uid = next(_UIDS)
+            _tag_rows(self._text_uid)
             self._text_in_step = True
-            if self._railed:
-                # Text may precede tool calls, so it is not necessarily the final answer.
-                self._out(f"{BORDER}{glyph('t_right')}{glyph('h')}{RST} {BOLD}Response{RST} "
-                          f"{MUTED}{glyph('dot')} step {self._step}{RST}\n")
-            else:
+            if not self._railed:
                 self._gap()
+            # On the timeline the text is a child of its step (same column as tool calls); no header row.
             self.spinner.set_label(f"Step {self._step} {glyph('dot')} responding")
+        self._resp_raw.append(e.text)
+        self._turn_text = True
         self._md_out(self._md.feed(e.text))
 
     def _md_out(self, chunk: str) -> None:
         """Write rendered markdown rows, behind the timeline rail when the response is on it."""
         if chunk and getattr(self, "_md_railed", False):
+            # rail + an accent bar: what the model *says* is easy to tell apart from trace rows
             bar = f"{BORDER}{glyph('v')}{RST}"
-            chunk = "".join((f"{bar} {row}" if row else bar) + "\n" for row in chunk.split("\n")[:-1])
+            says = f"{ACCENT}{glyph('quote')}{RST}"
+            chunk = "".join(f"{bar} {says} {row[2:] if row.startswith('  ') else row}" + "\n"
+                            for row in chunk.split("\n")[:-1])
         self._out(chunk)
 
     @staticmethod
@@ -1772,6 +2184,12 @@ class Renderer:
         if self._md is not None:
             self._md_out(self._md.flush())
             self._md = None
+            raw = "".join(self._resp_raw).strip()
+            self._resp_raw = []
+            if raw:
+                _record(TranscriptEntry("text", self._turn_no, self._step, title="Response",
+                                        summary=_one_line(raw, 120), body=raw,
+                                        uid=getattr(self, "_text_uid", 0) or next(_UIDS)))
             if not self._railed:
                 self._gap()
 
@@ -1791,6 +2209,15 @@ class Renderer:
         pass
 
     def _on_batch(self, e: ToolBatchStart) -> None:
+        self._flush_blocks(force=True)
+        tools = list(e.tools or ())
+        self._batch_order = [i for i in (str(getattr(t, 'id', '') or '') for t in tools) if i]
+        self._batch_blocks = {}
+        self._batch_next = 0
+        readonly = all(self._is_readonly(getattr(t, "name", "") or "") for t in tools)
+        # Same rule as Agent._execute_batch: only an all-read-only batch runs concurrently, and only
+        # then can results arrive out of order (so only then are tool blocks buffered).
+        self._batch_parallel = readonly and len(self._batch_order) > 1
         self._tool_batch_count += 1
         self._finish_stream()
         self._close_step_stats()
@@ -1798,21 +2225,77 @@ class Renderer:
             self._current_user_prompt = e.user_prompt
         if e.mode:
             self._current_permission_mode = e.mode
-        self._finish_stream()
-        if self.level >= 1:
-            readonly = all((getattr(t, "name", "") or "") not in MUTATING_TOOLS for t in e.tools)
-            how = ("parallel, read-only" if readonly else "sequential") if e.total_count > 1 else ("read-only" if readonly else "modifies workspace")
-            self._line(f"{MUTED}{glyph('arrow')} plans {_plural(e.total_count, 'tool call')} ({how}){RST}", "  ")
+        if self.level >= 2 or (self.level >= 1 and e.total_count > 1):
+            if e.total_count > 1:
+                how = "in parallel, read-only" if self._batch_parallel else "one after another"
+            else:
+                how = "read-only" if readonly else "may change files"
+            self._line(f"{MUTED}{glyph('arrow')} runs {_plural(e.total_count, 'tool')} {how}{RST}", "  ")
         self.spinner.start("Running tools")
 
-    def _tool_header(self, call_id: str, name: str, inp: dict[str, Any]) -> str:
+    def _is_readonly(self, name: str) -> bool:
+        if name == "Task":
+            return True
+        reg = self.registry
+        if reg is not None:
+            try:
+                return bool(reg.get(name).readonly)
+            except Exception:
+                pass
+        return name not in MUTATING_TOOLS
+
+    def _tool_header(self, call_id: str, name: str, inp: dict[str, Any], mark_last: bool = True) -> str:
         target = tool_target(name, inp)
         name = _clean(name)
-        self._last_header_id = call_id
+        if mark_last:
+            self._last_header_id = call_id
         mark = f"{PRIMARY}{glyph('tool')}{RST}"
         if self.level >= 1:
             return f"{mark} {BOLD}{name}{RST}" + (f"  {TEXT}{target}{RST}" if target else "")
         return f"{mark} {BOLD}{name}{RST}" + (f"{MUTED}({RST}{target}{MUTED}){RST}" if target else "")
+
+    def _block(self, call_id: str) -> dict[str, Any]:
+        """The pending output block of a parallel tool call (created on first use)."""
+        b = self._batch_blocks.get(call_id)
+        if b is None:
+            b = {"header": "", "why": "", "args": [], "notes": [], "rows": None, "printed": False}
+            self._batch_blocks[call_id] = b
+        return b
+
+    def _emit_block(self, b: dict[str, Any]) -> None:
+        """Print one tool call as a single, contiguous block: header, notes, result."""
+        b["printed"] = True
+        if b.get("uid"):
+            _tag_rows(b["uid"])
+        if not self._railed:
+            self._gap()
+        if b["header"]:
+            self._line(b["header"], "  ")
+        if b["why"]:
+            self._line(b["why"], "      ")
+        if b["args"]:
+            self._lines(b["args"], "      ")
+        for note in b["notes"]:
+            for row in note.split("\n"):
+                self._line(row, "      ")
+        if b["rows"]:
+            first, rest = b["rows"]
+            self._line(first, "    ", atomic=True)
+            if rest:
+                self._lines(rest, "    ")
+
+    def _flush_blocks(self, force: bool = False) -> None:
+        """Print finished parallel tool blocks in the order the model called them."""
+        while self._batch_next < len(self._batch_order):
+            b = self._batch_blocks.get(self._batch_order[self._batch_next])
+            if b is None or b["rows"] is None:
+                if not force:
+                    return
+                if b is not None and not b["printed"] and (b["header"] or b["notes"]):
+                    self._emit_block(b)
+            else:
+                self._emit_block(b)
+            self._batch_next += 1
 
     def _on_tool_start(self, e: ToolExecutionStart) -> None:
         self._finish_stream()
@@ -1820,54 +2303,156 @@ class Renderer:
         self._tool_call_count += 1
         inp = dict(e.input or {})
         self._active_tools[e.id] = {"name": e.name, "input": inp, "idx": self._tool_call_count, "t0": time.time()}
-        if not self._railed:
-            self._gap()
-        self._line(self._tool_header(e.id, e.name, inp))
+        prev = self._snapshot_before(e.name, inp)
+        if prev is not None:
+            self._active_tools[e.id]["prev"] = prev
         why = _get(e, "rationale", "why", default="") or self._pending_why.pop(e.id, "")
-        if why and self.level >= 1:
-            self._line(f"{SUBTLE}why: {DIM}{ITALIC}{_one_line(why, 140)}{RST}", "    ")
-        if self.level >= 2:
-            self._lines(_pretty_input(inp), "    ")
-        self.spinner.start(f"Running {_clean(e.name)}")
-        self.spinner.set_label(f"Running {_clean(e.name)}")
+        try:
+            import json as _json
+            detail = _json.dumps(inp, indent=2, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            detail = repr(inp)
+        self._t_tools[e.id] = _record(TranscriptEntry("tool", self._turn_no, self._step,
+                                                      title=f"{_clean(e.name)}  {tool_target(e.name, inp)}".rstrip(),
+                                                      detail=detail, status="running", started_at=time.time(), id=e.id,
+                                                      why=_plain(why)))
+        why_row = ""
+        if self.level >= 1:
+            bits = [tool_purpose(e.name, self.registry)] + ([f"why: {ITALIC}{_one_line(why, 400)}"] if why else [])
+            why_row = f"{SUBTLE}" + f" {glyph('dot')} ".join(b for b in bits if b) + RST if any(bits) else ""
+        args = _pretty_input(inp) if self.level >= 2 else []
+        if self._batch_parallel and e.id in self._batch_order:
+            b = self._block(e.id)
+            b["uid"] = self._t_tools[e.id].uid
+            b["header"] = self._tool_header(e.id, e.name, inp, mark_last=False)
+            b["why"], b["args"] = why_row, args
+        else:
+            if not self._railed:
+                self._gap()
+            self._line(self._tool_header(e.id, e.name, inp), "  ")
+            if why_row:
+                self._line(why_row, "      ")
+            if args:
+                self._lines(args, "      ")
+        running = [i for i in self._active_tools.values()]
+        label = (f"Running {_clean(e.name)} {_one_line(tool_target(e.name, inp), 40)}".rstrip() if len(running) == 1
+                 else f"Running {len(running)} tools")
+        self.spinner.start(label)
+        self.spinner.set_label(label)
+
+    def _workspace(self) -> Path:
+        ws = getattr(getattr(self._agent, "settings", None), "workspace", None)
+        try:
+            return Path(ws) if ws else Path.cwd()
+        except (TypeError, OSError):
+            return Path.cwd()
+
+    def _snapshot_before(self, name: str, inp: dict[str, Any]) -> str | None:
+        """What a file / notebook cell held before Write / NotebookEdit ran (so the card can show a diff)."""
+        if name not in WRITE_TOOLS and name != "NotebookEdit":
+            return None
+        raw = str(_first(inp, "path", "file_path", "notebook_path", "TargetFile") or "")
+        if not raw:
+            return None
+        try:
+            p = Path(raw).expanduser()
+            if not p.is_absolute():
+                p = self._workspace() / p
+            if not p.is_file() or p.stat().st_size > 2_000_000:
+                return None
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return None
+        if "\x00" in text[:4096]:
+            return None
+        if name in WRITE_TOOLS:
+            return text
+        try:   # NotebookEdit: the target cell's source
+            import json as _json
+            cells = _json.loads(text).get("cells") or []
+            cid, idx = inp.get("cell_id"), inp.get("cell_index")
+            cell = next((c for c in cells if cid and c.get("id") == cid), None)
+            if cell is None and isinstance(idx, int) and 0 <= idx < len(cells):
+                cell = cells[idx]
+            src = (cell or {}).get("source", "")
+            return "".join(src) if isinstance(src, list) else str(src or "")
+        except Exception:
+            return None
 
     def _on_tool_result(self, e: ToolExecutionResult) -> None:
-        _save_tool_output(e.content)
+        global _MORE_HINT
         self._finish_stream()
         info = self._active_tools.pop(e.id, None) or {"name": e.name, "input": {}, "idx": 0, "t0": None}
         inp = {**(info.get("input") or {}), **(e.input or {})}
-        if self._last_header_id != e.id:
-            self._line(self._tool_header(e.id, e.name, inp))
-        self._last_header_id = ""
-        width = _width(160) - 6
-        rows = tool_result_rows(e.name, inp, e.content, e.is_error, width, self.registry)
+        if "prev" in info:
+            inp["_prev_content"] = info["prev"]
+        if e.id in self._t_tools:
+            _tag_rows(self._t_tools[e.id].uid)
+        out_no = _save_tool_output(e.content, _clean(e.name), tool_target(e.name, inp))
+        in_block = self._batch_parallel and e.id in self._batch_order
+        if not in_block:
+            if self._last_header_id != e.id:
+                self._line(self._tool_header(e.id, e.name, inp), "  ")
+            self._last_header_id = ""
+        width = _width(160) - 10         # rail + "⎿  " + the hanging indent _lines reserves; never the last column
+        _MORE_HINT = f"/output {out_no}"
+        link = _output_file(out_no, e.content or "") if (e.content or "").strip() else ""
+        if link:
+            _MORE_HINT = hyperlink(link, _MORE_HINT)              # click (cmd/ctrl+click) opens the full output
+        try:
+            rows = tool_result_rows(e.name, inp, e.content, e.is_error, width, self.registry,
+                                    detail=min(self.level, 2), link=link)
+        finally:
+            _MORE_HINT = "/output"
+        entry = self._t_tools.pop(e.id, None) or _record(TranscriptEntry(
+            "tool", self._turn_no, self._step, title=f"{_clean(e.name)}  {tool_target(e.name, inp)}".rstrip(), id=e.id))
+        entry.body, entry.output_no = sanitize(e.content or ""), out_no
+        entry.summary = _plain(rows[0]) if rows else ""
+        entry.status = "error" if e.is_error else "ok"
+        if entry.started_at:
+            entry.duration = time.time() - entry.started_at
+        if e.is_error and rows:
+            rows[0] = f"{ERROR}{glyph('fail')}{RST} " + rows[0]
         self._round_obs_count += 1
         if self.level >= 1 and rows:
             content = e.content or ""
             n_bytes = len(content.encode("utf-8", errors="replace"))
             est = max(1, len(content) // 4) if content else 0
             t0 = info.get("t0")
-            dur = f" {glyph('dot')} {time.time() - t0:.2f}s" if t0 else ""
-            dest = f"step {self._current_iteration + 1}" if self._turn_open else "model"
-            meta = f"{SUBTLE} {glyph('dot')} sent {_fmt_bytes(n_bytes)} (~{_fmt_tokens(est)} tok) {glyph('arrow')} {dest}{dur}{RST}"
+            dur = f"{time.time() - t0:.2f}s" if t0 else ""
+            dest = f"step {self._current_iteration + 1}" if self._turn_open else "the model"
+            # normal: how long it took; detailed: also what was sent back to the model
+            facts = [dur] if dur else []
+            if self.level >= 2:
+                facts.append(f"sent {_fmt_bytes(n_bytes)} (~{_fmt_tokens(est)} tokens) to {dest}")
+            sep = f" {glyph('dot')} "
             if e.name in ("Task", "Agent") and not e.is_error:
-                # the subagent card is a box: keep it intact and put the payload facts under it
-                rows = rows + [f"{SUBTLE}result sent {_fmt_bytes(n_bytes)} (~{_fmt_tokens(est)} tok) {glyph('arrow')} {dest}{dur}{RST}"]
-            else:
-                rows = [rows[0] + meta] + rows[1:]
-        if self.level >= 2 and not e.is_error and e.name not in EDIT_TOOLS | MULTI_EDIT_TOOLS | WRITE_TOOLS | {"Task", "TodoWrite"}:
+                # the subagent card is a box: keep it intact and put the facts under it
+                if facts:
+                    rows = rows + [f"{SUBTLE}took {sep.join(facts)}{RST}"]
+            elif facts:
+                rows = [rows[0] + f"{SUBTLE}{sep}{sep.join(facts)}{RST}"] + rows[1:]
+        if self.level >= 2 and not e.is_error and e.name not in CARD_TOOLS:
             preview = [f"{DIM}{l}{RST}" for l in sanitize(e.content or "").splitlines()[:12]]
             more = len((e.content or "").splitlines()) - 12
-            if preview:
-                rows = rows[:1] + preview + ([f"{SUBTLE}{glyph('ellipsis')} +{more} lines (/output for all){RST}"] if more > 0 else [])
-            rows.append(f"{SUBTLE}observation #{self._round_obs_count} [{(e.id or '')[:12]}] queued for step {self._current_iteration + 1}{RST}")
-        if rows:
-            self._line(f"{SUBTLE}{glyph('result')}{RST}  " + rows[0], "  ", atomic=True)
-            self._lines(["   " + r for r in rows[1:]], "  ")
+            if preview and not _cards.find_json(e.content or ""):
+                rows = rows[:1] + preview + ([f"{SUBTLE}{glyph('ellipsis')} +{more} more lines {glyph('dot')} /output {out_no} to view all{RST}"] if more > 0 else [])
+        if self.level >= 2 and not e.is_error and e.name not in _CARD_HEADER_TOOLS | {"Task", "TodoWrite"}:
+            rows.append(f"{SUBTLE}result #{self._round_obs_count} [{(e.id or '')[:12]}] goes to the model in step {self._current_iteration + 1}{RST}")
+        if in_block:
+            b = self._block(e.id)
+            if not b["header"]:
+                b["header"] = self._tool_header(e.id, e.name, inp, mark_last=False)
+            b["rows"] = ((f"{SUBTLE}{glyph('result')}{RST}  " + rows[0]) if rows else "", ["   " + r for r in rows[1:]])
+            self._flush_blocks()
+        elif rows:
+            self._line(f"{SUBTLE}{glyph('result')}{RST}  " + rows[0], "    ", atomic=True)
+            self._lines(["   " + r for r in rows[1:]], "    ")
         if not self._active_tools:
             self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
 
     def _on_turn_complete(self, e: TurnComplete) -> None:
+        self._flush_blocks(force=True)
         self._finish_stream()
         if not self._step_stats_done:
             self._pending_stats = (e.usage, e.stop_reason)
@@ -1897,7 +2482,7 @@ class Renderer:
                                    str(_get(e, "cache_miss_cause", "cache_miss", default="") or ""),
                                    (used, window) if used and window else None)
             if str(_get(e, "outcome", default="ok")) == "error" and self.level >= 0:
-                self._line(f"{ERROR}{glyph('fail')} LLM call failed: {_one_line(_get(e, 'error', default='unknown error'), 160)}{RST}", "  ")
+                self._line(f"{ERROR}{glyph('fail')} model call failed: {_one_line(_get(e, 'error', default='unknown error'), 160)}{RST}", "  ")
             elif str(_get(e, "outcome", default="ok")) == "interrupted":
                 self._line(f"{WARNING}{glyph('warn')} interrupted{RST}", "  ")
             if str(_get(e, "stop_reason", default="")) != "tool_use":
@@ -1924,6 +2509,8 @@ class Renderer:
                 label, color, mark = (f"denied by {source}" if source else "denied"), ERROR, glyph("fail")
             else:
                 label, color, mark = f"{outcome or 'ask'}", WARNING, glyph("warn")
+            if outcome == "allow" and source in ("mode", "") and not approval and self.level < 2:
+                return          # routine approvals (bypass mode, read-only tools) are noise at the normal level
             text = (f"{color}{mark}{RST} {MUTED}{label}" + (f": {_one_line(reason, 200)}" if reason else "")
                     + (f" ({_one_line(approval, 80)})" if approval else "") + RST)
             self._annotate_tool(str(_get(e, "id", default="")), str(_get(e, "tool", default="")), text)
@@ -1943,8 +2530,11 @@ class Renderer:
             self._annotate_tool(str(_get(e, "tool_use_id", default="")), str(_get(e, "tool_name", default="")), text)
         elif kind == "RetryEvent":
             self._finish_stream()
-            self._line(f"{WARNING}{glyph('warn')} retry {_get(e, 'attempt', default='?')}/{_get(e, 'max_attempts', default='?')} "
-                       f"in {float(_get(e, 'delay_s', default=0) or 0):.1f}s {dot} {_one_line(_get(e, 'error', default=''), 120)}{RST}", "  ")
+            err = _one_line(_get(e, "error", default="") or "provider error", 120)
+            _record(TranscriptEntry("note", self._turn_no, self._step, title="Retry", status="error",
+                                    summary=f"{err} · retry {_get(e, 'attempt', default='?')} of {_get(e, 'max_attempts', default='?')}"))
+            self._line(f"{WARNING}{glyph('warn')} {err} {dot} retrying in {float(_get(e, 'delay_s', default=0) or 0):.1f}s "
+                       f"(retry {_get(e, 'attempt', default='?')} of {_get(e, 'max_attempts', default='?')}){RST}", "  ")
         elif kind == "CompactionEvent":
             self._finish_stream()
             if bool(_get(e, "blocked_by_hook", default=False)):
@@ -2027,6 +2617,8 @@ class Renderer:
                 text = _one_line(_get(e, "text", default=""), 140)
                 if call_id in self._active_tools:
                     self._line(f"{SUBTLE}why: {DIM}{ITALIC}{text}{RST}", "    ")
+                    if call_id in self._t_tools and not self._t_tools[call_id].why:
+                        self._t_tools[call_id].why = _plain(text)
                 elif text:
                     self._pending_why[call_id] = text
         elif kind == "ToolTiming":
@@ -2037,10 +2629,15 @@ class Renderer:
 
     def _annotate_tool(self, call_id: str, tool: str, text: str) -> None:
         """Print a note on a tool row (re-labelled when another tool's output came in between)."""
+        if call_id and self._batch_parallel and call_id in self._batch_order:
+            b = self._block(call_id)
+            if not b["printed"]:
+                b["notes"].append(text)
+                return
         if call_id and self._last_header_id != call_id and tool:
             text = f"{MUTED}[{tool}]{RST} " + text
         for row in text.split("\n"):
-            self._line(row, "    ")
+            self._line(row, "      ")
 
     _HANDLERS: dict[type, Callable[["Renderer", Any], None]] = {
         LLMCallStart: _on_llm_call,
@@ -2085,7 +2682,6 @@ class Renderer:
             else:
                 money = f"{WARNING}${float(cost or 0):.4f}{RST}"
             parts = [
-                f"{MUTED}{elapsed:.1f}s{RST}",
                 f"{MUTED}{_plural(llm_calls, 'LLM call')}{RST}",
                 f"{MUTED}{_plural(tool_count, 'tool call')}{RST}",
                 f"{MUTED}{_fmt_tokens(in_t)} in{RST}",
@@ -2095,10 +2691,17 @@ class Renderer:
             lead = f"{BORDER}{glyph('sq_bl')}{RST} " if railed else "  "
             if failed:
                 label = self._STOP_LABELS.get(stop_reason, "Failed")
-                lead += f"{ERROR}{glyph('fail')} {label}{RST} {SUBTLE}{glyph('dot')}{RST} "
+                lead += f"{ERROR}{glyph('fail')} {label}{RST} {MUTED}after {elapsed:.1f}s{RST} {SUBTLE}{glyph('dot')}{RST} "
             else:
-                lead += f"{SUCCESS}{glyph('ok')} Done{RST} {SUBTLE}{glyph('dot')}{RST} "
-            rows = _join_wrapped(lead, parts, dot, max(20, term_width() - 5))
+                lead += f"{SUCCESS}{glyph('ok')} Done{RST} {MUTED}in {elapsed:.1f}s{RST} {SUBTLE}{glyph('dot')}{RST} "
+            rows = _join_wrapped(lead, parts, dot, max(20, layout_width(5)))
+            _tag_rows(self._t_turn.uid if self._t_turn is not None else None)
+            if self._t_turn is not None:
+                self._t_turn.status = "error" if failed else "ok"
+                self._t_turn.duration = elapsed
+                self._t_turn.summary = _plain(f"{self._STOP_LABELS.get(stop_reason, 'Failed') if failed else 'Done'} in {elapsed:.1f}s · "
+                                              + " · ".join(_plain(x) for x in parts) + (f" · {error}" if failed and error else ""))
+                self._t_turn = None
             text = ("" if railed else self._gap_text()) + "\n    ".join(rows) + "\n"
             detail = str(error or "").strip()
             if failed and detail:
@@ -2106,14 +2709,34 @@ class Renderer:
                 if len(err_rows) > 6:
                     err_rows = err_rows[:6] + ["…"]
                 text += "".join(f"    {ERROR}{r}{RST}\n" for r in err_rows)
-            if not Renderer._tip_shown:
-                tip = self._next_tip()
-                if tip:
-                    tip_rows = wrap_ansi(f"Tip: {tip}", max(20, term_width() - 4))
-                    text += "\n" + "".join(f"  {SUBTLE}{r}{RST}\n" for r in tip_rows)
-                Renderer._tip_shown = True
+            if failed and stop_reason in ("error", "interrupted"):
+                if tool_count > 0 or self._turn_text:
+                    text += f"    {MUTED}Work done so far is kept {glyph('dot')} type {BOLD}continue{RST}{MUTED} to resume{RST}\n"
+                else:
+                    text += f"    {MUTED}Nothing was done yet {glyph('dot')} {BOLD}/retry{RST}{MUTED} sends your message again{RST}\n"
+            tip = self._footer_tip()
+            if tip:
+                tip_rows = wrap_ansi(f"{INFO}{glyph('info')} Tip:{RST} {MUTED}{tip}{RST}", max(20, layout_width(4)))
+                text += "\n" + "".join(f"  {r}\n" for r in tip_rows)
+            Renderer._tip_shown = True
             self._turn_open = False
             self._out(text + "\n")
+            _tag_rows(None)
+
+    def _footer_tip(self) -> str:
+        """Contextual tip after a turn (LLM-generated by axon.features.tips; registry-derived fallback)."""
+        pending = getattr(self, "pending_tip", "")
+        if pending:                         # a next step for this turn beats a generic usage tip
+            self.pending_tip = ""
+            return sanitize(pending)
+        if os.environ.get("AXON_NO_TIPS"):
+            return ""
+        try:
+            from axon.features.tips import tip_engine
+
+            return sanitize(tip_engine().footer_tip() or "")
+        except Exception:
+            return "" if Renderer._tip_shown else self._next_tip()
 
     @staticmethod
     def _next_tip() -> str:
@@ -2146,18 +2769,18 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
     head = f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {_get(turn_trace, 'turn', 'index', default='?')}{RST}"
     if prompt:
         head += f" {MUTED}{dot}{RST} {TEXT}\"{_one_line(prompt, 60)}\"{RST}"
-    head += f"  {MUTED}{model}" + (f" {dot} {mode}" if mode else "") + RST
+    head += f"  {MUTED}{model}" + (f" {dot} {mode} mode" if mode else "") + RST
     out.append(head)
     for step in _get(turn_trace, "steps", default=[]) or []:
         kind = str(_get(step, "kind", default=""))
         d = _get(step, "data", default=None) or {}
         if kind == "llm":
-            out.append(f"{v}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {d.get('iteration', '?')}{RST}  {TEXT}LLM call{RST} "
-                       f"{MUTED}{dot} {d.get('model', model)}" + (f" {dot} {_plural(int(d.get('message_count') or 0), 'message')}" if d.get("message_count") else "") + RST)
+            out.append(f"{v}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {d.get('iteration', '?')}{RST}  {TEXT}LLM call{RST} {MUTED}{dot}{RST} {TEXT}{d.get('model', model)}{RST}"
+                       + (f" {MUTED}{dot} reads {_plural(int(d.get('message_count') or 0), 'message')}{RST}" if d.get("message_count") else ""))
             fed = d.get("fed_back") or []
             if fed:
                 tok = sum(int(f.get("tokens", 0) or 0) for f in fed if isinstance(f, dict))
-                out.append(f"{v}  {MUTED}{glyph('arrow')} fed back {_plural(len(fed), 'tool result')} (~{_fmt_tokens(tok)} tokens){RST}")
+                out.append(f"{v}  {MUTED}{glyph('arrow')} includes {_plural(len(fed), 'tool result')} (~{_fmt_tokens(tok)} tokens){RST}")
             req = d.get("request") or {}
             if req and lvl >= 2:
                 out.append(f"{v}    {SUBTLE}request: system ~{_fmt_tokens(int(req.get('system_tokens', 0) or 0))} {dot} "
@@ -2169,9 +2792,9 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
                 out += [f"{v}    {DIM}{ITALIC}{r}{RST}" for r in rows]
             if d.get("usage") is not None:
                 gauge = context_gauge(int(d.get("context_used") or 0), int(d.get("context_window") or 0))
-                out.append(f"{v}  {SUBTLE}{glyph('result')}{RST} {MUTED}{_usage_line(d['usage'], duration=d.get('duration_s'), cost=d.get('cost'), stop=str(d.get('stop_reason', '')) if lvl >= 2 else '')}{RST}"
+                out.append(f"{v}  {SUBTLE}{glyph('wrap')}{RST} {MUTED}" + (f"replied in {float(d['duration_s']):.1f}s {dot} " if d.get("duration_s") is not None else "") + f"{_usage_line(d['usage'], cost=d.get('cost'), stop=str(d.get('stop_reason', '')) if lvl >= 2 else '')}{RST}"
                            + (f" {MUTED}{dot}{RST} {gauge}" if gauge else ""))
-                if d.get("cache_miss_cause"):
+                if d.get("cache_miss_cause") and lvl >= 2:
                     out.append(f"{v}    {WARNING}{glyph('warn')} cache miss: {_one_line(d['cache_miss_cause'], 100)}{RST}")
             if d.get("error"):
                 out.append(f"{v}  {ERROR}{glyph('fail')} {_one_line(d['error'], 160)}{RST}")
@@ -2189,14 +2812,14 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
             if lvl >= 2:
                 out += [f"{v}    {r}" for r in _pretty_input(inp)]
             content = str(d.get("result_preview", "") or "")
-            rows = tool_result_rows(name, inp, content, bool(d.get("is_error")), width - 8)
+            rows = tool_result_rows(name, inp, content, bool(d.get("is_error")), width - 8, detail=min(lvl, 2))
             if rows and d.get("bytes") is not None:
                 rows[0] += f"{SUBTLE} {dot} {int(d.get('bytes') or 0) / 1024:.1f} KB {dot} ~{_fmt_tokens(int(d.get('est_tokens') or 0))} tok {glyph('arrow')} model{RST}"
-            if lvl >= 2 and content and name not in EDIT_TOOLS | MULTI_EDIT_TOOLS | WRITE_TOOLS | {"TodoWrite", "Task"}:
+            if lvl >= 2 and content and name not in CARD_TOOLS and not _cards.find_json(content):
                 rows = rows[:1] + [f"{DIM}{l}{RST}" for l in content.splitlines()[:12]]
             out += [f"{v}  " + (f"{SUBTLE}{glyph('result')}{RST}  " if i == 0 else "   ") + r for i, r in enumerate(rows)]
         elif kind == "retry":
-            out.append(f"{v}  {WARNING}{glyph('warn')} retry {d.get('attempt')}/{d.get('max_attempts')} in {float(d.get('delay_s') or 0):.1f}s {dot} {_one_line(d.get('error', ''), 100)}{RST}")
+            out.append(f"{v}  {WARNING}{glyph('warn')} {_one_line(d.get('error', '') or 'provider error', 100)} {dot} retried in {float(d.get('delay_s') or 0):.1f}s (retry {d.get('attempt')} of {d.get('max_attempts')}){RST}")
         elif kind == "compaction":
             out.append(f"{v}  {INFO}{glyph('info')} context compacted{RST} {MUTED}{_fmt_tokens(int(d.get('tokens_before') or 0))} {glyph('arrow')} "
                        f"{_fmt_tokens(int(d.get('tokens_after') or 0))} tokens {dot} ${float(d.get('cost') or 0):.4f}{RST}")
@@ -2249,6 +2872,121 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
                f"{_plural(int(_get(turn_trace, 'tool_calls', default=0) or 0), 'tool call')} {dot} "
                f"{_usage_line(usage, duration=dur, cost=_get(turn_trace, 'cost', default=None), stop=str(_get(turn_trace, 'stop_reason', default='') or ''))}{RST}")
     return "\n".join(r if r.startswith("  ") else truncate(r, width) for r in out)
+
+def _block_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return str(content or "")
+
+
+def format_conversation_replay(messages: list[Any], registry: Any = None, width: int | None = None,
+                               tag: str = "(restored)", row_tags: list[int | None] | None = None,
+                               detail: int = 1) -> list[str]:
+    """A restored conversation drawn like the live timeline: each prompt, then per turn the thinking
+    summary, every tool call (what it does, its result preview) and the response behind the accent bar."""
+    width = width or _width(110)
+    results: dict[str, tuple[str, bool]] = {}
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(m, dict) and m.get("role") == "tool":
+            results[str(m.get("tool_call_id", ""))] = (_block_text(content), False)
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                results[str(b.get("tool_use_id", ""))] = (_block_text(b.get("content")), bool(b.get("is_error")))
+    rail = f"{BORDER}{glyph('v')}{RST} "
+    says = f"{ACCENT}{glyph('quote')}{RST} "
+    out: list[str] = []
+    turn_open = False
+    turn = 0
+
+    def close() -> None:
+        nonlocal turn_open
+        if turn_open:
+            out.append(f"{BORDER}{glyph('sq_bl')}{RST}")
+            out.append("")
+            turn_open = False
+
+    by_call = {e.id: e.uid for e in get_transcript() if e.kind == "tool" and e.id}
+
+    def tool_rows(name: str, inp: dict[str, Any], call_id: str) -> None:
+        start = len(out)
+        try:
+            _tool_rows(name, inp, call_id)
+        finally:
+            if row_tags is not None and call_id in by_call:
+                spans.append((start, len(out), by_call[call_id]))
+
+    spans: list[tuple[int, int, int]] = []
+
+    def _tool_rows(name: str, inp: dict[str, Any], call_id: str) -> None:
+        out.append(truncate(f"{rail}  {PRIMARY}{glyph('tool')}{RST} {BOLD}{_clean(name)}{RST}  {TEXT}{tool_target(name, inp)}{RST}", width + 2))
+        purpose = tool_purpose(name, registry)
+        if purpose:
+            out.append(f"{rail}      {SUBTLE}{purpose}{RST}")
+        if call_id in results:
+            global _MORE_HINT
+            content, is_err = results[call_id]
+            _MORE_HINT = "/transcript"            # restored outputs are browsed in the transcript viewer
+            try:
+                rows = tool_result_rows(name, inp, sanitize(content), is_err, width - 8, registry, detail=detail)
+            finally:
+                _MORE_HINT = "/output"
+            if rows:
+                mark = f"{ERROR}{glyph('fail')}{RST} " if is_err else ""
+                out.append(f"{rail}    {SUBTLE}{glyph('result')}{RST}  {mark}{rows[0]}")
+                out.extend(f"{rail}       {r}" for r in rows[1:])
+        else:
+            out.append(f"{rail}    {SUBTLE}{glyph('result')}  (no result recorded){RST}")
+
+    from axon.ui.input import format_user_prompt_banner
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if role == "user":
+            text = Renderer._SHELL_CTX_RE.sub("", _block_text(content)).strip()
+            if not text:
+                continue
+            close()
+            turn += 1
+            out += format_user_prompt_banner(text, max_w=width + 4).splitlines() + [""]
+            out.append(f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {turn}{RST}" + (f" {MUTED}{tag}{RST}" if tag else ""))
+            turn_open = True
+        elif role == "assistant":
+            if not turn_open:
+                out.append(f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {turn or 1}{RST}" + (f" {MUTED}{tag}{RST}" if tag else ""))
+                turn_open = True
+            blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}] if content else [])
+            for b in blocks:
+                if not isinstance(b, dict):
+                    continue
+                kind = b.get("type")
+                if kind == "thinking" and str(b.get("thinking") or b.get("text") or "").strip():
+                    first = _one_line(b.get("thinking") or b.get("text"), max(20, width - 20))
+                    out.append(f"{rail}  {SUBTLE}{glyph('star')} thought {glyph('chevron')}{RST} {DIM}{ITALIC}{first}{RST}")
+                elif kind == "text" and str(b.get("text", "")).strip():
+                    md = format_markdown(str(b["text"]).strip(), max_width=width - 2).splitlines()
+                    out.extend(f"{rail}{says}{r[2:] if r.startswith('  ') else r}" for r in md)
+                elif kind == "tool_use":
+                    inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                    tool_rows(str(b.get("name", "tool")), inp, str(b.get("id", "")))
+            for tc in m.get("tool_calls") or []:
+                fn = (tc or {}).get("function", {}) if isinstance(tc, dict) else {}
+                try:
+                    import json as _json
+                    inp = _json.loads(fn.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    inp = {}
+                tool_rows(str(fn.get("name", "tool")), inp if isinstance(inp, dict) else {}, str(tc.get("id", "")))
+    close()
+    if row_tags is not None:            # which transcript entry each row shows (clickable after a redraw)
+        row_tags[:] = [None] * len(out)
+        for a, b, uid in spans:
+            row_tags[a:b] = [uid] * (b - a)
+    return out
+
 
 def _provider_label(model: str, base_url: str) -> str:
     url = (base_url or "").lower()

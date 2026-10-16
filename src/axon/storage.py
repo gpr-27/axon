@@ -12,14 +12,26 @@ All state lives under one home directory (default ``~/.axon``, override with
       usage.jsonl                                         every LLM call: tokens + cost
       logs/                                               axon.log, mcp-<server>.log
       cache/  paste-cache/  images/                       scratch data
+      README.md                                           generated guide to this folder
+      backup/<timestamp>/                                 originals kept by migrations
+      projects/index.json                                 every project: path, name, last opened
       projects/<project-key>/
-        project.json                                      workspace path + metadata
+        project.json  README.md                           workspace path, name, git, counts
+        activity.jsonl                                    append-only journal of everything
         sessions/<session-id>.jsonl                       full transcript: messages,
                                                           tool calls, results, usage, cost
+        outputs/<session-id>/                             full tool / shell outputs that were
+                                                          truncated for the model
         traces/<session-id>.jsonl                         per-turn glass-box traces
         checkpoints/<session-id>/                         file snapshots for /rewind
+                                   (rewound/)             snapshots undone by /rewind (kept)
         memory/MEMORY.md (+ topic files)                  auto memory for this project
         todos/<session-id>.json                           todo list state
+        trash/<stamp>_<session-id>/                       deleted sessions (/restore brings
+                                                          them back)
+        images/  pastes/  exports/  plans/  debug/        pasted images, large pastes, exports
+
+Nothing is deleted automatically: ``cleanup_period_days`` defaults to 0 (keep forever).
 
 ``project_key`` is the resolved git root (or workspace) with every
 non-alphanumeric character replaced by ``-`` (Claude-Code style), so it is
@@ -123,6 +135,56 @@ def todos_dir(workspace: Path) -> Path:
     return ensure_dir(project_dir(workspace) / "todos")
 
 
+def project_subdir(workspace: Path | None, name: str) -> Path:
+    """``projects/<key>/<name>`` for ``workspace`` (the current directory when None)."""
+    ws = Path(workspace) if workspace is not None else Path.cwd()
+    return ensure_dir(project_dir(ws) / name)
+
+
+def outputs_dir(workspace: Path, session_id: str = "") -> Path:
+    """Full tool/shell outputs that were truncated before reaching the model."""
+    d = project_subdir(workspace, "outputs")
+    return ensure_dir(d / _safe_name(session_id)) if session_id else d
+
+
+def trash_dir(workspace: Path) -> Path:
+    """Deleted sessions (moved here, never destroyed; /restore brings them back)."""
+    return project_subdir(workspace, "trash")
+
+
+def activity_path(workspace: Path) -> Path:
+    """Append-only activity journal of a project (see axon.session.activity)."""
+    return project_dir(Path(workspace)) / "activity.jsonl"
+
+
+def _safe_name(name: str, limit: int = 120) -> str:
+    out = re.sub(r"[^A-Za-z0-9_.\-]+", "_", str(name or "")).strip("._") or "item"
+    return out[:limit]
+
+
+def save_full_output(workspace: Path, session_id: str, name: str, text: str) -> Path | None:
+    """Store a complete tool/shell output under ``outputs/<session>/<name>.txt`` (unique name,
+    fsync'ed). Returns the path, or None when it could not be written."""
+    try:
+        d = outputs_dir(Path(workspace), session_id or "no-session")
+        base = _safe_name(name)
+        path = d / f"{base}.txt"
+        n = 2
+        while path.exists():
+            path = d / f"{base}-{n}.txt"
+            n += 1
+        with open(path, "w", encoding="utf-8", errors="replace", newline="") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        return path
+    except OSError:
+        return None
+
+
 def logs_dir() -> Path:
     return ensure_dir(axon_home() / "logs")
 
@@ -146,19 +208,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def append_line(path: Path, line: str, *, fsync: bool = True) -> None:
+    """Append one line in append mode (safe with concurrent writers) and flush it.
+
+    If the file does not end with a newline (a writer crashed mid-line), a newline is written
+    first so the torn line stays isolated and this record is not glued onto it. Raises OSError."""
+    data = line.rstrip("\n").encode("utf-8", errors="replace") + b"\n"
+    with open(path, "a+b") as f:
+        try:
+            end = f.seek(0, os.SEEK_END)
+            if end > 0:
+                f.seek(end - 1)
+                if f.read(1) != b"\n":
+                    data = b"\n" + data
+        except OSError:
+            pass
+        f.write(data)
+        f.flush()
+        if fsync:
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
+
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     """Thread-safe, crash-tolerant JSONL append (one fsync'd line per record)."""
-    line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+    line = json.dumps(record, ensure_ascii=False, default=str)
     with _LOCK:
         ensure_dir(path.parent)
         try:
-            with open(path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(line)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
+            append_line(path, line)
         except OSError:
             pass
 
@@ -240,9 +320,16 @@ def storage_summary() -> list[dict[str, Any]]:
 
 def prune_old(days: int = 30) -> int:
     """Delete sessions/traces/todos/checkpoints/paste-cache older than ``days`` (Claude-Code
-    cleanupPeriodDays). Returns the number of files and directories removed."""
+    cleanupPeriodDays). ``days <= 0`` keeps everything. Returns the number of files and
+    directories removed. Only runs when the user opted in (cleanup_period_days > 0) or
+    explicitly; the activity journal, memory and trash are never pruned."""
     import shutil
-    days = max(1, int(days or 30))
+    try:
+        days = int(days or 0)
+    except (TypeError, ValueError):
+        return 0
+    if days <= 0:
+        return 0
     cutoff = time.time() - days * 86400
     removed = 0
     root = axon_home() / "projects"
@@ -280,8 +367,14 @@ def prune_old(days: int = 30) -> int:
 _PRUNE_STAMP = "last-cleanup"
 
 
-def prune_on_startup(days: int = 30, min_interval_s: float = 86400.0) -> int:
-    """Run :func:`prune_old` at most once per ``min_interval_s`` (stamp file in the cache dir)."""
+def prune_on_startup(days: int = 0, min_interval_s: float = 86400.0) -> int:
+    """Run :func:`prune_old` at most once per ``min_interval_s`` (stamp file in the cache dir).
+    ``days <= 0`` (the default) never deletes anything."""
+    try:
+        if int(days or 0) <= 0:
+            return 0
+    except (TypeError, ValueError):
+        return 0
     stamp = cache_dir() / _PRUNE_STAMP
     try:
         if stamp.is_file() and time.time() - stamp.stat().st_mtime < min_interval_s:
@@ -299,6 +392,7 @@ def prune_on_startup(days: int = 30, min_interval_s: float = 86400.0) -> int:
 __all__ = [
     "axon_home", "ensure_dir", "find_git_root", "project_key", "project_dir", "sessions_dir",
     "traces_dir", "checkpoints_dir", "memory_dir", "todos_dir", "logs_dir", "cache_dir",
-    "user_file", "user_ext_dir", "append_jsonl", "read_jsonl", "record_usage",
+    "user_file", "user_ext_dir", "append_jsonl", "append_line", "read_jsonl", "record_usage",
+    "project_subdir", "outputs_dir", "trash_dir", "activity_path", "save_full_output",
     "record_history", "storage_summary", "prune_old", "prune_on_startup",
 ]

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/axon-logo.svg" alt="Axon logo" width="112" height="112">
+<img src="https://raw.githubusercontent.com/gpr-27/axon/main/docs/assets/axon-logo.svg" alt="Axon logo" width="112" height="112">
 
 # Axon
 
@@ -11,9 +11,10 @@ See every step: every LLM call, tool, token, cache hit and cent.
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
 [![Version](https://img.shields.io/badge/version-0.28.0-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
+[![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-104 slash commands · 21 built-in tools · 15 provider presets
+112 slash commands · 21 built-in tools · 15 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -26,7 +27,7 @@ numbered timeline: the model that was called and why, the tokens it consumed, ho
 came from cache, which tools ran with which arguments, what each one fed back to the model, who
 approved it, which hooks fired, and what it all cost, to four decimal places.
 
-<p align="center"><img src="docs/assets/demo.svg" alt="Axon rendering a turn as a glass-box timeline" width="860"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/gpr-27/axon/main/docs/assets/demo.svg" alt="Axon rendering a turn as a glass-box timeline" width="860"></p>
 
 <details>
 <summary>The same turn as plain text (<code>NO_COLOR=1</code>)</summary>
@@ -35,51 +36,61 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 ```text
 > fix the failing test in tests/test_cart.py
 
-┌ Turn 1 · "fix the failing test in tests/test_cart.py"         claude-sonnet-4-5 · acceptEdits
-│ ◆ Step 1  LLM call · claude-sonnet-4-5 · 1 message · ~11.8k ctx
-├─ Response · step 1
-│   I'll look at the test and the code it exercises.
-│   ⎿ step 1: 11.8k in (10.9k cached 92%) · 164 out · 2.1s · $0.0061 · ctx 6%/200k
-│   → plans 2 tool calls (parallel, read-only)
-│ ● Read  tests/test_cart.py
-│     ✓ auto-allowed: read-only
-│   ⎿  48 lines · 375 B · sent 806 B (~177 tok) → step 2 · 0.01s
-│ ● Grep  "def total" in src/
-│     ✓ auto-allowed: read-only
-│   ⎿  1 match in 1 file · sent 51 B (~12 tok) → step 2 · 0.04s
-│ ◆ Step 2  LLM call · claude-sonnet-4-5 · 4 messages · ~12.5k ctx
-│   ⎿ 12.5k in (11.8k cached 94%) · 96 out · 1.4s · $0.0052 · ctx █░░░░░░░ 6% of 200k
-│   → plans 1 tool call (modifies workspace)
-│ ● Bash  pytest -q tests/test_cart.py
-│     ✓ allowed by rule: Bash(pytest *)
-│   ⎿  F.... · 3 lines · sent 128 B (~32 tok) → step 3 · 1.80s
-│      FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') == Decimal('…
-│      1 failed, 4 passed in 0.21s
-│ ◆ Step 3  LLM call · claude-sonnet-4-5 · 6 messages · ~12.7k ctx
-├─ Response · step 3
-│   The discount is truncated instead of rounded. Fixing `total()`.
-│   ⎿ step 3: 12.7k in (12.5k cached 98%) · 212 out · 2.6s · $0.0068 · ctx 6%/200k
-│   → plans 1 tool call (modifies workspace)
-│ ● Edit  src/shop/cart.py
-│     ✓ auto-allowed: acceptEdits
-│     › hook PostToolUse ran (1 command)
-│   ⎿  Updated src/shop/cart.py with 1 addition and 1 removal · sent 39 B (~9 tok) → step 4 ·
-│     0.03s
-│          1 -         return (subtotal * rate).quantize(CENTS, ROUND_DOWN)
-│          1 +         return (subtotal * rate).quantize(CENTS, ROUND_HALF_UP)
-│ ◆ Step 4  LLM call · claude-sonnet-4-5 · 8 messages · ~12.9k ctx
-│   ⎿ 12.9k in (12.7k cached 97%) · 88 out · 1.2s · $0.0049 · ctx █░░░░░░░ 7% of 200k
-│   → plans 1 tool call (modifies workspace)
-│ ● Bash  pytest -q tests/test_cart.py
-│     ✓ allowed by rule: Bash(pytest *)
-│   ⎿  ..... · 2 lines · sent 23 B (~5 tok) → step 5 · 1.70s
-│      5 passed in 0.19s
-│ ◆ Step 5  LLM call · claude-sonnet-4-5 · 10 messages · ~13.0k ctx
-├─ Response · step 5
-│   Fixed. `Cart.total()` now rounds the discount with `ROUND_HALF_UP`, so 9.995 becomes
-│   10.00. All 5 cart tests pass.
-│   ⎿ step 5: 13.0k in (12.9k cached 99%) · 58 out · 1.1s · $0.0045 · ctx █░░░░░░░ 7% of 200k
-└ ✓ Done · 10.6s · 5 LLM calls · 5 tool calls · 62.9k in · 618 out · $0.0275
+┌ Turn 1 · "fix the failing test in tests/test_cart.py"
+│ ◆ Step 1  LLM call · claude-sonnet-4-5 · reads 1 message (~11.8k tokens)
+│ ▎ I'll look at the test and the code it exercises.
+│   ↪ replied in 2.1s · 11.8k in (92% cached) · 164 out · $0.0061 · ctx 6%/200k
+│   → runs 2 tools in parallel, read-only
+│   ● Read  tests/test_cart.py
+│       reads a file
+│     ⎿  48 lines · 375 B · 0.01s
+│         1 │ line 1
+│         2 │ line 2
+│         3 │ line 3
+│         4 │ line 4
+│         5 │ line 5
+│        … +43 more lines · /output 1 to view all
+│   ● Grep  "def total" in src/
+│       searches inside files
+│     ⎿  1 match in 1 file · 0.04s
+│        src/shop/cart.py · 1 match
+│           31:     def total(self) -> Decimal:
+│ 
+│ ◆ Step 2  LLM call · claude-sonnet-4-5 · reads 4 messages (~12.5k tokens)
+│   ↪ replied in 1.4s · 12.5k in (94% cached) · 96 out · $0.0052 · ctx 6%/200k
+│   ● Bash  pytest -q tests/test_cart.py
+│       runs a shell command
+│       ✓ allowed by rule: Bash(pytest *)
+│     ⎿  ██████████▒▒ 4 passed · 1 failed · 3 lines of output · 1.80s
+│        F....
+│        FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') ==
+│       Decimal('10.00')
+│        1 failed, 4 passed in 0.21s
+│ 
+│ ◆ Step 3  LLM call · claude-sonnet-4-5 · reads 6 messages (~12.7k tokens)
+│ ▎ The discount is truncated instead of rounded. Fixing `total()`.
+│   ↪ replied in 2.6s · 12.7k in (98% cached) · 212 out · $0.0068 · ctx 6%/200k
+│   ● Edit  src/shop/cart.py
+│       edits a file
+│       › hook PostToolUse ran (1 command)
+│     ⎿  ✎ Edited src/shop/cart.py · +1 −1 · 0.03s
+│            -         return (subtotal * rate).quantize(CENTS, ROUND_DOWN)
+│            +         return (subtotal * rate).quantize(CENTS, ROUND_HALF_UP)
+│ 
+│ ◆ Step 4  LLM call · claude-sonnet-4-5 · reads 8 messages (~12.9k tokens)
+│   ↪ replied in 1.2s · 12.9k in (97% cached) · 88 out · $0.0049 · ctx 7%/200k
+│   ● Bash  pytest -q tests/test_cart.py
+│       runs a shell command
+│       ✓ allowed by rule: Bash(pytest *)
+│     ⎿  ████████████ 5 passed · 2 lines of output · 1.70s
+│        .....
+│        5 passed in 0.19s
+│ 
+│ ◆ Step 5  LLM call · claude-sonnet-4-5 · reads 10 messages (~13.0k tokens)
+│ ▎ Fixed. `Cart.total()` now rounds the discount with `ROUND_HALF_UP`, so 9.995
+│ ▎ becomes 10.00. All 5 cart tests pass.
+│   ↪ replied in 1.1s · 13.0k in (99% cached) · 58 out · $0.0045 · ctx 7%/200k
+└ ✓ Done in 10.6s · 5 LLM calls · 5 tool calls · 62.9k in · 618 out · $0.0275
 ```
 <!-- END GENERATED: demo -->
 
@@ -87,16 +98,320 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 
 ## Contents
 
-[Highlights](#highlights) · [Install](#install) · [Quick start](#quick-start) · [Providers](#providers) ·
-[Glass-box tracing](#glass-box-tracing) · [Commands](#commands) · [Tools](#tools) ·
-[Extending Axon](#extending-axon) · [Memory](#memory) · [Settings](#settings) · [Storage](#storage-layout) ·
-[Analytics](#analytics) · [Solver](#solver-verify-fix-plan) · [SDK and HTTP API](#sdk-and-http-api) ·
-[Testing](#testing) · [Project structure](#project-structure) · [Docs](#documentation)
+**Start here:** [What you need](#what-you-need) · [Install](#install) · [Set up a model](#set-up-a-model) ·
+[Your first task](#your-first-task) · [Cheat sheet](#cheat-sheet) · [Reading a turn](#reading-a-turn) ·
+[Update or uninstall](#update-or-uninstall) · [Your data](#your-data) · [FAQ](#faq) · [Troubleshooting](#troubleshooting)
+
+**Reference:** [Highlights](#highlights) · [Providers](#providers) · [Glass-box tracing](#glass-box-tracing) ·
+[Commands](#commands) · [Tools](#tools) · [Extending Axon](#extending-axon) · [Memory](#memory) ·
+[Settings](#settings) · [Storage](#storage-layout) · [Analytics](#analytics) · [Solver](#solver-verify-fix-plan) ·
+[SDK and HTTP API](#sdk-and-http-api) · [Testing](#testing) · [Project structure](#project-structure) · [Docs](#documentation)
+
+## What you need
+
+| | |
+|---|---|
+| **A computer** | macOS, Windows 10/11 or Linux (WSL works too) |
+| **Python 3.10 or newer** | check with the command below; the installer tells you if it is missing |
+| **A model to talk to** | an API key from a provider (AgentRouter, Anthropic, OpenAI, Gemini, DeepSeek, OpenRouter, …) **or** a free local model with [Ollama](https://ollama.com) / [LM Studio](https://lmstudio.ai) |
+
+**Check Python** (open a terminal: *Terminal* on macOS, *PowerShell* on Windows):
+
+```bash
+python3 --version      # macOS / Linux
+py --version           # Windows (or: python --version)
+```
+
+You need `3.10` or higher. If it is missing or older:
+
+| System | Install Python |
+|---|---|
+| macOS | download from [python.org](https://www.python.org/downloads/macos/), or `brew install python` |
+| Windows | download from [python.org](https://www.python.org/downloads/windows/) and **tick "Add python.exe to PATH"** during setup (the "python" that opens the Microsoft Store is only a placeholder) |
+| Ubuntu / Debian | `sudo apt install python3 python3-venv` |
+| Fedora | `sudo dnf install python3` |
+
+## Install
+
+Copy **one** line into your terminal and press Enter. It installs Axon in its own environment (nothing
+else on your system changes) and adds an `axon` command. Run the same line again any time to update.
+
+**macOS · Linux · WSL**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+```
+
+**Windows (Command Prompt)**
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex"
+```
+
+When it finishes, **close the terminal and open a new one** (so it finds the new `axon` command), then
+check it works:
+
+```bash
+axon --version
+```
+
+The installer uses [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io/) if you already have
+them, and otherwise a private virtual environment in `~/.axon/venv` (`%USERPROFILE%\.axon\venv` on Windows).
+
+<details>
+<summary><b>Other ways to install</b>: uv, pipx, pip, from a clone</summary>
+
+| Tool | Install | Update | Remove |
+|---|---|---|---|
+| uv | `uv tool install git+https://github.com/gpr-27/axon.git` | `uv tool upgrade axon-terminal` | `uv tool uninstall axon-terminal` |
+| pipx | `pipx install git+https://github.com/gpr-27/axon.git` | `pipx upgrade axon-terminal` | `pipx uninstall axon-terminal` |
+| pip | `pip install "git+https://github.com/gpr-27/axon.git"` | same command with `--force-reinstall` | `pip uninstall axon-terminal` |
+
+For git installs, `uv tool upgrade` and `pipx upgrade` can skip a new commit while the version number
+is unchanged. Re-running the one-line installer always picks it up.
+
+**From a clone** (editable install, for development):
+
+```bash
+git clone https://github.com/gpr-27/axon.git
+cd axon
+./install.sh        # macOS / Linux / WSL / Git Bash   -> ~/.local/bin/axon
+.\install.ps1       # PowerShell                       -> %USERPROFILE%\.axon\bin\axon.cmd
+install.bat         # cmd, or double-click
+```
+
+Or by hand: `python -m venv .venv`, activate it, then `python -m pip install -e ".[dev]"`.
+`python scripts/axon_run.py` runs Axon from a checkout without installing it.
+</details>
+
+<details>
+<summary><b>Installer options</b>: pin a version, choose a method, dry run</summary>
+
+```bash
+# pin a branch, tag or commit
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --ref v0.28.0
+# force a method: auto | uv | pipx | venv
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --method venv
+# show what it would do without changing anything
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --dry-run
+```
+
+```powershell
+$env:AXON_INSTALL_REF = "v0.28.0"; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+```
+
+PowerShell parameters: `-Method -Ref -Source -InstallDir -PythonExe -Uninstall -NoPath -NoShim -DryRun -Help`.
+Both installers read `AXON_INSTALL_METHOD`, `AXON_INSTALL_REF`, `AXON_INSTALL_DIR`, `AXON_BIN_DIR`,
+`AXON_INSTALL_SOURCE` (a folder, `git+` URL, archive URL or PyPI requirement), `AXON_PYTHON` and
+`AXON_NO_MODIFY_PATH=1`. Without git, the installer downloads the GitHub archive instead.
+</details>
+
+## Set up a model
+
+Run the guided setup once:
+
+```bash
+axon setup
+```
+
+It asks three things: **which provider**, **your API key** (typed hidden, checked live before it is
+saved) and **which model**. Keys are stored in `~/.axon/.env` on your machine only.
+
+**Where to get a key:**
+
+| Provider | Get a key at | Good for |
+|---|---|---|
+| AgentRouter (default) | [agentrouter.org/console](https://agentrouter.org/console) | DeepSeek V4, Claude Opus 5.5, GPT-6 through one key |
+| Anthropic | [console.anthropic.com](https://console.anthropic.com/) | Claude models directly |
+| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | GPT models |
+| Google Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Gemini (has a free tier) |
+| DeepSeek | [platform.deepseek.com](https://platform.deepseek.com/) | DeepSeek directly, low cost |
+| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | hundreds of models through one key |
+
+**No key, no cost, works offline:** install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:7b`,
+then pick *Ollama (Local)* in `axon setup`.
+
+You can change any of this later from inside Axon: `/model` (switch model), `/provider` (switch
+provider), `/keys` (add, replace, test or remove keys), `/endpoint` (use a proxy or custom URL) and
+`/settings` (every option in one menu). `axon doctor` checks that everything is set up correctly.
+
+## Your first task
+
+Go to a project folder and start Axon there. It works on the files in that folder:
+
+```bash
+cd path/to/your/project
+axon
+```
+
+Then just type what you want, in plain words, and press Enter:
+
+```text
+explain how this project is structured
+find why the tests in tests/test_cart.py fail and fix it
+add a --verbose flag to the CLI and update the README
+```
+
+Axon plans the work, reads and searches your files, runs commands and edits code, and shows every
+step as it goes ([what each mark means](#reading-a-turn)). Things to know:
+
+- **Approvals.** Out of the box Axon runs in `bypass` mode and does not ask before running tools. Press
+  **Shift+Tab** to switch to `default` (asks before edits and commands), `acceptEdits` (edits freely, asks
+  before commands) or `plan` (read-only: it only plans). Dangerous commands such as `rm -rf /` are blocked
+  in every mode.
+- **Talk while it works.** Type a message while Axon is busy: it is queued and shown to the model between
+  steps. `/btw <question>` asks a quick side question without interrupting. **Esc** stops the current turn.
+- **Undo.** Axon snapshots files before changing them: `/rewind` restores code, the conversation, or both.
+- **Pick up later.** `axon -c` continues your last session in that folder, `axon -r` lets you choose one.
+- **Shell commands.** Start a line with `!` to run it yourself (`!git status`); Axon reads the output and
+  explains it.
+
+## Cheat sheet
+
+| You want to… | Type |
+|---|---|
+| See every command | `/help` (or `?` for keyboard shortcuts) |
+| Switch model / provider | `/model` · `/provider` |
+| Add or replace an API key | `/keys` |
+| Change any setting | `/settings` |
+| See what a turn cost | `/cost` · `/stats` (all-time) |
+| See how full the context is | `/context` · change its size with `/context limit` (128k default, 256k, 1M) |
+| Attach a file to your message | `@path/to/file` (`Ctrl+P` opens a fuzzy finder) |
+| Run a shell command | `!command` |
+| Save a note Axon should remember | `# note` (this project) · `#~ note` (every project) |
+| See a tool's full output | `/output 3`, or **Ctrl+F** for the full transcript (click to expand) |
+| Undo changes | `/rewind` |
+| Start fresh | `/clear` (the old session stays resumable) |
+| Retry after a provider error | `/retry` or type `continue` |
+| Copy the last answer | `/copy` |
+| Change how much detail is shown | **Ctrl+O** cycles compact → normal → detailed → debug |
+| Quit | `/exit` or **Ctrl+D** twice |
+
+```bash
+axon "explain the auth flow"                         # start with a prompt
+axon -p "list TODOs in src/" --output-format json    # one answer, no interactive session (scripts, CI)
+axon --mode plan                                     # read-only planning
+axon --model deepseek-v4-flash --context-limit 256k  # choose model and context size for this run
+axon -w feature-x                                    # work in a separate git worktree
+```
+
+## Reading a turn
+
+Every turn is drawn as a timeline. Each kind of row has its own mark, so you can always tell what the
+model *thought*, what it *did* and what it *said*:
+
+```text
+ › fix the failing test
+
+┌ Turn 3 · "fix the failing test"                       deepseek-v4-flash · bypass mode
+│ ◆ Step 1  LLM call · deepseek-v4-flash · reads 5 messages (~9.3k tokens)
+│   ✻ Thinking
+│   ┊ The test fails on rounding. Let me run it first.
+│   ✻ thought for 1.2s
+│   ↪ replied in 3.8s · 9.1k in · 287 out · $0.0398 · context █░░░░░░░ 1% of 1M
+│   ● Bash  pytest -q tests/test_cart.py
+│       runs a shell command · why: Let me run it first.
+│     ⎿  exit code 1 · 3 lines of output · 1.80s
+│        FAILED tests/test_cart.py::test_discount_rounding
+│        1 failed, 4 passed in 0.21s
+│
+│ ◆ Step 2  LLM call · deepseek-v4-flash · reads 8 messages (~10.4k tokens)
+│   → includes 1 tool result from step 1 (128 B · ~32 tokens)
+│ ▎ The discount is truncated instead of rounded. Fixing it.
+│   ↪ replied in 2.5s · 10.4k in (89% cached) · 128 out · $0.0093
+└ ✓ Done in 6.4s · 2 LLM calls · 1 tool call · 19.5k in · 415 out · $0.0491
+```
+
+| Mark | Meaning |
+|---|---|
+| `┌ Turn` … `└ ✓ Done` | One prompt and everything it caused, closed by the totals for the turn |
+| `◆ Step N  LLM call` | One request to the model: which model, and how much it reads |
+| `✻ Thinking`, `┊` | The model's reasoning. `/thinking` switches between the full text and a one-line summary |
+| `↪ replied in …` | That call's time, tokens (and how many came from cache), cost and context use |
+| `→ runs 3 tools …` | Several tool calls at once: in parallel when all are read-only, otherwise one after another |
+| `● Tool  target` | A tool call, followed by what the tool does and why the model called it |
+| `⎿` | The tool's result: a summary, a short preview, and `/output n` for everything |
+| `→ includes …` | Which tool results the next LLM call receives |
+| `▎` | Text written by the model |
+| `⚠`, `✗` | Retries, warnings and failures |
+
+While Axon works, the bottom of the screen shows a spinner with a **live timer** for the current tool
+or step, the tokens streamed so far, and a tip underneath. `Ctrl+F` (or `/transcript`) opens the whole session
+full-screen, where every block can be expanded or collapsed with a click.
+
+## Update or uninstall
+
+**Update:** run the same install line again (it picks up the newest version).
+
+**Uninstall:**
+
+```bash
+# macOS / Linux / WSL
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --uninstall
+```
+
+```powershell
+# Windows
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1))) -Uninstall
+```
+
+Uninstalling keeps your settings, keys and sessions in `~/.axon`. Delete that folder too if you want
+everything gone.
+
+## Your data
+
+Everything stays on your computer, under `~/.axon` (`%USERPROFILE%\.axon` on Windows), organised per
+project. Nothing is deleted automatically.
+
+| What | Where | See it with |
+|---|---|---|
+| Every conversation, with full tool outputs | `~/.axon/projects/<project>/sessions/` | `/resume`, `/history`, **Ctrl+F** |
+| Everything you did (prompts, commands, settings changes, approvals) | `…/<project>/activity.jsonl` | `/activity` |
+| A plain-text copy of everything shown on screen | `…/<project>/screen/` | any text editor |
+| File snapshots for undo | `…/<project>/checkpoints/` | `/rewind` |
+| What it costs | `~/.axon/usage.jsonl` | `/cost`, `/stats`, `/report` |
+| Your keys | `~/.axon/.env` | `/keys` |
+
+`/project` shows the folder for the project you are in. `/delete` moves a session to a trash folder
+(`/restore` brings it back). `axon purge` is the only thing that really deletes data, and it asks first.
+`~/.axon/README.md` explains the layout in detail.
+
+## FAQ
+
+**Does it cost money?** Axon itself is free. The model provider charges for the tokens each request uses;
+Axon shows the cost of every step, every turn (`/cost`) and over time (`/stats`). Local models through
+Ollama or LM Studio cost nothing. Use `/budget 2` to stop a session at $2.
+
+**Is my code sent anywhere?** Only to the model provider you chose, and only what the model needs for
+your request (the files it reads, command output). Nothing is sent to Axon's authors. With a local model
+nothing leaves your machine.
+
+**Which model should I use?** `deepseek-v4-flash` (the default on AgentRouter) is fast and cheap for most
+work; switch to a larger model (`/model`) for hard problems. `/model` lists what your provider offers.
+
+**Does it work on Windows?** Yes: PowerShell 7, Windows PowerShell 5.1, Command Prompt, Windows Terminal,
+Git Bash and WSL. See [docs/windows.md](docs/windows.md).
+
+**Can I use it in scripts or CI?** Yes: `axon -p "…" --output-format json` prints one answer (or
+`stream-json` for every event) and exits. There is also a Python SDK and a local HTTP API (below).
+
+**I use Claude Code. Does my setup carry over?** Axon reads `CLAUDE.md`, `.claude/commands`,
+`.claude/agents`, `.claude/skills`, `.mcp.json` and the same hook format. Claude Code's own model choice
+is not used; Axon's model comes from `/model`.
 
 ## Highlights
 
 | | |
 |---|---|
+| **Readable timeline** | Thinking, LLM calls, tool calls (with what each tool does and why it was called) and the model's answer each have their own mark; live timers while tools run; previews of every result; resumed sessions are redrawn the same way. |
+| **Smart shell** | `!cmd` runs a command and the model responds to its output. Type while it works to queue messages; `/btw` asks a side question. |
+| **Tips that fit** | Usage tips are written by the model from what you are doing, checked against the real command list, and shown under the spinner and after turns. |
 | **Glass-box trace** | Four trace levels, from one line per tool up to the raw request. `/inspect` replays any stored turn, `/explain` summarises one without an LLM call, and `/payload` shows the exact prompt that was sent. |
 | **Cost you can audit** | Per-call pricing including cache reads and writes, `/cost` by source and model, cache hit rate and savings, a cache-miss explanation, budget guards, and an HTML usage report. |
 | **Any model** | Anthropic, OpenAI, OpenRouter, Gemini, DeepSeek, xAI, Groq, Mistral, Together, Fireworks, Cerebras, Azure, AgentRouter, plus local Ollama and LM Studio. Fallback chains handle 429, 5xx and overload errors. |
@@ -105,85 +420,6 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 | **Extensible** | MCP (stdio, HTTP, SSE), lifecycle hooks, skills, custom slash commands, subagents, plugins and output styles. |
 | **Native on Windows** | Works in PowerShell 7, Windows PowerShell 5.1 and cmd, as well as Git Bash, WSL, macOS and Linux shells. See [docs/windows.md](docs/windows.md). |
 | **Scriptable** | Print mode with `text`, `json` and `stream-json` output, a Python SDK, and `axon serve`, a local HTTP/SSE API. |
-
-## Install
-
-You need **Python 3.10 or newer** and git. Clone the repository, then run the installer for your
-shell. The installer creates `./.venv`, installs Axon into it in editable mode, and puts an `axon`
-launcher on your PATH.
-
-```bash
-git clone https://github.com/gpr-27/axon.git
-cd axon
-```
-
-| Platform | Command | Launcher it creates |
-|---|---|---|
-| Windows PowerShell / PowerShell 7 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` | `%USERPROFILE%\.axon\bin\axon.cmd`, added to your user PATH |
-| Windows cmd (or double-click) | `install.bat` | same as above |
-| macOS, Linux, WSL, Git Bash | `./install.sh` | `~/.local/bin/axon` |
-
-Open a **new** terminal afterwards so the PATH change takes effect. Installer options:
-`-NoPath` / `-NoShim` (PowerShell) and `--no-path` / `--no-shim` (`install.sh`, `install.bat`).
-
-<details>
-<summary>Manual install with pip (any OS)</summary>
-
-```bash
-python -m venv .venv
-# macOS / Linux:            source .venv/bin/activate
-# Windows PowerShell:       .venv\Scripts\Activate.ps1
-# Windows cmd:              .venv\Scripts\activate.bat
-python -m pip install -e .            # runtime
-python -m pip install -e ".[dev]"     # + pytest, ruff, mypy
-```
-
-`pyproject.toml` is the single source of dependencies. To run from a checkout without installing,
-use `python scripts/axon_run.py`.
-</details>
-
-Then connect a provider:
-
-```bash
-axon setup          # guided: provider, API key (verified live), model, permission mode, trace level
-axon doctor         # check the installation, keys, shell and terminal
-```
-
-`axon setup` writes `~/.axon/config.toml` and stores the key in `~/.axon/.env`. You can also export
-a key yourself, such as `ANTHROPIC_API_KEY` or `AXON_API_KEY`. See [.env.example](.env.example).
-
-## Quick start
-
-```bash
-axon                                    # interactive session in the current directory
-axon "explain the auth flow"            # start the session with a prompt
-axon -p "list TODOs in src/" --output-format json   # one prompt, non-interactive
-axon -c                                 # continue the latest session
-axon -r                                 # pick a session to resume
-axon --mode plan                        # read-only planning
-axon --trace detailed                   # more detail in the timeline
-axon --model claude-sonnet-4-5 --fallback-model gpt-5
-axon -w feature-x                       # run in a git worktree
-```
-
-Inside a session:
-
-| Input | Does |
-|---|---|
-| `/help`, `?` | List commands, or show keyboard shortcuts |
-| `@path` | Attach a file (`Ctrl+P` opens a fuzzy finder) |
-| `!cmd` | Run a shell command and add its output to the conversation |
-| `# note` | Save a project memory (`#~ note` saves it for every project) |
-| `Shift+Tab` | Cycle the permission mode: default, acceptEdits, plan, bypass |
-| `Ctrl+O` | Cycle the trace level |
-| `Ctrl+B` | Send the running turn to the background |
-| `Esc` / `Ctrl+C` | Interrupt the turn |
-| `Ctrl+D` | Exit (`Ctrl+Z` then Enter in Windows consoles) |
-
-> **Permission mode.** Out of the box Axon starts in `bypass` mode and runs tools without asking.
-> Choose a stricter default during `axon setup`, set `mode = "default"` in `~/.axon/config.toml`,
-> or pass `--mode default`. Hard invariants (for example `rm -rf /` or writes to credential paths)
-> are blocked in every mode.
 
 ## Providers
 
@@ -220,13 +456,16 @@ with `--trace`, `/trace`, `Ctrl+O`, or `trace_level` in settings.
 
 | Level | Shows |
 |---|---|
-| `compact` | One line per tool call, plus the turn footer |
-| `normal` | The step timeline. Each LLM call shows tokens, cache, time, cost and a context gauge. Each tool call shows arguments, a result summary and what was fed back. Permission decisions, hooks, retries and compaction also appear. |
-| `detailed` | Adds full tool input JSON, result previews, prompt breakdown, the full reasoning stream and stop reasons |
+| `compact` | One line per tool call, the answer, and the turn footer |
+| `normal` | The step timeline described in [Reading a turn](#reading-a-turn): every LLM call with its tokens, cache, time, cost and context gauge; the thinking; every tool call with what it does, why, a result preview and its timing; what each step feeds back; permission denials, hooks, retries and compaction |
+| `detailed` | Adds full tool input JSON, longer result previews, the exact bytes and tokens sent back to the model, the prompt breakdown, cache-miss causes, the cost split and stop reasons |
 | `debug` | Adds the raw request and usage fields of every event |
 
 Related commands:
 
+- `Ctrl+F` / `/transcript` opens the session full-screen; click or press Enter on a block to expand or collapse it.
+- `/output <n>` prints tool call *n* in full (`/output list` shows what is kept); in terminals with
+  link support, the `/output n` hint itself is clickable and opens the full output.
 - `/inspect [n]` replays the timeline of a stored turn. The default is the last turn.
 - `/explain [n]` summarises a turn in plain language, without an LLM call.
 - `/payload` shows the exact prompt sent to the model, with token counts per section.
@@ -238,19 +477,19 @@ Related commands:
 ## Commands
 
 <!-- BEGIN GENERATED: commands-overview -->
-104 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
+112 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
 
 | Group | Commands |
 |---|---|
-| **Session** | `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/loop` `/rename` `/resume` `/rewind` `/sessions` `/star` `/tag` |
+| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/loop` `/project` `/rename` `/restore` `/resume` `/retry` `/rewind` `/sessions` `/star` `/tag` |
 | **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/faq` `/payload` `/pricing` `/recap` `/window` |
-| **Model & Modes** | `/effort` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
-| **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` |
+| **Model & Modes** | `/effort` `/endpoint` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
+| **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` |
 | **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/main` `/mcp` `/plugin` `/reload-plugins` `/skill-doctor` `/skills` `/subagents` `/tasks` `/tools` |
 | **Memory & Project** | `/add-dir` `/cd` `/import` `/init` `/learn` `/memory` `/optimize` `/prompt` |
-| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/status` `/statusbar` `/statusline` `/terminal-setup` `/theme` `/vim` |
+| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/settings` `/status` `/statusbar` `/statusline` `/terminal-setup` `/theme` `/vim` |
 | **Code** | `/index` `/map` |
-| **Getting started** | `/new` `/next` `/setup` |
+| **Getting started** | `/new` `/next` `/setup` `/tips` |
 | **Git** | `/changes` `/commit` `/git` `/pr` |
 | **Insight** | `/budget` `/insights` `/report` `/stats` |
 | **Integrations** | `/serve` |
@@ -375,9 +614,14 @@ files may not set `api_key` or `base_url`.
 | `trace_level` | `normal` | `compact`, `normal`, `detailed` or `debug` |
 | `budget_session_usd`, `budget_turn_usd`, `budget_action` | none, none, `stop` | Live budget guard (`warn`, `stop` or `downgrade`) |
 | `fallback_model` | none | Failover chain for 429, 5xx and overload errors |
-| `compact_at` | `0.85` | Auto-compact threshold as a fraction of the context window |
+| `context_limit` | `128000` | How much of the model's context window Axon uses: 128k, 256k or 1M (`0` = the model's maximum). Change it with `/context limit` or `--context-limit 256k` |
+| `compact_at` | `0.75` | Auto-compact at this share of the context limit (96k of 128k by default) |
 | `permissions.allow / ask / deny` | `[]` | Rules such as `Bash(git *)`, `Edit(src/**)`, `WebFetch(domain:docs.python.org)` |
 | `output_style`, `theme`, `vim_mode` | `default`, `auto`, `false` | Appearance |
+| `respond_to_bash_commands` | `true` | After `!cmd`, the model responds to the command's output |
+| `tips`, `tips_llm` | `true`, `true` | Show usage tips; let the model write them (otherwise they come from the command list) |
+| `suggestions` | `true` | Suggested next steps (with reasons) after each turn; `/next <n>` runs one |
+| `notifications`, `notify_after_seconds` | `important`, `30` | Desktop notifications while you are in another app: `important` = Axon needs your approval or an answer, a turn failed, a long turn (≥ 30 s) or a background turn finished; `all` = after every turn; `off` |
 
 Every key, with its environment variable and `settings.json` spelling, is listed in
 [docs/configuration.md](docs/configuration.md).
@@ -385,27 +629,49 @@ Every key, with its environment variable and `settings.json` spelling, is listed
 ## Storage layout
 
 All state lives under `~/.axon`, or under `AXON_HOME` if you set it. Axon writes inside your
-project only when you ask it to, for example with `/init` or a project-scoped memory.
+project only when you ask it to, for example with `/init` or a project-scoped memory. Everything a
+project produces is kept in that project's own folder; `~/.axon/README.md` (generated) explains
+every file, and `/project` (alias `/where`) shows which project you opened and where its data is.
 
 ```text
 ~/.axon/
+  README.md                                           generated guide to this folder
   settings.json  config.toml  .env  mcp.json  AXON.md    user-level config & memory
   agents/  commands/  skills/  plugins/  rules/  output-styles/
+  memory/                                             user-wide memory (all projects)
   history.jsonl                                       prompt history (all projects)
   usage.jsonl                                         every LLM call: tokens + cost
-  logs/                                               axon.log, mcp-<server>.log
-  cache/  paste-cache/  images/                       scratch data
+  logs/  cache/                                       logs and scratch data
+  backup/<timestamp>/                                 originals kept by migrations
+  projects/index.json                                 every project: path, last opened, size
   projects/<project-key>/
-    project.json                                      workspace path + metadata
-    sessions/<session-id>.jsonl                       full transcript
+    project.json  README.md                           name, workspace path, git, counts
+    activity.jsonl                                    append-only journal of everything
+    sessions/<session-id>.jsonl                       full transcript (+ _sub_<n> subagents)
+    outputs/<session-id>/                             full tool/shell outputs cut for the model
+    screen/<stamp>-<session-id>.log                   plain-text copy of the terminal
     traces/<session-id>.jsonl                         per-turn glass-box traces
-    checkpoints/<session-id>/                         file snapshots for /rewind
+    checkpoints/<session-id>/                         file snapshots for /rewind (+ rewound/)
     memory/MEMORY.md                                  auto memory for this project
     todos/<session-id>.json                           todo list state
+    trash/                                            deleted sessions (/restore)
+    images/  pastes/  exports/  plans/  debug/        attachments, exports, debug logs
 ```
 
-Sessions, traces and todos older than `cleanup_period_days` (default 30) are pruned at startup, at
-most once a day. Run `axon purge [project|caches|all]` to delete stored data immediately.
+Nothing is deleted automatically: `cleanup_period_days` defaults to `0` (keep forever). Set it to
+N > 0 to prune sessions, traces and todos older than N days at startup (the journal, memory,
+screen logs and trash are never pruned). `/delete` moves a session to the project's `trash/` and
+`/restore <id>` brings it back. Run `axon purge [project|caches|all]` to delete stored data on
+purpose.
+
+The activity journal records every prompt, slash command, `!` shell command, `#` note, `/btw`
+question and answer, queued message, permission decision, settings change, turn (stop reason and
+cost), tool call, error, retry, rewind, resume and delete, with secrets redacted. Read it with
+`/activity [N] [--kind k] [--session id] [--since 2h] [--all-projects] [--export file.md|.jsonl]`
+or `axon activity` with the same flags; `axon projects` lists every project, and
+`/history all` shows a transcript including messages a rewind removed. Transcripts that older
+versions kept in `~/.axon/sessions/` are moved into their project once (copied, verified, the
+originals kept in `~/.axon/backup/`).
 
 ## Analytics
 
@@ -458,6 +724,24 @@ curl -N -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 The endpoints are `GET /health`, `GET /v1/sessions`, `GET /v1/usage` and `POST /v1/query` (SSE or
 JSON). Binding to a non-loopback address requires `--allow-remote`.
 
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `axon: command not found` after installing | Open a new terminal. If it persists, add `~/.local/bin` (macOS/Linux) or `%USERPROFILE%\.axon\bin` (Windows) to your PATH, or re-run the installer. |
+| `python: command not found` inside a session on macOS | macOS ships only `python3`. Axon's Bash tool uses the workspace `.venv` automatically; for your own shell, recreate a moved or broken venv with `python3 -m venv .venv` (or `uv venv`). |
+| "running scripts is disabled on this system" (Windows) | Use the `irm … \| iex` one-liner, or `powershell -ExecutionPolicy Bypass -File .\install.ps1`; both apply to that one run only. |
+| A turn failed with an HTTP error from the provider | The work done so far is kept: type `continue` or `/retry`. Persistent errors: try `/model` to switch model, or `axon doctor`. |
+| "rejected the request as invalid" | The provider refused the request itself, not an outage. `/retry` once; if it repeats, `/compact` or switch model with `/model`. |
+| Garbled boxes or symbols | Set `AXON_ASCII=1` for plain ASCII output, or use a UTF-8 terminal font. |
+| Too much or too little detail | `Ctrl+O` cycles the trace level; `/trace compact` is the quietest, `/thinking` hides the full reasoning. |
+| Tips or suggestions are distracting | `/tips off`, or set `suggestions = false`. |
+| Too many (or no) desktop notifications | `/notify` shows when they fire. `/notify off`, `/notify all`, or `/notify after 60` to raise the threshold for finished turns. Notifications only appear while another app is in front. |
+| Wrong model or provider in use | The turn header shows the real model and provider (`deepseek-v4-flash via AgentRouter`). Switch with `/model` or `/provider`; `/status` shows the active model and endpoint. |
+| Want a different API key | `/keys` → replace (it is checked before saving); `/keys test` checks every key. |
+| Scroll wheel or text selection does not work | Mouse capture is off by default. If you turned on `mouse_click_expand`, hold ⌥ (Option) or Shift while dragging, or turn it off in `/settings`. |
+| The answer uses only part of a wide window | Set `max_width` to 0 in `/settings` (full width is the default). |
+
 ## Testing
 
 ```bash
@@ -474,12 +758,13 @@ key. For details, see [docs/testing.md](docs/testing.md).
 
 ```text
 axon/
-├── install.ps1 · install.bat · install.sh   one-step installers (Windows / Windows / POSIX)
+├── install.sh · install.ps1 · install.bat   installers: one-line remote install or from a clone
+├── .github/workflows/                       CI (lint, tests on Linux/macOS/Windows, installers) and PyPI release
 ├── pyproject.toml                           package metadata and the only dependency list
+├── check_models.py                          live latency/health check across models
 ├── scripts/
 │   ├── setup_env.py                         installer core used by install.*
 │   ├── axon_run.py                          run from a checkout without installing
-│   ├── check_models.py                      live latency/health check across models
 │   └── gen_docs.py                          regenerates the reference parts of the docs
 ├── src/axon/
 │   ├── cli.py                               argument parsing, print mode, REPL, subcommands

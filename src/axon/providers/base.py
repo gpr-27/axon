@@ -261,8 +261,13 @@ def abort_http_response(resp: Any) -> None:
     """Abort a streaming HTTP response from *another* thread, waking a blocked socket read.
 
     Closing an httpx response alone does not reliably interrupt a ``recv()`` blocked in a different
-    thread, so the underlying socket is shut down first (the read then returns immediately).
+    thread, so the underlying socket is shut down (the read then returns immediately).
     Accepts an ``httpx.Response`` or an object exposing one as ``.response`` (SDK stream wrappers).
+
+    When the shutdown succeeds the response is NOT closed here: closing it from this thread sets
+    the socket's fd to -1 while the streaming thread may be about to ``poll()`` it again, and a poll
+    on fd -1 sleeps for the whole read timeout (seen as Esc leaving the turn hung on "responding").
+    The streaming thread closes the response itself when the aborted read unwinds its ``with``.
     """
     import socket as _socket
 
@@ -273,7 +278,7 @@ def abort_http_response(resp: Any) -> None:
             sock = ns.get_extra_info("socket") if ns is not None else None
             if sock is not None:
                 sock.shutdown(_socket.SHUT_RDWR)
-                break
+                return
         except Exception:
             continue
     for obj in (resp, target):

@@ -9,6 +9,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
+from typing import Any
 
 from axon import platform as plat
 
@@ -144,3 +147,72 @@ def notify_if_unfocused(title: str = "Axon", message: str = "Task finished.") ->
     if not is_terminal_window_focused():
         return send_desktop_notification(title, message)
     return False
+
+
+# ─── Notification policy ───────────────────────────────────────────────────
+# Only things worth leaving another app for reach the desktop:
+#   permission_prompt  Axon is waiting for you to approve a tool (only asked in default / acceptEdits / plan mode)
+#   question           Axon asked you a question (AskUserQuestion) and is waiting
+#   turn_failed        a turn stopped on an error
+#   turn_complete      a turn finished - only when it ran at least `notify_after_seconds` ("important" mode)
+#   background_task    a turn you sent to the background finished
+# `notifications = "all"` notifies after every turn; "off" never. Tests, scripts, print mode and
+# subagents never notify, and the same kind is not repeated within a few seconds.
+NOTIFY_MODES = ("important", "all", "off")
+ALWAYS_IMPORTANT = frozenset({"permission_prompt", "question", "turn_failed", "background_task"})
+_DEDUPE_S = 5.0
+_policy: dict[str, Any] = {"mode": "important", "after": 30.0}
+_last_sent: dict[str, float] = {}
+_lock = threading.Lock()
+
+
+def configure(settings: Any) -> None:
+    """Remember the user's notification settings (called with the agent's settings)."""
+    mode = str(getattr(settings, "notifications", "important") or "important").lower()
+    _policy["mode"] = mode if mode in NOTIFY_MODES else "important"
+    try:
+        _policy["after"] = max(0.0, float(getattr(settings, "notify_after_seconds", 30.0)))
+    except (TypeError, ValueError):
+        _policy["after"] = 30.0
+
+
+def _blocked_by_env() -> bool:
+    return bool(os.environ.get("AXON_NO_NOTIFY") or os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("CI"))
+
+
+def notifications_allowed() -> bool:
+    """False in tests, CI, scripts and print mode: only a person at an interactive terminal is notified."""
+    if _blocked_by_env():
+        return False
+    if _policy["mode"] == "off":
+        return False
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def should_notify(kind: str, elapsed: float | None = None) -> bool:
+    """The policy alone (no focus check, no side effects)."""
+    if not notifications_allowed():
+        return False
+    if kind in ALWAYS_IMPORTANT:
+        return True
+    if kind == "turn_complete":
+        return _policy["mode"] == "all" or (elapsed is not None and elapsed >= _policy["after"])
+    return _policy["mode"] == "all"
+
+
+def notify_event(kind: str, message: str, *, settings: Any = None, elapsed: float | None = None,
+                 title: str = "Axon") -> bool:
+    """Send a desktop notification for *kind* if the policy allows it and you are in another app."""
+    if settings is not None:
+        configure(settings)
+    if not should_notify(kind, elapsed):
+        return False
+    now = time.monotonic()
+    with _lock:
+        if now - _last_sent.get(kind, -1e9) < _DEDUPE_S:
+            return False
+        _last_sent[kind] = now
+    return notify_if_unfocused(title, message)

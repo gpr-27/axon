@@ -595,8 +595,8 @@ def test_explicit_settings_provider_wins(monkeypatch):
 def test_model_aliases_resolve_per_provider(monkeypatch):
     ar = Settings(base_url="https://agentrouter.org", api_key=SecretStr("ar"))
     p = provider_for("opus", ar)
-    assert p._wire_model("opus") == "claude-opus-5"  # AgentRouter's Opus
-    assert pricing.price_for("opus").input == Decimal("6.0")
+    assert p._wire_model("opus") == "claude-opus-5-5"  # AgentRouter's Opus
+    assert pricing.price_for("opus").input == Decimal("12.0")
     s = provider_for("sonnet", ar)
     assert isinstance(s, AnthropicProvider) and s._wire_model("sonnet") == "claude-sonnet-5-5"
     assert resolve_model_alias("opusplan", mode="plan") == "claude-opus-5-5"
@@ -674,7 +674,7 @@ def test_agentrouter_feed_never_overrides_verified_rates(monkeypatch):
     feed = {"data": [{"model_name": "gpt-6-astra", "model_ratio": 3, "completion_ratio": 5},
                      {"model_name": "brand-new-model", "model_ratio": 0.5, "completion_ratio": 4}]}
     assert pricing.apply_agentrouter_pricing_feed(feed) == 1
-    assert PRICING["gpt-6-astra"]["input"] == 3.0
+    assert PRICING["gpt-6-astra"]["input"] == 8.0      # the verified table wins over the feed
     assert pricing.price_for("brand-new-model").input == Decimal("1.0")
     assert pricing.price_for("brand-new-model").output == Decimal("4.0")
 

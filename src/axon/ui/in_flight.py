@@ -101,6 +101,15 @@ def take_type_ahead() -> str:
     return text
 
 
+def _record_btw(agent: Any, question: str, answer: str, error: str = "") -> None:
+    """Keep mid-turn /btw questions and answers (journal + transcript)."""
+    try:
+        from axon.session.activity import record_side_question
+        record_side_question(agent, question, answer, error=error, source="btw-in-flight")
+    except Exception:
+        pass
+
+
 class InFlightInputListener:
     """Context manager running the background key listener for one agent turn."""
 
@@ -439,6 +448,8 @@ class InFlightInputListener:
                         pass
                 except Exception:
                     pass
+            _record_btw(self.agent, question, turn.text or "")
             _say(f"\n{render_side_question_box(question, turn.text or '(no answer)')}\n\n")
         except Exception as e:
+            _record_btw(self.agent, question, "", f"{type(e).__name__}: {e}")
             _say(f"\n  {ROSE}✗ Side question failed: {e}{RST}\n")

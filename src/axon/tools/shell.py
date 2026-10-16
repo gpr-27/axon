@@ -9,7 +9,9 @@ from __future__ import annotations
 import codecs
 import collections
 import os
+import re
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
@@ -61,8 +63,63 @@ def _describe() -> str:
     )
 
 
-def _child_env() -> dict[str, str]:
+def _venv_bin(venv: Path) -> Path | None:
+    """The executables dir of a virtualenv when it holds a Python interpreter."""
+    for sub, exe in (("Scripts", "python.exe"), ("bin", "python"), ("bin", "python3")):
+        if (venv / sub / exe).is_file():
+            return venv / sub
+    return None
+
+
+def workspace_venv(workspace: Path) -> Path | None:
+    """The project's own virtualenv (.venv/ or venv/ in the workspace root), if it has an interpreter.
+    Same lookup order as the solver's interpreter detection."""
+    for name in (".venv", "venv"):
+        venv = workspace / name
+        if _venv_bin(venv) is not None:
+            return venv
+    return None
+
+
+def _apply_python_env(env: dict[str, str], workspace: Path) -> None:
+    """Make `python` resolve to the project's interpreter in tool shells.
+
+    An environment the user activated (VIRTUAL_ENV / CONDA_PREFIX pointing at an existing directory)
+    always wins: its PATH is inherited untouched. Otherwise the workspace .venv/venv bin dir is
+    prepended and VIRTUAL_ENV set, as `source .venv/bin/activate` would. A stale VIRTUAL_ENV (the env
+    was moved or deleted; its activate script then keeps prepending a dead directory, so `python` is
+    "command not found" even after activating) is dropped along with its PATH entry.
+    """
+    if any(env.get(k) and os.path.isdir(env[k]) for k in ("VIRTUAL_ENV", "CONDA_PREFIX")):
+        return
+    path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    entries = [e for e in env.get(path_key, "").split(os.pathsep) if e]
+    original = list(entries)
+    stale = env.pop("VIRTUAL_ENV", None)
+    if stale:
+        dead = {os.path.normcase(os.path.join(stale, d)) for d in ("bin", "Scripts")}
+        entries = [e for e in entries if os.path.normcase(e.rstrip("/\\")) not in dead]
+        env.pop("VIRTUAL_ENV_PROMPT", None)
+    venv = workspace_venv(workspace)
+    bindir = _venv_bin(venv) if venv is not None else None
+    if venv is not None and bindir is not None:
+        entries = [str(bindir)] + [e for e in entries if os.path.normcase(e) != os.path.normcase(str(bindir))]
+        env["VIRTUAL_ENV"] = str(venv)
+    if entries != original:
+        env[path_key] = os.pathsep.join(entries)
+
+
+def _python_hint(env: dict[str, str]) -> str:
+    path = next((v for k, v in env.items() if k.upper() == "PATH"), None)
+    if shutil.which("python3", path=path):
+        return "(note: there is no `python` on this PATH; use `python3`, or the project's .venv/bin/python)"
+    return "(note: no Python interpreter is on this PATH; create a .venv in the workspace or activate one before starting axon)"
+
+
+def _child_env(workspace: Path | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not any(sub in k.upper() for sub in _SCRUB_ENV_SUBSTRINGS)}
+    if workspace is not None:
+        _apply_python_env(env, Path(workspace))
     env.update({"TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat", "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0"})
     return env
@@ -76,7 +133,9 @@ class _ShellDescription:
 
 
 class _Capture:
-    """Keeps the head and tail of a stream within a character budget."""
+    """Keeps the head and tail of a stream within a character budget. Once the output outgrows
+    the budget, everything is also spooled to a temp file (``spill_path``) so the complete
+    output can be saved with the session instead of being dropped."""
 
     def __init__(self, cap: int, on_text: Callable[[str], None] | None = None) -> None:
         self.cap = max(1000, cap)
@@ -87,11 +146,40 @@ class _Capture:
         self.total = 0
         self.on_text = on_text
         self.lock = threading.Lock()
+        self.spill: Any = None
+        self.spill_path: str = ""
+
+    def _open_spill(self) -> None:
+        import tempfile
+        try:
+            fd, path = tempfile.mkstemp(prefix="axon-bash-", suffix=".txt")
+            self.spill = os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="")
+            self.spill_path = path
+            self.spill.write("".join(self.head) + "".join(self.tail))  # nothing was dropped yet
+        except OSError:
+            self.spill, self.spill_path = None, ""
+
+    def close_spill(self) -> str:
+        with self.lock:
+            if self.spill is not None:
+                try:
+                    self.spill.close()
+                except OSError:
+                    pass
+                self.spill = None
+            return self.spill_path
 
     def add(self, text: str) -> None:
         if not text:
             return
         with self.lock:
+            if self.spill is None and not self.spill_path and self.total + len(text) > 2 * (self.cap // 2):
+                self._open_spill()
+            if self.spill is not None:
+                try:
+                    self.spill.write(text)
+                except (OSError, ValueError):
+                    pass
             self.total += len(text)
             half = self.cap // 2
             if self.head_len < half:
@@ -120,6 +208,31 @@ class _Capture:
             tail = tail[-(self.cap // 2):]
             elided = self.total - len(head) - len(tail)
             return f"{head}\n\n[... {elided} characters elided by Axon ...]\n\n{tail}"
+
+
+def _session_of(ctx: Any) -> tuple[Path, str]:
+    agent = getattr(ctx, "agent", None)
+    sid = str(getattr(getattr(agent, "session", None), "active_session_id", "") or "")
+    return Path(ctx.workspace), sid
+
+
+def _persist_spill(spill: str, ctx: Any, cmd: str) -> str:
+    """Move a spooled full output into the project's outputs/ folder; returns a note for the model."""
+    try:
+        from axon import storage
+        with open(spill, "r", encoding="utf-8", errors="replace") as f:
+            full = _clean_output(f.read())
+        ws, sid = _session_of(ctx)
+        name = "bash-" + re.sub(r"[^A-Za-z0-9]+", "-", cmd)[:40].strip("-")
+        saved = storage.save_full_output(ws, sid, name, full)
+        return f"(full output, {len(full):,} chars, saved to {saved})" if saved else ""
+    except OSError:
+        return ""
+    finally:
+        try:
+            os.unlink(spill)
+        except OSError:
+            pass
 
 
 def _clean_output(text: str) -> str:
@@ -213,11 +326,19 @@ class BashTool(Tool):
         cap = int(getattr(ctx.settings, "tool_output_cap", 0) or 30000)
         info = plat.shell_info()
         cwd = self.current_dir(ctx.workspace)
-        env = _child_env()
+        env = _child_env(ctx.workspace)
         if args.get("run_in_background"):
-            shell = BACKGROUND.start(cmd, cwd, env, info)
+            log_path: Path | None = None
+            try:
+                from axon import storage
+                ws, sid = _session_of(ctx)
+                log_path = storage.outputs_dir(ws, sid or "no-session") / f"background-{int(time.time() * 1000)}.log"
+            except Exception:
+                log_path = None
+            shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path)
+            logged = f"\nIts complete output is also logged to {log_path}." if log_path else ""
             return (f"Started background shell {shell.id} (pid {shell.proc.pid}) in {cwd}.\n"
-                    f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.")
+                    f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.{logged}")
         stream_cb = getattr(ctx, "on_output", None)
         capture = _Capture(cap, stream_cb if callable(stream_cb) else None)
         argv = self._wrap(cmd, info)
@@ -254,16 +375,29 @@ class BashTool(Tool):
         reader.join(timeout=2.0 if timed_out else 1.0)
         detached = reader.is_alive()  # a background child still holds the pipe; the daemon reader drains it
         output = self._extract_cwd(_clean_output(capture.text())).strip("\n")
+        full_note = ""
+        spill = capture.close_spill() if not detached else ""
+        if spill:
+            full_note = _persist_spill(spill, ctx, cmd)
+            marker = "characters elided by Axon ...]"
+            if full_note and marker in output:  # keep the tail intact: the note goes inside the marker
+                output = output.replace(marker, f"characters elided by Axon {full_note} ...]", 1)
+                full_note = ""
         elapsed = time.monotonic() - started
         if timed_out:
             tail = output[-4000:]
-            raise ToolError(f"Command timed out after {timeout}s; the process tree was killed.\nPartial output:\n{tail}")
+            raise ToolError(f"Command timed out after {timeout}s; the process tree was killed.\nPartial output:\n{tail}"
+                            + (f"\n{full_note}" if full_note else ""))
         code = proc.returncode
         notes = []
         if detached:
             notes.append("(a background process is still running and holds the output pipe; its output is not captured)")
+        if "python: command not found" in output or "python: not found" in output:
+            notes.append(_python_hint(env))
         if self._cwd and os.path.normcase(self._cwd) != os.path.normcase(str(ctx.workspace)):
             notes.append(f"(cwd: {self._cwd})")
+        if full_note:
+            notes.append(full_note)
         suffix = ("\n" + "\n".join(notes)) if notes else ""
         if code not in (0, None):
             return f"Command exited with non-zero code {code}.\nOutput:\n{output}{suffix}"
@@ -310,12 +444,22 @@ class _Stream:
 
 
 class BackgroundShell:
-    def __init__(self, shell_id: str, command: str, proc: subprocess.Popen[bytes]) -> None:
+    def __init__(self, shell_id: str, command: str, proc: subprocess.Popen[bytes], log_path: Path | None = None) -> None:
         self.id = shell_id
         self.command = command
         self.proc = proc
         self.started = time.time()
         self.stream = _Stream()
+        self.log_path = log_path
+        self._log: Any = None
+        if log_path is not None:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log = open(log_path, "a", encoding="utf-8", errors="replace", newline="")
+                self._log.write(f"$ {command}\n")
+                self._log.flush()
+            except OSError:
+                self._log = None
         self.reader = threading.Thread(target=self._pump, daemon=True, name=f"bg-shell-{shell_id}")
         self.reader.start()
 
@@ -323,10 +467,29 @@ class BackgroundShell:
         dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             for chunk in iter(lambda: self.proc.stdout.read1(65536), b""):  # type: ignore[union-attr]
-                self.stream.add(dec.decode(chunk))
-            self.stream.add(dec.decode(b"", final=True))
+                text = dec.decode(chunk)
+                self.stream.add(text)
+                self._write_log(text)
+            tail = dec.decode(b"", final=True)
+            self.stream.add(tail)
+            self._write_log(tail)
         except (OSError, ValueError):
             pass
+        finally:
+            if self._log is not None:
+                try:
+                    self._log.close()
+                except OSError:
+                    pass
+                self._log = None
+
+    def _write_log(self, text: str) -> None:
+        if self._log is not None and text:
+            try:
+                self._log.write(text)
+                self._log.flush()
+            except (OSError, ValueError):
+                self._log = None
 
     @property
     def status(self) -> str:
@@ -340,12 +503,13 @@ class BackgroundShells:
         self._lock = threading.Lock()
         self._seq = 0
 
-    def start(self, command: str, cwd: str, env: dict[str, str], info: plat.ShellInfo) -> BackgroundShell:
+    def start(self, command: str, cwd: str, env: dict[str, str], info: plat.ShellInfo,
+              log_path: Path | None = None) -> BackgroundShell:
         proc = subprocess.Popen(plat.shell_command_argv(command, info), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **plat.new_process_group_kwargs())
         with self._lock:
             self._seq += 1
-            shell = BackgroundShell(f"bash_{self._seq}", command, proc)
+            shell = BackgroundShell(f"bash_{self._seq}", command, proc, log_path=log_path)
             self._shells[shell.id] = shell
         return shell
 
@@ -413,7 +577,9 @@ class BashOutputTool(Tool):
             skipped += len(text) - cap
             text = text[-cap:]
         head = f"[{shell.id}] {shell.status} · {time.time() - shell.started:.0f}s · {shell.command}"
-        note = f"\n[{skipped} earlier characters dropped]" if skipped else ""
+        log = getattr(shell, "log_path", None)
+        note = (f"\n[{skipped} earlier characters not shown here" + (f"; complete log: {log}" if log else "") + "]"
+                if skipped else "")
         return f"{head}{note}\n{text.strip(chr(10)) or '(no new output)'}"
 
 

@@ -61,10 +61,10 @@ def test_normal_timeline_with_stats_and_answer(capsys):
     r.turn_footer(0, Usage(input=12_400, output=412), 0.0031, 1.9, 1)
     out = strip_ansi(capsys.readouterr().out)
     assert '┌ Turn 1 · "fix the failing test"' in out
-    assert "◆ Step 1  LLM call" in out
+    assert "◆ Step 1  LLM call · claude-opus-5" in out
     assert "thought for" in out and "I need to read the file." in out
-    assert "├─ Response" in out and "All good." in out
-    assert "12.4k in (9.8k cached 79%) · 412 out" in out
+    assert "▎ All good." in out                 # response rows carry the accent bar
+    assert "12.4k in (79% cached) · 412 out" in out
     assert "└ ✓ Done" in out
 
 
@@ -85,12 +85,12 @@ def test_glass_box_events(capsys):
     r.on_event(trace.SubagentEvent(phase="end", task_id="s", agent_type="explore", title="map db", model="m", cost=0.002, status="completed"))
     r.on_event(object())  # unknown events are ignored
     out = strip_ansi(capsys.readouterr().out)
-    assert "1.2s · $0.5000" in out           # LLMCallEnd figures, printed once
+    assert "replied in 1.2s · 100 in · 10 out · $0.5000" in out   # LLMCallEnd figures, printed once
     assert out.count("100 in") == 1
-    assert "plans 1 tool call (modifies workspace)" in out
+    assert "runs 1 tool" not in out           # single-tool plan line only at detailed
     assert "denied by rule: Bash(rm:*)" in out
     assert "hook PreToolUse blocked" in out
-    assert "retry 1/3 in 0.8s" in out
+    assert "529 overloaded · retrying in 0.8s (retry 1 of 3)" in out
     assert "context compacted (auto) 150k → 20.0k tokens" in out
     assert "subagent completed map db (explore)" in out
 
@@ -102,12 +102,17 @@ def test_edit_deletion_and_multiedit_diffs(capsys, tmp_path, monkeypatch):
     r.on_event(ToolExecutionStart(id="e1", name="Edit", input={"path": "f.py", "old_string": "gone\n", "new_string": ""}))
     r.on_event(ToolExecutionResult(id="e1", name="Edit", input={}, content="ok"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "0 additions and 1 removal" in out and "- gone" in out
+    assert "✎ Edited f.py · +0 −1" in out and "- gone" not in out     # compact: the card header row only
+    r = Renderer(trace_level="normal")
+    r.on_event(ToolExecutionStart(id="e1", name="Edit", input={"path": "f.py", "old_string": "gone\n", "new_string": ""}))
+    r.on_event(ToolExecutionResult(id="e1", name="Edit", input={}, content="ok"))
+    out = strip_ansi(capsys.readouterr().out)
+    assert "Edited f.py · +0 −1" in out and "- gone" in out
     r.on_event(ToolExecutionStart(id="e2", name="MultiEdit", input={"path": "f.py", "edits": [
         {"old_string": "x", "new_string": "three"}, {"old_string": "y\nz", "new_string": "four"}]}))
     r.on_event(ToolExecutionResult(id="e2", name="MultiEdit", input={}, content="ok"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "2 additions and 3 removals" in out
+    assert "Edited f.py · +2 −3 · 2 edits" in out
     assert "3 + three" in out          # line number located in the edited file
     assert "4 + four" in out
 
@@ -167,7 +172,7 @@ def test_format_trace_from_real_turn_trace():
     t.finish("Final **answer**", "end_turn")
     text = strip_ansi(format_trace(t))
     assert '┌ Turn 3 · "fix"' in text
-    assert "Step 1  LLM call" in text and "1.0k in (500 cached 50%)" in text
+    assert "Step 1  LLM call · m · reads 2 messages" in text and "1.0k in (50% cached)" in text
     assert "● Read  x.py" in text and '"path": "x.py"' in text
     assert "Answer" in text and "Final answer" in text
     assert "└ ✓ Done" in text
@@ -211,3 +216,64 @@ def test_spinner_proxy_erases_line_before_foreign_writes(monkeypatch):
     for line in text.split("\n"):
         if "line from another thread" in line:
             assert line.rsplit("\r\x1b[2K", 1)[-1] == "line from another thread"
+
+
+def test_turn_numbers_restart_after_clear(capsys):
+    """Turn labels follow the agent's own turn history, so /clear (traces reset) starts at Turn 1 again."""
+    from types import SimpleNamespace
+    agent = SimpleNamespace(traces=[object()] * 21, registry=None, settings=None)
+    r = Renderer()
+    r.attach(agent)
+    agent.traces.append(object())
+    _turn(r)
+    assert "┌ Turn 22" in strip_ansi(capsys.readouterr().out)
+    r.turn_footer(0, Usage(), 0.0, 0.1, 1)
+    agent.traces = [object()]                      # what reset_for_new_session leaves after the first new turn
+    _turn(r)
+    out = strip_ansi(capsys.readouterr().out)
+    assert "┌ Turn 1 " in out and "Turn 22" not in out
+
+
+def test_restored_conversation_replay_shows_tools_results_and_answers():
+    from axon.ui.render import format_conversation_replay
+    msgs = [
+        {"role": "user", "content": "list files"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "I should run ls."},
+                                          {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a.py\nb.py"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "There are **two** files."}]},
+    ]
+    out = strip_ansi("\n".join(format_conversation_replay(msgs, width=80)))
+    assert "› list files" in out and "Turn 1 (restored)" in out
+    assert "● Bash  ls" in out and "runs a shell command" in out
+    assert "a.py" in out and "b.py" in out                 # the result is shown, not just the call
+    assert "thought › I should run ls." in out
+    assert "▎ There are two files." in out
+    assert out.count("Turn 1") == 1                      # the tool_result message does not open a new turn
+
+
+def test_tool_rows_say_what_the_tool_does_and_why(capsys):
+    trace = pytest.importorskip("axon.agent.trace")
+    r = Renderer()
+    _turn(r)
+    r.on_event(ToolExecutionStart(id="g", name="Grep", input={"pattern": "x"}, rationale="find the handler"))
+    r.on_event(ToolExecutionResult(id="g", name="Grep", input={"pattern": "x"}, content="a.py:1:x\nb.py:2:x"))
+    out = strip_ansi(capsys.readouterr().out)
+    assert "searches inside files · why: find the handler" in out
+    assert "a.py · 1 match" in out and "1: x" in out     # search results are grouped by file under the summary
+
+
+def test_spinner_live_timer_counts_the_current_activity(monkeypatch):
+    import axon.ui.render as render_mod
+    now = [1000.0]
+    monkeypatch.setattr(render_mod.time, "time", lambda: now[0])
+    s = Spinner()
+    s.started_at = 990.0
+    s.set_label("Running Bash")
+    now[0] += 3.0
+    assert "Running Bash… 3.0s (turn 13s)" in strip_ansi(s.render_line())
+    s.set_label("Running Bash")                      # same activity: the clock keeps running
+    now[0] += 1.0
+    assert "4.0s" in strip_ansi(s.render_line())
+    s.set_label("Step 2 · thinking")                 # new activity: its own clock
+    assert "thinking… 0.0s" in strip_ansi(s.render_line())

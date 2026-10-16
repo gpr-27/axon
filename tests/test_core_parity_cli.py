@@ -1,6 +1,8 @@
 """Parity round (P-CORE): CLI flags, footer/suggestions, resume, doctor, debug log, worktree, mentions."""
 from __future__ import annotations
 
+import os
+
 import json
 import shutil
 import subprocess
@@ -61,6 +63,18 @@ def test_agent_flag_sets_prompt_model_and_tools(workspace: Path) -> None:
     assert "You audit code." in "\n".join(b["text"] for b in agent.system_blocks())
     with pytest.raises(ConfigError, match="unknown agent"):
         cli._apply_agent_flag(make_settings(workspace), "ghost")
+
+
+def test_agent_flag_readonly_definition_drops_modifying_tools(workspace: Path) -> None:
+    """Regression: `--agent explore` (readonly=True, no tool list) kept Write/Edit/Bash in the main session."""
+    s, ad = cli._apply_agent_flag(make_settings(workspace), "explore")
+    agent = cli.build_agent(s, provider=FakeProvider([]), connect_mcp=False, agent_def=ad)
+    names = set(agent.registry.visible_names())
+    assert {"Read", "Grep", "Glob"} <= names
+    assert not names & {"Write", "Edit", "Bash", "MultiEdit"}, names
+    # a non-readonly definition keeps the full tool set
+    s2, gp = cli._apply_agent_flag(make_settings(workspace), "general-purpose")
+    assert "Write" in cli.build_agent(s2, provider=FakeProvider([]), connect_mcp=False, agent_def=gp).registry.visible_names()
 
 
 def test_tools_flag_restricts_registry(workspace: Path) -> None:
@@ -131,7 +145,7 @@ def test_resume_restores_mode_and_recaps(workspace: Path) -> None:
 
 def test_shell_output_goes_into_context(workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     prov = FakeProvider(scripted("I see the files"))
-    agent = make_agent(prov, workspace)
+    agent = make_agent(prov, workspace, respond_to_bash_commands=False)
 
     class R:
         def turn_footer(self, **kw: Any) -> None:
@@ -155,6 +169,33 @@ def test_shell_respond_runs_a_turn(workspace: Path) -> None:
 
     cli.process_line(agent, R(), "!echo hi")
     assert len(prov.requests) == 1 and "<bash-stdout>hi" in prov.requests[0]["messages"][0]["content"]
+    assert "Respond to its output" in prov.requests[0]["messages"][0]["content"]
+
+
+def test_shell_respond_is_the_default_and_skips_cd(workspace: Path) -> None:
+    prov = FakeProvider(scripted("noted"))
+    agent = make_agent(prov, workspace)
+    assert agent.settings.respond_to_bash_commands is True
+
+    class R:
+        def turn_footer(self, **kw: Any) -> None:
+            pass
+
+    cwd = os.getcwd()
+    try:
+        cli.process_line(agent, R(), f"!cd {workspace}")
+    finally:
+        os.chdir(cwd)
+    assert prov.requests == []          # a bare cd only changes state; nothing to answer
+    cli.process_line(agent, R(), "!echo hi")
+    assert len(prov.requests) == 1
+
+
+def test_shell_echo_shows_bang_once() -> None:
+    from axon.ui.input import format_user_prompt_banner
+    from axon.ui.theme import strip_ansi
+    text = strip_ansi(format_user_prompt_banner("!ls -la", is_bash=True, max_w=60))
+    assert "! ls -la" in text and "!!" not in text.replace(" ", "")
 
 
 def test_busy_agent_queues_prompts(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -197,6 +238,28 @@ def test_debug_logging_writes_file(workspace: Path, tmp_path: Path) -> None:
             h.close()
         root.setLevel(logging.WARNING)
     assert cli.setup_debug_logging(None, None) is None
+
+
+def test_debug_api_filter_captures_llm_call_events(tmp_path: Path) -> None:
+    """Regression: `--debug api` mapped only to axon.providers (which never logs), so the file was empty."""
+    import logging
+    from axon.providers.base import LLMCallStart, ToolExecutionStart
+    from axon.agent.loop import _debug_event
+    path = cli.setup_debug_logging("api", str(tmp_path / "api.log"), "sid")
+    try:
+        _debug_event("main", LLMCallStart(iteration=1, max_iterations=5, model="m-x", message_count=1, tokens_in=1))
+        _debug_event("main", ToolExecutionStart(id="t1", name="Read", input={}))
+        for h in logging.getLogger("axon").handlers:
+            h.flush()
+        text = path.read_text(encoding="utf-8")
+        assert "debug logging started" in text and "LLMCallStart" in text and "m-x" in text
+        assert "ToolExecutionStart" not in text
+    finally:
+        root = logging.getLogger("axon")
+        for h in list(root.handlers):
+            root.removeHandler(h)
+            h.close()
+        root.setLevel(logging.WARNING)
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")

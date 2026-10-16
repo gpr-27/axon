@@ -121,8 +121,8 @@ def context_usage(agent: Any) -> tuple[int, int]:
     settings = getattr(agent, "settings", None)
     if not window:
         try:
-            from axon.providers.registry import get_context_window
-            window = int(get_context_window(str(getattr(settings, "model", "") or "")) or 0)
+            from axon.providers.registry import effective_context_window
+            window = int(effective_context_window(str(getattr(settings, "model", "") or ""), settings) or 0)
         except Exception:
             window = 0
     if not used:

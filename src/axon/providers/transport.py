@@ -229,6 +229,44 @@ def backoff_delay(attempt: int, retry_after: float | None = None, *, base: float
     return exp * (0.5 + random.random() * 0.5)
 
 
+# Gateways (AgentRouter in particular) report an upstream "invalid request" rejection as HTTP 5xx
+# ("Upstream rejected the request as invalid"). When the request really is malformed, retrying the
+# identical body fails every time, so such answers get a reduced retry budget instead of the full one.
+# They are still retried a little because AgentRouter also returns that exact wording intermittently
+# for valid requests (it spreads traffic over several upstream channels).
+MAX_INVALID_5XX_RETRIES = 2
+
+_INVALID_REQUEST_MARKERS = (
+    "rejected the request as invalid",
+    "invalid_request_error",
+    "invalid request",
+    "must be passed back",
+)
+
+
+def is_invalid_request_body(body: Any) -> bool:
+    """True when an error body says the *request* was invalid (as opposed to a server fault)."""
+    if body is None:
+        return False
+    raw = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else body
+    if not isinstance(raw, str):
+        try:
+            raw = json.dumps(raw)
+        except (TypeError, ValueError):
+            raw = str(raw)
+    text = raw.lower()
+    return any(m in text for m in _INVALID_REQUEST_MARKERS)
+
+
+def should_retry_status(status: int | None, body: Any, attempt: int) -> bool:
+    """Whether a non-2xx answer is worth retrying. *attempt* is the 0-based index of the failed try."""
+    if status not in RETRYABLE_STATUS:
+        return False
+    if status is not None and status >= 500 and is_invalid_request_body(body):
+        return attempt < MAX_INVALID_5XX_RETRIES
+    return True
+
+
 def max_retries_for(settings: Any, default: int = 3) -> int:
     val = getattr(settings, "max_retries", None)
     try:
@@ -411,6 +449,16 @@ def classify_error(
         return err(f"HTTP 413 from {label}: request too large. Remove large attachments or run `/compact`.{suffix}")
     if status == 429:
         return err(f"HTTP 429 Rate limited by {label} after several retries. Wait a moment and try again, or switch models with `/model`.{suffix}")
+    if status is not None and status >= 500 and is_invalid_request_body(body if body is not None else detail):
+        e = err(
+            f"{label} rejected the request as invalid (HTTP {status}). This is a rejection of the request "
+            f"itself, not an outage.\n"
+            f"  How to fix: retry once more (AgentRouter also sends this intermittently for valid requests); "
+            f"if it keeps failing, run `/compact` to rebuild the conversation sent to the model, or switch "
+            f"models with `/model`.{suffix}"
+        )
+        e.retryable = False  # type: ignore[attr-defined]
+        return e
     if status is not None and status >= 500:
         return err(f"HTTP {status} from {label}: the provider is temporarily unavailable (retries exhausted). Try again shortly.{suffix}")
     if status is not None:

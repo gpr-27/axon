@@ -50,7 +50,7 @@ def test_renderer_human_readable_observation_tracking(capsys):
     )
     plain0 = strip_ansi(capsys.readouterr().out)
     assert 'Turn 1 · "show the tree"' in plain0
-    assert "Step 1  LLM call · deepseek-v4-flash · 1 message · ~1.2k ctx" in plain0
+    assert "Step 1  LLM call · deepseek-v4-flash · reads 1 message (~1.2k tokens)" in plain0
 
     renderer.on_event(ToolExecutionStart(id="call_00_H1bn", name="FileTree", input={"max_depth": 2}))
     renderer.on_event(
@@ -59,9 +59,9 @@ def test_renderer_human_readable_observation_tracking(capsys):
     plain1 = strip_ansi(capsys.readouterr().out)
     assert "● FileTree" in plain1
     assert '"max_depth": 2' in plain1                      # detailed: full input JSON
-    assert "→ step 2" in plain1                            # where the result goes
+    assert "to step 2" in plain1                           # where the result goes
     assert "axon/" in plain1                               # detailed: result preview
-    assert "observation #1 [call_00_H1bn] queued for step 2" in plain1
+    assert "result #1 [call_00_H1bn] goes to the model in step 2" in plain1
 
     renderer.on_event(
         LLMCallStart(
@@ -71,8 +71,8 @@ def test_renderer_human_readable_observation_tracking(capsys):
         )
     )
     plain2 = strip_ansi(capsys.readouterr().out)
-    assert "Step 2  LLM call" in plain2
-    assert "fed back 1 tool result from step 1: 24 B · ~8 tokens" in plain2
+    assert "Step 2  LLM call · deepseek-v4-flash" in plain2
+    assert "includes 1 tool result from step 1 (24 B · ~8 tokens)" in plain2
     assert "FileTree . · 3 lines · 24 bytes · ~8 tok · [call_00_H1bn]" in plain2
 
 def test_renderer_multi_observation_numbering(capsys):
@@ -83,12 +83,12 @@ def test_renderer_multi_observation_numbering(capsys):
     renderer.on_event(ToolExecutionStart(id="call_01", name="Ls", input={"path": "src/axon"}))
     renderer.on_event(ToolExecutionResult(id="call_01", name="Ls", input={"path": "src/axon"}, content="agent/\nui/\n"))
     out1 = strip_ansi(capsys.readouterr().out)
-    assert "observation #1 [call_01] queued for step 3" in out1
+    assert "result #1 [call_01] goes to the model in step 3" in out1
     renderer.on_event(ToolExecutionStart(id="call_02", name="Read", input={"path": "pyproject.toml"}))
     renderer.on_event(ToolExecutionResult(id="call_02", name="Read", input={"path": "pyproject.toml"}, content="[project]\nversion = '0.27.1'\n"))
     out2 = strip_ansi(capsys.readouterr().out)
-    assert "observation #2 [call_02] queued for step 3" in out2
-    assert "→ step 3" in out2
+    assert "result #2 [call_02] goes to the model in step 3" in out2
+    assert "to step 3" in out2
 
 def test_render_side_question_box_format():
     """Verify high-clarity text field box format for /btw side questions."""
@@ -152,11 +152,11 @@ def test_renderer_tool_plan_and_invocation(capsys):
     ]
     renderer.on_event(ToolBatchStart(total_count=3, tools=tools, user_prompt="Test tool calling", mode="bypass"))
     plan_out = strip_ansi(capsys.readouterr().out)
-    assert "plans 3 tool calls (sequential)" in plan_out
+    assert "runs 3 tools one after another" in plan_out
 
     renderer.on_event(ToolExecutionStart(id="call_03_bash", name="Bash", input={"command": "echo 'hello from bash'"}, mode="bypass"))
     renderer.on_event(PermissionDecisionEvent(id="call_03_bash", tool="Bash", outcome="allow", reason="bypass mode", source="mode"))
     bash_out = strip_ansi(capsys.readouterr().out)
     assert "● Bash  echo 'hello from bash'" in bash_out
-    assert "auto-allowed: bypass mode" in bash_out
+    assert "auto-allowed" not in bash_out          # routine bypass-mode approvals are hidden at normal level
 

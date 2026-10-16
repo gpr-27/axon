@@ -11,7 +11,14 @@ Scripted use (CI, Docker, no TTY)::
     axon setup --provider ollama --model qwen2.5-coder:7b --mode default --trace normal
 
 uses keys already present in the environment / ``~/.axon/.env``. Without a TTY and without
-``--provider`` the command prints manual instructions and exits 1.
+``--provider`` the command prints manual instructions and exits 1. ``--base-url URL`` points the
+provider at a proxy / gateway (or, with ``--provider custom-name``, creates a custom
+OpenAI-compatible endpoint whose key is read from ``--key-env VAR``); ``--project-env`` saves a new
+key to this project's ``.env`` instead of ``~/.axon/.env``.
+
+Interactively the key step offers: use the existing key, test it, or replace it; a new key can be
+saved to ``~/.axon/.env`` (all projects) or this project's ``.env`` (git-ignored automatically); the
+provider list ends with "Custom endpoint" for any OpenAI- or Anthropic-compatible URL.
 
 ``needs_setup(settings_or_none)`` tells the CLI whether to suggest ``axon setup``.
 """
@@ -44,6 +51,7 @@ TRACE_LEVELS: tuple[tuple[str, str], ...] = (
     ("debug", "Also raw provider request summaries and usage"),
 )
 LOCAL_PORTS: dict[str, int] = {"ollama": 11434, "lmstudio": 1234}
+CUSTOM_ENDPOINT = "__custom_endpoint__"
 _PLACEHOLDER_KEYS = {"", "local", "none", "null", "skip", "sk-placeholder", "your_api_key_here",
                      "your-api-key-here", "replace_me"}
 
@@ -351,6 +359,8 @@ def _provider_choices(env_keys: dict[str, tuple[str, str]], local: dict[str, lis
         elif not p.requires_key:
             hint = f"not running · {p.description}"
         choices.append(Choice(label=p.name, value=p.id, hint=hint, badge=badge, group=p.category))
+    choices.append(Choice(label="Custom endpoint", value=CUSTOM_ENDPOINT, group="Custom",
+                          hint="any OpenAI- or Anthropic-compatible URL (proxy, gateway, self-hosted server)"))
     return choices, max(default, 0)
 
 
@@ -434,6 +444,10 @@ def run_setup(
     parser.add_argument("--mode", choices=[m for m, _ in PERMISSION_MODES], help="default permission mode")
     parser.add_argument("--trace", choices=[t for t, _ in TRACE_LEVELS], help="default trace level")
     parser.add_argument("--skip-verify", action="store_true", help="do not test the API key")
+    parser.add_argument("--base-url", dest="base_url", help="send this provider's traffic to another URL "
+                        "(proxy/gateway); with an unknown --provider name: create a custom endpoint")
+    parser.add_argument("--key-env", dest="key_env", help="custom endpoint: environment variable holding its key")
+    parser.add_argument("--project-env", action="store_true", help="save a new key to this project's .env")
     try:
         args = parser.parse_args(list(argv or []))
     except SystemExit as e:
@@ -488,13 +502,26 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
             _ok(f"Python {sys.version.split()[0]} on {sys.platform} - environment looks good")
 
     # 2. provider
+    try:
+        from axon.providers.endpoints import apply_endpoint_overrides
+        apply_endpoint_overrides()
+    except Exception:
+        pass
     env_keys = detect_env_keys()
     local = detect_local() if (interactive or (args.provider or "") in LOCAL_PORTS) else {}
     if args.provider:
         preset = get_preset_by_id(args.provider)
-        if preset is None:
-            _err(f"Unknown provider '{args.provider}'.")
+        if preset is None and args.base_url:
+            preset = _save_custom_endpoint(args.provider, args.base_url, args.key_env, args.model)
+            if preset is None:
+                return 2, None
+        elif preset is None:
+            _err(f"Unknown provider '{args.provider}'. (Add --base-url URL to create a custom endpoint.)")
             return 2, None
+        elif args.base_url:
+            preset = _redirect_preset(preset, args.base_url)
+            if preset is None:
+                return 2, None
     else:
         _heading(2, total, "Choose a provider")
         if local:
@@ -502,7 +529,8 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
         if env_keys:
             _ok("API keys already configured for: " + ", ".join(sorted(env_keys)))
         choices, default = _provider_choices(env_keys, local)
-        preset = get_preset_by_id(io.choose("Provider", choices, default))
+        picked = io.choose("Provider", choices, default)
+        preset = _ask_custom_endpoint(io) if picked == CUSTOM_ENDPOINT else get_preset_by_id(picked)
         if preset is None:
             raise SetupCancelled()
     _ok(f"Provider: {preset.name}")
@@ -514,6 +542,14 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
     new_key = False
     verified, latency = False, 0.0
     model_for_check = args.model or preset.default_model
+    try:
+        from axon.providers.endpoints import is_custom, test_endpoint
+        if is_custom(preset) and not model_for_check:
+            def verify_fn(p: Any, k: str, base_url: str | None = None, model: str | None = None) -> tuple[bool, str]:
+                res = test_endpoint(base_url or p.base_url, k, p.api_format)  # no model yet: list models instead
+                return res.ok, res.message
+    except ImportError:
+        pass
     if preset.id == "azure" and base_url == preset.base_url:
         if not interactive:
             _err("Azure needs AZURE_OPENAI_ENDPOINT set (https://<resource>.openai.azure.com).")
@@ -528,7 +564,9 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
         if interactive:
             _heading(3, total, "API key")
         existing = find_api_key(list(preset.env_vars))
-        if existing and (not interactive or io.confirm(f"Use the existing {env_keys.get(preset.id, (preset.env_var, ''))[0]} key?", True)):
+        if existing and interactive:
+            existing = _existing_key_choice(io, verify_fn, preset, existing, env_keys, base_url, model_for_check)
+        if existing:
             key = existing
         elif not interactive:
             _err(f"No API key found. Set {preset.env_var} in your environment or ~/.axon/.env.")
@@ -567,8 +605,17 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
                 raise SetupCancelled()
             new_key = True
         if new_key:
-            key_saved_to = save_api_key(preset.env_var or "AXON_API_KEY", key)
-            _ok(f"Saved {preset.env_var} to {key_saved_to}")
+            var = preset.env_var or "AXON_API_KEY"
+            scope = "project" if args.project_env else ("user" if not interactive else _key_scope(io, settings))
+            key_saved_to = _save_key(var, key, scope, settings)
+            _ok(f"Saved {var} to {key_saved_to}")
+            try:
+                from axon.providers import keystore
+                keystore.register_secret(key)
+                if verified:
+                    keystore.record_check(var, key, True, latency)
+            except Exception:
+                pass
     else:
         models = local.get(preset.id)
         if models is None and preset.id in LOCAL_PORTS and not _port_open(LOCAL_PORTS[preset.id]):
@@ -637,6 +684,104 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
                          api_key=key)
     _try_card(result)
     return 0, result
+
+
+# ─── Key / endpoint helpers ────────────────────────────────────────────────
+
+def _masked(key: str) -> str:
+    try:
+        from axon.providers.keystore import mask_key
+        return mask_key(key)
+    except Exception:
+        return "set"
+
+
+def _existing_key_choice(io: SetupIO, verify_fn: Callable[..., tuple[bool, str]], preset: Any, existing: str,
+                         env_keys: dict[str, tuple[str, str]], base_url: str, model: str) -> str:
+    """Use / test / replace an existing key. Returns the key to use, or '' to enter a new one."""
+    var, where = env_keys.get(preset.id, (preset.env_var, ".env"))
+    label = f"{var} {_masked(existing)} ({'environment' if where == 'env' else '~/.axon/.env'})"
+    while True:
+        action = io.choose(f"An API key is already set: {label}", [
+            Choice("Use it", "use", "keep the current key"),
+            Choice("Test it first", "test", "5-token live request"),
+            Choice("Replace it with a new key", "replace", "paste a different key (hidden input)"),
+        ], 0)
+        if action == "use":
+            return existing
+        if action == "replace":
+            return ""
+        ok, msg, latency = _verify(verify_fn, preset, existing, base_url, model)
+        if ok:
+            _ok(f"The existing key works {glyph('dot')} {latency * 1000:.0f} ms round trip")
+        else:
+            _err(f"The existing key failed: {msg}")
+
+
+def _key_scope(io: SetupIO, settings: Any) -> str:
+    ws = Path(getattr(settings, "workspace", None) or Path.cwd())
+    return io.choose("Save the key to", [
+        Choice("~/.axon/.env", "user", "all projects (recommended)"),
+        Choice("This project's .env", "project", f"{ws / '.env'} - only this project; git-ignored automatically"),
+    ], 0)
+
+
+def _save_key(var: str, key: str, scope: str, settings: Any) -> Path:
+    from axon.providers.catalog import save_api_key
+    if scope != "project":
+        return save_api_key(var, key)
+    from axon.providers import keystore
+    ws = Path(getattr(settings, "workspace", None) or Path.cwd())
+    path = keystore.set_env_value(keystore.project_env_path(ws), var, key)
+    os.environ[var] = keystore.clean_key(key)
+    state, msg = keystore.ensure_gitignored(ws)
+    (_warn if state in ("tracked", "not-ignored") else _ok)(msg)
+    return path
+
+
+def _save_custom_endpoint(name: str, url: str, key_env: str | None, model: str | None) -> Any:
+    try:
+        from axon.providers import endpoints as ep
+        from axon.providers.catalog import get_preset_by_id
+        from axon.providers.transport import is_local_url
+        eid = ep.slug(name)
+        var = key_env if key_env is not None else ("" if is_local_url(url) else ep.suggest_env_var(eid))
+        if var.lower() in ("-", "none", "no"):
+            var = ""
+        ep.save_endpoint(eid, url, env_var=var, model=model or "")
+        preset = get_preset_by_id(eid)
+    except (ValueError, OSError, ImportError) as e:
+        _err(f"Could not save the endpoint: {e}")
+        return None
+    _ok(f"Custom endpoint {eid} -> {url}" + (f" (key from {var})" if var else " (no key)"))
+    return preset
+
+
+def _redirect_preset(preset: Any, url: str) -> Any:
+    try:
+        from axon.providers import endpoints as ep
+        ep.save_endpoint(preset.id, url)
+    except (ValueError, OSError, ImportError) as e:
+        _err(f"Could not save the endpoint: {e}")
+        return None
+    _ok(f"{preset.name} will use {url}")
+    return preset
+
+
+def _ask_custom_endpoint(io: SetupIO) -> Any:
+    from axon.providers import endpoints as ep
+    from axon.providers.transport import is_local_url
+    url = io.ask("Base URL (e.g. https://llm.example.com/v1)")
+    if not ep.valid_url(url):
+        _err("Enter a full http(s) URL.")
+        raise SetupCancelled()
+    if w := ep.url_warning(url):
+        _warn(w)
+    name = io.ask("Short name", ep.suggest_id(url))
+    default_var = "" if is_local_url(url) else ep.suggest_env_var(ep.slug(name))
+    var = io.ask("Environment variable for its API key ('-' for none)", default_var or "-")
+    model = io.ask("Default model id (optional)")
+    return _save_custom_endpoint(name, url, var, model or None)
 
 
 # ─── Entry points ──────────────────────────────────────────────────────────

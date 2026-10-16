@@ -4,6 +4,7 @@ Windows (clip.exe / PowerShell).
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,14 @@ from typing import Any, Callable
 from axon import platform as plat
 
 
+def _clipboard_file() -> str:
+    """AXON_CLIPBOARD_FILE redirects copy/paste to a file (tests, headless use) instead of the system clipboard."""
+    return os.environ.get("AXON_CLIPBOARD_FILE", "")
+
+
 def _run(argv: list[str], data: bytes | None = None, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes] | None:
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("AXON_ALLOW_REAL_CLIPBOARD"):
+        return None   # a test must never overwrite the user's real clipboard
     try:
         return subprocess.run(argv, input=data, capture_output=True, timeout=timeout,
                               stdin=None if data is not None else subprocess.DEVNULL)
@@ -28,6 +36,13 @@ def copy_to_clipboard(text: str) -> bool:
     """Copy text to the system clipboard. Returns True on success."""
     if not text:
         return False
+    if _clipboard_file():
+        try:
+            with open(_clipboard_file(), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return True
+        except OSError:
+            return False
     if plat.IS_WINDOWS:
         clip = shutil.which("clip") or shutil.which("clip.exe")
         if clip:
@@ -56,6 +71,12 @@ def copy_to_clipboard(text: str) -> bool:
 
 def paste_from_clipboard() -> str:
     """Return clipboard text ('' when unavailable)."""
+    if _clipboard_file():
+        try:
+            with open(_clipboard_file(), encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return ""
     if plat.IS_WINDOWS:
         ps = _windows_powershell()
         if not ps:

@@ -157,11 +157,9 @@ end try'''
     return False
 
 def get_images_cache_dir() -> Path:
-    """Return the persistent image cache directory."""
-    from axon.storage import axon_home as _axon_home
-    d = _axon_home() / "images"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """Persistent pasted-image folder of the current project (~/.axon/projects/<key>/images)."""
+    from axon.storage import project_subdir
+    return project_subdir(None, "images")
 
 def _get_image_dimensions(p: Path) -> tuple[int, int]:
     """Extract width and height from image headers or macOS sips."""

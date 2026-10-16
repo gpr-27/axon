@@ -130,7 +130,7 @@ def test_interactive_wizard_full_flow(axon_home: Path, capsys: pytest.CaptureFix
         calls.append((preset.id, key, base_url, model))
         return True, "OK"
 
-    io = FakeIO(answers=["anthropic", "claude-sonnet-4-5", "default", "detailed"], secrets=["sk-ant-secret"])
+    io = FakeIO(answers=["anthropic", "1", "claude-sonnet-4-5", "default", "detailed"], secrets=["sk-ant-secret"])
     code, res = ob.run_setup([], io=io, verify_fn=verify, interactive=True, detect_local=lambda: {})
     assert code == 0 and res is not None
     assert calls and calls[0][0] == "anthropic" and calls[0][1] == "sk-ant-secret"
@@ -144,7 +144,7 @@ def test_interactive_wizard_full_flow(axon_home: Path, capsys: pytest.CaptureFix
 
 def test_wizard_uses_existing_env_key_without_saving(monkeypatch: pytest.MonkeyPatch, axon_home: Path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-env")
-    io = FakeIO(answers=["openai", "y", "gpt-5", "acceptEdits", "normal"])
+    io = FakeIO(answers=["openai", "1", "gpt-5", "acceptEdits", "normal"])
     code, res = ob.run_setup([], io=io, verify_fn=lambda *a, **k: (True, "OK"), interactive=True,
                              detect_local=lambda: {})
     assert code == 0 and res.api_key == "sk-openai-env" and res.key_saved_to is None
@@ -161,7 +161,7 @@ def test_wizard_failed_verification_then_cancel_changes_nothing(axon_home: Path)
 
 def test_wizard_retry_with_new_key(axon_home: Path) -> None:
     results = iter([(False, "HTTP 401"), (True, "OK")])
-    io = FakeIO(answers=["deepseek", "1", "deepseek-chat", "default", "normal"], secrets=["bad", "good-key"])
+    io = FakeIO(answers=["deepseek", "1", "1", "deepseek-chat", "default", "normal"], secrets=["bad", "good-key"])
     code, res = ob.run_setup([], io=io, verify_fn=lambda *a, **k: next(results), interactive=True,
                              detect_local=lambda: {})
     assert code == 0 and res.verified and res.api_key == "good-key"

@@ -210,3 +210,29 @@ def test_feature_commands_override_builtins(monkeypatch, agent: Agent):
         assert ("/changes", "x") in list_command_names(agent=agent)
     finally:
         reg.reload_features()
+
+
+def test_multiline_usage_is_aligned_under_first_line(agent: Agent, capsys):
+    """An invalid /rewind argument prints the multi-line usage with every line indented (not at column 0)."""
+    from axon.ui.theme import strip_ansi
+    dispatch_command("/rewind 1 code", agent)
+    lines = [ln for ln in strip_ansi(capsys.readouterr().out).splitlines() if "/rewind" in ln]
+    assert len(lines) >= 5 and lines[0].startswith("  Usage: /rewind ")
+    assert all(ln.startswith(" " * 9 + "/rewind") for ln in lines[1:]), lines
+
+
+def test_analytics_is_an_alias_of_stats_and_unknown_commands_suggest_by_meaning(capsys):
+    from axon.commands.registry import dispatch_command, suggest_commands
+    from axon.ui.theme import strip_ansi
+    # /analytics now reaches the analytics command instead of "Unknown command"
+    from axon.commands import registry
+    table = registry.feature_table()
+    assert "stats" in table and "analytics" in table["stats"].aliases
+    # typos and words that describe a command both find it
+    assert [n for n, _ in suggest_commands("modle")][:2] == ["mode", "model"]
+    assert "stats" in [n for n, _ in suggest_commands("analytic")]
+    assert suggest_commands("xyzzy") == []
+    res = dispatch_command("/memry", None)
+    out = strip_ansi(capsys.readouterr().out)
+    assert res is not None and res.handled
+    assert "Unknown command /memry." in out and "Did you mean:" in out and "/memory" in out

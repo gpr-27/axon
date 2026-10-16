@@ -64,8 +64,9 @@ def test_get_models_for_provider_separates_models_cleanly():
     assert ar is not None
     ar_models = get_models_for_provider(ar)
     assert "deepseek-v4-flash" in ar_models
-    assert "gpt-5.6-sol" in ar_models
-    assert "claude-opus-5" in ar_models
+    assert "gpt-6.1-sol" in ar_models and "gpt-6-astra" in ar_models
+    assert "claude-opus-5-5" in ar_models
+    assert "gpt-5.6-sol" not in ar_models   # retired by AgentRouter
     # Shouldn't contain other providers' models
     assert "gpt-4o" not in ar_models
     assert "gemini-2.0-flash" not in ar_models

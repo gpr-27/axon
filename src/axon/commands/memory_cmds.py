@@ -548,6 +548,27 @@ def fill_placeholders(template: str, given: dict[str, str], ask: bool) -> str | 
     return _PH.sub(lambda m: values.get(m.group(1), m.group(0)), template)
 
 
+def parse_template_args(rest: str, names: list[str]) -> tuple[dict[str, str], list[str]]:
+    """``key=value`` pairs for /prompt. A value runs until the next ``key=`` (so
+    ``description=login fails`` keeps both words) and may be quoted; words before any key are free."""
+    # quote-aware split that keeps backslashes (Windows paths): key="a b" -> key=a b
+    tokens = [re.sub(r'"([^"]*)"|\'([^\']*)\'', lambda m: m.group(1) if m.group(1) is not None else m.group(2), t)
+              for t in re.findall(r'(?:[^\s"\']+|"[^"]*"|\'[^\']*\')+|["\']\S*', rest)]
+    given: dict[str, str] = {}
+    free: list[str] = []
+    last: str | None = None
+    for tok in tokens:
+        k, eq, v = tok.partition("=")
+        if eq and (k in names or re.fullmatch(r"[A-Za-z_][\w-]*", k)):
+            given[k] = v
+            last = k
+        elif last is not None:
+            given[last] = f"{given[last]} {tok}".strip()
+        else:
+            free.append(tok)
+    return given, free
+
+
 @command("prompt", category=CAT, description="Prompt library: templates with {placeholders}",
          aliases=("prompts", "template", "templates"),
          usage="/prompt                         list templates\n/prompt <name> [key=value ...]  fill placeholders (asks for missing ones) and send\n/prompt show <name>\n/prompt save <name> [--global] <template text>")
@@ -589,15 +610,8 @@ def handle_prompt(agent: Any, arg: str) -> CommandResult:
     if p is None:
         err(f"No template '{sub}'. /prompt lists them.")
         return CommandResult(handled=True)
-    given: dict[str, str] = {}
-    free: list[str] = []
-    for tok in rest.split():
-        k, eq, v = tok.partition("=")
-        if eq:
-            given[k] = v
-        else:
-            free.append(tok)
     names = list(dict.fromkeys(m.group(1) for m in _PH.finditer(p[1])))
+    given, free = parse_template_args(rest, names)
     if free and names:
         pending = [n for n in names if n not in given]
         if len(pending) == 1:

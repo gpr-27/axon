@@ -21,7 +21,10 @@ FEATURE_MODULES: tuple[str, ...] = (
     "axon.features.planner",
     "axon.features.onboarding",
     "axon.features.suggest",
+    "axon.features.tips",
     "axon.features.scaffold",
+    "axon.features.journal",
+    "axon.features.credentials",
 )
 
 

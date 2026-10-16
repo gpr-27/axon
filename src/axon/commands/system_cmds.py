@@ -159,6 +159,8 @@ _CONFIG_KEYS: dict[str, str] = {
     "tool_output_cap": "max chars of tool output fed back",
     "base_url": "provider endpoint",
     "small_model": "cheap model for compaction, /fast and side tasks",
+    "tips_refresh_turns": "min turns between model-written tip refreshes",
+    "tips_refresh_minutes": "min minutes between model-written tip refreshes",
 }
 
 
@@ -195,6 +197,8 @@ def _panel_keys(agent: Any) -> list[tuple[str, str, Any, str]]:
         ("theme", "Theme", [n for n, _ in THEMES], "theme"),
         ("vim_mode", "Vim mode", "bool", "editorMode"),
         ("suggestions", "Prompt suggestions", "bool", "promptSuggestionEnabled"),
+        ("tips", "Usage tips", "bool", "tips"),
+        ("tips_llm", "Model-written tips", "bool", "tipsLlm"),
     ]
 
 
@@ -301,7 +305,7 @@ def _config_panel(agent: Any) -> CommandResult:
 
 
 @command("config", category=CAT, description="Settings panel, or show/change one setting",
-         aliases=("settings", "set"), usage="/config                          interactive panel (list without a terminal)\n/config <key> <value> [--save]\n/config <key>=<value>")
+         aliases=("set",), usage="/config                          interactive panel (list without a terminal)\n/config <key> <value> [--save]\n/config <key>=<value>")
 def handle_config(agent: Any, arg: str) -> CommandResult:
     from axon.commands.common import is_tty
     words = arg.split()
@@ -408,12 +412,12 @@ def type_default(field: str) -> Any:
 def handle_autocompact(agent: Any, arg: str) -> CommandResult:
     a = arg.strip()
     try:
-        window = int(agent.context.get_effective_budget(agent.settings.model))
+        window = int(agent.context.context_window(agent.settings.model))
     except Exception:
         window = 200_000
     if not a:
         pct_now = float(agent.settings.compact_at)
-        kv("Auto-compact at", f"{int(pct_now * 100)}% of the context window (~{fmt_tokens(int(pct_now * window))} tokens)")
+        kv("Auto-compact at", f"{int(pct_now * 100)}% of the context limit (~{fmt_tokens(int(pct_now * window))} of {fmt_tokens(window)} tokens; /context limit changes the size)")
         print()
         return CommandResult(handled=True)
     try:
@@ -422,7 +426,7 @@ def handle_autocompact(agent: Any, arg: str) -> CommandResult:
         usage(f"/autocompact <10-99 | 500k | auto>   ({e})")
         return CommandResult(handled=True)
     update_settings(agent, compact_at=pct)
-    ok(f"Auto-compact at {BOLD}{int(pct * 100)}%{RST} of the context window (~{fmt_tokens(int(pct * window))} tokens)")
+    ok(f"Auto-compact at {BOLD}{int(pct * 100)}%{RST} of the context limit (~{fmt_tokens(int(pct * window))} of {fmt_tokens(window)} tokens)")
     return CommandResult(handled=True)
 
 
@@ -476,14 +480,51 @@ def handle_keybindings(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
-@command("notify", category=CAT, description="Send a test desktop notification", usage="/notify [message]")
+@command("notify", category=CAT, description="Desktop notifications: when they fire (important/all/off), or send a test",
+         usage="/notify [important|all|off|after <seconds>|test [message]]")
 def handle_notify(agent: Any, arg: str) -> CommandResult:
-    from axon.ui.notify import send_desktop_notification
-    msg = arg.strip() or "Axon notifications work."
-    if send_desktop_notification("Axon", msg):
-        ok(f"Notification sent: {msg}")
-    else:
-        info("Desktop notifications are not available here.")
+    from axon.commands.common import update_settings, update_settings_file
+    from axon.ui.notify import NOTIFY_MODES, configure, send_desktop_notification
+    words = arg.split()
+    sub = words[0].lower() if words else ""
+    s = agent.settings
+    if sub in NOTIFY_MODES:
+        update_settings(agent, notifications=sub)
+        update_settings_file({"notifications": sub}, workspace=ws_of(agent))
+        configure(agent.settings)
+        ok(f"Desktop notifications: {sub}")
+        return CommandResult(handled=True)
+    if sub == "after" and len(words) > 1:
+        try:
+            secs = max(0.0, float(words[1].rstrip("s")))
+        except ValueError:
+            err("Usage: /notify after <seconds>")
+            return CommandResult(handled=True)
+        update_settings(agent, notify_after_seconds=secs)
+        update_settings_file({"notifyAfterSeconds": secs}, workspace=ws_of(agent))
+        configure(agent.settings)
+        ok(f"Finished turns notify only after running {secs:g}s or longer")
+        return CommandResult(handled=True)
+    if sub == "test" or (sub and sub not in NOTIFY_MODES):
+        msg = " ".join(words[1:] if sub == "test" else words).strip() or "Axon notifications work."
+        if send_desktop_notification("Axon", msg):
+            ok(f"Notification sent: {msg}")
+        else:
+            info("Desktop notifications are not available here.")
+        return CommandResult(handled=True)
+    mode = getattr(s, "notifications", "important")
+    after = float(getattr(s, "notify_after_seconds", 30.0))
+    header("Desktop notifications", f"mode: {mode}")
+    rows = {
+        "important": ["Axon needs your permission for a tool (default / acceptEdits / plan mode)",
+                      "Axon asked you a question and is waiting", "a turn failed",
+                      f"a turn finished after running {after:g}s or longer", "a background turn finished"],
+        "all": ["after every turn, plus everything in 'important'"],
+        "off": ["never"],
+    }.get(mode, [])
+    for r in rows:
+        print(f"    {SLATE}·{RST} {WHITE}{r}{RST}")
+    print(f"\n  {SLATE}Only while you are in another app. /notify important|all|off · /notify after <seconds> · /notify test{RST}\n")
     return CommandResult(handled=True)
 
 

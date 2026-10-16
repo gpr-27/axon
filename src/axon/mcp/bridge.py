@@ -147,6 +147,8 @@ class MCPServerConnection:
             self.status, self.error = "connecting", None
         spec = self.spec.resolved()
         init_timeout = min(spec.timeout, CONNECT_TIMEOUT_CAP) if timeout is None else timeout
+        logger.debug("mcp %s: starting (%s %s, timeout %.1fs)", self.name, spec.type,
+                     getattr(spec, "url", "") or getattr(spec, "command", ""), init_timeout)
         try:
             try:
                 client = self._open(spec, spec.type, init_timeout, gen)
@@ -169,6 +171,7 @@ class MCPServerConnection:
                         else f"{type(e).__name__}: {e}"
                     self.status, self.error = "failed", msg
                     self._stop_locked()
+            logger.debug("mcp %s: failed to start: %s", self.name, self.error or e)
             return False
         with self._lock:
             if gen != self._gen:
@@ -177,9 +180,12 @@ class MCPServerConnection:
             self.client, self.tools, self.transport_kind = client, tools, kind
             self.status = "connected"
             self.connected_at = time.time()
+        logger.debug("mcp %s: connected over %s with %d tool(s): %s", self.name, kind, len(tools),
+                     ", ".join(str(t.get("name", "?")) for t in tools[:30] if isinstance(t, dict)))
         return True
 
     def stop(self) -> None:
+        logger.debug("mcp %s: stopping", self.name)
         with self._lock:
             self._gen += 1
             self._stop_locked()
@@ -196,6 +202,7 @@ class MCPServerConnection:
 
     def _closed(self, client: MCPClient, reason: str) -> None:
         if client is self.client and self.status == "connected":
+            logger.debug("mcp %s: disconnected: %s", self.name, reason)
             self.status, self.error = "disconnected", reason
 
     def _tools_changed(self, client: MCPClient) -> None:
@@ -216,11 +223,16 @@ class MCPServerConnection:
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         client = self._require_client()
+        logger.debug("mcp %s: call %s %s", self.name, tool_name, str(arguments)[:500])
+        t0 = time.time()
         try:
             result = client.call_tool(tool_name, arguments, timeout=self.spec.timeout)
         except MCPError as e:
+            logger.debug("mcp %s: call %s failed after %.2fs: %s", self.name, tool_name, time.time() - t0, e)
             raise ToolError(f"MCP tool '{tool_name}' on '{self.name}' failed: {e}") from e
         text, is_error = render_tool_result(result)
+        logger.debug("mcp %s: call %s %s in %.2fs (%d chars)", self.name, tool_name,
+                     "returned an error" if is_error else "ok", time.time() - t0, len(text))
         if is_error:
             raise ToolError(f"MCP tool '{tool_name}' returned an error:\n{text}")
         return text

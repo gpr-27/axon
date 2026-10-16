@@ -262,18 +262,52 @@ def suggest_next(agent: Any, result: Any = None, *, available: Callable[[str], b
 
     traces = getattr(agent, "traces", None) or []
     if len(traces) <= 1 and not has_instructions(_workspace(agent)):
-        add(("/init",), "no AXON.md yet: /init records how to build and test this repo")
+        ws = _workspace(agent)
+        where = f" in {ws.name}/" if ws is not None else ""
+        add(("/init",), f"this project has no AXON.md yet: /init writes one{where} so Axon remembers how to build and test it")
 
     return out[:MAX_SUGGESTIONS]
 
 
+_LAST_TIP: list[str] = [""]
+
+
+def next_step_tip(agent: Any, result: Any = None) -> str:
+    """The single most useful next step as one tip line ("" when there is none, or it was the last tip).
+    Suggestions and usage tips share the one tip row after a turn; /next still lists all of them."""
+    if not getattr(getattr(agent, "settings", None), "suggestions", True):
+        return ""
+    try:
+        sugs = suggest_next(agent, result)
+    except Exception:
+        return ""
+    if not sugs:
+        return ""
+    s = sugs[0]
+    run = s.command if not s.is_prompt else "/next 1"
+    text = f"{s.reason[:1].upper()}{s.reason[1:]} — {run}" if run not in s.reason else f"{s.reason[:1].upper()}{s.reason[1:]}"
+    if text == _LAST_TIP[0]:
+        return ""                       # don't repeat the same advice turn after turn
+    _LAST_TIP[0] = text
+    return safe_text(text)
+
+
 def render_suggestions(suggestions: list[Suggestion]) -> str:
-    """One dim line: ``Next: [1] /verify · [2] /commit · [3] /stats`` ("" when there is nothing)."""
+    """Suggested next steps with the reason for each, and how to run one ("" when there is nothing)::
+
+        Suggested next  (/next <n> runs one)
+          1. /verify   2 file(s) edited but no tests were run
+          2. /commit   working tree has uncommitted changes
+    """
     if not suggestions:
         return ""
-    sep = f" {glyph('dot')} "
-    body = sep.join(f"[{i}] {s.label}" for i, s in enumerate(suggestions[:MAX_SUGGESTIONS], 1))
-    return safe_text(f"  {DIM}Next: {body}{RST}")
+    items = suggestions[:MAX_SUGGESTIONS]
+    run = "/next 1 runs it" if len(items) == 1 else "/next <n> runs one"
+    width = max(len(s.label) for s in items)
+    rows = [f"  {GOLD}{glyph('arrow')} Suggested next{RST}  {DIM}({run}){RST}"]
+    for i, s in enumerate(items, 1):
+        rows.append(f"    {DIM}{i}.{RST} {WHITE}{s.label.ljust(width)}{RST}  {DIM}{s.reason}{RST}")
+    return safe_text("\n".join(rows))
 
 
 # ─── /next ─────────────────────────────────────────────────────────────────

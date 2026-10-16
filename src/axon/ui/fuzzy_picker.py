@@ -89,8 +89,9 @@ def rank_files(query: str, files: list[str], limit: int = 50) -> list[str]:
     return [f for _, f in scored[:limit]]
 
 
-def run_fuzzy_file_finder(workspace: Path) -> str | None:
-    """Interactive fuzzy finder. Returns the selected workspace-relative path, or None."""
+def run_fuzzy_file_finder(workspace: Path, query: str = "") -> str | None:
+    """Interactive fuzzy finder, optionally pre-filtered with `query`. Returns the selected
+    workspace-relative path, or None (non-interactive: the best match for `query`)."""
     files = list_workspace_files(Path(workspace))
     if not files:
         return None
@@ -104,5 +105,8 @@ def run_fuzzy_file_finder(workspace: Path) -> str | None:
 
     sel = Selector(title="Find file", subtitle=f"{len(files)} files", filterable=True, filter_fn=filter_fn,
                    placeholder="type to fuzzy-search files", footer="↑↓ move · enter insert @path · esc cancel")
+    if query:
+        sel.query = query
+        sel.refresh_items()
     chosen = sel.run()
     return chosen.value if isinstance(chosen, SelectItem) else None

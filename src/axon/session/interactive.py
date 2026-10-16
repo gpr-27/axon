@@ -4,6 +4,8 @@ rendering of a restored transcript.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import datetime
 import re
 import sys
@@ -11,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from axon.session.store import SessionStore
 from axon.ui.picker import pick
-from axon.ui.theme import BOLD, DARK_SLATE, DIM, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE, term_width
+from axon.ui.theme import BOLD, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE, term_width
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
@@ -21,15 +23,27 @@ def _fmt_ts(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
+def _project_name(store: SessionStore) -> str:
+    try:
+        from axon.session.layout import project_name
+        return project_name(store.workspace)
+    except Exception:
+        return store.workspace.name or str(store.workspace)
+
+
 def handle_sessions_list(store: SessionStore) -> None:
     recent = store.list_recent(limit=None)
+    trash = store.list_trash() if hasattr(store, "list_trash") else []
     if not recent:
-        print(f"\n  {SLATE}No saved sessions for this workspace (store: {store.session_dir}).{RST}\n")
+        print(f"\n  {SLATE}No saved sessions for project {_project_name(store)} (store: {store.session_dir}).{RST}")
+        if trash:
+            print(f"  {SLATE}{len(trash)} deleted session(s) in the trash: /restore lists them.{RST}")
+        print()
         return
 
     from axon.ui.markdown import format_markdown
     table_lines = [
-        "### Saved Sessions",
+        f"### Saved Sessions · project {_project_name(store).replace('|', '/')}",
         "",
         "| Session | Updated | Title | Msgs | Tokens | Cost | |",
         "|---|---|---|---|---|---|---|",
@@ -53,8 +67,11 @@ def handle_sessions_list(store: SessionStore) -> None:
         "",
         f"**Total:** `${total_spend:.4f}` across `{len(recent)}` sessions (`{total_tokens:,}` tokens)",
         "",
-        "> `/resume <id>` to switch · `/sessions delete <id>` to remove · `←` opens the switcher",
+        "> `/resume <id>` to switch · `/sessions delete <id>` moves to the trash · `/restore` brings it back"
+        " · `←` opens the switcher",
     ]
+    if trash:
+        table_lines.append(f"> {len(trash)} deleted session(s) in the trash (`/restore` to list)")
     print(format_markdown("\n".join(table_lines)))
 
 
@@ -77,7 +94,8 @@ def handle_session_delete(store: SessionStore, session_id: str = "") -> None:
     clean_arg = session_id.strip()
     if clean_arg in ("--all", "-a", "all", "clear"):
         count = store.delete_all_sessions()
-        print(f"\n  {MINT}✓ Deleted {count} session(s) for this workspace.{RST}\n")
+        print(f"\n  {MINT}✓ Moved {count} session(s) of this workspace to the trash.{RST} "
+              f"{SLATE}(/restore <id> brings one back){RST}\n")
         return
 
     ids = [m.session_id for m in recent]
@@ -102,17 +120,18 @@ def handle_session_delete(store: SessionStore, session_id: str = "") -> None:
         chosen_id = chosen.split()[0]
 
     if store.delete_session(chosen_id):
-        print(f"\n  {MINT}✓ Deleted session {BOLD}{chosen_id}{RST}\n")
+        print(f"\n  {MINT}✓ Moved session {BOLD}{chosen_id}{RST}{MINT} to the trash{RST} "
+              f"{SLATE}(/restore {chosen_id} brings it back){RST}\n")
     else:
         print(f"\n  {ROSE}✗ Failed to delete session {chosen_id}{RST}\n")
 
 
-def render_restored_conversation(conversation: Any, session_id: str, ledger: Any = None) -> None:
-    """Render a restored transcript with tool badges and its recorded token/cost usage."""
-    from axon.ui.markdown import format_markdown
+def render_restored_conversation(conversation: Any, session_id: str, ledger: Any = None, path: Any = None) -> None:
+    """Render a restored session like the live timeline, from its transcript file when available
+    (every turn complete: thinking, tool calls and outputs, timings, cost), else from the messages."""
 
     msgs = getattr(conversation, "messages", [])
-    if not msgs:
+    if not msgs and not path:
         print(f"\n  {SLATE}(Restored session is empty){RST}\n")
         return
 
@@ -127,46 +146,21 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
     print(f"\n  {DARK_SLATE}╭── {TEAL}Restored Chat Session:{RST} {BOLD}{WHITE}{session_id}{RST} "
           f"{SLATE}({len(msgs)} messages{hdr_metrics}){DARK_SLATE} {'─' * fill}╮{RST}\n")
 
-    for m in msgs:
-        role = m.get("role")
-        content = m.get("content")
-        if role == "user":
-            if isinstance(content, str):
-                try:
-                    from axon.ui.input import format_user_prompt_banner
-                    sys.stdout.write(f"{format_user_prompt_banner(content.strip(), max_w=width)}\n\n")
-                except Exception:
-                    print(f"  {TEAL}›{RST} {content.strip()}\n")
-            elif isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                        lines = str(blk.get("content", "")).strip().splitlines()
-                        icon = f"{ROSE}✗" if blk.get("is_error") else f"{MINT}✓"
-                        print(f"    {icon} {SLATE}{(lines[0][:80] if lines else 'Completed')}{RST}")
-                        if len(lines) > 1:
-                            print(f"      {DIM}... (+{len(lines) - 1} lines of output){RST}")
-                    elif isinstance(blk, dict) and blk.get("type") == "text":
-                        print(f"  {TEAL}›{RST} {blk.get('text', '')}")
-                print()
-        elif role == "tool":
-            lines = str(content or "").strip().splitlines()
-            print(f"    {MINT}✓ {SLATE}{(lines[0][:80] if lines else 'Completed')}{RST}")
-        elif role == "assistant":
-            blocks = content if isinstance(content, list) else []
-            for tc in m.get("tool_calls") or []:
-                fn = (tc or {}).get("function", {}) if isinstance(tc, dict) else {}
-                print(f"  {MINT}⚡ Tool:{RST} {GOLD}{BOLD}{fn.get('name', 'tool')}{RST}")
-            for blk in blocks:
-                if not isinstance(blk, dict):
-                    continue
-                if blk.get("type") == "tool_use":
-                    inp = blk.get("input", {}) or {}
-                    arg = inp.get("command") or inp.get("path") or inp.get("pattern") or inp.get("query") or "" if isinstance(inp, dict) else ""
-                    print(f"  {MINT}⚡ Tool:{RST} {GOLD}{BOLD}{blk.get('name', 'tool')}{RST} {WHITE}{arg}{RST}")
-                elif blk.get("type") == "text" and str(blk.get("text", "")).strip():
-                    print(f"{format_markdown(str(blk['text']).strip(), max_width=width)}\n")
-            if isinstance(content, str) and content.strip():
-                print(f"{format_markdown(content.strip(), max_width=width)}\n")
+    rows: list[str] = []
+    if path:
+        try:
+            from axon.ui.history_view import format_session_history
+            rows = format_session_history(Path(path), width=width - 2, tag="(restored)")
+        except Exception:
+            rows = []
+    if not rows:
+        from axon.ui.render import format_conversation_replay
+        try:
+            rows = format_conversation_replay(msgs, width=width - 2)
+        except Exception:
+            rows = [f"  {SLATE}(could not draw the restored conversation){RST}"]
+    sys.stdout.write("\n".join(rows) + "\n")
+    print(f"  {SLATE}/transcript opens it with every tool output expandable{RST}\n")
 
     if ledger is not None:
         reason_tok = int(getattr(ledger, "total_reasoning_tokens", 0) or 0)
@@ -176,7 +170,7 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
     print(f"  {DARK_SLATE}╰──{'─' * max(2, width - 4)}╯{RST}\n")
 
 
-def pick_session(recent: list[Any], active_id: str = "") -> str | None:
+def pick_session(recent: list[Any], active_id: str = "", project: str = "") -> str | None:
     """Searchable session picker (type to filter by title, id, tag or model). Non-TTY: numbered menu."""
     from axon import platform as plat
     if not plat.is_interactive():
@@ -191,7 +185,8 @@ def pick_session(recent: list[Any], active_id: str = "") -> str | None:
         hint = f"{_fmt_ts(m.created_at)} · {m.message_count} msgs · ${float(getattr(m, 'total_cost', 0.0)):.4f}"
         items.append(SelectItem(label=(m.first_prompt or m.session_id)[:70], value=m.session_id, hint=hint, badge=star,
                                 search=f"{m.session_id} {tags} {m.model}"))
-    chosen = Selector(items, title="Resume session", subtitle=f"{len(recent)} saved · type to search",
+    title = f"Resume session · {project}" if project else "Resume session"
+    chosen = Selector(items, title=title, subtitle=f"{len(recent)} saved · type to search",
                       filterable=True, placeholder="search title, id, #tag or model", max_visible=12).run()
     value = getattr(chosen, "value", None)
     return str(value) if value else None
@@ -216,13 +211,18 @@ def handle_resume(agent: Agent, session_id: str = "") -> None:
             print(f"\n  {ROSE}✗ Session not found: {arg}{RST}\n")
             return
     else:
-        chosen = pick_session(recent, store.active_session_id)
+        try:
+            chosen = pick_session(recent, store.active_session_id, project=_project_name(store))
+        except TypeError:  # a patched picker with the old signature
+            chosen = pick_session(recent, store.active_session_id)
 
     if not chosen:
         print(f"\n  {SLATE}(Session unchanged: {store.active_session_id}){RST}\n")
         return
     agent.conversation = store.load(chosen)
     agent.ledger = store.load_ledger(chosen, agent.settings.model)
+    from axon.session.store import restore_retry_state
+    restore_retry_state(agent, chosen)
     cp = getattr(agent, "checkpoints", None)
     if cp is not None and hasattr(cp, "set_session"):
         try:
@@ -234,7 +234,13 @@ def handle_resume(agent: Agent, session_id: str = "") -> None:
         sync_subagents_for_session(agent)
     except Exception:
         pass
-    render_restored_conversation(agent.conversation, chosen, ledger=agent.ledger)
+    try:
+        from axon.session import activity
+        activity.record("resume", {"session": chosen, "messages": len(agent.conversation.messages)}, agent=agent)
+    except Exception:
+        pass
+    from axon.ui.history_view import session_file
+    render_restored_conversation(agent.conversation, chosen, ledger=agent.ledger, path=session_file(agent, chosen))
 
 
 def handle_branch(agent: Agent, name: str = "") -> None:

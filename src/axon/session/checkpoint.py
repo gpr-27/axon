@@ -5,6 +5,11 @@ Contents are captured as raw bytes so binary files, CRLF line endings and
 non-UTF-8 encodings round-trip exactly. Each committed snapshot is one agent turn.
 When a session is bound (``set_session``), snapshots are also persisted under
 ``storage.checkpoints_dir(workspace, session_id)/<n>/`` so /rewind survives a resume.
+
+Rewinding never destroys data: before files are restored, their current contents are saved to
+``<session checkpoints>/rewound/<stamp>-current/`` and the undone snapshots are moved to
+``<session checkpoints>/rewound/<stamp>-<n>/`` (same manifest format, loadable with
+:meth:`CheckpointManager.load_archived`).
 """
 from __future__ import annotations
 
@@ -94,13 +99,91 @@ class CheckpointManager:
         except OSError:
             pass
 
-    def _forget(self, snap: Snapshot) -> None:
+    def _forget(self, snap: Snapshot, stamp: str = "") -> None:
+        """Move an undone snapshot to ``rewound/`` (kept, no longer offered by /rewind)."""
         if self._dir is None:
             return
         seq = getattr(snap, "_seq", None)
         if seq is None:
             seq = snap.turn_id
-        shutil.rmtree(self._dir / str(seq), ignore_errors=True)
+        src = self._dir / str(seq)
+        if not src.is_dir():
+            return
+        dest = self._dir / "rewound" / f"{stamp or time.strftime('%Y%m%d-%H%M%S')}-{seq}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            n = 2
+            while dest.exists():
+                dest = dest.with_name(f"{dest.name}-{n}")
+                n += 1
+            shutil.move(str(src), str(dest))
+        except OSError:
+            pass
+
+    def _archive_current(self, snaps: list[Snapshot], stamp: str) -> Path | None:
+        """Save the current bytes of every file a rewind is about to overwrite or delete."""
+        if self._dir is None or not snaps:
+            return None
+        paths: list[Path] = []
+        for sn in snaps:
+            for pth in sn.files:
+                if pth not in paths:
+                    paths.append(pth)
+        current: dict[Path, bytes | None] = {}
+        for pth in paths:
+            try:
+                current[pth] = pth.read_bytes() if pth.is_file() else None
+            except OSError:
+                current[pth] = None
+        snap = Snapshot(turn_id=-2, timestamp=time.time(), files=current, label="state before /rewind")
+        d = self._dir / "rewound" / f"{stamp}-current"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            entries = []
+            for i, (pth, data) in enumerate(snap.files.items()):
+                entries.append({"path": str(pth), "existed": data is not None})
+                if data is not None:
+                    (d / f"{i}.bin").write_bytes(data)
+            (d / "manifest.json").write_text(json.dumps({
+                "turn_id": snap.turn_id, "timestamp": snap.timestamp, "label": snap.label,
+                "files": entries, "skipped": []}, indent=1), encoding="utf-8")
+            return d
+        except OSError:
+            return None
+
+    def load_archived(self) -> list[tuple[str, Snapshot]]:
+        """Archived snapshots under ``rewound/`` (name, snapshot), oldest first."""
+        if self._dir is None:
+            return []
+        root = self._dir / "rewound"
+        out: list[tuple[str, Snapshot]] = []
+        try:
+            for d in sorted(x for x in root.iterdir() if x.is_dir()):
+                snap = self._load_snapshot(d)
+                if snap is not None:
+                    out.append((d.name, snap))
+        except OSError:
+            return []
+        return out
+
+    def _undo(self, snaps: list[Snapshot]) -> list[str]:
+        """Restore ``snaps`` (newest first) after archiving the current file contents."""
+        if not snaps:
+            return []
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        archive = self._archive_current(snaps, stamp)
+        reverted: list[str] = []
+        for snap in snaps:
+            reverted.extend(self._restore(snap))
+            self._forget(snap, stamp)
+        try:
+            from axon.session import activity
+            activity.record("rewind_code", {"snapshots": len(snaps), "reverted": reverted[:200],
+                                            "archive": str(archive) if archive else ""},
+                            workspace=self.workspace, session_id=self.session_id or "")
+        except Exception:
+            pass
+        return reverted
 
     def clear(self) -> None:
         self.history.clear()
@@ -184,14 +267,12 @@ class CheckpointManager:
         """Undo the last ``steps`` turns (uncommitted edits count as the newest turn)."""
         if self._pending_files or self._pending_skipped:
             self.commit_turn_snapshot(label="(current turn)")
-        reverted: list[str] = []
+        snaps: list[Snapshot] = []
         for _ in range(max(1, steps)):
             if not self.history:
                 break
-            snap = self.history.pop()
-            reverted.extend(self._restore(snap))
-            self._forget(snap)
-        return reverted
+            snaps.append(self.history.pop())
+        return self._undo(snaps)
 
     def snapshots_since(self, ts: float) -> list[Snapshot]:
         """Committed snapshots taken at or after ``ts`` (plus pending edits), oldest first."""
@@ -201,9 +282,7 @@ class CheckpointManager:
         """Undo every snapshot taken at or after ``ts`` (newest first), including uncommitted edits."""
         if self._pending_files or self._pending_skipped:
             self.commit_turn_snapshot(label="(current turn)")
-        reverted: list[str] = []
+        snaps: list[Snapshot] = []
         while self.history and self.history[-1].timestamp >= ts:
-            snap = self.history.pop()
-            reverted.extend(self._restore(snap))
-            self._forget(snap)
-        return reverted
+            snaps.append(self.history.pop())
+        return self._undo(snaps)

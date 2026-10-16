@@ -310,7 +310,7 @@ def render_help(agent: Any, topic: str = "") -> None:
     collisions = shadowed_names(agent)
     if collisions:
         print(f"\n  {GOLD}!{RST} {SLATE}Shadowed by built-ins (use the prefixed form): {', '.join(collisions)}{RST}")
-    print(f"\n  {DARK_SLATE}Shortcuts: {WHITE}?{DARK_SLATE} help · {WHITE}#text{DARK_SLATE} quick memory · {WHITE}!cmd{DARK_SLATE} shell · {WHITE}@file{DARK_SLATE} attach · {WHITE}Ctrl+D{DARK_SLATE} exit{RST}\n")
+    print(f"\n  {DARK_SLATE}Shortcuts: {WHITE}?{DARK_SLATE} help · {WHITE}#text{DARK_SLATE} quick memory · {WHITE}!cmd{DARK_SLATE} shell · {WHITE}@file{DARK_SLATE} attach · {WHITE}Ctrl+F{DARK_SLATE} transcript · {WHITE}Ctrl+D{DARK_SLATE} exit{RST}\n")
 
 
 def shadowed_names(agent: Any) -> list[str]:
@@ -342,18 +342,48 @@ def _looks_like_path(token: str) -> bool:
         return False
 
 
+def _journal_command(agent: Any, label: str, arg: str, res: CommandResult, started: float, status: str = "") -> None:
+    """Every slash command and its outcome goes to the activity journal (axon.session.activity)."""
+    try:
+        import time as _time
+        from axon.session import activity
+        kind = "memory" if label == "# memory" else "command"
+        if label == "/keys":  # never journal a key typed as an argument
+            from axon.providers.keystore import redact_keys_arg
+            arg = redact_keys_arg(arg)
+        data: dict[str, Any] = {"name": label, "arg": arg, "success": bool(res.success),
+                                "duration_s": round(_time.time() - started, 3)}
+        if kind == "memory":
+            data = {"scope": "project", "text": arg, "success": bool(res.success)}
+        if res.message:
+            data["message"] = str(res.message)[:2000]
+        if res.should_exit:
+            data["exit"] = True
+        if status:
+            data["status"] = status
+        activity.record(kind, data, agent=agent)
+    except Exception:
+        pass
+
+
 def _run_handler(fn: Handler, agent: Any, arg: str, label: str) -> CommandResult:
+    import time as _time
+    started = _time.time()
     try:
         res = fn(agent, arg)
     except KeyboardInterrupt:
         print(f"\n  {SLATE}⏹ {label} cancelled.{RST}\n")
-        return CommandResult(handled=True)
+        out = CommandResult(handled=True)
+        _journal_command(agent, label, arg, out, started, "cancelled")
+        return out
     except Exception as e:  # never let a command crash the REPL
         print(f"\n  {ROSE}✗ {label} failed:{RST} {type(e).__name__}: {e}\n")
-        return CommandResult(handled=True, message=str(e), success=False)
-    if isinstance(res, CommandResult):
-        return res
-    return CommandResult(handled=True, success=res is not False)  # a handler may return False on failure
+        out = CommandResult(handled=True, message=f"{type(e).__name__}: {e}", success=False)
+        _journal_command(agent, label, arg, out, started)
+        return out
+    out = res if isinstance(res, CommandResult) else CommandResult(handled=True, success=res is not False)
+    _journal_command(agent, label, arg, out, started)
+    return out  # a handler may return False on failure
 
 
 def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
@@ -384,6 +414,9 @@ def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
     name = first[1:]
     cmd = resolve_builtin(name)
     if cmd is not None:
+        if arg in ("--help", "-h") and cmd.name != "help":
+            # every built-in answers `/cmd --help` with its description, usage and aliases
+            return _run_handler(lambda a, _t: render_help(a, cmd.name), agent, "", f"/{cmd.name}")
         return _run_handler(cmd.handler, agent, arg, f"/{cmd.name}")
 
     if not name or _looks_like_path(first):
@@ -413,10 +446,57 @@ def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
                 from axon.commands.agent_cmds import run_mcp_prompt
                 return _run_handler(lambda a, t: run_mcp_prompt(a, p, t), agent, arg, f"/{name}")
 
-    suggestion = _suggest(lname, agent)
-    tip = f" Did you mean {WHITE}/{suggestion}{ROSE}?" if suggestion else ""
-    print(f"\n  {ROSE}Unknown command /{name}.{tip}{RST} {SLATE}Type /help for the list.{RST}\n")
-    return CommandResult(handled=True)
+    matches = suggest_commands(lname, agent)
+    if matches:
+        width = max(len(n) for n, _ in matches) + 1
+        rows = "".join(f"    {WHITE}/{n:<{width}}{RST} {SLATE}{d}{RST}\n" for n, d in matches)
+        print(f"\n  {ROSE}Unknown command /{name}.{RST} {SLATE}Did you mean:{RST}\n{rows}"
+              f"  {SLATE}/help lists every command · /help <word> searches them{RST}\n")
+    else:
+        print(f"\n  {ROSE}Unknown command /{name}.{RST} {SLATE}/help lists every command · /help <word> searches them.{RST}\n")
+    unknown = CommandResult(handled=True)
+    import time as _time
+    _journal_command(agent, f"/{name}", arg, unknown, _time.time(), "unknown")
+    return unknown
+
+
+def suggest_commands(name: str, agent: Any = None, limit: int = 3) -> list[tuple[str, str]]:
+    """Commands the user probably meant: close spellings first (typos), then commands whose name or
+    description mentions the word ("/analytics" → /stats, /report, /insights). [(name, description)]."""
+    import difflib
+    try:
+        entries = [(n.lstrip("/"), d or "") for n, d in list_command_names(_workspace(agent) if agent is not None else None, agent)]
+    except Exception:
+        entries = [(k, c.description) for k, c in COMMANDS.items()]
+    desc = {}
+    for n, d in entries:
+        desc.setdefault(n.lower(), d)
+    out: list[str] = []
+    best = _suggest(name, agent)
+    if best:
+        out.append(best)
+    for m in difflib.get_close_matches(name, list(desc), n=limit, cutoff=0.6):
+        out.append(_FEATURE_ALIASES.get(m) or ALIASES.get(m, m))
+    stem = name.lower().rstrip("s")
+    stems = {stem, stem[:-2] if stem.endswith("ic") else stem, stem.removesuffix("ing")}
+    if len(stem) >= 3:
+        scored = []
+        for n, d in desc.items():
+            text = f"{n} {d}".lower()
+            hits = sum(1 for s in stems if len(s) >= 3 and s in text)
+            if hits:
+                scored.append((-hits, len(n), n))
+        out += [n for _, _, n in sorted(scored)]
+    seen: list[str] = []
+    for n in out:
+        if n and n not in seen and n != name:
+            seen.append(n)
+    return [(n, _one_line_desc(desc.get(n, ""))) for n in seen[:limit]]
+
+
+def _one_line_desc(text: str, limit: int = 70) -> str:
+    t = " ".join(str(text).split())
+    return t if len(t) <= limit else t[: limit - 1] + "…"
 
 
 def _suggest(name: str, agent: Any) -> str | None:

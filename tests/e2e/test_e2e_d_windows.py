@@ -95,7 +95,7 @@ def test_legacy_cp1252_console_uses_ascii_glyphs(axon_env: AxonEnv, tmp_path: Pa
     assert "UnicodeEncodeError" not in err and TRACEBACK not in err, err
     assert "+ Done" in out and "✓" not in out and "⎿" not in out
     if level != "compact":
-        assert "| # Step 1" in out and "+- Response" in out
+        assert "| # Step 1" in out and "| | " in out          # response rows: rail + ASCII accent bar
 
 
 def test_legacy_cp1252_console_replaces_unencodable_answer_chars(axon_env: AxonEnv, tmp_path: Path) -> None:

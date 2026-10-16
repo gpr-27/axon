@@ -68,7 +68,7 @@ class StatusBar:
             color = MINT
 
         bar = f"{color}{'█' * filled}{SLATE}{'░' * empty}{RST}"
-        pct = int(ratio * 100)
+        pct = f"{ratio * 100:.0f}"   # same rounding as the "ctx N%" of the status line beside it
         return f"{bar} {SLATE}({pct}%){RST}"
 
     @classmethod
@@ -139,8 +139,8 @@ class StatusBar:
 
         cls.record_tokens(active_context_tok)
         try:
-            from axon.providers.registry import get_context_window
-            cap = get_context_window(agent.settings.model)
+            from axon.providers.registry import effective_context_window
+            cap = effective_context_window(agent.settings.model, agent.settings)
         except (ImportError, AttributeError):
             cap = 200_000
         sub_count = len(agent.subagents.all_tasks()) if hasattr(agent, "subagents") and agent.subagents else 0

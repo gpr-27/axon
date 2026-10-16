@@ -372,11 +372,11 @@ def test_export_infers_format_from_extension(axon_env: AxonEnv) -> None:
 
 @parallel
 def test_export_default_path_under_axon_home(axon_env: AxonEnv) -> None:
-    """`/export md` with no path writes AXON_HOME/exports/<sid>.md."""
+    """`/export md` with no path writes AXON_HOME/projects/<key>/exports/<sid>.md."""
     axon_env.llm.enqueue([{"text": "A"}])
     sid = run_json(axon_env, "q")["session_id"]
     no_crash(axon_env.run(["-p", "--continue", "/export md"]))
-    assert (axon_env.axon_home / "exports" / f"{sid}.md").is_file()
+    assert list((axon_env.axon_home / "projects").glob(f"*/exports/{sid}.md"))
 
 
 @parallel

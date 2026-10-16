@@ -1,4 +1,4 @@
-"""Model & mode commands: /model /provider /effort /mode /plan /thinking /keys /trace."""
+"""Model & mode commands: /model /provider /effort /mode /plan /thinking /trace (/keys lives in keys_cmds)."""
 from __future__ import annotations
 
 import os
@@ -8,11 +8,11 @@ from typing import Any
 from pydantic import SecretStr
 
 from axon.commands.common import (
-    ask_text, err, header, hint, info, is_cancel_word, is_tty, kv, lookup_key, ok, save_env_key,
+    err, header, hint, info, is_cancel_word, is_tty, kv, lookup_key, ok, save_env_key,
     update_global_config, update_settings, usage, warn,
 )
 from axon.commands.registry import CommandResult, command
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE
+from axon.ui.theme import BOLD, GOLD, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE
 
 CAT = "Model & Modes"
 _SMALL_HINTS = ("0.5b", "1.5b", "1b", "2b", "3b", "3.8b", "7b", "8b", "mini", "flash", "haiku", "lite", "nano")
@@ -85,7 +85,8 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
             var = preset.env_var or "AXON_API_KEY"
             k = _key_for_preset(preset)
             if not k and is_tty():
-                entered = ask_text(f"API key for {preset.name} ({var}):")
+                from axon.commands.keys_cmds import ask_secret
+                entered = ask_secret(f"API key for {preset.name} ({var}, input hidden, Enter skips):")
                 if not is_cancel_word(entered) and _verify_and_save(preset, var, entered):
                     k = entered
             if not k:
@@ -305,55 +306,4 @@ def handle_trace(agent: Any, arg: str) -> CommandResult:
     if "trace_level" in type(agent.settings).model_fields:
         update_settings(agent, trace_level=a)
     ok(f"Trace level: {BOLD}{a}{RST}")
-    return CommandResult(handled=True)
-
-
-@command("keys", category=CAT, description="Show or set provider API keys (verified before saving)",
-         aliases=("key", "apikey"), usage="/keys                     list keys\n/keys <provider> [key]    set a key (prompts if omitted)")
-def handle_keys(agent: Any, arg: str) -> CommandResult:
-    from axon.providers.catalog import PROVIDER_PRESETS
-    a = arg.strip()
-    if a:
-        prov, _, key = a.partition(" ")
-        prov, key = prov.lower(), key.strip()
-        preset = next((p for p in PROVIDER_PRESETS if prov == p.id.lower()), None) or \
-            next((p for p in PROVIDER_PRESETS if prov in p.id.lower() or prov in p.name.lower()), None)
-        if preset is None:
-            err(f"Unknown provider '{prov}'. Known: {', '.join(p.id for p in PROVIDER_PRESETS)}")
-            return CommandResult(handled=True)
-        var = preset.env_var or "AXON_API_KEY"
-        if not key:
-            if not is_tty():
-                usage(f"/keys {preset.id} <api-key>")
-                return CommandResult(handled=True)
-            key = ask_text(f"New API key for {preset.name} ({var}):")
-        if is_cancel_word(key):
-            info("Cancelled.")
-            return CommandResult(handled=True)
-        print()
-        _verify_and_save(preset, var, key, agent=agent)
-        print()
-        return CommandResult(handled=True)
-
-    header("API keys", "process env and ~/.axon/.env")
-    from axon.commands.common import read_env_file
-    dot = read_env_file()
-    seen: set[str] = set()
-    for p in PROVIDER_PRESETS:
-        var = p.env_var or ("AXON_API_KEY" if p.requires_key else "")
-        if not var or var in seen:
-            continue
-        seen.add(var)
-        val = os.environ.get(var) or dot.get(var, "")
-        src = "env" if os.environ.get(var) else ("~/.axon/.env" if var in dot else "")
-        if val and val not in ("local",) and not val.startswith("/"):
-            masked = f"{val[:4]}…{val[-4:]}" if len(val) > 10 else "•••"
-            print(f"    {MINT}●{RST} {WHITE}{var:<22}{RST} {CYAN}{masked:<14}{RST} {SLATE}{p.name} · {src}{RST}")
-        else:
-            print(f"    {DARK_SLATE}○ {var:<22} {'not set':<14} {p.name}{RST}")
-    local = [p.name for p in PROVIDER_PRESETS if not p.requires_key]
-    if local:
-        print(f"\n    {SLATE}No key needed: {', '.join(local)}{RST}")
-    hint("    /keys <provider> <key> to set one")
-    print()
     return CommandResult(handled=True)

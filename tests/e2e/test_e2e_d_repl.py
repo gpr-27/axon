@@ -129,41 +129,41 @@ def timeline_out(tmp_path_factory: pytest.TempPathFactory) -> str:
 def test_timeline_turn_header(timeline_out: str) -> None:
     """The turn opens with `┌ Turn 1 · "<prompt>"` and the model · mode on the right."""
     out = timeline_out
-    assert re.search(r'┌ Turn 1 · "run the tool"\s+gpt-4o · bypass', out), out[-2500:]
+    assert re.search(r'┌ Turn 1 · "run the tool"\s+gpt-4o via [^·\n]+ · bypass', out), out[-2500:]   # model + provider
 
 
 def test_timeline_step_rows(timeline_out: str) -> None:
-    """Each LLM call is a numbered `◆ Step N  LLM call` row with model and message count."""
+    """Each LLM call is a numbered `◆ Step N  <model> · reads N messages` row."""
     out = timeline_out
-    assert "◆ Step 1  LLM call · gpt-4o · 1 message" in out
-    assert "◆ Step 2  LLM call · gpt-4o · 3 messages" in out
+    assert re.search(r"◆ Step 1  LLM call · gpt-4o(?: \([^)\n]+\))? · reads 1 message", out), out[-2500:]
+    assert re.search(r"◆ Step 2  LLM call · gpt-4o(?: \([^)\n]+\))? · reads 3 messages", out), out[-2500:]
 
 
 def test_timeline_tool_row_and_result_summary(timeline_out: str) -> None:
     """A tool call renders as `● Bash  <command>` followed by a `⎿` summary with the output."""
     out = timeline_out
     assert "● Bash  echo hi-from-tool" in out
-    assert re.search(r"⎿\s+hi-from-tool · sent \d+ B", out), out[-2500:]
-    assert "auto-allowed: Bypass mode active." in out
+    assert re.search(r"⎿\s+hi-from-tool · [\d.]+s", out), out[-2500:]
+    assert "auto-allowed" not in out           # routine bypass-mode approvals are hidden at normal level
 
 
 def test_timeline_response_text_rendered_as_markdown(timeline_out: str) -> None:
-    """The streamed answer is shown under a Response row with markdown emphasis applied."""
+    """The streamed answer sits inside its step behind an accent bar, with markdown emphasis applied."""
     out = timeline_out
-    assert "├─ Response · step 2" in out
+    assert "▎ FINAL" in out
     assert "FINAL bold ANSWER" in out and "**bold**" not in out
 
 
 def test_timeline_done_footer_has_tokens_and_cost(timeline_out: str) -> None:
     """The footer `└ ✓ Done` lists LLM calls, tool calls, tokens in/out and a dollar cost."""
     out = timeline_out
-    assert re.search(r"└ ✓ Done · [\d.]+s · 2 LLM calls · 1 tool call · [\d.]+k in · \d+ out · \$\d+\.\d{4}", out), out[-1500:]
+    assert re.search(r"└ ✓ Done in [\d.]+s · 2 LLM calls · 1 tool call · [\d.]+k in · \d+ out · \$\d+\.\d{4}", out), out[-1500:]
 
 
 def test_timeline_feedback_row_between_steps(timeline_out: str) -> None:
-    """Step 2 explains what was fed back to the model from step 1."""
+    """Step 2 says which tool results from step 1 it includes."""
     out = timeline_out
-    assert "→ fed back 1 tool result from step 1" in out
+    assert "→ includes 1 tool result from step 1" in out
 
 
 # ─── trace levels via /trace ───────────────────────────────────────────────
@@ -172,7 +172,7 @@ TRACE_MARKERS = {
     "compact": (["● Bash(echo hi-from-tool)", "✓ Done"], ["┌ Turn", "◆ Step", "request: system", "LLMCallStart"]),
     "normal": (["┌ Turn", "◆ Step 1", "● Bash  echo hi-from-tool", "└ ✓ Done"],
                ["request: system", '"command": "echo hi-from-tool"', "LLMCallStart", "usage: input="]),
-    "detailed": (["┌ Turn", "request: system", '"command": "echo hi-from-tool"', "observation #1"],
+    "detailed": (["┌ Turn", "request: system", '"command": "echo hi-from-tool"', "result #1"],
                  ["LLMCallStart", "usage: input=", "timing: id="]),
     "debug": (["┌ Turn", "request: system", "LLMCallStart", "usage: input=", "timing: id="], []),
 }
@@ -218,7 +218,7 @@ def test_ctrl_o_cycles_through_all_trace_levels(idle) -> None:
         for lv in ("detailed", "debug", "compact", "normal"):
             m = s.mark()
             s.send(CTRL_O)
-            s.expect(f"trace level: {lv}", timeout=8, since=m)
+            s.expect(f"Trace level {lv}:", timeout=8, since=m)
             s.expect(f"trace {lv}", timeout=8, since=m)
             s.drain(0.3)
 
@@ -229,7 +229,7 @@ def test_ctrl_o_detailed_applies_to_next_turn(axon_env: AxonEnv) -> None:
     with open_repl(axon_env, ("--mode", "bypass")) as s:
         m = s.mark()
         s.send(CTRL_O)
-        s.expect("trace level: detailed", since=m)
+        s.expect("Trace level detailed:", since=m)
         s.ready(since=m)
         out = s.turn("go")
         assert '"command": "echo hi-from-tool"' in out
@@ -284,7 +284,7 @@ def test_shift_tab_mode_applies_to_next_turn(axon_env: AxonEnv) -> None:
             s.expect(re.escape(label), since=m)
         s.drain(0.3)
         out = s.turn("make a plan")
-        assert re.search(r'Turn 1 · "make a plan"\s+gpt-4o · plan', out), out[-1500:]
+        assert re.search(r'Turn 1 · "make a plan"\s+gpt-4o(?: via [^·\n]+)? · plan', out), out[-1500:]
 
 
 def test_plan_mode_blocks_write_interactively(axon_env: AxonEnv) -> None:
@@ -621,19 +621,23 @@ def test_at_completion_lists_directories(idle) -> None:
 
 # ─── ! shell mode / # memory ───────────────────────────────────────────────
 
-def test_bang_shell_mode_runs_command(idle) -> None:
-    """`!echo hi` runs in the shell, prints the output and does not call the model."""
-    with _shared(idle) as s:
-        out = s.command("!echo hi-shell-mode", r"output added to context")
+def test_bang_shell_mode_runs_command_and_model_responds(axon_env: AxonEnv) -> None:
+    """`!echo hi` runs in the shell, prints the output, then the model responds to that output."""
+    axon_env.llm.enqueue([{"text": "It printed hi-shell-mode."}])
+    with open_repl(axon_env) as s:
+        out = s.command("!echo hi-shell-mode", r"✓ Done")
         assert "Shell: echo hi-shell-mode" in out
         assert re.search(r"^hi-shell-mode$", out, re.M), out[-800:]
-    assert idle.env.llm.completion_requests() == []
+        assert "It printed hi-shell-mode." in out
+        assert "<bash-input>" not in out                 # the turn header shows the instruction, not raw context
+    req = axon_env.llm.completion_requests()[0].all_text()
+    assert "hi-shell-mode" in req and "Respond to its output" in req
 
 
 def test_bang_shell_output_reaches_next_prompt(axon_env: AxonEnv) -> None:
-    """Output of a `!` command is added to the context of the next model request."""
+    """With respond_to_bash_commands off, `!` output is added to the context of the next model request."""
     axon_env.llm.enqueue([{"text": "seen"}])
-    with open_repl(axon_env) as s:
+    with open_repl(axon_env, extra_env={"AXON_RESPOND_TO_BASH_COMMANDS": "0"}) as s:
         s.command("!echo SHELL-CTX-777", r"output added to context")
         s.ready()
         s.turn("what did it print?")
@@ -1091,6 +1095,27 @@ def test_resize_during_running_turn(axon_env: AxonEnv) -> None:
         os.killpg(s.proc.pid, signal.SIGWINCH)
         s.expect("✓ Done", timeout=15, since=m)
         assert "part two" in s.screen[m:] and TRACEBACK not in s.screen
+
+
+def test_resize_at_prompt_redraws_conversation_at_new_width_and_keeps_draft(axon_env: AxonEnv) -> None:
+    """Changing the window width at the prompt clears the re-wrapped output and redraws the conversation
+    (prompts, tools, answers) at the new width; the half-typed draft survives."""
+    import fcntl
+    import termios
+    axon_env.llm.enqueue(*tool_turn())
+    with open_repl(axon_env, ("--mode", "bypass")) as s:
+        s.turn("run the tool")
+        s.ready()
+        s.type("half typed")
+        m = s.mark()
+        fcntl.ioctl(s._master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 64, 0, 0))
+        os.killpg(s.proc.pid, signal.SIGWINCH)
+        s.expect(r"Redrawn for the new window width \(64 columns\)", timeout=10, since=m)
+        s.expect("❯ half typed", timeout=8, since=m)
+        out = s.screen[m:]
+        assert "● Bash  echo hi-from-tool" in out          # the conversation is drawn again
+        assert "\x1b[3J" in s._raw.decode("utf-8", "replace")  # scrollback with the old wrapping cleared
+        assert TRACEBACK not in s.screen and s.proc.poll() is None
 
 
 def test_ctrl_l_redraws(idle) -> None:

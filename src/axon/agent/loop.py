@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
+import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -182,7 +184,10 @@ def tool_rationales(turn: AssistantTurn, registry: Any = None, previous_tools: l
     return out
 
 _log = logging.getLogger("axon.agent")
+# Provider-call events go to a child logger so `--debug api` selects them (`--debug agent` still does too).
+_api_log = logging.getLogger("axon.agent.api")
 _DEBUG_SKIP = ("TextDelta", "ThinkingDelta", "ToolArgsDelta")
+_API_EVENTS = ("LLMCallStart", "LLMRequestInfo", "LLMCallEnd", "CacheStatus", "ProviderRetry", "RetryEvent")
 
 
 def _debug_event(agent_name: str, event: Any) -> None:
@@ -195,7 +200,7 @@ def _debug_event(agent_name: str, event: Any) -> None:
         text = json.dumps(data, default=str, ensure_ascii=False)
     except Exception:
         text = repr(event)
-    _log.debug("[%s] %s %s", agent_name, name, text[:2000])
+    (_api_log if name in _API_EVENTS else _log).debug("[%s] %s %s", agent_name, name, text[:2000])
 
 
 _PROVIDER_LOCKS: dict[int, threading.RLock] = {}
@@ -358,6 +363,8 @@ class Agent:
         self._approval_lock = threading.Lock()
         self._partial_results: list[ToolResultBlock | None] = []
         self._current_turn_prompt = ""
+        # Set when the last turn ended on a provider error: {"prompt": str, "resume": bool}. /retry uses it.
+        self.last_failed_turn: dict[str, Any] | None = None
         self._pending_summary: str | None = None
         self.last_compaction: str | None = None
         self.traces: list[TurnTrace] = []
@@ -446,12 +453,33 @@ class Agent:
                     pass
         return res
 
+    def journal(self, kind: str, data: Any = None, sync: bool = False) -> None:
+        """Append to the project's activity journal (axon.session.activity); never raises.
+        Subagents write to the main project's journal under their own session id."""
+        try:
+            from axon.session import activity
+            ws = None if self.is_subagent else self.settings.workspace
+            if self.is_subagent and isinstance(data, dict):
+                data = {**data, "agent": self.agent_name}
+            activity.record(kind, data, workspace=ws, sync=sync,
+                            session_id=str(getattr(self.session, "active_session_id", "") or ""))
+        except Exception:
+            pass
+
     def start_session(self, source: str = "startup") -> Any:
         """Fire SessionStart hooks once; their context is added to the system prompt."""
         self._session_started = True
         self._bind_checkpoints()
         if not self.is_subagent:
             self.record_mode()
+            try:
+                from axon.session import activity
+                activity.bind(self, workspace=self.settings.workspace)
+            except Exception:
+                pass
+            self.journal("session_start", {"source": source, "model": self.settings.model, "mode": self.settings.mode,
+                                           "workspace": str(self.settings.workspace), "cwd": os.getcwd(),
+                                           "transcript": str(getattr(self.session, "active_file", "") or "")})
         res = self._hook("SessionStart", {"source": source})
         if res is not None and getattr(res, "additional_context", ""):
             self._session_context = res.additional_context
@@ -484,21 +512,54 @@ class Agent:
 
     def set_mode(self, mode: str) -> None:
         """Switch the permission mode (settings + permission engine) and record it."""
+        previous = self.settings.mode
         self.settings = self.settings.model_copy(update={"mode": mode})
         try:
             self.permissions.settings = self.settings
         except Exception:
             pass
         self.record_mode(mode)
+        if previous != mode:
+            self.journal("mode", {"from": previous, "to": mode})
 
     def end_session(self, reason: str = "exit") -> Any:
         return self._hook("SessionEnd", {"reason": reason})
 
-    def notify(self, message: str, notification_type: str = "info") -> Any:
-        return self._hook("Notification", {"message": message, "notification_type": notification_type})
+    def display_model(self) -> str:
+        """The model actually called: an alias such as "opus" or "default" resolved to the real id the
+        provider receives (what the timeline, status line and cost should show)."""
+        model = str(self.settings.model or "")
+        wire = getattr(self.provider, "_wire_model", None)
+        if callable(wire):
+            try:
+                return str(wire(model) or model)
+            except Exception:
+                pass
+        try:
+            from axon.providers.catalog import is_model_alias, resolve_model_alias
+            if is_model_alias(model):
+                return resolve_model_alias(model)
+        except Exception:
+            pass
+        return model
+
+    def notify(self, message: str, notification_type: str = "info", desktop: bool = True) -> Any:
+        """Run the Notification hook and, for events that need you, send a desktop notification
+        (policy in axon.ui.notify: permission prompts, questions, failures, long turns)."""
+        res = self._hook("Notification", {"message": message, "notification_type": notification_type})
+        if desktop and not self.is_subagent:
+            try:
+                from axon.ui.notify import notify_event
+                notify_event(notification_type, message, settings=self.settings)
+            except Exception:
+                pass
+        return res
 
     def reset_for_new_session(self, session_id: str | None = None) -> str:
         """Completely refresh state for a fresh session."""
+        old_id = str(getattr(self.session, "active_session_id", "") or "")
+        self.journal("clear", {"old_session": old_id, "messages": len(self.conversation.messages),
+                               "transcript": str(getattr(self.session, "active_file", "") or "")}, sync=True)
         self.conversation = Conversation([])
         if getattr(self, "ledger", None) is not None:
             self.ledger.clear()
@@ -509,6 +570,7 @@ class Agent:
             if obj is not None and hasattr(obj, "clear"):
                 obj.clear()
         self._session_context = ""
+        self.last_failed_turn = None
         self._git_snapshot = None
         self._pending_context = []
         self._post_compact_context = ""
@@ -529,17 +591,28 @@ class Agent:
         """Record a user-run `!command` so the model sees it with the next prompt (CC bash mode).
         Returns the context block that was queued."""
         out = output or ""
+        full_path = ""
         if len(out) > SHELL_CONTEXT_CAP:
+            try:
+                from axon import storage
+                saved = storage.save_full_output(self.settings.workspace, str(getattr(self.session, "active_session_id", "")),
+                                                 f"shell-{int(time.time())}", out)
+                full_path = str(saved) if saved else ""
+            except Exception:
+                full_path = ""
             half = SHELL_CONTEXT_CAP // 2
-            out = f"{out[:half]}\n[... {len(out) - 2 * half:,} characters omitted ...]\n{out[-half:]}"
+            note = f"; full output: {full_path}" if full_path else ""
+            out = f"{out[:half]}\n[... {len(out) - 2 * half:,} characters omitted{note} ...]\n{out[-half:]}"
         code = "" if exit_code is None else f"\n<bash-exit-code>{exit_code}</bash-exit-code>"
         block = (f"<bash-input>{command}</bash-input>\n<bash-stdout>{out.rstrip()}</bash-stdout>{code}\n"
                  "(The user ran this command in the terminal; its output is shown for context.)")
         self._pending_context.append(block)
         try:
-            self.session.append("shell_command", {"command": command, "output": out, "exit_code": exit_code})
+            self.session.append("shell_command", {"command": command, "output": out, "exit_code": exit_code,
+                                                  **({"full_output": full_path} if full_path else {})})
         except Exception:
             pass
+        self._last_shell_full_output = full_path
         return block
 
     def take_pending_context(self) -> str:
@@ -580,6 +653,7 @@ class Agent:
         except Exception:
             pass
         self._hook("TaskCreated", {"task_id": rec.id, "task_type": "background_turn", "prompt": rec.prompt[:2000]})
+        self.journal("background", {"action": "start", "id": rec.id, "prompt": rec.prompt[:500]})
         self._bg_request.set()
         return rec
 
@@ -616,6 +690,8 @@ class Agent:
         self._active_bg = None
         self._hook("TaskCompleted", {"task_id": rec.id, "task_type": "background_turn", "status": rec.status,
                                      "last_assistant_message": str(getattr(result, "final_text", "") or "")[:4000]})
+        self.journal("background", {"action": "finish", "id": rec.id, "status": rec.status, "error": rec.error or "",
+                                    "elapsed_s": round(rec.ended_at - rec.started_at, 3)}, sync=True)
         self.notify(f"Background turn {rec.id} {rec.status}", "background_task")
 
     def run_turn_threaded(self, user_input: str, poll_s: float = 0.1) -> TurnResult | None:
@@ -949,6 +1025,8 @@ class Agent:
             model=model,
             summary=(summary or "")[:4000],
         ))
+        self.journal("compact", {"trigger": trigger, "messages_before": before, "messages_after": len(self.conversation.messages),
+                                 "tokens_before": tokens_before, "changed": changed, "cost_usd": round(float(cost or 0), 6)})
         if changed:
             self.last_compaction = trigger
             # Re-read instructions and git state from disk, and let SessionStart hooks re-inject context.
@@ -1019,11 +1097,37 @@ class Agent:
         self.traces.append(trace)
         self._trace = trace
         result: TurnResult | None = None
+        self._full_outputs: dict[str, str] = {}
+        self.journal("turn_start", {"turn": trace.turn, "prompt": user_input, "model": self.settings.model,
+                                    "mode": self.settings.mode})
         boost = self._apply_thinking_boost(user_input)
+        turn_error: BaseException | None = None
         try:
             result = self._run_turn(user_input)
             return result
+        except BaseException as e:
+            turn_error = e
+            raise
         finally:
+            try:
+                u = result.usage if result is not None else None
+                self.journal("turn_end", {
+                    "turn": trace.turn,
+                    "stop_reason": result.stop_reason if result is not None else (
+                        "interrupted" if isinstance(turn_error, KeyboardInterrupt) or turn_error is None else "exception"),
+                    "error": (str(result.error or "")[:2000] if result is not None else
+                              (f"{type(turn_error).__name__}: {turn_error}"[:2000] if turn_error is not None
+                               and not isinstance(turn_error, KeyboardInterrupt) else "")),
+                    "iterations": result.iterations if result is not None else None,
+                    "tool_calls": result.tool_calls_count if result is not None else None,
+                    "input_tokens": int(getattr(u, "input", 0) or 0) if u is not None else int(trace.input_tokens or 0),
+                    "output_tokens": int(getattr(u, "output", 0) or 0) if u is not None else int(trace.output_tokens or 0),
+                    "cost_usd": round(float(trace.cost or 0.0), 6),
+                    "duration_s": round(time.time() - float(trace.started_at or time.time()), 3),
+                    "answer": (result.final_text or "")[:500] if result is not None else "",
+                }, sync=True)
+            except Exception:
+                pass
             if boost is not None:
                 try:
                     self.settings = self.settings.model_copy(update={"effort": boost[0], "thinking": boost[1]})
@@ -1098,6 +1202,7 @@ class Agent:
         results = results[:-1] + [ToolResultBlock(tool_use_id=last.tool_use_id,
                                                    content=f"{last.content}\n\n{note}", is_error=last.is_error)]
         self._emit(SteerEvent(count=len(texts), texts=tuple(t[:500] for t in texts), iteration=iteration))
+        self.journal("steer", {"action": "delivered", "texts": texts, "iteration": iteration})
         try:
             for t in texts:
                 self.session.append("steer_message", {"text": t, "iteration": iteration})
@@ -1110,6 +1215,8 @@ class Agent:
 
     def _run_turn(self, user_input: str) -> TurnResult:
         total_usage = Usage()
+        raw_prompt = user_input
+        self.last_failed_turn = None
         ceiling = Decimal(str(self.settings.session_cost_ceiling or 0))
         if ceiling > 0 and self.ledger.total() >= ceiling:
             return self._stop_result(
@@ -1187,7 +1294,7 @@ class Agent:
                     LLMCallStart(
                         iteration=iterations,
                         max_iterations=self.settings.max_iterations,
-                        model=self.settings.model,
+                        model=self.display_model(),
                         message_count=len(self.conversation.messages),
                         tokens_in=self.context.projected_tokens(self.conversation, system_blocks, tool_schemas),
                         tools_ingested=list(last_round),
@@ -1239,12 +1346,25 @@ class Agent:
                 if iterations == 1:
                     # Nothing happened this turn: roll the prompt back so the next request stays valid.
                     del self.conversation.messages[user_msg_index:]
-                note = AssistantTurn(blocks=[TextBlock(text=f"[{msg}]")], stop_reason="end_turn")
+                    hint = "Your message was not answered and is not in the history; /retry sends it again."
+                else:
+                    # Tool calls and results of this turn stay in the history, so the model can pick up
+                    # exactly where the failed request left off.
+                    hint = (f"Progress from this turn is kept ({total_tool_calls} tool call(s) already ran); "
+                            "type 'continue' or /retry to resume.")
+                self.last_failed_turn = {"prompt": raw_prompt, "resume": iterations > 1}
+                self.journal("error", {"error": f"{type(err).__name__}: {err}"[:2000], "iteration": iterations,
+                                       "model": call_model, "tool_calls_so_far": total_tool_calls})
                 try:
-                    self.session.append_turn(note)
+                    # A typed record (not a fake assistant message): resume replays the history without the
+                    # unanswered prompt, and /retry in a resumed session can resend it.
+                    self.session.append("turn_failed", {"prompt": raw_prompt, "resume": iterations > 1,
+                                                        "rolled_back": iterations == 1, "error": msg[:4000],
+                                                        "tool_calls": total_tool_calls})
                 except Exception:
                     pass
-                return self._stop_result(msg, "error", iterations, total_tool_calls, total_usage, error=str(err))
+                return self._stop_result(f"{msg}\n  {hint}", "error", iterations, total_tool_calls, total_usage,
+                                         error=f"{err}\n  {hint}")
 
             assert turn is not None
             self.conversation.append_assistant(turn)
@@ -1332,8 +1452,13 @@ class Agent:
 
     def _append_results(self, results: list[ToolResultBlock]) -> None:
         timings = {r.tool_use_id: self._tool_timings.pop(r.tool_use_id) for r in results if r.tool_use_id in self._tool_timings}
+        full = getattr(self, "_full_outputs", None) or {}
+        full = {r.tool_use_id: full[r.tool_use_id] for r in results if r.tool_use_id in full}
         try:
-            self.session.append_results(results, timings=timings)
+            if full:
+                self.session.append_results(results, timings=timings, full_outputs=full)
+            else:
+                self.session.append_results(results, timings=timings)
         except TypeError:
             self.session.append_results(results)
 
@@ -1505,6 +1630,8 @@ class Agent:
                     delay = self.retry_backoff_s * (2 ** (attempt - 1))
                     self._emit(RetryEvent(attempt=attempt, max_attempts=self.max_retries, delay_s=delay,
                                           error=f"{type(e).__name__}: {e}", iteration=iteration))
+                    self.journal("retry", {"attempt": attempt, "max_attempts": self.max_retries, "delay_s": delay,
+                                           "error": f"{type(e).__name__}: {e}"[:1000], "iteration": iteration})
                     try:
                         time.sleep(delay)
                     except KeyboardInterrupt:
@@ -1652,16 +1779,53 @@ class Agent:
             self.session.append_permission(block.id, block.name, outcome, reason, source=source, approval=approval)
         except Exception:
             pass
+        if source in ("user", "hook", "no-approver") or outcome == "deny":
+            self.journal("permission", {"tool_use_id": block.id, "tool": block.name, "outcome": outcome, "reason": reason,
+                                        "source": source, "approval": approval})
         if outcome == "deny" and source != "hook":
             self._hook("PermissionDenied", {"tool_name": block.name, "tool_input": block.input if isinstance(block.input, dict) else {},
                                             "reason": reason, "source": source}, tool_use_id=block.id)
 
-    def _cap_output(self, text: str) -> str:
+    _FULL_OUTPUT_RE = re.compile(r"\(full output, [\d,]+ chars, saved to (.+?)\)")
+
+    def _note_full_output(self, block: ToolUseBlock, text: str) -> None:
+        """Remember a complete-output file a tool saved itself (Bash), so the transcript references it."""
+        m = self._FULL_OUTPUT_RE.search(text) if "(full output, " in text else None
+        if m:
+            if not isinstance(getattr(self, "_full_outputs", None), dict):
+                self._full_outputs = {}
+            self._full_outputs[block.id] = m.group(1)
+
+    def _cap_output(self, text: str, block: ToolUseBlock | None = None) -> str:
+        """Shorten a tool output for the model. The complete output is never dropped: it is saved to
+        ``projects/<key>/outputs/<session>/<tool_use_id>.txt`` and referenced from the result."""
         cap = int(getattr(self.settings, "tool_output_cap", 0) or 0)
+        saved_by_tool = (getattr(self, "_full_outputs", None) or {}).get(block.id, "") if block is not None else ""
+        if saved_by_tool and len(text) <= cap + 4096:
+            return text  # the tool already cut it to the cap (its markers/notes add a little) and saved it in full
         if cap > 0 and len(text) > cap:
             half = cap // 2
             omitted = len(text) - 2 * half
-            return f"{text[:half]}\n\n[... {omitted:,} characters omitted ...]\n\n{text[-half:]}"
+            where = saved_by_tool
+            try:
+                if where:
+                    raise StopIteration  # the tool already saved its complete output (e.g. Bash)
+                from axon import storage
+                name = f"{block.id}-{block.name}" if block is not None else f"output-{int(time.time() * 1000)}"
+                saved = storage.save_full_output(self.settings.workspace,
+                                                 str(getattr(self.session, "active_session_id", "") or ""), name, text)
+                if saved is not None:
+                    where = str(saved)
+                    if block is not None:
+                        if not isinstance(getattr(self, "_full_outputs", None), dict):
+                            self._full_outputs = {}
+                        self._full_outputs[block.id] = where
+            except StopIteration:
+                pass
+            except Exception:
+                where = ""
+            note = f"; the full output is saved at {where}" if where else ""
+            return f"{text[:half]}\n\n[... {omitted:,} characters omitted{note} ...]\n\n{text[-half:]}"
         return text
 
     def _grant_session(self, tool_name: str) -> None:
@@ -1733,6 +1897,18 @@ class Agent:
         t1 = time.time()
         self._tool_timings[block.id] = t1 - t0
         text = str(res.content)
+        try:
+            from axon.session.activity import summarize_input
+            inp = block.input if isinstance(block.input, dict) else {}
+            target = (inp.get("path") or inp.get("file_path") or inp.get("command") or inp.get("pattern")
+                      or inp.get("query") or inp.get("url") or inp.get("description") or "")
+            full = (getattr(self, "_full_outputs", None) or {}).get(block.id, "")
+            self.journal("tool", {"id": block.id, "name": block.name, "target": str(target)[:300],
+                                  "input": summarize_input(inp), "is_error": bool(res.is_error),
+                                  "duration_s": round(t1 - t0, 3), "output_chars": len(text),
+                                  "output_preview": text[:300], **({"full_output": full} if full else {})})
+        except Exception:
+            pass
         self._emit(ToolTiming(
             id=block.id,
             name=block.name,
@@ -1845,9 +2021,10 @@ class Agent:
         )
         try:
             out = tool.run(tool_input, ctx)
-            content, is_error = self._cap_output(str(out)), False
+            self._note_full_output(block, str(out))
+            content, is_error = self._cap_output(str(out), block), False
         except ToolError as e:
-            content, is_error = self._cap_output(str(e)), True
+            content, is_error = self._cap_output(str(e), block), True
         except Exception as e:
             content, is_error = f"Unexpected {type(e).__name__}: {e}", True
 

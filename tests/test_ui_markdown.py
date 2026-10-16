@@ -80,7 +80,7 @@ def test_renderer_user_message_and_footer(capsys):
     usage = Usage(input=1000, output=200, cache_read=500)
     renderer.turn_footer(tool_count=2, usage=usage, cost=0.0123, elapsed=1.5, llm_calls=1)
     plain2 = strip_ansi(capsys.readouterr().out)
-    assert "Done · 1.5s" in plain2
+    assert "Done in 1.5s" in plain2
     assert "2 tool calls" in plain2
     assert "1 LLM call" in plain2
     assert "$0.0123" in plain2
@@ -160,13 +160,13 @@ def test_renderer_tool_execution_events(capsys):
     renderer = Renderer(trace_level="normal")
     renderer.on_event(LLMCallStart(iteration=1, max_iterations=25, model="deepseek-v4-flash", message_count=5))
     plain0 = strip_ansi(capsys.readouterr().out)
-    assert "Turn" in plain0 and "Step 1  LLM call · deepseek-v4-flash · 5 messages" in plain0
+    assert "Turn" in plain0 and "Step 1  LLM call · deepseek-v4-flash · reads 5 messages" in plain0
 
     renderer.on_event(ToolExecutionStart(id="t1", name="Ls", input={"path": "."}))
     renderer.on_event(ToolExecutionResult(id="t1", name="Ls", input={"path": "."}, content="axon/\ncheck_models.py"))
     plain1 = strip_ansi(capsys.readouterr().out)
     assert "● Ls  ." in plain1
-    assert "⎿" in plain1 and "→ step 2" in plain1
+    assert "⎿" in plain1 and "1 directory, 1 file" in plain1
 
     renderer.on_event(ToolExecutionStart(id="t2", name="Bash", input={"command": "python3 -m pytest"}))
     renderer.on_event(ToolExecutionResult(id="t2", name="Bash", input={"command": "python3 -m pytest"}, content="14 passed in 0.1s"))
@@ -181,7 +181,7 @@ def test_renderer_tool_execution_events(capsys):
     assert "line" in get_last_tool_output()
 
     renderer.on_event(LLMCallStart(iteration=2, max_iterations=25, model="deepseek-v4-flash", message_count=8))
-    assert "Step 2  LLM call" in strip_ansi(capsys.readouterr().out)
+    assert "Step 2  LLM call · deepseek-v4-flash" in strip_ansi(capsys.readouterr().out)
 
 
 def test_renderer_compact_level(capsys):

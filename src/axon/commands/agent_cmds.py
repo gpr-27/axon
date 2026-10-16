@@ -375,7 +375,7 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
         agent.subagents.clear()
     _clear_screen()
     from axon.session.interactive import render_restored_conversation
-    render_restored_conversation(agent.conversation, sub_id, ledger=agent.ledger)
+    render_restored_conversation(agent.conversation, sub_id, ledger=agent.ledger, path=_session_file(agent, sub_id))
     print(f"  {CYAN}⚡ Viewing subagent #{task.index} ({task.title}){RST} · {SLATE}/main returns to the main session{RST}\n")
 
 
@@ -444,7 +444,7 @@ def handle_main(agent: Any, arg: str) -> CommandResult:
         pass
     _clear_screen()
     from axon.session.interactive import render_restored_conversation
-    render_restored_conversation(agent.conversation, parent_id, ledger=agent.ledger)
+    render_restored_conversation(agent.conversation, parent_id, ledger=agent.ledger, path=_session_file(agent, parent_id))
     print(f"  {MINT}✓ Back in the main session ({parent_id}){RST}\n")
     return CommandResult(handled=True)
 
@@ -714,7 +714,10 @@ def handle_tools(agent: Any, arg: str) -> CommandResult:
     tools = {t.name: t for t in agent.registry.all_tools() if not getattr(t, "hidden", False)}
     q = arg.strip().lower()
     if q:
-        hits = [t for t in tools.values() if q in t.name.lower()]
+        # exact name first; otherwise prefix matches; otherwise substring matches
+        hits = ([t for t in tools.values() if t.name.lower() == q]
+                or [t for t in tools.values() if t.name.lower().startswith(q)]
+                or [t for t in tools.values() if q in t.name.lower()])
         if not hits:
             err(f"No tool matching '{arg.strip()}'.")
             return CommandResult(handled=True)
@@ -906,3 +909,9 @@ def handle_explain(agent: Any, arg: str) -> CommandResult:
         print(f"    {WHITE}{ln}{RST}")
     print()
     return CommandResult(handled=True)
+
+
+def _session_file(agent: Any, session_id: str) -> Any:
+    """Transcript file of a session (the full record the restored view is drawn from)."""
+    from axon.ui.history_view import session_file
+    return session_file(agent, session_id)

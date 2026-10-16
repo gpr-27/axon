@@ -170,8 +170,8 @@ def test_one_step_model_switch_endpoint_sync(tmp_path: Path, monkeypatch):
     assert agent.settings.api_key.get_secret_value() == "local"
 
     # 2. Switch to AgentRouter model -> Endpoint must update to agentrouter.org
-    handle_model(agent, "claude-opus-5")
-    assert agent.settings.model == "claude-opus-5"
+    handle_model(agent, "gpt-6.1-sol")
+    assert agent.settings.model == "gpt-6.1-sol"
     assert "agentrouter.org" in agent.settings.base_url
     assert agent.settings.api_key.get_secret_value() == "sk-agentrouter-test"
 

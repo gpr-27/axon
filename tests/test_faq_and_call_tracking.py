@@ -24,17 +24,20 @@ def test_agentrouter_model_pricing_constants():
     assert ds["output"] == 12.0
     assert ds["cache_read"] == 0.8
 
-    # gpt-5.6-sol: Prompt $3.00, Completion $15.00, Cache $0.60
-    sol = PRICING["gpt-5.6-sol"]
-    assert sol["input"] == 3.0
-    assert sol["output"] == 15.0
-    assert sol["cache_read"] == 0.6
+    # gpt-6.1-sol (ratio 2, completion 5): $4.00 / $20.00, cache $0.80
+    sol = PRICING["gpt-6.1-sol"]
+    assert (sol["input"], sol["output"], sol["cache_read"]) == (4.0, 20.0, 0.8)
 
-    # gpt-6-astra: Prompt $3.00, Completion $15.00, Cache $0.60
+    # gpt-6-astra (ratio 4, completion 5): $8.00 / $40.00, cache $1.60
     astra = PRICING["gpt-6-astra"]
-    assert astra["input"] == 3.0
-    assert astra["output"] == 15.0
-    assert astra["cache_read"] == 0.6
+    assert (astra["input"], astra["output"], astra["cache_read"]) == (8.0, 40.0, 1.6)
+
+    # claude-opus-5-5 (ratio 6, completion 1): $12.00 / $12.00
+    o55 = PRICING["claude-opus-5-5"]
+    assert (o55["input"], o55["output"]) == (12.0, 12.0)
+
+    # Retired models keep their rates so older sessions are still costed correctly.
+    assert PRICING["gpt-5.6-sol"]["input"] == 3.0
 
     # claude-opus-5: Prompt $6.00, Completion $30.00, Cache Read $1.20, Cache Write $7.50
     op5 = PRICING["claude-opus-5"]
@@ -162,8 +165,9 @@ def test_faq_command_all_and_topics(capsys):
     assert res.handled is True
     out = capsys.readouterr().out
     assert "deepseek-v4-flash" in out
-    assert "claude-opus-5" in out
-    assert "$6.000" in out
+    assert "claude-opus-5-5" in out and "gpt-6.1-sol" in out
+    assert "$12.000" in out                 # claude-opus-5-5 input rate
+    assert "gpt-5.6-sol" not in out         # retired models are not offered
 
 
 def test_dispatch_command_routes_faq():
@@ -259,3 +263,22 @@ def test_anthropic_provider_faq_diagnostics(monkeypatch):
     with pytest.raises(ProviderError) as exc:
         list(prov.stream(model="claude-opus-5", system=[], messages=[{"role": "user", "content": "hi"}], tools=[], max_tokens=100))
     assert "400 Content Blocked" in str(exc.value)
+
+
+def test_agentrouter_offers_exactly_the_models_it_serves():
+    from axon.providers.catalog import get_preset_by_id
+    from axon.providers.pricing import apply_agentrouter_pricing_feed, AGENTROUTER_PRICING
+    ar = get_preset_by_id("agentrouter")
+    assert ar.models == ["deepseek-v4-flash", "claude-opus-5-5", "gpt-6.1-sol", "gpt-6-astra"]
+    assert ar.default_model == "deepseek-v4-flash"
+    # every offered model is priced and has a context window
+    from axon.providers.registry import get_context_window
+    for m in ar.models:
+        assert m in AGENTROUTER_PRICING and get_context_window(m) >= 128_000
+    # the table agrees with the gateway's own ratio feed (ratio 1 = $2 input; output = input x completion)
+    feed = {"data": [{"model_name": "gpt-6.1-sol", "model_ratio": 2, "completion_ratio": 5},
+                     {"model_name": "deepseek-v4-flash", "model_ratio": 2, "completion_ratio": 3}]}
+    for item in feed["data"]:
+        p = AGENTROUTER_PRICING[item["model_name"]]
+        assert p["input"] == item["model_ratio"] * 2 and p["output"] == p["input"] * item["completion_ratio"]
+    assert apply_agentrouter_pricing_feed(feed) == 0   # verified entries are never overwritten

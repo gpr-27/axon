@@ -217,6 +217,12 @@ class AskUserQuestionTool(Tool):
         except Exception:  # pragma: no cover
             import contextlib
             _pause_input = contextlib.nullcontext  # type: ignore[assignment]
+        try:
+            from axon.ui.notify import notify_event
+            first = str((questions[0] or {}).get("question", "")) if questions and isinstance(questions[0], dict) else ""
+            notify_event("question", f"Axon is asking you: {first[:150]}" if first else "Axon is asking you a question")
+        except Exception:
+            pass
         with _ASK_LOCK, _pause_input():
             for i, q in enumerate(questions, 1):
                 picked = self._ask(q, i, len(questions))

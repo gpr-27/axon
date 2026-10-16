@@ -50,8 +50,50 @@ Axon resolves the key in this order:
 4. In an interactive terminal, a hidden prompt. The key is verified live, then appended to
    `~/.axon/.env` (mode `0600` on POSIX).
 
-Local endpoints need no key. `/keys` shows and sets keys per provider, and each key is verified
-before it is saved.
+Local endpoints need no key.
+
+`/keys` (or `axon keys` outside the REPL) is the key manager. On a terminal it opens a menu that
+shows each provider's key status: masked value (`sk-a…9f3c`), where it comes from, and whether it
+was verified. From the menu you can add, replace, test or remove a key, open a `.env` in `$EDITOR`,
+and choose where new keys are saved. For scripts:
+
+```
+/keys set <provider|VAR> [key] [--project] [--no-verify]   hidden prompt when the key is omitted; verified live
+/keys test [provider|all]                                  latency and model count, or the exact error
+/keys remove <provider|VAR> [--project|--user] [-y]
+/keys where                                                files in order of precedence, git-ignore status
+/keys edit [--project]                                     open the .env in $EDITOR
+```
+
+Keys are saved to `~/.axon/.env` by default. With `--project` they go to `<project>/.env` instead,
+and Axon adds `.env` to `.gitignore` (or warns you if the file is already tracked by git). A
+variable set in your shell always wins, then the project `.env`, then `~/.axon/.env`. Axon never
+prints a full key. Keys typed after `/keys set` are masked in the activity journal.
+
+### Endpoints (base URL redirection)
+
+`/endpoint` (or `axon endpoint`) changes where a provider's requests go, for example to a proxy or
+gateway, and adds custom OpenAI- or Anthropic-compatible endpoints. These are saved only in
+`~/.axon/config.toml`, never in project files:
+
+```toml
+[endpoints.openai]                 # send OpenAI traffic through a proxy
+base_url = "https://proxy.example.com/v1"
+
+[endpoints.my-gateway]             # a new provider in /provider, /keys and /model
+base_url = "https://llm.example.com/v1"
+env_var  = "MY_GATEWAY_API_KEY"    # its key; leave it out for no key
+model    = "qwen3-coder"           # optional default model
+```
+
+```
+/endpoint set <provider> <url>     /endpoint add <name> <url> [--key-env VAR] [--model M] [--use]
+/endpoint reset <provider|name>    /endpoint test [provider|url]     /endpoint use <name>
+```
+
+`/settings` lists every option grouped by purpose: model and provider, permissions, display,
+context and cost, data, and shell. On a terminal you can change any of them in place. Without a
+terminal, use `/settings <key> <value>`.
 
 ## Example `config.toml`
 
@@ -132,7 +174,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `turn_token_budget` | `AXON_TURN_TOKEN_BUDGET` | – | `2000000` |
 | `max_history_turns` | `AXON_MAX_HISTORY_TURNS` | – | `0` |
 | `session_cost_ceiling` | `AXON_SESSION_COST_CEILING` | – | `50.00` |
-| `compact_at` | `AXON_COMPACT_AT` | `compactAt` | `0.85` |
+| `compact_at` | `AXON_COMPACT_AT` | `compactAt` | `0.75` |
 | `parallel_tools` | `AXON_PARALLEL_TOOLS` | `parallelTools` | `6` |
 | `bash_timeout_s` | `AXON_BASH_TIMEOUT_S` | – | `180` |
 | `tool_output_cap` | `AXON_TOOL_OUTPUT_CAP` | – | `150000` |
@@ -157,14 +199,24 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `status_line` | `AXON_STATUS_LINE` | `statusLine` | `none` |
 | `vim_mode` | `AXON_VIM_MODE` | `editorMode`, `vimMode` | `false` |
 | `theme` | `AXON_THEME` | `theme` | `"auto"` |
-| `cleanup_period_days` | `AXON_CLEANUP_PERIOD_DAYS` | `cleanupPeriodDays` | `30` |
+| `cleanup_period_days` | `AXON_CLEANUP_PERIOD_DAYS` | `cleanupPeriodDays` | `0` |
 | `verify_commands` | `AXON_VERIFY_COMMANDS` | `verifyCommands` | `[]` |
 | `verify_timeout` | `AXON_VERIFY_TIMEOUT` | `verifyTimeout` | `900` |
 | `repo_map` | `AXON_REPO_MAP` | `repoMap` | `false` |
 | `repo_map_tokens` | `AXON_REPO_MAP_TOKENS` | `repoMapTokens` | `1500` |
 | `suggestions` | `AXON_SUGGESTIONS` | `promptSuggestionEnabled` | `true` |
+| `tips` | `AXON_TIPS` | `spinnerTipsEnabled` | `true` |
+| `tips_llm` | `AXON_TIPS_LLM` | `tipsLlm` | `true` |
+| `tips_refresh_turns` | `AXON_TIPS_REFRESH_TURNS` | `tipsRefreshTurns` | `5` |
+| `context_limit` | `AXON_CONTEXT_LIMIT` | `contextLimit` | `128000` |
+| `max_width` | `AXON_MAX_WIDTH` | – | `0` |
+| `screen_log` | `AXON_SCREEN_LOG` | – | `true` |
+| `mouse_click_expand` | `AXON_MOUSE_CLICK_EXPAND` | `mouseClickExpand` | `false` |
+| `notifications` | `AXON_NOTIFICATIONS` | `preferredNotifChannel` | `"important"` |
+| `notify_after_seconds` | `AXON_NOTIFY_AFTER_SECONDS` | `notifyAfterSeconds` | `30.0` |
+| `tips_refresh_minutes` | `AXON_TIPS_REFRESH_MINUTES` | `tipsRefreshMinutes` | `15.0` |
 | `auto_title` | `AXON_AUTO_TITLE` | `autoTitle` | `true` |
-| `respond_to_bash_commands` | `AXON_RESPOND_TO_BASH_COMMANDS` | `respondToBashCommands` | `false` |
+| `respond_to_bash_commands` | `AXON_RESPOND_TO_BASH_COMMANDS` | `respondToBashCommands` | `true` |
 | `disable_all_hooks` | `AXON_DISABLE_ALL_HOOKS` | `disableAllHooks` | `false` |
 | `prompt_color` | `AXON_PROMPT_COLOR` | `promptColor` | `none` |
 | `goal` | `AXON_GOAL` | – | `none` |

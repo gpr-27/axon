@@ -111,25 +111,25 @@ def test_live_timeline_structure(out):
     text, _ = out("normal")
     plain = strip_ansi(text)
     rows = plain.splitlines()
-    assert rows[0].startswith("┌ Turn 1") and rows[0].rstrip().endswith("claude-opus-5 · default")
+    assert rows[0].startswith("┌ Turn 1") and rows[0].rstrip().endswith("claude-opus-5 · default mode")
     assert all(display_width(r) <= WIDTH for r in rows)
     for n in (1, 2, 3, 4):
-        assert f"◆ Step {n}  LLM call" in plain
+        assert f"◆ Step {n}  LLM call · claude-opus-5 · reads" in plain
     # per-step context gauge from LLMCallEnd.context_used / context_window
-    assert "ctx █░░░░░░░ 6% of 200k" in plain and "ctx ██████░░ 75% of 200k" in plain
+    assert "context █░░░░░░░ 6% of 200k" in plain and "context ██████░░ 75% of 200k" in plain
     # timeline rows keep the rail; only response bodies (markdown) and the footer leave it
     body_rows = [r for r in rows[1:] if r.strip() and not r.startswith("  ") and not r.startswith("└")]
-    assert all(r.startswith(("│", "├─")) for r in body_rows), body_rows
+    assert all(r.startswith("│") for r in body_rows), body_rows
     # nested subagent steps sit between its start and end lines
     start = next(i for i, r in enumerate(rows) if "subagent started" in r)
     end = next(i for i, r in enumerate(rows) if "subagent completed" in r)
     nested = [r for r in rows[start + 1:end] if "┊" in r]
     assert len(nested) == 2 and "LLM claude-haiku-4" in nested[0] and "Bash" in nested[1]
     assert "1 message you typed during the turn sent to the model" in plain
-    assert "result sent 37 B" in plain                 # payload facts under the subagent card, not glued to it
-    assert "✓ auto-allowed: read-only" in plain and "approved by user (once)" in plain
+    assert "took " in plain                           # timing under the subagent card, not glued to it
+    assert "auto-allowed" not in plain and "approved by user (once)" in plain
     assert "hook PreToolUse ran" in plain
-    assert plain.count("├─ Response") == 2
+    assert plain.count("▎ ") == 2                    # both responses carry the accent bar
     assert rows[-3].startswith("└ ✓ Done") or any(r.startswith("└ ✓ Done") for r in rows)
 
 
@@ -145,6 +145,6 @@ def test_stored_trace_replay_has_nested_steps_and_gauges(out, monkeypatch):
     replay = strip_ansi(format_trace(trace, "normal"))
     assert "subagent run the test suite completed · 2 steps · 4.2s · $0.0009" in replay
     assert replay.count("┊") == 2
-    assert "ctx ██████░░ 75% of 200k" in replay
+    assert "context ██████░░ 75% of 200k" in replay
     assert "you typed during the turn" in replay
     assert all(display_width(r) <= WIDTH for r in replay.splitlines())

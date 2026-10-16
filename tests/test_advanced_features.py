@@ -280,8 +280,9 @@ def test_context_manager_rung3_summarization():
 def test_clipboard_copy_helper():
     from axon.ui.clipboard import copy_to_clipboard
     # Should not raise exception
-    res = copy_to_clipboard("Test string for Axon clipboard")
-    assert isinstance(res, bool)
+    from axon.ui.clipboard import paste_from_clipboard
+    assert copy_to_clipboard("Test string for Axon clipboard") is True   # goes to the test's private file
+    assert paste_from_clipboard() == "Test string for Axon clipboard"
 
 
 def test_auto_skill_detection(tmp_path: Path):

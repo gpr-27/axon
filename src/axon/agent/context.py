@@ -14,7 +14,6 @@ import json
 from typing import Any
 from axon.agent.state import Conversation, estimate_content_tokens, is_turn_start
 from axon.config import Settings
-from axon.providers.registry import get_context_window
 
 DEFAULT_CONTEXT_WINDOW = 128_000
 TRIM_THRESHOLD_CHARS = 8_000
@@ -76,7 +75,9 @@ class ContextManager:
 
     # ── budgeting ───────────────────────────────────────────────────
     def context_window(self, model: str | None = None) -> int:
-        return get_context_window(model or self.settings.model, default=DEFAULT_CONTEXT_WINDOW)
+        """The model's window capped by the context_limit setting (default 128k)."""
+        from axon.providers.registry import effective_context_window
+        return effective_context_window(model or self.settings.model, self.settings, default=DEFAULT_CONTEXT_WINDOW)
 
     def get_effective_budget(self, model: str | None = None) -> int:
         """Usable prompt capacity: the model's context window (less room for the reply)."""
@@ -93,7 +94,9 @@ class ContextManager:
         return conv.token_estimate() + self.overhead_tokens(system, tools)
 
     def threshold(self, model: str | None = None) -> int:
-        return int(self.get_effective_budget(model) * float(self.settings.compact_at))
+        """Auto-compact point: ``compact_at`` (default 75%) of the context window in use, but never past
+        the usable part (the reply needs its reserve)."""
+        return min(int(self.context_window(model) * float(self.settings.compact_at)), self.get_effective_budget(model))
 
     def needs_compaction(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]], model: str | None = None) -> bool:
         return self.projected_tokens(conv, system, tools) > self.threshold(model)

@@ -8,10 +8,13 @@ scoped per project; older transcripts without it are shown everywhere.
 
 Robustness:
 - every line is parsed independently - corrupt / truncated lines are skipped;
-- appends are fsync'ed; whole-file writes go through :func:`atomic_write_text`
+- appends are fsync'ed and start on a fresh line even after a torn (crashed) write;
+  whole-file writes go through :func:`atomic_write_text`
   (temp file + ``os.replace`` with a retry loop for Windows sharing violations);
 - listing metadata is cached per file on (mtime_ns, size), so re-opening the
-  session switcher only re-reads transcripts that changed.
+  session switcher only re-reads transcripts that changed;
+- deleting a session moves it (transcript, subagents, traces, checkpoints, todos, full
+  outputs) to ``projects/<key>/trash/`` - :meth:`SessionStore.restore_session` brings it back.
 """
 from __future__ import annotations
 
@@ -34,6 +37,13 @@ from axon.session.ledger import Ledger
 _IS_WINDOWS = sys.platform == "win32"
 _RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4)
 _CONTENT_TYPES = ("user_message", "assistant_turn", "tool_results")
+_LEGACY_ERROR_PREFIX = "[Provider error:"
+
+
+def _is_legacy_error_turn(data: Any) -> bool:
+    """Older versions saved a failed model call as a fake assistant message "[Provider error: ...]"."""
+    return (isinstance(data, dict) and not data.get("tool_uses") and not data.get("usage")
+            and str(data.get("text") or "").startswith(_LEGACY_ERROR_PREFIX))
 
 
 # ─── File helpers ───────────────────────────────────────────────────────────
@@ -72,15 +82,8 @@ def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> N
 
 
 def _append_line(path: Path, line: str) -> None:
-    def _do() -> None:
-        with open(path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(line + "\n")
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-    _retry(_do)
+    from axon.storage import append_line
+    _retry(lambda: append_line(path, line, fsync=True))
 
 
 def _unlink(path: Path) -> bool:
@@ -455,11 +458,14 @@ class SessionStore:
         }
         self.append("assistant_turn", turn_data)
 
-    def append_results(self, results: list[ToolResultBlock], timings: dict[str, float] | None = None) -> None:
-        """Persist tool results (full content); ``timings`` maps tool_use_id -> seconds."""
+    def append_results(self, results: list[ToolResultBlock], timings: dict[str, float] | None = None,
+                       full_outputs: dict[str, str] | None = None) -> None:
+        """Persist tool results (the content the model saw); ``timings`` maps tool_use_id -> seconds and
+        ``full_outputs`` maps tool_use_id -> file holding the untruncated output."""
         self.append("tool_results", [
             {"tool_use_id": r.tool_use_id, "content": r.content, "is_error": r.is_error,
-             **({"duration_s": round(timings[r.tool_use_id], 3)} if timings and r.tool_use_id in timings else {})}
+             **({"duration_s": round(timings[r.tool_use_id], 3)} if timings and r.tool_use_id in timings else {}),
+             **({"full_output": full_outputs[r.tool_use_id]} if full_outputs and r.tool_use_id in full_outputs else {})}
             for r in results
         ])
 
@@ -470,8 +476,11 @@ class SessionStore:
                                    "reason": reason, "source": source, "approval": approval})
 
     def append_rewind(self, messages: list[dict[str, Any]], mode: str, prompt_index: int) -> None:
-        """Persist a conversation rewind: on resume the history is replaced by ``messages``."""
+        """Persist a conversation rewind: on resume the history is replaced by ``messages``. The
+        transcript is append-only, so the rewound messages stay in the file (``/history all``)."""
         self.append("rewind", {"messages": messages, "mode": mode, "prompt_index": prompt_index})
+        _journal("rewind", {"mode": mode, "prompt_index": prompt_index, "kept_messages": len(messages),
+                            "transcript": str(self.active_file)}, self)
 
     def user_message_times(self, session_id: str | None = None) -> list[float]:
         """Timestamps of the user prompts in the *current* history of a transcript (oldest first).
@@ -482,7 +491,9 @@ class SessionStore:
         for entry in iter_records(target):
             t = entry.get("type")
             data = entry.get("data")
-            if t == "user_message":
+            if t == "turn_failed" and isinstance(data, dict) and data.get("rolled_back") and out:
+                out.pop()  # that prompt is not in the replayed history
+            elif t == "user_message":
                 try:
                     out.append(float(entry.get("timestamp") or 0.0))
                 except (TypeError, ValueError):
@@ -502,6 +513,7 @@ class SessionStore:
     def rename_session(self, new_title: str, session_id: str | None = None) -> str:
         clean_title = " ".join(new_title.split())[:64]
         self._meta_record("session_rename", {"title": clean_title}, session_id)
+        _journal("rename", {"title": clean_title, "session": session_id or self.active_session_id}, self)
         return clean_title
 
     def tag_session(self, tag_name: str, session_id: str | None = None) -> str:
@@ -541,11 +553,27 @@ class SessionStore:
         if not target.exists():
             raise FileNotFoundError(f"Session transcript not found: {target}")
         messages: list[dict[str, Any]] = []
+        prompt_start = 0          # len(messages) before the latest user_message record
+        prev_type = ""
         for entry in iter_records(target):
             t = entry.get("type")
             data = entry.get("data", {})
             try:
+                if t == "turn_failed" and isinstance(data, dict):
+                    # The failed prompt is kept in the file (and the journal) but never replayed to the model.
+                    if data.get("rolled_back"):
+                        messages = messages[:prompt_start]
+                    prev_type = t
+                    continue
+                if t == "assistant_turn" and _is_legacy_error_turn(data):
+                    if prev_type == "user_message":
+                        messages = messages[:prompt_start]
+                    prev_type = "turn_failed"
+                    continue
+                if t in _CONTENT_TYPES:
+                    prev_type = t
                 if t == "user_message" and isinstance(data, dict):
+                    prompt_start = len(messages)
                     messages.append({"role": data.get("role", "user"), "content": data.get("content", "")})
                 elif t == "assistant_turn" and isinstance(data, dict):
                     native = data.get("native")
@@ -585,6 +613,64 @@ class SessionStore:
             except (KeyError, TypeError):
                 continue
         return Conversation(messages)
+
+    def recorded_tool_outputs(self, session_id: str | None = None) -> list[dict[str, Any]]:
+        """Tool results recorded in a transcript, oldest first, numbered from 1:
+        {"n", "id", "name", "target", "content", "full_output"}. ``content`` is the complete output
+        (read from the saved sidecar when the model only saw a truncated copy)."""
+        calls: dict[str, tuple[str, str]] = {}
+        out: list[dict[str, Any]] = []
+        for entry in iter_records(self._file(session_id or self.active_session_id)):
+            t = entry.get("type")
+            data = entry.get("data")
+            if t == "assistant_turn" and isinstance(data, dict):
+                for tu in data.get("tool_uses") or []:
+                    if isinstance(tu, dict) and tu.get("id"):
+                        inp = tu.get("input") if isinstance(tu.get("input"), dict) else {}
+                        target = (inp.get("path") or inp.get("file_path") or inp.get("command") or inp.get("pattern")
+                                  or inp.get("query") or inp.get("url") or inp.get("description") or "")
+                        calls[str(tu["id"])] = (str(tu.get("name") or "?"), str(target))
+            elif t == "tool_results" and isinstance(data, list):
+                for r in data:
+                    if not isinstance(r, dict):
+                        continue
+                    tid = str(r.get("tool_use_id") or r.get("tool_call_id") or "")
+                    content = r.get("content", "")
+                    if not isinstance(content, str):
+                        content = json.dumps(content, ensure_ascii=False, default=str)
+                    full = str(r.get("full_output") or "")
+                    if full:
+                        try:
+                            content = Path(full).read_text(encoding="utf-8", errors="replace")
+                        except OSError:
+                            pass
+                    name, target = calls.get(tid, ("?", ""))
+                    out.append({"n": len(out) + 1, "id": tid, "name": name, "target": target,
+                                "content": content, "full_output": full})
+        return out
+
+    def last_failed_turn(self, session_id: str | None = None) -> dict[str, Any] | None:
+        """{"prompt", "resume"} when the transcript ends on a failed model call (so /retry works after
+        a resume), else None."""
+        failed: dict[str, Any] | None = None
+        last_prompt = ""
+        prev = ""
+        for entry in iter_records(self._file(session_id or self.active_session_id)):
+            t = entry.get("type")
+            data = entry.get("data")
+            if t == "turn_failed" and isinstance(data, dict):
+                failed = {"prompt": str(data.get("prompt") or ""), "resume": bool(data.get("resume"))}
+            elif t == "assistant_turn" and _is_legacy_error_turn(data):
+                failed = {"prompt": last_prompt if prev == "user_message" else "", "resume": prev != "user_message"}
+            elif t in _CONTENT_TYPES:
+                failed = None
+                if t == "user_message" and isinstance(data, dict):
+                    c = data.get("content")
+                    last_prompt = c if isinstance(c, str) else " ".join(
+                        str(b.get("text", "")) for b in (c or []) if isinstance(b, dict) and b.get("type") == "text")
+            if t in _CONTENT_TYPES or t == "turn_failed":
+                prev = t if not (t == "assistant_turn" and _is_legacy_error_turn(data)) else "turn_failed"
+        return failed
 
     def load(self, session_id: str) -> Conversation:
         """Reconstruct Conversation and make it the active session."""
@@ -748,34 +834,140 @@ class SessionStore:
             ))
         return out
 
-    # ── deletion ──
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a transcript, its subagent transcripts and its checkpoints."""
+    # ── deletion (to the trash) ──
+    def _session_artifacts(self, session_id: str) -> list[Path]:
+        """Every file/dir that belongs to a session: transcript, subagents, traces, checkpoints,
+        todos and full-output files (current and legacy locations)."""
         main_file = self._file(session_id)
-        deleted = _unlink(main_file)
-        for sub_f in self._subagent_files(session_id):
-            deleted = _unlink(sub_f) or deleted
-        import shutil
-        cp_dirs = [self.workspace / ".axon" / "checkpoints" / session_id]
+        items: list[Path] = [main_file, *self._subagent_files(session_id),
+                             main_file.with_name(f"{session_id}.traces.jsonl"),
+                             self.workspace / ".axon" / "checkpoints" / session_id]
         try:
             from axon import storage
-            cp_dirs.append(storage.project_dir(self.workspace, create=False) / "checkpoints" / session_id)
+            pdir = storage.project_dir(self.workspace, create=False)
+            items += [pdir / "traces" / f"{session_id}.jsonl", pdir / "checkpoints" / session_id,
+                      pdir / "todos" / f"{session_id}.json", pdir / "outputs" / session_id]
         except Exception:
             pass
-        for cp_dir in cp_dirs:
-            if cp_dir.exists():
-                shutil.rmtree(cp_dir, ignore_errors=True)
-        trace = main_file.with_name(f"{session_id}.traces.jsonl")
-        if trace.exists():
-            _unlink(trace)
+        out: list[Path] = []
+        for p in items:
+            if p.exists() and p not in out:
+                out.append(p)
+        return out
+
+    def trash_root(self) -> Path:
+        try:
+            from axon import storage
+            return storage.trash_dir(self.workspace)
+        except Exception:
+            return self.session_dir.parent / "trash"
+
+    def delete_session(self, session_id: str) -> bool:
+        """Move a session (transcript, subagents, traces, checkpoints, todos, outputs) to the
+        project trash. Nothing is destroyed; :meth:`restore_session` undoes it."""
+        import shutil
+        main_file = self._file(session_id)
+        if not main_file.exists():
+            return False
+        title = ""
+        try:
+            title = _scan(main_file, self.model).custom_title or _scan(main_file, self.model).first_prompt
+        except Exception:
+            pass
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = self.trash_root() / f"{stamp}_{session_id}"
+        n = 2
+        while dest.exists():
+            dest = self.trash_root() / f"{stamp}_{session_id}-{n}"
+            n += 1
+        moved: list[dict[str, str]] = []
+        try:
+            dest.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            return False
+        for i, src in enumerate(self._session_artifacts(session_id)):
+            target = dest / f"{i:02d}_{src.name}"
+            try:
+                _retry(lambda s=src, t=target: shutil.move(str(s), str(t)))
+                moved.append({"from": str(src), "to": target.name})
+            except OSError:
+                continue
+        manifest = {"session_id": session_id, "title": title, "deleted_at": time.time(),
+                    "workspace": str(self.workspace), "items": moved}
+        try:
+            atomic_write_text(dest / "manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        except OSError:
+            pass
         with _cache_lock:
             _summary_cache.pop(str(main_file), None)
+        deleted = any(m["from"] == str(main_file) for m in moved)
+        _journal("delete", {"session": session_id, "title": title, "trash": str(dest), "files": len(moved)}, self)
         if session_id == self.active_session_id:
             self.open()
         return deleted
 
+    def list_trash(self) -> list[dict[str, Any]]:
+        """Trashed sessions of this project, newest first: {id, title, deleted_at, path, files}."""
+        out: list[dict[str, Any]] = []
+        root = self.trash_root()
+        try:
+            dirs = [d for d in root.iterdir() if d.is_dir()]
+        except OSError:
+            return out
+        for d in dirs:
+            try:
+                meta = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {"session_id": d.name.split("_", 1)[-1], "deleted_at": d.stat().st_mtime, "items": []}
+            out.append({"id": str(meta.get("session_id") or d.name), "title": str(meta.get("title") or ""),
+                        "deleted_at": float(meta.get("deleted_at") or 0), "path": d,
+                        "files": len(meta.get("items") or [])})
+        out.sort(key=lambda m: m["deleted_at"], reverse=True)
+        return out
+
+    def restore_session(self, query: str) -> str | None:
+        """Move a trashed session back (id, unique prefix or trash folder name). Returns its id.
+        Files whose original location is occupied are left in the trash folder."""
+        import shutil
+        items = self.list_trash()
+        q = query.strip()
+        hit = ([m for m in items if m["id"] == q or m["path"].name == q]
+               or [m for m in items if m["id"].startswith(q) or m["path"].name.startswith(q)])
+        if not q or not hit:
+            return None
+        entry = hit[0]  # newest deletion of that session
+        d: Path = entry["path"]
+        try:
+            meta = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        left = []
+        for it in meta.get("items") or []:
+            src, dst = d / str(it.get("to")), Path(str(it.get("from")))
+            if not src.exists():
+                continue
+            if dst.exists():
+                left.append(it)
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _retry(lambda s=src, t=dst: shutil.move(str(s), str(t)))
+            except OSError:
+                left.append(it)
+        if not left:
+            shutil.rmtree(d, ignore_errors=True)
+        else:
+            meta["items"] = left
+            try:
+                atomic_write_text(d / "manifest.json", json.dumps(meta, indent=2, ensure_ascii=False))
+            except OSError:
+                pass
+        _journal("restore", {"session": entry["id"], "from": str(d), "left_in_trash": len(left)}, self)
+        return str(entry["id"])
+
     def delete_all_sessions(self, keep_active: bool = False) -> int:
-        """Delete every session listed for this workspace (and their subagents)."""
+        """Move every session listed for this workspace (and their subagents) to the trash."""
         count = 0
         for m in self.list_recent():
             if keep_active and m.session_id == self.active_session_id:
@@ -790,6 +982,74 @@ class SessionStore:
         """Most recent session of *this* workspace (unscoped legacy files are ignored)."""
         files = self._main_files(strict=True)
         return files[0][0].stem if files else None
+
+
+def restore_retry_state(agent: Any, session_id: str | None = None) -> None:
+    """After a resume: if the session ended on a failed model call, make /retry able to resend it."""
+    try:
+        failed = agent.session.last_failed_turn(session_id)
+    except Exception:
+        failed = None
+    try:
+        agent.last_failed_turn = failed
+    except Exception:
+        pass
+
+
+def _journal(kind: str, data: dict[str, Any], store: "SessionStore") -> None:
+    try:
+        from axon.session import activity
+        activity.record(kind, data, workspace=store.workspace, session_id=store.active_session_id)
+    except Exception:
+        pass
+
+
+def iter_history(path: Path) -> Iterator[dict[str, Any]]:
+    """Every conversation record of a transcript in file order, including messages that a rewind
+    or compaction later removed: {"index", "type", "timestamp", "role", "text", "data"}."""
+    i = 0
+    for entry in iter_records(path):
+        t = entry.get("type")
+        data = entry.get("data")
+        if t not in _CONTENT_TYPES and t not in ("rewind", "compaction", "side_question", "shell_command",
+                                                 "steer_message", "unsent_messages"):
+            continue
+        i += 1
+        text = ""
+        role = ""
+        if t == "user_message" and isinstance(data, dict):
+            role = "user"
+            c = data.get("content")
+            text = c if isinstance(c, str) else " ".join(
+                str(b.get("text", "")) for b in (c or []) if isinstance(b, dict) and b.get("type") == "text")
+        elif t == "assistant_turn" and isinstance(data, dict):
+            role = "assistant"
+            text = str(data.get("text") or "")
+            if not text and isinstance(data.get("native"), dict):
+                nc = data["native"].get("content")
+                text = nc if isinstance(nc, str) else ""
+            tools = [str(tu.get("name")) for tu in data.get("tool_uses") or [] if isinstance(tu, dict)]
+            if tools:
+                text = (text + " " if text else "") + f"[tools: {', '.join(tools)}]"
+        elif t == "tool_results" and isinstance(data, list):
+            role = "tool"
+            text = " | ".join(str(r.get("content", ""))[:200] for r in data if isinstance(r, dict))
+        elif t in ("rewind", "compaction") and isinstance(data, dict):
+            role = "event"
+            text = f"{t}: history replaced by {len(data.get('messages') or [])} message(s)"
+        elif t == "side_question" and isinstance(data, dict):
+            role = "event"
+            text = f"/btw {data.get('question', '')} -> {data.get('answer', '')}"
+        elif t == "shell_command" and isinstance(data, dict):
+            role = "event"
+            text = f"!{data.get('command', '')} (exit {data.get('exit_code')})"
+        elif t == "steer_message" and isinstance(data, dict):
+            role = "user"
+            text = f"[steer] {data.get('text', '')}"
+        elif t == "unsent_messages" and isinstance(data, dict):
+            role = "event"
+            text = f"unsent at exit: {len(data.get('queue') or [])} queued, draft {len(str(data.get('draft') or ''))} chars"
+        yield {"index": i, "type": t, "timestamp": entry.get("timestamp"), "role": role, "text": text, "data": data}
 
 
 def glob_escape(s: str) -> str:

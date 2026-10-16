@@ -127,6 +127,7 @@ def test_process_tool_stats(tmp_path: Path) -> None:
 def test_clipboard_windows_uses_utf16_for_clip(monkeypatch) -> None:
     import axon.ui.clipboard as cb
     calls = []
+    monkeypatch.delenv("AXON_CLIPBOARD_FILE", raising=False)   # exercise the real code path (with _run stubbed)
     monkeypatch.setattr(cb.plat, "IS_WINDOWS", True)
     monkeypatch.setattr(cb.shutil, "which", lambda n: r"C:\Windows\System32\clip.exe" if n == "clip" else None)
     monkeypatch.setattr(cb, "_run", lambda argv, data=None, timeout=3.0: calls.append((argv, data)) or SimpleNamespace(returncode=0))

@@ -77,7 +77,9 @@ def test_code_block_soft_wraps_with_marker() -> None:
     rows = out.splitlines()
     assert all(display_width(r) <= 40 for r in rows), rows
     assert any(theme.glyph("wrap") in r for r in rows)
-    body = "".join(strip_ansi(r).strip().lstrip(theme.glyph("wrap")).strip() for r in rows[1:])
+    # the card frame lives in the gutter ('│ ' rows between '╭── python' and '╰──')
+    body = "".join(strip_ansi(r).strip().lstrip(theme.glyph("v")).strip().lstrip(theme.glyph("wrap")).strip()
+                   for r in rows[1:-1])
     assert body.replace(" ", "") == ("x = 1  # " + "word " * 30).replace(" ", "")
 
 
@@ -207,6 +209,45 @@ def test_stream_canceller_wakes_blocked_socket_read() -> None:
     assert c.cancel(t.ident)
     t.join(3)
     assert result.get("out") == "interrupted" and time.monotonic() - t0 < 2
+    a.close()
+    b.close()
+
+
+def test_stream_cancel_does_not_close_socket_under_the_reader() -> None:
+    """Regression: cancel() shut the socket down AND closed the response from the cancelling thread.
+    A reader that reached its next recv() after the close polled fd -1 and slept for the whole read
+    timeout - Esc then left the REPL stuck on "responding" (~4% of interrupts on macOS)."""
+    from axon.providers.base import StreamCanceller
+    a, b = socket.socketpair()
+    a.settimeout(5)
+    resp = types.SimpleNamespace(extensions={"network_stream": types.SimpleNamespace(get_extra_info=lambda k: a)},
+                                 close=a.close)  # like httpx: closing the response closes the socket
+    c = StreamCanceller()
+    cancelled = threading.Event()
+    result: dict[str, object] = {}
+
+    def reader() -> None:
+        c.begin()
+        try:
+            with c.track(resp):
+                cancelled.wait(3)       # the reader is between two reads when Esc arrives
+                result["data"] = a.recv(10)
+            c.check()
+            result["out"] = "finished"
+        except KeyboardInterrupt:
+            result["out"] = "interrupted"
+        except OSError as e:
+            result["out"] = f"oserror {e}"
+
+    t = threading.Thread(target=reader)
+    t.start()
+    time.sleep(0.1)
+    t0 = time.monotonic()
+    assert c.cancel(t.ident)
+    cancelled.set()
+    t.join(4)
+    assert result.get("out") == "interrupted", result
+    assert time.monotonic() - t0 < 2
     a.close()
     b.close()
 

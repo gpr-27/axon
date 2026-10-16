@@ -97,13 +97,19 @@ def build_parser() -> argparse.ArgumentParser:
         prog="axon",
         description="A terminal-native agentic coding assistant.",
         epilog="Subcommands: `axon mcp <list|add|remove|...>` MCP servers, `axon doctor` checks your setup, "
-               "`axon setup` guided provider setup, `axon purge` deletes stored sessions/traces.",
+               "`axon setup` guided provider setup, `axon purge` deletes stored sessions/traces, "
+               "`axon new <template>` starter project, `axon map` repository map, `axon stats` / "
+               "`axon report` usage analytics, `axon serve` local HTTP/SSE API, `axon activity` the journal "
+               "of everything you did, `axon projects` every project and its data folder, `axon keys` API keys "
+               "(add, replace, test, remove), `axon endpoint` base URLs and custom endpoints.",
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s v{getattr(axon, '__version__', '?')}")
     parser.add_argument("prompt", nargs="*", default=[], help="Prompt to run (starts the REPL when omitted)")
     parser.add_argument("-p", "--print", dest="print_mode", action="store_true", help="Run one prompt non-interactively and exit")
     parser.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text", help="Print-mode output format")
     parser.add_argument("--model", help="Model to use")
+    parser.add_argument("--context-limit", metavar="SIZE",
+                        help="How much of the model's context window to use: 128k (default), 256k, 1m or max")
     parser.add_argument("--provider", help="Provider preset id (e.g. anthropic, openai, openrouter, ollama)")
     parser.add_argument("--base-url", dest="base_url", help="Provider API base URL")
     parser.add_argument("--mode", "--permission-mode", dest="mode", type=_permission_mode, metavar="MODE",
@@ -161,6 +167,7 @@ def _permission_mode(value: str) -> str:
 def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "model": args.model,
+        "context_limit": _context_limit_arg(getattr(args, "context_limit", None)),
         "provider": args.provider,
         "base_url": args.base_url,
         "mode": args.mode,
@@ -237,17 +244,22 @@ def setup_debug_logging(filter_spec: str | None, file: str | None, session_id: s
         path = Path(os.path.expanduser(file))
     else:
         from axon import storage
-        path = storage.ensure_dir(storage.axon_home() / "debug") / f"{session_id or time.strftime('%Y%m%d-%H%M%S')}.log"
+        path = storage.project_subdir(None, "debug") / f"{session_id or time.strftime('%Y%m%d-%H%M%S')}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
-    cats = {"api": "axon.providers", "providers": "axon.providers", "hooks": "axon.hooks", "mcp": "axon.mcp",
-            "permissions": "axon.permissions", "agent": "axon.agent", "tools": "axon.tools", "session": "axon.session"}
+    api = ("axon.providers", "axon.agent.api")  # provider modules + the agent's LLM-call events
+    cats: dict[str, tuple[str, ...]] = {
+        "api": api, "providers": api, "hooks": ("axon.hooks",), "mcp": ("axon.mcp",),
+        "permissions": ("axon.permissions",), "agent": ("axon.agent",), "tools": ("axon.tools",),
+        "session": ("axon.session",)}
     spec = [c.strip().lower() for c in (filter_spec or "all").split(",") if c.strip()]
-    include = [cats[c] for c in spec if c in cats]
-    exclude = [cats[c[1:]] for c in spec if c.startswith("!") and c[1:] in cats]
+    include = [x for c in spec if c in cats for x in cats[c]]
+    exclude = [x for c in spec if c.startswith("!") and c[1:] in cats for x in cats[c[1:]]]
 
     class _Filter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             name = record.name
+            if name == "axon":  # the log's own header line
+                return True
             if any(name.startswith(x) for x in exclude):
                 return False
             return not include or any(name.startswith(x) for x in include)
@@ -363,9 +375,12 @@ def build_agent(
     bare = {d for d in (disallowed_tools or []) if "(" not in d}
     if agent_def is not None:
         bare |= {str(t) for t in getattr(agent_def, "disallowed_tools", []) or []}
-    if bare:
+    # A read-only definition (explore, plan, ...) keeps only read-only tools, exactly as it does when
+    # it runs as a Task subagent (agent/subagent.py) - `--agent explore` must not be able to edit files.
+    readonly_def = agent_def is not None and bool(getattr(agent_def, "readonly", False))
+    if bare or readonly_def:
         keep = [t.name for t in tools.all_tools() if t.name not in bare]
-        tools = tools.subset(names=keep)
+        tools = tools.subset(names=keep, readonly_only=readonly_def)
 
     context = ContextManager(settings)
     try:
@@ -473,10 +488,35 @@ def session_state(agent: Any, session_id: str) -> dict[str, Any]:
     return state
 
 
+def _journal(kind: str, data: Any, agent: Any = None, sync: bool = False) -> None:
+    """Activity journal (axon.session.activity); never raises."""
+    try:
+        from axon.session import activity
+        activity.record(kind, data, agent=agent, sync=sync)
+    except Exception:
+        pass
+
+
 def _one_line(text: str, limit: int) -> str:
     t = " ".join(str(text or "").split())
     return t if len(t) <= limit else t[: limit - 1] + "…"
 
+
+
+def _context_limit_arg(value: str | None) -> int | None:
+    if not value:
+        return None
+    from axon.providers.registry import parse_token_count
+    try:
+        return parse_token_count(value)
+    except ValueError as e:
+        raise SystemExit(f"axon: --context-limit: {e} (use 128k, 256k, 1m or max)")
+
+
+def _session_file(agent: Any, session_id: str) -> Any:
+    """Transcript file of a session (the full record the restored view is drawn from)."""
+    from axon.ui.history_view import session_file
+    return session_file(agent, session_id)
 
 def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mode: bool = True) -> bool:
     try:
@@ -487,6 +527,8 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
     except Exception as e:
         say(f"Could not resume session {session_id}: {e}")
         return False
+    from axon.session.store import restore_retry_state
+    restore_retry_state(agent, session_id)
     bind = getattr(agent, "_bind_checkpoints", None)
     if callable(bind):
         bind()
@@ -504,9 +546,19 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
     if state.get("title") and hasattr(agent, "mark_titled"):
         agent.mark_titled(state["title"])
     tot_tok = agent.ledger.total_input_tokens + agent.ledger.total_output_tokens
+    _journal("resume", {"session": session_id, "title": state.get("title") or "",
+                        "messages": len(agent.conversation.messages)}, agent=agent)
     name = f" \"{state['title']}\"" if state.get("title") else ""
     say(f"Resumed session {session_id}{name} ({len(agent.conversation.messages)} msgs · {tot_tok:,} tokens · ${agent.ledger.total():.5f})")
-    if state.get("turns"):
+    replayed = False
+    if state.get("turns") and sys.stdout.isatty() and agent.conversation.messages:
+        try:   # interactive: redraw the conversation like it looked live (prompts, tools, results, answers)
+            from axon.session.interactive import render_restored_conversation
+            render_restored_conversation(agent.conversation, session_id, ledger=agent.ledger, path=_session_file(agent, session_id))
+            replayed = True
+        except Exception:
+            replayed = False
+    if state.get("turns") and not replayed:
         say(f"  Recap: {state['turns']} prompt(s). Last: \"{_one_line(state['last_prompt'], 90)}\"")
         if state.get("last_answer"):
             say(f"  Last answer: {_one_line(state['last_answer'], 110)}")
@@ -570,7 +622,7 @@ def run_shell_shortcut(cmd_shell: str, sink: list[str] | None = None) -> int:
                     sys.stdout.flush()
                 except Exception:
                     pass
-                if total < 400_000:
+                if total < 64_000_000:   # everything (the full text is saved to the project's outputs/)
                     chunks.append(text)
                     total += len(text)
             sink.append("".join(chunks))
@@ -597,20 +649,44 @@ def _shell_into_context(agent: Any, renderer: Any, command: str) -> None:
     from axon.ui.theme import RST, SLATE
     sink: list[str] = []
     cwd_before = os.getcwd()
+    t0 = time.time()
     code = run_shell_shortcut(command, sink=sink)
     output = "".join(sink)
+    shell_rec: dict[str, Any] = {"command": command.strip(), "exit_code": code, "cwd": os.getcwd(),
+                                 "output_chars": len(output), "duration_s": round(time.time() - t0, 3),
+                                 "respond": bool(getattr(agent.settings, "respond_to_bash_commands", True)),
+                                 "output": output[:4000]}
     if os.getcwd() != cwd_before:
         hook = getattr(agent, "_hook", None)
         if callable(hook):
             hook("CwdChanged", {"old_cwd": cwd_before, "new_cwd": os.getcwd()})
     add = getattr(agent, "add_shell_context", None)
     if not callable(add):
+        _journal("shell", shell_rec, agent=agent)
         return
     add(command, output, code)
-    if getattr(agent.settings, "respond_to_bash_commands", False):
-        _run_agent_turn(agent, renderer, "", "Shell follow-up")
-    else:
+    full = getattr(agent, "_last_shell_full_output", "") or ""
+    if not full and len(output) > 4000:
+        try:
+            from axon import storage
+            saved = storage.save_full_output(agent.settings.workspace, str(agent.session.active_session_id),
+                                             f"shell-{int(time.time())}", output)
+            full = str(saved) if saved else ""
+        except Exception:
+            full = ""
+    if full:
+        shell_rec["full_output"] = full
+    _journal("shell", shell_rec, agent=agent)
+    cmd = command.strip()
+    if not getattr(agent.settings, "respond_to_bash_commands", True) or not cmd or cmd == "cd" or cmd.startswith("cd "):
         print(f"  {SLATE}(output added to context for your next message){RST}\n")
+        return
+    # The model answers right away: the captured output reaches it as context with this instruction.
+    status = "it failed" if code else "it succeeded"
+    _run_agent_turn(agent, renderer, f"I ran `{_one_line(cmd, 200)}` in my terminal ({status}, exit code {code}). "
+                    "Respond to its output: say briefly what it shows, explain any error and how to fix it, "
+                    "and answer any question it raises. Don't re-run the command unless that is needed.",
+                    "Shell follow-up")
 
 
 # ─── prompt preprocessing ──────────────────────────────────────────────────
@@ -787,6 +863,7 @@ def _stop_loops(agent: Any) -> None:
 
 
 def _print_turn(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> int:
+    _journal("prompt", {"text": prompt, "source": "print", "format": fmt}, agent=agent)
     prompt = expand_file_mentions(prompt, agent.settings.workspace)
     t0 = time.time()
     try:
@@ -841,7 +918,7 @@ def _open_session_switcher(agent: Any, renderer: Any) -> str | None:
     if not selected:
         if agent.conversation.messages:
             from axon.session.interactive import render_restored_conversation
-            render_restored_conversation(agent.conversation, agent.session.active_session_id, ledger=agent.ledger)
+            render_restored_conversation(agent.conversation, agent.session.active_session_id, ledger=agent.ledger, path=_session_file(agent, agent.session.active_session_id))
         return None
     if selected.startswith("__NEW_SESSION__:"):
         prompt_buf = selected.split(":", 1)[1].strip()
@@ -857,10 +934,13 @@ def _open_session_switcher(agent: Any, renderer: Any) -> str | None:
         agent.conversation = agent.session.load(selected)
         agent.conversation.repair()
         agent.ledger = agent.session.load_ledger(selected, agent.settings.model)
+        from axon.session.store import restore_retry_state
+        restore_retry_state(agent, selected)
         from axon.agent.subagent import sync_subagents_for_session
         sync_subagents_for_session(agent)
+        _journal("resume", {"session": selected, "via": "switcher", "messages": len(agent.conversation.messages)}, agent=agent)
         from axon.session.interactive import render_restored_conversation
-        render_restored_conversation(agent.conversation, selected, ledger=agent.ledger)
+        render_restored_conversation(agent.conversation, selected, ledger=agent.ledger, path=_session_file(agent, selected))
     except Exception as e:
         print(f"\n  {ROSE}Failed to switch session: {e}{RST}\n")
     return None
@@ -879,8 +959,11 @@ def _quick_memory(agent: Any, line: str) -> None:
     try:
         item = MemoryStore(agent.settings.workspace).add(body, scope=scope)
     except Exception as e:
+        _journal("memory", {"scope": scope, "text": body.strip(), "success": False, "error": str(e)}, agent=agent)
         print(f"  {ROSE}Could not save memory: {e}{RST}\n")
         return
+    _journal("memory", {"scope": scope, "text": body.strip(), "id": getattr(item, "id", ""),
+                        "title": getattr(item, "title", "")}, agent=agent)
     where = "~/.axon/memory" if scope == "global" else ".axon/memory"
     print(f"  {MINT}Saved {'user' if scope == 'global' else 'project'} memory:{RST} {item.title} {SLATE}({where}/{item.id}.md){RST}\n")
 
@@ -960,9 +1043,11 @@ def _run_agent_turn(agent: Any, renderer: Any, turn_input: str, label: str) -> N
         print(f"\n\n  {TEAL}Stopped by user.{RST}\n")
         return
     except AxonError as e:
+        _journal("error", {"where": label, "error": str(e), "prompt": turn_input[:500]}, agent=agent)
         print(f"\n  {ROSE}Error: {e}{RST}\n")
         return
     except Exception as e:
+        _journal("error", {"where": label, "error": f"{type(e).__name__}: {e}", "prompt": turn_input[:500]}, agent=agent)
         print(f"\n  {ROSE}Error during execution: {type(e).__name__}: {e}{RST}\n")
         return
     if res is None:  # moved to the background with Ctrl+B
@@ -973,15 +1058,30 @@ def _run_agent_turn(agent: Any, renderer: Any, turn_input: str, label: str) -> N
         return
     elapsed = time.time() - t0
     tot_cost = float(agent.get_combined_cost())
-    if not render_turn_footer(renderer, agent, res, elapsed) and res.stop_reason == "error" and res.final_text:
-        print(f"\n  {ROSE}{res.final_text}{RST}\n")
-    show_suggestions(agent, res)
-    try:
-        from axon.ui.notify import notify_if_unfocused
-        notify_if_unfocused(title="Axon", message=f"{label} finished ({elapsed:.1f}s · ${tot_cost:.4f})")
+    try:   # one tip row after the turn: the most useful next step if there is one, else a usage tip
+        from axon.features.suggest import next_step_tip
+        renderer.pending_tip = next_step_tip(agent, res)
     except Exception:
         pass
-    agent.notify(f"{label} finished", "turn_complete")
+    if not render_turn_footer(renderer, agent, res, elapsed) and res.stop_reason == "error" and res.final_text:
+        print(f"\n  {ROSE}{res.final_text}{RST}\n")
+    try:
+        from axon.features.tips import tip_engine
+        tip_engine(agent).observe_turn(agent, res)
+    except Exception:
+        pass
+    try:
+        from axon.ui.notify import notify_event
+        failed = getattr(res, "stop_reason", "") in ("error", "blocked", "budget_exceeded", "max_iterations")
+        if failed:
+            notify_event("turn_failed", f"{label} stopped: {_one_line(str(getattr(res, 'final_text', '') or res.stop_reason), 120)}",
+                         settings=agent.settings, elapsed=elapsed)
+        else:
+            notify_event("turn_complete", f"{label} finished ({elapsed:.1f}s · ${tot_cost:.4f})",
+                         settings=agent.settings, elapsed=elapsed)
+    except Exception:
+        pass
+    agent.notify(f"{label} finished", "turn_complete", desktop=False)   # hook only; desktop handled above
 
 
 def report_background(agent: Any, renderer: Any) -> int:
@@ -1029,7 +1129,13 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
                 agent.settings = agent.settings.model_copy(update={"trace_level": level})
             except Exception:
                 pass
-            print(f"  {SLATE}trace level: {level}{RST}")
+            what = {
+                "compact": "one line per tool call, no step details",
+                "normal": "each step: model, thinking summary, tools and results, timing and cost",
+                "detailed": "adds full tool inputs, result previews, what is sent to the model, cost split",
+                "debug": "adds raw request and usage fields of every event",
+            }.get(level, "")
+            print(f"  {SLATE}Trace level {WHITE}{level}{RST}{SLATE}: {what} (ctrl+o for the next level){RST}")
         return True
     if line == "__REWIND__":
         line = "/rewind"
@@ -1066,6 +1172,7 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
                 return False
             return True
 
+    _journal("prompt", {"text": line, "source": "queue" if from_queue else "typed"}, agent=agent)
     line = expand_file_mentions(line, agent.settings.workspace)
 
     if not from_queue and ";;" in line and not line.startswith("/"):
@@ -1117,8 +1224,96 @@ def drain_queue(agent: Any, renderer: Any) -> bool:
     return True
 
 
+def _start_screen_log(agent: Any) -> Any:
+    """Record everything shown in this REPL to ~/.axon/projects/<project>/screen/<started>-<session>.log."""
+    if not sys.stdout.isatty():
+        return None
+    try:
+        from axon.storage import project_dir
+        from axon.ui.screen_log import ScreenLog, click_expand_enabled
+        keep_file = bool(getattr(agent.settings, "screen_log", True))
+        if not keep_file and not click_expand_enabled(agent.settings):
+            return None
+        sid = str(getattr(agent.session, "active_session_id", "") or "session")
+        path = project_dir(Path(agent.settings.workspace)) / "screen" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sid}.log"
+        # without a file it still tracks which transcript entry each row shows (click-to-expand)
+        log = ScreenLog(sys.stdout, path if keep_file else None)
+        log.mark(f"Axon · {agent.settings.workspace} · session {sid}")
+        sys.stdout = log  # type: ignore[assignment]
+        return log
+    except Exception:
+        return None
+
+
+def _stop_screen_log(log: Any) -> None:
+    if log is None:
+        return
+    try:
+        if sys.stdout is log:
+            sys.stdout = log._real
+        log.close()
+    except Exception:
+        pass
+
+
+def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
+    """The window changed width: the terminal has re-wrapped everything already printed into ragged rows.
+    Clear the screen and draw the banner and the conversation again at the new width."""
+    from axon.ui.render import format_conversation_replay
+    from axon.ui.theme import RST, SLATE, term_width
+    if log is not None:
+        log.pause()                   # the screen log already has all of it
+    try:
+        sys.stdout.write("\033[3J\033[H\033[2J")
+        _print_banner(agent, renderer)
+        msgs = list(getattr(agent.conversation, "messages", []) or [])
+        path = _session_file(agent, agent.session.active_session_id)
+        if msgs or path:
+            from axon.ui.theme import layout_width
+            width = max(30, layout_width(4))
+            tags: list[Any] = []
+            rows: list[str] = []
+            if path:   # the full record: earlier turns keep their thinking, tool calls and outputs
+                try:
+                    from axon.ui.history_view import format_session_history
+                    from axon.ui.render import get_transcript
+                    tool_tags = {e.id: e.uid for e in get_transcript() if e.kind == "tool" and e.id}
+                    rows = format_session_history(path, registry=getattr(agent, "registry", None), width=width,
+                                                  row_tags=tags, tool_tags=tool_tags)
+                except Exception:
+                    rows, tags = [], []
+            if not rows:
+                tags = []
+                rows = format_conversation_replay(msgs, registry=getattr(agent, "registry", None), width=width, tag="",
+                                                  row_tags=tags)
+            try:
+                from axon.ui.screen_log import set_tag
+            except ImportError:
+                set_tag = None
+            for row, uid in zip(rows, tags or [None] * len(rows)):
+                if set_tag is not None:
+                    set_tag(uid)        # tool blocks stay clickable after the redraw
+                sys.stdout.write(row + "\n")
+            if set_tag is not None:
+                set_tag(None)
+            print(f"  {SLATE}Redrawn for the new window width ({term_width()} columns) · Ctrl+F opens the full "
+                  f"transcript with every output{RST}\n")
+        sys.stdout.flush()
+    finally:
+        if log is not None:
+            log.resume()
+
+
 def run_repl(agent: Any, renderer: Any) -> int:
-    """Interactive terminal REPL."""
+    """Interactive terminal REPL (everything shown is also kept in the project's screen log)."""
+    log = _start_screen_log(agent)
+    try:
+        return _run_repl(agent, renderer, log)
+    finally:
+        _stop_screen_log(log)
+
+
+def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
     from axon.ui.input import read_input
     from axon.ui.theme import GOLD, RST, SLATE, TEAL
 
@@ -1132,8 +1327,18 @@ def run_repl(agent: Any, renderer: Any) -> int:
     except Exception:
         pass
 
+    from axon.ui.input import RESIZE_REDRAW
+    from axon.ui.theme import term_width
     last_interrupt = 0.0
+    logged_session = str(getattr(agent.session, "active_session_id", "") or "")
+    layout_width = term_width()
     while True:
+        if term_width() != layout_width and sys.stdout.isatty():
+            layout_width = term_width()   # resized while a turn was running: tidy up before the prompt
+            _redraw_for_new_size(agent, renderer, log)
+        if log is not None and str(agent.session.active_session_id or "") != logged_session:
+            logged_session = str(agent.session.active_session_id or "")
+            log.mark(f"session {logged_session}")
         if report_background(agent, renderer) and not getattr(agent, "busy", False):
             if not drain_queue(agent, renderer):
                 return 0
@@ -1149,16 +1354,28 @@ def run_repl(agent: Any, renderer: Any) -> int:
             prefill = getattr(agent, "pending_input", None) or ""
             if prefill:
                 agent.pending_input = None
-            res_input = read_input(
-                initial=prefill,
-                mode=agent.settings.mode,
-                effort=agent.settings.effort,
-                plan_summary=plan_summary,
-                queue_summary=queue_summary,
-                subagent_label=subagent_label,
-                session_id=curr_id,
-            )
+            if log is not None:
+                log.pause()          # the prompt editor redraws on every key; the submitted text is noted below
+            try:
+                res_input = read_input(
+                    initial=prefill,
+                    mode=agent.settings.mode,
+                    effort=agent.settings.effort,
+                    plan_summary=plan_summary,
+                    queue_summary=queue_summary,
+                    subagent_label=subagent_label,
+                    session_id=curr_id,
+                )
+            finally:
+                if log is not None:
+                    log.resume()
             line, toggled_mode = res_input[0], res_input[1]
+            if line == RESIZE_REDRAW:
+                layout_width = term_width()
+                _redraw_for_new_size(agent, renderer, log)
+                continue
+            if log is not None and (line or "").strip() and not str(line).startswith("__"):
+                log.note("\n".join(f"{'›' if i == 0 else ' '} {r}" for i, r in enumerate(str(line).strip().splitlines())))
             if toggled_mode:
                 if callable(getattr(agent, "set_mode", None)):
                     agent.set_mode(toggled_mode)
@@ -1262,6 +1479,46 @@ def run_doctor_subcommand(args: list[str]) -> int:
 
 # ─── entry point ───────────────────────────────────────────────────────────
 
+def _startup_error(args: Any, message: str, code: int, subtype: str = "error") -> int:
+    """Report a failure before the agent runs: plain text on stderr, plus one JSON error object on
+    stdout for --output-format json / stream-json (so scripts always get parseable output)."""
+    sys.stderr.write(f"axon: {message}\n")
+    fmt = getattr(args, "output_format", "text")
+    if fmt in ("json", "stream-json"):
+        payload = {"type": "error", "subtype": subtype, "is_error": True, "error": message, "exit_code": code}
+        out = json.dumps(payload, indent=2 if fmt == "json" else None, ensure_ascii=False)
+        sys.stdout.write(out + "\n")
+        sys.stdout.flush()
+    return code
+
+
+class _Terminated(SystemExit):
+    """Raised by the SIGTERM handler so ``finally`` blocks flush and save everything."""
+
+
+def _install_sigterm() -> Any:
+    import signal
+    if not hasattr(signal, "SIGTERM"):
+        return None
+
+    def _handler(signum: int, frame: Any) -> None:
+        raise _Terminated(143)
+
+    try:
+        return signal.signal(signal.SIGTERM, _handler)
+    except (ValueError, OSError):  # not the main thread (embedded / tests)
+        return None
+
+
+def _restore_sigterm(prev: Any) -> None:
+    if prev is None:
+        return
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, prev)
+    except (ValueError, OSError, TypeError):
+        pass
+
 def main(argv: list[str] | None = None) -> int:
     _setup_console()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -1330,15 +1587,19 @@ def main(argv: list[str] | None = None) -> int:
             settings, agent_def = _apply_agent_flag(settings, args.agent_name)
         mcp_specs = _mcp_specs_from_args(args.mcp_config, settings.workspace) if args.mcp_config else None
     except ConfigError as e:
-        sys.stderr.write(f"axon: {e}\n")
-        return 2
+        return _startup_error(args, str(e), 2, "config_error")
     except KeyboardInterrupt:
         sys.stderr.write("\n")
         return 130
 
     try:
         from axon import storage
-        storage.prune_on_startup(settings.cleanup_period_days)
+        storage.prune_on_startup(settings.cleanup_period_days)  # 0 (default) = keep everything
+    except Exception:
+        pass
+    try:  # one-time legacy migration, project.json / index.json, generated READMEs
+        from axon.session.layout import startup as _layout_startup
+        _layout_startup(settings.workspace)
     except Exception:
         pass
 
@@ -1369,6 +1630,8 @@ def main(argv: list[str] | None = None) -> int:
         if fmt == "text":
             print(f"  {msg}")
 
+    # Before build_agent, so MCP server startup (and everything else at boot) reaches --debug logs.
+    debug_path = setup_debug_logging(args.debug, args.debug_file, "")
     try:
         agent = build_agent(
             settings,
@@ -1382,11 +1645,9 @@ def main(argv: list[str] | None = None) -> int:
             agent_def=agent_def,
         )
     except AxonError as e:
-        sys.stderr.write(f"axon: {e}\n")
-        return 2
+        return _startup_error(args, str(e), 2, "startup_error")
     except OSError as e:
-        sys.stderr.write(f"axon: failed to start: {e}\n")
-        return 2
+        return _startup_error(args, f"failed to start: {e}", 2, "startup_error")
     agent.renderer = renderer
     if renderer is not None and hasattr(renderer, "attach"):
         try:
@@ -1439,7 +1700,9 @@ def main(argv: list[str] | None = None) -> int:
             set_terminal_title(args.session_name)
         except Exception:
             pass
-    debug_path = setup_debug_logging(args.debug, args.debug_file, getattr(agent.session, "active_session_id", ""))
+    if debug_path is not None:
+        import logging as _logging
+        _logging.getLogger("axon").debug("session %s", getattr(agent.session, "active_session_id", ""))
     if debug_path is not None and fmt == "text":
         announce(f"Debug log: {debug_path}")
     try:
@@ -1450,6 +1713,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     agent.start_session(source)
+    prev_term = _install_sigterm()
     if settings.additional_dirs:
         for d in settings.additional_dirs:
             agent._hook("DirectoryAdded", {"directory": str(d), "source": "cli"})
@@ -1461,7 +1725,19 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         exit_reason = "interrupt"
         return 130
+    except _Terminated:
+        exit_reason = "terminated"
+        return 143
+    except BaseException as e:
+        exit_reason = f"crash: {type(e).__name__}: {e}"[:300]
+        raise
     finally:
+        try:  # stop a running turn (its partial answer is saved), journal unsent queue/draft, fsync
+            from axon.session.activity import on_exit
+            on_exit(agent, exit_reason)
+        except Exception:
+            pass
+        _restore_sigterm(prev_term)
         try:
             agent.end_session(exit_reason)
         except Exception:

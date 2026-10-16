@@ -13,7 +13,7 @@ A custom command whose name collides with a built-in stays reachable as `/cmd:<n
 The tables below are generated from the command registry by `scripts/gen_docs.py`.
 
 <!-- BEGIN GENERATED: commands-reference -->
-104 built-in commands in 13 groups.
+112 built-in commands in 13 groups.
 
 Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Modes](#model--modes) · [Code & Review](#code--review) · [Agents, Skills & Tools](#agents-skills--tools) · [Memory & Project](#memory--project) · [System](#system) · [Code](#code) · [Getting started](#getting-started) · [Git](#git) · [Insight](#insight) · [Integrations](#integrations) · [Solve](#solve)
 
@@ -21,6 +21,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 | Command | Aliases | Description |
 |---|---|---|
+| `/activity` | `/journal` | Everything you and Axon did: prompts, commands, shell, tools, settings, errors |
 | `/branch` | `/fork` | Fork the conversation into a new session |
 | `/clear` | `/reset` | Start a fresh session (the old one stays resumable) |
 | `/delete` |  | Delete a saved session (picker, id, or --all) |
@@ -28,12 +29,31 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/export` |  | Export the conversation (Markdown, JSON, text) to a file or the clipboard |
 | `/history` | `/timeline` | List the messages in the conversation |
 | `/loop` | `/repeat` | Repeat a prompt N times or on an interval |
+| `/project` | `/where` | Current project: name, path, data folder, sessions, journal, memory |
 | `/rename` | `/title` | Rename the current session (no name: generate one) |
+| `/restore` | `/trash` | List deleted sessions (the trash) and restore them |
 | `/resume` | `/continue` | Resume a previous session of this workspace |
+| `/retry` |  | Retry the last turn that failed with a provider error |
 | `/rewind` | `/undo` `/checkpoint` | Restore code and/or conversation to an earlier prompt |
 | `/sessions` | `/session` | List saved sessions with tokens and cost |
 | `/star` | `/fav` | Toggle the favourite star on this session |
 | `/tag` |  | Tag the current session (use '-' to clear) |
+
+<details><summary><code>/activity</code> usage</summary>
+
+```text
+/activity                      the last 30 events of this project
+/activity <N>                  the last N events
+/activity --kind prompt,shell  only these kinds (--kinds lists them)
+/activity --session <id>       only one session (id or prefix)
+/activity <text> | --grep <t>  events containing text
+/activity --since 2h|3d        only recent events
+/activity --all-projects       every project's journal
+/activity --export <file>      write the selection (.md or .jsonl)
+/activity --path               where the journal lives
+```
+
+</details>
 
 <details><summary><code>/branch</code> usage</summary>
 
@@ -62,7 +82,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 <details><summary><code>/export</code> usage</summary>
 
 ```text
-/export [md|json|txt] [path]      default path: ~/.axon/exports/<session>.<ext>
+/export [md|json|txt] [path]      default path: ~/.axon/projects/<project>/exports/<session>.<ext>
 /export [md|json|txt] clipboard   copy instead of saving
 /export                          on a terminal: choose clipboard or file
 ```
@@ -73,6 +93,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /history [window]
+/history all [session-id]   every record of the transcript, rewound and compacted messages included
 ```
 
 </details>
@@ -93,6 +114,16 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /rename [new title]   (without a title one is generated from the conversation)
+```
+
+</details>
+
+<details><summary><code>/restore</code> usage</summary>
+
+```text
+/restore              list the trash (pick one on a terminal)
+/restore <id>         restore a session
+/restore --all        restore every trashed session
 ```
 
 </details>
@@ -141,7 +172,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 |---|---|---|
 | `/autocompact` |  | Set the auto-compact threshold (percent or tokens) |
 | `/compact` |  | Summarise older turns to free context (optional focus) |
-| `/context` | `/tokens` | Context usage by category; --why explains each block |
+| `/context` | `/tokens` | Context usage by category; --why explains each block; limit sets the window size |
 | `/cost` | `/usage` `/ledger` | Cost by source and model, cache savings, $/turn |
 | `/faq` | `/faqs` | AgentRouter FAQ and error troubleshooting |
 | `/payload` | `/breakdown` `/input` | Inspect the exact prompt sent to the model |
@@ -173,6 +204,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 /context          coloured usage grid + breakdown by category
 /context --why    every injected block, its trigger and tokens
 /context all      include per-tool token sizes
+/context limit    how much of the model's window to use: 128k (default), 256k, 1m or max
 ```
 
 </details>
@@ -226,9 +258,10 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | Command | Aliases | Description |
 |---|---|---|
 | `/effort` |  | Reasoning effort: reflex \| balanced \| synapse \| quantum |
+| `/endpoint` | `/endpoints` `/base-url` `/baseurl` | Provider base URLs: redirect to a proxy, add custom endpoints, test, reset |
 | `/fast` |  | Toggle the small/fast model for this session |
 | `/goal` |  | Set a session goal shown in the status and sent to the model |
-| `/keys` | `/key` `/apikey` | Show or set provider API keys (verified before saving) |
+| `/keys` | `/key` `/apikey` | API keys: add/replace (verified), test, remove, where they are stored |
 | `/mode` |  | Permission mode: default \| acceptEdits \| plan \| bypass |
 | `/model` |  | Switch model (picker, name, 'random' or 'random:small') |
 | `/permissions` | `/perms` `/permission` | Manage allow / ask / deny rules and working directories |
@@ -243,6 +276,20 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 /effort [reflex|balanced|synapse|quantum]   (aliases: low, medium, high, max)
 /effort auto      back to the default effort
 /effort status    show the current effort
+```
+
+</details>
+
+<details><summary><code>/endpoint</code> usage</summary>
+
+```text
+/endpoint                                        menu (a list without a terminal)
+/endpoint set <provider> <url>                   redirect a provider to another base URL (proxy/gateway)
+/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--use]
+/endpoint reset <provider|name>                  preset default URL again / delete a custom endpoint
+/endpoint test [provider|url]                    connectivity, latency and model count
+/endpoint use <provider|name> [--model M]        switch to it now (also saved as the default)
+saved in ~/.axon/config.toml (user scope only)
 ```
 
 </details>
@@ -268,8 +315,13 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 <details><summary><code>/keys</code> usage</summary>
 
 ```text
-/keys                     list keys
-/keys <provider> [key]    set a key (prompts if omitted)
+/keys                                       key manager (menu; a list without a terminal)
+/keys set <provider|VAR> [key] [--project]  add or replace a key (hidden prompt when the key is omitted)
+/keys test [provider|VAR|all]               live check: latency and model count, or the exact error
+/keys remove <provider|VAR> [--project]     delete a key from ~/.axon/.env (or this project's .env)
+/keys where                                 where keys are read from, in order
+/keys edit [--project]                      open the .env file in $EDITOR
+flags: --no-verify saves without a live check · -y skips confirmations
 ```
 
 </details>
@@ -342,7 +394,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/copy` | `/cp` | Copy an answer (N = Nth latest), its code blocks, or the git diff |
 | `/diff` |  | Uncommitted changes, or edits since checkpoint T<n> |
 | `/find` | `/fuzzy` | Fuzzy-find a workspace file (Ctrl+P while typing) |
-| `/output` | `/expand` `/view` `/more` | Full output of the last tool, or a workspace file |
+| `/output` | `/expand` `/view` `/more` | Full output of a tool call (/output 7), the last one, or a workspace file |
 | `/paste` | `/multiline` | Multi-line input: paste text, finish with END |
 | `/queue` | `/q` | Queue prompts to run after the current turn |
 | `/review` | `/code-review` | Code review of the current changes (or a focus area) |
@@ -350,6 +402,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/simplify` |  | Simplify the changed code (reuse, dead code, efficiency) and apply fixes |
 | `/test` | `/tests` | Detect and run the project's test suite |
 | `/todos` | `/todo` | Show the agent's task checklist |
+| `/transcript` | `/tr` `/scrollback` | Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+F) |
 
 <details><summary><code>/btw</code> usage</summary>
 
@@ -380,10 +433,19 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/find</code> usage</summary>
+
+```text
+/find [query]
+```
+
+</details>
+
 <details><summary><code>/output</code> usage</summary>
 
 ```text
-/output [path] [pager]
+/output [n | list | path] [pager]
+/output list saved   tool outputs recorded in this session (also after a resume)
 ```
 
 </details>
@@ -428,6 +490,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /test [extra args]
+```
+
+</details>
+
+<details><summary><code>/transcript</code> usage</summary>
+
+```text
+/transcript   (keys: click/enter expand · e/c all · t turns · / search · n/N · y copy · q close)
 ```
 
 </details>
@@ -643,15 +713,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 |---|---|---|
 | `/bug` | `/feedback` | Save a bug report with diagnostics |
 | `/color` | `/colour` | Colour of the prompt bar for this session |
-| `/config` | `/settings` `/set` | Settings panel, or show/change one setting |
+| `/config` | `/set` | Settings panel, or show/change one setting |
 | `/doctor` |  | Diagnose installation, keys, tools and environment |
 | `/env` | `/environment` | OS, Python, shell, paths and toolchains |
 | `/focus` |  | Focus view: only prompts, one-line tool summaries and answers |
 | `/help` |  | List commands, or details for one command |
 | `/keybindings` | `/shortcuts` `/kb` | Keyboard shortcuts in effect (remap in ~/.axon/keybindings.json) |
-| `/notify` |  | Send a test desktop notification |
+| `/notify` |  | Desktop notifications: when they fire (important/all/off), or send a test |
 | `/output-style` | `/output-styles` `/style` | Choose how answers are written (default, explanatory, learning, concise, custom) |
 | `/release-notes` | `/changelog` `/whats-new` | What's new in this and earlier Axon versions |
+| `/settings` | `/preferences` `/prefs` `/options` | All settings in one place: model, keys, endpoint, permissions, display, cost, data |
 | `/status` |  | Version, model, mode, trace, session, cost, storage |
 | `/statusbar` |  | Show the live status bar, or toggle it |
 | `/statusline` |  | Custom status line command under the prompt |
@@ -713,7 +784,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/notify</code> usage</summary>
 
 ```text
-/notify [message]
+/notify [important|all|off|after <seconds>|test [message]]
 ```
 
 </details>
@@ -732,6 +803,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /release-notes [version|all]
+```
+
+</details>
+
+<details><summary><code>/settings</code> usage</summary>
+
+```text
+/settings                       every option, grouped (menu on a terminal)
+/settings <section>             one section: model, permissions, display, context, data, shell
+/settings <key> <value>         change one option (e.g. /settings tips off)
 ```
 
 </details>
@@ -809,6 +890,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/new` | `/scaffold` | Create a runnable starter project from a template (list with /new) |
 | `/next` | `/suggest` | Suggested next steps for the last turn (verify, fix, commit, compact...) |
 | `/setup` | `/onboard` | Guided setup: provider, API key (verified), model, permission mode, trace level |
+| `/tips` |  | Usage tips for what you are doing (model-written, grounded in the command list) |
 
 <details><summary><code>/new</code> usage</summary>
 
@@ -830,6 +912,17 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /setup [--provider P] [--model M] [--mode X] [--trace L]
+```
+
+</details>
+
+<details><summary><code>/tips</code> usage</summary>
+
+```text
+/tips                list the current tips
+/tips refresh        write fresh tips now
+/tips off|on         hide / show tips
+/tips llm off|on     registry-only / model-written tips
 ```
 
 </details>
@@ -866,7 +959,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/budget` |  | Show or set this session's spending limit |
 | `/insights` |  | Ask the analytics subagent to explain your spending and suggest savings |
 | `/report` |  | Write a self-contained HTML usage dashboard |
-| `/stats` |  | Usage analytics: cost, tokens, cache, models, sources, tools, expensive turns |
+| `/stats` | `/analytics` | Usage analytics: cost, tokens, cache, models, sources, tools, expensive turns |
 
 <details><summary><code>/budget</code> usage</summary>
 
@@ -1013,7 +1106,7 @@ command fails. Piped standard input is placed before the prompt:
 <!-- BEGIN GENERATED: cli-help -->
 ```text
 usage: axon [-h] [-v] [-p] [--output-format {text,json,stream-json}] [--model MODEL]
-            [--provider PROVIDER] [--base-url BASE_URL] [--mode MODE]
+            [--context-limit SIZE] [--provider PROVIDER] [--base-url BASE_URL] [--mode MODE]
             [--effort {reflex,balanced,synapse,quantum,low,medium,high,xhigh,max}]
             [--workspace WORKSPACE] [-c] [-r [RESUME_ID]] [--fork-session] [-n SESSION_NAME]
             [--trace {compact,normal,detailed,debug}] [--max-budget-usd MAX_BUDGET_USD]
@@ -1039,6 +1132,8 @@ options:
   --output-format {text,json,stream-json}
                         Print-mode output format
   --model MODEL         Model to use
+  --context-limit SIZE  How much of the model's context window to use: 128k (default), 256k, 1m or
+                        max
   --provider PROVIDER   Provider preset id (e.g. anthropic, openai, openrouter, ollama)
   --base-url BASE_URL   Provider API base URL
   --mode MODE, --permission-mode MODE
@@ -1096,6 +1191,10 @@ options:
                         Run the session in a git worktree (created or reused)
 
 Subcommands: `axon mcp <list|add|remove|...>` MCP servers, `axon doctor` checks your setup, `axon
-setup` guided provider setup, `axon purge` deletes stored sessions/traces.
+setup` guided provider setup, `axon purge` deletes stored sessions/traces, `axon new <template>`
+starter project, `axon map` repository map, `axon stats` / `axon report` usage analytics, `axon
+serve` local HTTP/SSE API, `axon activity` the journal of everything you did, `axon projects`
+every project and its data folder, `axon keys` API keys (add, replace, test, remove), `axon
+endpoint` base URLs and custom endpoints.
 ```
 <!-- END GENERATED: cli-help -->

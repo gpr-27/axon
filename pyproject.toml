@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=62.3"]  # "**" globs in package-data
+requires = ["setuptools>=64"]  # 64+: PEP 660 editable installs; 62.3+: "**" globs in package-data
 build-backend = "setuptools.build_meta"
 
 [project]

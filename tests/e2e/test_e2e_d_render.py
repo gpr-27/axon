@@ -375,7 +375,7 @@ def _seq_turn(axon_env: AxonEnv, n: int, level: str) -> str:
 def test_long_tool_output_truncated_in_normal_trace(axon_env: AxonEnv) -> None:
     """300 output lines show the first rows and a `… +N lines` marker; middle lines are hidden."""
     out = _seq_turn(axon_env, 300, "normal")
-    assert re.search(r"… \+\d+ lines", out), out[-1500:]
+    assert re.search(r"… \+\d+ more lines · /output \d+ to view all", out), out[-1500:]
     lines = [ln.strip("│ ") for ln in visible_lines(out)]
     assert "2" in lines and "150" not in lines
 
@@ -385,13 +385,13 @@ def test_long_tool_output_detailed_shows_more_but_bounded(axon_env: AxonEnv) -> 
     out = _seq_turn(axon_env, 300, "detailed")
     lines = [ln.strip("│ ") for ln in visible_lines(out)]
     assert "10" in lines and "200" not in lines
-    assert re.search(r"\+\d+ lines", out)
+    assert re.search(r"\+\d+ more lines", out)
 
 
 def test_long_tool_output_compact_hint(axon_env: AxonEnv) -> None:
-    """The compact trace hints how to expand truncated output."""
+    """The compact trace says how to see truncated output in full (/output <n>)."""
     out = _seq_turn(axon_env, 300, "compact")
-    assert re.search(r"… \+\d+ lines \(ctrl\+o to expand\)", out), out
+    assert re.search(r"… \+\d+ more lines · /output \d+ to view all", out), out
 
 
 def test_huge_tool_output_head_and_tail_sent_to_model(axon_env: AxonEnv) -> None:

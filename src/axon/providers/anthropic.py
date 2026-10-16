@@ -34,9 +34,9 @@ from axon.providers.base import (
 from axon.providers import transport as _transport
 from axon.providers.base import StreamCanceller, retry_event
 from axon.providers.transport import (
-    RETRYABLE_STATUS,
     backoff_delay,
     parse_retry_after,
+    should_retry_status,
     canonical_effort,
     classify_error,
     connection_error,
@@ -396,7 +396,7 @@ class AnthropicProvider:
                         kwargs["tools"] = t_
                     kwargs["messages"] = m_
                     continue
-                retryable = (status in RETRYABLE_STATUS) if isinstance(status, int) else is_retryable_exception(e)
+                retryable = should_retry_status(status, text, retry_no) if isinstance(status, int) else is_retryable_exception(e)
                 if not emitted[0] and retryable and retry_no < self._max_retries:
                     resp = getattr(e, "response", None)
                     delay = backoff_delay(retry_no, parse_retry_after(getattr(resp, "headers", None)))

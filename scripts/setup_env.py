@@ -122,7 +122,8 @@ def create_shim(py: Path, add_path: bool) -> None:
         bin_dir = Path.home() / ".axon" / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         shim = bin_dir / "axon.cmd"
-        shim.write_text(f'@echo off\r\n"{py}" -m axon %*\r\n', encoding="ascii", errors="replace", newline="")
+        shim.write_text(f'@echo off\r\nREM axon launcher, written by the Axon installer\r\n"{py}" -m axon %*\r\n',
+                        encoding="ascii", errors="replace", newline="")
         say(f"[OK] Launcher: {shim}")
         if add_path:
             try:
@@ -136,7 +137,7 @@ def create_shim(py: Path, add_path: bool) -> None:
     bin_dir = Path.home() / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "axon"
-    shim.write_text(f'#!/bin/sh\nexec "{py}" -m axon "$@"\n', encoding="utf-8")
+    shim.write_text(f'#!/bin/sh\n# axon launcher, written by the Axon installer\nexec "{py}" -m axon "$@"\n', encoding="utf-8")
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     say(f"[OK] Launcher: {shim}")
     on_path = any(Path(p).expanduser() == bin_dir for p in os.environ.get("PATH", "").split(os.pathsep) if p)
@@ -187,8 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         say(f"  (or without PATH:       \"{py}\" -m axon)")
     else:
         say(f"  (or without PATH:       {py} -m axon)")
-    say("  Set an API key first, e.g.  setx ANTHROPIC_API_KEY sk-...  (Windows)" if IS_WINDOWS
-        else "  Set an API key first, e.g.  export ANTHROPIC_API_KEY=sk-...")
+    say("  First run:  axon setup     (adds an API key and picks a model)")
     say("")
     return 0
 

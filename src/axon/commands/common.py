@@ -54,7 +54,9 @@ def err(msg: str) -> None:
 
 
 def usage(text: str) -> None:
-    print(f"\n  {GOLD}Usage:{RST} {WHITE}{text}{RST}\n")
+    # continuation lines of a multi-line usage are aligned under the first one (after "  Usage: ")
+    body = text.replace("\n", "\n" + " " * 9)
+    print(f"\n  {GOLD}Usage:{RST} {WHITE}{body}{RST}\n")
 
 
 def hint(text: str) -> None:
@@ -134,7 +136,9 @@ def update_settings(agent: Any, **changes: Any) -> None:
         changes = dict(changes)
         set_mode(changes.pop("mode"))
     if changes:
+        before = {k: getattr(agent.settings, k, None) for k in changes}
         agent.settings = agent.settings.model_copy(update=changes)
+        _journal_settings(agent, before, changes)
     perms = getattr(agent, "permissions", None)
     if perms is not None and hasattr(perms, "settings"):
         perms.settings = agent.settings
@@ -149,6 +153,24 @@ def update_settings(agent: Any, **changes: Any) -> None:
             agent.renderer.show_thinking = bool(changes["thinking"])
         except Exception:
             pass
+
+
+def _journal_settings(agent: Any, before: dict[str, Any], changes: dict[str, Any]) -> None:
+    """Record in-session settings changes (old -> new) in the activity journal; secrets are masked."""
+    try:
+        from axon.session import activity
+
+        def plain(v: Any) -> Any:
+            if hasattr(v, "get_secret_value"):
+                return activity.REDACTED if v.get_secret_value() else ""
+            return v if isinstance(v, (str, int, float, bool, type(None), list, dict)) else str(v)
+
+        diff = {k: {"from": plain(before.get(k)), "to": plain(v)} for k, v in changes.items()
+                if plain(before.get(k)) != plain(v)}
+        if diff:
+            activity.record("settings", {"changes": diff}, agent=agent)
+    except Exception:
+        pass
 
 
 def reprint_banner(agent: Any) -> None:
@@ -277,9 +299,15 @@ def update_settings_file(updates: dict[str, Any], scope: str = "user", workspace
     try:
         from axon.session.store import atomic_write_text
         atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-        return path
     except OSError:
         return None
+    try:
+        from axon.session import activity
+        activity.record("settings_file", {"path": str(path), "scope": scope, "updates": updates},
+                        workspace=workspace)
+    except Exception:
+        pass
+    return path
 
 
 def read_env_file() -> dict[str, str]:

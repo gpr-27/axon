@@ -23,6 +23,18 @@ def isolate_user_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pyt
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
     return fake_home
 
+@pytest.fixture(autouse=True)
+def _fresh_tip_engine():
+    """The tips engine is a process-wide singleton (footer/spinner state): start each test clean."""
+    try:
+        from axon.features.tips import reset_tip_engine
+    except Exception:
+        yield
+        return
+    reset_tip_engine()
+    yield
+    reset_tip_engine()
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Fixture providing isolated temporary workspace."""
@@ -57,3 +69,9 @@ def session_store(workspace: Path):
 @pytest.fixture
 def ledger():
     return Ledger()
+
+
+@pytest.fixture(autouse=True)
+def _private_clipboard(tmp_path_factory, monkeypatch):
+    """Copies made by tests go to a temp file, never to the developer's real clipboard."""
+    monkeypatch.setenv("AXON_CLIPBOARD_FILE", str(tmp_path_factory.mktemp("clip") / "clipboard.txt"))

@@ -424,7 +424,9 @@ def test_export_txt_and_clipboard(agent: Agent, monkeypatch, isolate_user_home: 
     dispatch_command("/export txt clipboard", agent)
     assert copied and "> export me" in copied[0]
     dispatch_command("/export txt", agent)
-    out = isolate_user_home / ".axon" / "exports" / f"{agent.session.active_session_id}.txt"
+    from axon import storage
+    out = storage.project_dir(agent.settings.workspace) / "exports" / f"{agent.session.active_session_id}.txt"
+    assert str(out).startswith(str(isolate_user_home / ".axon" / "projects"))
     assert out.exists() and "> export me" in out.read_text(encoding="utf-8")
 
 

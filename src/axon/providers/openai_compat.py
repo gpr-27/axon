@@ -40,13 +40,13 @@ from axon.providers.base import (
     parse_tool_arguments,
 )
 from axon.providers.transport import (
-    RETRYABLE_STATUS,
     azure_chat_url,
     backoff_delay,
     chat_completions_url,
     classify_error,
     connection_error,
     default_headers,
+    extract_error_detail,
     is_agentrouter,
     is_azure,
     is_official_openai,
@@ -56,11 +56,37 @@ from axon.providers.transport import (
     parse_retry_after,
     request_timeout_for,
     responses_url,
+    should_retry_status,
 )
 from axon.providers import transport as _transport
 
 # Message fields that strict OpenAI-compatible servers reject (Groq, Mistral, OpenAI, ...).
 _NON_STANDARD_MESSAGE_KEYS = ("reasoning_content", "reasoning", "reasoning_details")
+
+# Thinking-mode APIs that require `reasoning_content` on every assistant message carrying tool_calls
+# (DeepSeek: "The `reasoning_content` in the thinking mode must be passed back to the API"). The model
+# sometimes emits a tool call with no reasoning at all; an empty string counts as missing, so such
+# turns are replayed with this placeholder instead.
+REASONING_PLACEHOLDER = "(no reasoning)"
+_PASSBACK_MODEL_PREFIXES = ("deepseek-v4", "deepseek-v3.2", "deepseek-reasoner")
+
+
+def needs_reasoning_passback(model: str, messages: list[dict[str, Any]]) -> bool:
+    """True when tool-call turns must carry reasoning_content: a known thinking-mode model family, or a
+    conversation that already round-trips reasoning_content (the endpoint returned it, we send it back)."""
+    if _bare(model).startswith(_PASSBACK_MODEL_PREFIXES):
+        return True
+    return any(isinstance(m, dict) and m.get("role") == "assistant" and m.get("reasoning_content") for m in messages)
+
+
+def _with_reasoning(m: dict[str, Any]) -> dict[str, Any]:
+    """*m* with a non-empty reasoning_content when it is an assistant tool_calls message (copy if changed)."""
+    if m.get("role") != "assistant" or not m.get("tool_calls"):
+        return m
+    rc = m.get("reasoning_content")
+    if isinstance(rc, str) and rc.strip():
+        return m
+    return {**m, "reasoning_content": REASONING_PLACEHOLDER}
 
 
 def _copy_content(c: Any) -> Any:
@@ -73,7 +99,8 @@ def _strip_cache_control(content: Any) -> Any:
     return content
 
 
-def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = False) -> list[dict[str, Any]]:
+def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = False,
+                             reasoning_passback: bool = False) -> list[dict[str, Any]]:
     """
     Normalize a mixed Anthropic/OpenAI conversation into valid OpenAI chat messages:
     1. Unpack accidental nested message dicts; content is never None.
@@ -82,6 +109,8 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
     4. Every assistant tool_calls message is followed by one tool message per id (synthesized if missing).
     5. Orphaned tool messages and empty assistant turns are dropped; consecutive user turns are merged.
     6. strict=True strips non-standard fields (reasoning_content, cache_control) for picky servers.
+    7. reasoning_passback=True (ignored when strict) gives every assistant tool_calls message a
+       non-empty reasoning_content, as thinking-mode APIs (DeepSeek) reject the request otherwise.
     Input messages are never mutated.
     """
     if not messages:
@@ -157,6 +186,8 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
             for k in _NON_STANDARD_MESSAGE_KEYS:
                 m.pop(k, None)
             m["content"] = _strip_cache_control(m.get("content"))
+        elif reasoning_passback:
+            m = _with_reasoning(m)
         cleaned.append(m)
 
     sanitized: list[dict[str, Any]] = []
@@ -487,7 +518,9 @@ class OpenAICompatProvider:
         if system_text:
             raw_messages.append({"role": "system", "content": system_text})
         raw_messages.extend(messages)
-        chat_messages = sanitize_openai_messages(raw_messages, strict=self._strict())
+        strict = self._strict()
+        passback = not strict and ("reasoning_passback" in self._rejected(model) or needs_reasoning_passback(model, messages))
+        chat_messages = sanitize_openai_messages(raw_messages, strict=strict, reasoning_passback=passback)
 
         use_responses = self._wants_responses(model)
         tried: set[str] = set()
@@ -527,6 +560,11 @@ class OpenAICompatProvider:
                 status = outcome.status or 0
                 reasoning_sent = "reasoning" in body or "reasoning_effort" in body
                 # Recovery ladder: each adjustment is tried once, then remembered for this host/model.
+                if not passback and not strict and "reasoning_content" in err and ("passed back" in err or "missing" in err):
+                    passback = True  # thinking-mode API wants reasoning_content on tool-call turns
+                    self._learn(model, "reasoning_passback")
+                    chat_messages = [_with_reasoning(m) for m in chat_messages]
+                    continue
                 if reasoning_sent and "no_reasoning" not in tried and (
                     "reasoning_effort" in err or "reasoning" in err and "not supported" in err
                     or "does not support thinking" in err or "does not support reasoning" in err
@@ -604,9 +642,10 @@ class OpenAICompatProvider:
                             pass
                         txt = getattr(resp, "text", "")
                         outcome.text = txt if isinstance(txt, str) else str(txt)
-                        if status in RETRYABLE_STATUS and attempt < retries:
+                        if attempt < retries and should_retry_status(status, outcome.text, attempt):
                             delay = backoff_delay(attempt, parse_retry_after(outcome.headers))
-                            reason = f"HTTP {status} from {self.endpoint_label()}"
+                            detail = extract_error_detail(outcome.text)
+                            reason = f"HTTP {status} from {self.endpoint_label()}" + (f": {detail[:160]}" if detail else "")
             except Exception as e:
                 self._canceller.check()  # an aborted read surfaces as a transport error: report Esc/Ctrl+C
                 if outcome.events_yielded or not is_retryable_exception(e) or attempt >= retries:

@@ -114,6 +114,8 @@ def make_env(home: Path, axon_home: Path, base_url: str, model: str = "gpt-4o") 
         "AXON_MODEL": model,
         "AXON_OFFLINE": "1",
         "AXON_NO_UPDATE_CHECK": "1",
+        "AXON_TIPS_LLM": "0",          # model-written tips would consume scripted LLM replies
+        "AXON_NO_NOTIFY": "1",         # never pop desktop notifications from test sessions
         "PYTHONPATH": str(SRC),
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
@@ -138,6 +140,14 @@ def create_axon_env(tmp_path: Path, llm: FakeLLMServer, git: bool = False) -> Ax
     if git:
         subprocess.run(["git", "init", "-q", str(ws)], check=False, capture_output=True)
     env = make_env(home, axon_home, llm.url)
+    if not IS_WINDOWS:  # never overwrite the developer's real clipboard (/copy, /export clipboard, ...)
+        shims = tmp_path / "bin-shims"
+        shims.mkdir(exist_ok=True)
+        for name in ("pbcopy", "wl-copy", "xclip", "xsel"):
+            p = shims / name
+            p.write_text(f'#!/bin/sh\ncat > "{tmp_path / "clipboard.txt"}"\n', encoding="utf-8")
+            p.chmod(0o755)
+        env["PATH"] = str(shims) + os.pathsep + env.get("PATH", "")
     return AxonEnv(root=tmp_path, home=home, axon_home=axon_home, workspace=ws, llm=llm, env=env)
 
 

@@ -51,6 +51,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "deepseek-v4-flash": 1_000_000,
     "gpt-5.6-sol": 1_000_000,
     "gpt-6-astra": 1_000_000,
+    "gpt-6.1-sol": 1_000_000,
     # Anthropic
     "claude-fable-5": 1_000_000,
     "claude-mythos-5": 1_000_000,
@@ -105,6 +106,7 @@ MODEL_MAX_OUTPUT: dict[str, int] = {
     "deepseek-v4-flash": 128_000,
     "gpt-5.6-sol": 128_000,
     "gpt-6-astra": 128_000,
+    "gpt-6.1-sol": 128_000,
     "claude-fable-5": 128_000,
     "claude-mythos-5": 128_000,
     "claude-opus-5-5": 128_000,
@@ -191,6 +193,37 @@ def get_context_window(model: str, default: int | None = None) -> int:
     if val is not None:
         return val
     return default if default is not None else 128_000
+
+
+CONTEXT_LIMIT_CHOICES = (128_000, 256_000, 1_000_000)
+
+
+def effective_context_window(model: str, settings: Any = None, default: int | None = None) -> int:
+    """The window Axon actually uses: the model's window, capped by the user's ``context_limit``
+    setting (default 128k; 0 = the model's full window). Auto-compact, the gauge, /context and the
+    status line all measure against this."""
+    window = get_context_window(model, default=default)
+    try:
+        limit = int(getattr(settings, "context_limit", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    return min(window, limit) if limit > 0 else window
+
+
+def parse_token_count(text: str) -> int:
+    """'128k' / '256K' / '1m' / '1M' / '200000' / 'max' -> tokens (0 for max/full)."""
+    t = str(text).strip().lower().replace(",", "").replace("_", "").removesuffix("tokens").strip()
+    if t in ("max", "full", "model", "0", "unlimited"):
+        return 0
+    mult = 1
+    if t.endswith("k"):
+        mult, t = 1_000, t[:-1]
+    elif t.endswith("m"):
+        mult, t = 1_000_000, t[:-1]
+    value = int(float(t) * mult)
+    if value < 8_000:
+        raise ValueError("context limit must be at least 8k tokens")
+    return value
 
 
 def get_max_output(model: str, default: int = 64_000) -> int:

@@ -12,8 +12,8 @@ from axon.commands.registry import (  # noqa: F401
     resolve_builtin,
 )
 from axon.commands import (  # noqa: F401  (import for registration side effects)
-    agent_cmds, code_cmds, context_cmds, insight_cmds, memory_cmds, model_cmds, perm_cmds, prefs_cmds, session_cmds, system_cmds,
-    workspace_cmds,
+    agent_cmds, code_cmds, context_cmds, endpoint_cmds, insight_cmds, keys_cmds, memory_cmds, model_cmds, perm_cmds, prefs_cmds,
+    session_cmds, settings_cmds, system_cmds, workspace_cmds,
 )
 from axon.commands.agent_cmds import (  # noqa: F401
     handle_agents, handle_explain, handle_hooks, handle_inspect, handle_main, handle_mcp, handle_plugin,
@@ -29,8 +29,11 @@ from axon.commands.context_cmds import (  # noqa: F401
 from axon.commands.memory_cmds import (  # noqa: F401
     handle_init, handle_learn, handle_memory, handle_optimize, handle_prompt, quick_memory,
 )
+from axon.commands.endpoint_cmds import handle_endpoint  # noqa: F401
+from axon.commands.keys_cmds import handle_keys  # noqa: F401
+from axon.commands.settings_cmds import handle_settings  # noqa: F401
 from axon.commands.model_cmds import (  # noqa: F401
-    handle_effort, handle_keys, handle_mode, handle_model, handle_plan, handle_provider, handle_thinking,
+    handle_effort, handle_mode, handle_model, handle_plan, handle_provider, handle_thinking,
     handle_trace, save_or_update_env_key, switch_model,
 )
 from axon.commands.perm_cmds import handle_permissions  # noqa: F401

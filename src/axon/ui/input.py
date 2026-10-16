@@ -79,11 +79,13 @@ INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069
 def format_user_prompt_banner(text: str, subagent_label: str | None = "", is_bash: bool = False,
                               max_w: int | None = None) -> str:
     """Render a submitted prompt as a full-width tinted block (echoed into the transcript)."""
-    tw = max_w or term_width()
+    from axon.ui.theme import layout_width
+    tw = max_w or layout_width(0)            # same measure as the turn timeline
     width = max(20, tw - 4)
     lines = text.strip().splitlines() or [""]
     if is_bash:
         first = "! "
+        lines[0] = lines[0][1:].lstrip() if lines[0].startswith("!") else lines[0]   # the prefix already shows it
     elif subagent_label:
         first = f"[{subagent_label}] › "
     else:
@@ -102,9 +104,11 @@ def format_user_prompt_banner(text: str, subagent_label: str | None = "", is_bas
 
 # name, kind ("core"/"ext"/"custom"), category, description, takes_args
 ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
-    ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek, GLM)", True),
+    ("/model", "core", "Core & Models", "Switch active LLM (Claude, GPT, DeepSeek)", True),
+    ("/keys", "core", "Core & Models", "API keys: add/replace (verified), test, remove, where stored", True),
+    ("/endpoint", "core", "Core & Models", "Provider base URLs: redirect to a proxy, add custom endpoints, test, reset", True),
+    ("/settings", "core", "Core & Models", "All settings in one place: model, keys, endpoint, permissions, display, cost, data", True),
     ("/provider", "core", "Core & Models", "Connect local or cloud engine (Ollama, LM Studio, OpenRouter, Anthropic, OpenAI)", False),
-    ("/keys", "core", "Core & Models", "View and update API keys & environment credentials (/keys <provider>)", True),
     ("/env", "core", "Core & Models", "Inspect runtime environment variables and provider keys", False),
     ("/effort", "core", "Core & Models", "Adjust reasoning tier (reflex, balanced, synapse, quantum)", True),
     ("/config", "core", "Core & Models", "View and adjust runtime configuration parameters", True),
@@ -126,6 +130,7 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/rewind", "core", "History & Diff", "Revert file edits made during previous turns", False),
     ("/copy", "core", "History & Diff", "Copy last response, code blocks, or diff to clipboard", True),
     ("/expand", "core", "History & Diff", "View full un-truncated output or expand any file", True),
+    ("/transcript", "core", "History & Diff", "Full-screen transcript: click a tool call to expand it (Ctrl+F)", False),
     ("/export", "core", "History & Diff", "Export session to Markdown or JSON transcript", True),
     ("/subagents", "core", "Multi-Agent", "Subagent matrix & isolated worker transcripts", False),
     ("/agents", "core", "Multi-Agent", "List and manage custom subagent definitions", True),
@@ -250,6 +255,11 @@ def add_history(text: str, session_id: str = "") -> None:
     text = text.strip()
     if not text:
         return
+    try:   # `/keys set openai sk-…` must never reach history.jsonl
+        from axon.providers.keystore import redact_command_line
+        text = redact_command_line(text)
+    except Exception:
+        pass
     if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != text:
         _SESSION_HISTORY.append(text)
     try:
@@ -672,11 +682,11 @@ class EditorState:
 
 
 def _save_paste(text: str) -> None:
-    """Keep large pastes in ~/.axon/paste-cache so a session can be inspected later."""
+    """Keep large pastes in ~/.axon/projects/<key>/pastes so a session can be inspected later."""
     try:
         import hashlib
-        from axon.storage import cache_dir
-        d = cache_dir("paste")
+        from axon.storage import project_subdir
+        d = project_subdir(None, "pastes")
         (d / f"{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}.txt").write_text(text, encoding="utf-8")
     except OSError:
         pass
@@ -809,7 +819,7 @@ def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple
     shown = rows[first:first + max_rows]
     lines = [f"  {rule_color}{'─' * width}{RST}"]
     if not body:
-        hint = ("shell mode · type a command (esc to leave)" if bash
+        hint = ("shell mode · run a command, then Axon responds to its output (esc to leave)" if bash
                 else "Ask anything · / commands · @ files · ! shell · # memory · ? shortcuts")
         lines.append(f"  {prefix}{DARK_SLATE}{hint}{RST}")
     else:
@@ -931,8 +941,10 @@ TRACE_CYCLE = "__TRACE_CYCLE__"
 _last_empty_ctrl_c = 0.0
 
 # Keys that end the prompt and hand a command to the REPL (default bindings; see keybindings.py).
-_SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "ctrl-o": TRACE_CYCLE, "alt-p": "/model", "alt-t": "/thinking"}
-_ACTION_COMMANDS = {"app:todos": "/todos", "app:traceCycle": TRACE_CYCLE, "app:modelPicker": "/model",
+_SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "ctrl-o": TRACE_CYCLE, "ctrl-f": "/transcript", "alt-p": "/model",
+                      "alt-t": "/thinking"}
+_ACTION_COMMANDS = {"app:todos": "/todos", "app:traceCycle": TRACE_CYCLE, "app:transcript": "/transcript",
+                    "app:modelPicker": "/model",
                     "app:thinkingToggle": "/thinking", "app:fastToggle": "/fast"}
 
 
@@ -1263,7 +1275,7 @@ def read_input(
     this return ``("", None, 0)`` so the REPL drains ``agent.message_queue`` (e.g. a /loop run).
 
     Special results: "__SWITCH_SESSION__" (← on empty prompt), "__REWIND__" (Esc Esc on empty
-    prompt), "__TRACE_CYCLE__" (Ctrl+O), "/todos" (Ctrl+T), "/model" (Alt+P), "/thinking"
+    prompt), "__TRACE_CYCLE__" (Ctrl+O), "/todos" (Ctrl+T), "/transcript" (Ctrl+F), "/model" (Alt+P), "/thinking"
     (Alt+T), "/kb" ("?" on empty prompt). Raises KeyboardInterrupt on Ctrl+C with an empty line
     and EOFError on a second Ctrl+C, or Ctrl+D pressed twice, on an empty line.
     """
@@ -1278,6 +1290,11 @@ def read_input(
     cwd_arg = kwargs.get("cwd") or getattr(getattr(agent, "settings", None), "workspace", None)
     cwd = Path(cwd_arg) if cwd_arg else Path.cwd()
     plat.setup_console()
+    try:
+        from axon.ui.screen_log import set_tag
+        set_tag(None)              # whatever prints after the prompt (commands) is not a transcript block
+    except ImportError:
+        pass
     st = EditorState(mode=mode, history=load_history(cwd=str(cwd)), cwd=cwd)
     vim_on = kwargs.get("vim_mode")
     if vim_on if vim_on is not None else _VIM_ENABLED:
@@ -1292,6 +1309,9 @@ def read_input(
         ahead = ""
     if ahead:
         initial = f"{initial}{ahead}" if initial else ahead
+    global _RESIZE_DRAFT
+    if _RESIZE_DRAFT:              # what was typed before a window resize redrew the screen
+        initial, _RESIZE_DRAFT = _RESIZE_DRAFT, ""
     if initial:
         st.set_text(str(initial))
     editor = PromptEditor(st)
@@ -1312,19 +1332,54 @@ def read_input(
         text = st.expanded().strip()
         frame.clear()
         if text:
+            try:
+                from axon.providers.keystore import redact_command_line
+                shown = redact_command_line(shown)
+            except Exception:
+                pass
             _echo_submitted(shown, chrome)
             add_history(text, session_id)
         return (text, changed_mode(), 0)
 
+    width0 = term_width()          # the real window (shutil's size prefers a stale $COLUMNS)
+    resized_at = 0.0
+    clicks = ClickMap.for_prompt(agent)   # click a block above the prompt -> expand it in the transcript
     try:
         with plat.raw_terminal(isig=False, bracketed_paste=True):
             frame.render(*build_frame(st, chrome))
+            if clicks is not None:
+                clicks.measure(frame)
             while True:
                 try:
-                    key = plat.read_key(timeout=0.25 if wake is not None else None)
+                    key = plat.read_key(timeout=0.25 if (wake is not None or resized_at) else None)
                 except EOFError:
                     frame.clear()
                     raise
+                if key == "resize":
+                    resized_at = time.monotonic()      # wait until the user stops dragging the window
+                    continue
+                if key is None and resized_at and time.monotonic() - resized_at >= 0.25:
+                    resized_at = 0.0
+                    if term_width() != width0:
+                        # The terminal re-wrapped everything already printed: hand back so the REPL redraws
+                        # the conversation at the new width (the draft is kept).
+                        _RESIZE_DRAFT = st.buf
+                        return (RESIZE_REDRAW, changed_mode(), 0)
+                    frame.render(*build_frame(st, chrome))
+                    if clicks is not None:
+                        clicks.measure(frame)
+                    continue
+                if key and key.startswith((plat.MOUSE_PREFIX, plat.CPR_PREFIX)):
+                    target = clicks.target(key) if clicks is not None else None
+                    if target is not None:
+                        _open_transcript_from_prompt(agent, target)
+                        if term_width() != width0:
+                            _RESIZE_DRAFT = st.buf
+                            return (RESIZE_REDRAW, changed_mode(), 0)
+                        frame.render(*build_frame(st, chrome))
+                        if clicks is not None:
+                            clicks.update(frame)
+                    continue
                 if key is None:
                     if wake is not None and wake.is_set() and not st.buf:
                         wake.clear()
@@ -1340,10 +1395,106 @@ def read_input(
                     if kind == "raise":
                         frame.clear()
                         raise value
+                    plat.set_mouse_reporting(False)    # editor / finder / suspend own the terminal
                     frame = _run_ui_action(value, st, frame)
+                    frame.render(*build_frame(st, chrome))
+                    if clicks is not None:
+                        clicks.measure(frame)
+                    continue
                 frame.render(*build_frame(st, chrome))
+                if clicks is not None:
+                    clicks.update(frame)
     finally:
+        plat.set_mouse_reporting(False)                # never leave mouse reporting on for a turn / shell / exit
         _ACTIVE_EDITOR = None
+
+
+RESIZE_REDRAW = "__RESIZE_REDRAW__"
+_RESIZE_DRAFT = ""
+
+
+class ClickMap:
+    """Maps a mouse click above the idle prompt to the transcript entry printed on that row.
+
+    The rows themselves are tagged by :class:`axon.ui.screen_log.RowTags` (fed with all output, so its
+    newest rows are the prompt frame's rows above the cursor). Where they are on screen comes from one
+    cursor position report (CSI 6n) after the frame is drawn; frames that grow past the bottom of the
+    window scroll everything up, which :meth:`update` accounts for without asking again."""
+
+    WHEEL_UP = -1        # target(): open the viewer at the end (scroll back through history)
+
+    def __init__(self, tags: Any) -> None:
+        self.tags = tags
+        self.frame_top = 0     # 1-based screen row of the frame's first line (0: unknown -> clicks ignored)
+        self._skip = 0         # frame rows above the cursor (already committed in the row model)
+
+    @classmethod
+    def for_prompt(cls, agent: Any = None) -> "ClickMap | None":
+        try:
+            from axon.ui.screen_log import RowTags, click_expand_enabled
+        except ImportError:
+            return None
+        tags = getattr(sys.stdout, "tags", None)
+        if not isinstance(tags, RowTags) or not plat.is_interactive():
+            return None
+        if not click_expand_enabled(getattr(agent, "settings", None)):
+            return None
+        return cls(tags)
+
+    _misses = 0            # terminals that never answer CSI 6n are not asked again (each try waits 150 ms)
+
+    def measure(self, frame: LiveFrame) -> bool:
+        """Locate the frame with a cursor position report; turns mouse reporting on when it works."""
+        pos = plat.query_cursor_position(0.15) if ClickMap._misses < 2 else None
+        if pos is None:
+            ClickMap._misses += 1
+            self.frame_top = 0
+            plat.set_mouse_reporting(False)
+            return False
+        ClickMap._misses = 0
+        self.frame_top = max(1, pos[0] - frame._cursor_row)
+        self._skip = frame._cursor_row
+        plat.set_mouse_reporting(True)
+        return True
+
+    def update(self, frame: LiveFrame, height: int | None = None) -> None:
+        """After a re-render: a taller frame near the bottom scrolled the screen up."""
+        if not self.frame_top:
+            return
+        h = height if height is not None else plat.term_size()[1]
+        n = max(1, len(frame._widths))
+        if self.frame_top + n - 1 > h:
+            self.frame_top = max(1, h - n + 1)
+        self._skip = frame._cursor_row
+
+    def entry_at(self, y: int, cols: int | None = None) -> int | None:
+        """uid of the transcript entry shown on screen row ``y`` (1-based), or None."""
+        if not self.frame_top or y >= self.frame_top or y < 1:
+            return None
+        return self.tags.tag_at(self.frame_top - y, skip=self._skip, cols=cols or plat.term_size()[0])
+
+    def target(self, key: str) -> int | None:
+        ev = plat.parse_mouse(key)
+        if ev is None or not self.frame_top:
+            return None
+        if ev.kind == "wheel-up":
+            return self.WHEEL_UP
+        if ev.kind == "press" and ev.button == 0:
+            return self.entry_at(ev.y)
+        return None
+
+
+def _open_transcript_from_prompt(agent: Any, target: int) -> None:
+    """Open the full-screen transcript over the prompt (alternate screen: the prompt and the draft
+    stay exactly as they were)."""
+    try:
+        from axon.ui.transcript_view import open_transcript_viewer
+        if target == ClickMap.WHEEL_UP:
+            open_transcript_viewer(agent)
+        else:
+            open_transcript_viewer(agent, focus=target, expand=True)
+    except Exception:
+        pass
 
 
 def _loop_wake_event() -> Any:

@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from axon.storage import axon_home as _axon_home
 from axon.commands.common import (
     confirm, err, estimate_tokens, header, hint, info, is_tty, ok, reprint_banner, usage, ws_of,
 )
@@ -49,6 +48,7 @@ def handle_clear(agent: Any, arg: str) -> CommandResult:
     cp = getattr(agent, "checkpoints", None)
     if cp is not None and hasattr(cp, "set_session"):
         cp.set_session(new_id)
+    _clear_transcript()
     reprint_banner(agent)
     print(f"  {MINT}⚡ New session:{RST} {BOLD}{WHITE}{new_id}{RST}")
     if had_messages:
@@ -61,7 +61,41 @@ def handle_clear(agent: Any, arg: str) -> CommandResult:
          aliases=("continue",), usage="/resume [session-id or prefix]")
 def handle_resume_cmd(agent: Any, arg: str) -> CommandResult:
     from axon.session.interactive import handle_resume
+    before = getattr(agent.session, "active_session_id", None)
     handle_resume(agent, arg)
+    if getattr(agent.session, "active_session_id", None) != before:
+        _clear_transcript()  # /transcript then rebuilds the resumed conversation from its messages
+    return CommandResult(handled=True)
+
+
+def _clear_transcript() -> None:
+    """Forget the expandable transcript (/transcript) of the previous session."""
+    try:
+        from axon.ui.render import clear_transcript
+        clear_transcript()
+    except Exception:
+        pass
+
+
+RETRY_RESUME_PROMPT = ("continue (the previous request failed with a provider error; pick up where you left off "
+                       "using the tool results above)")
+
+
+@command("retry", category=CAT, description="Retry the last turn that failed with a provider error", usage="/retry")
+def handle_retry(agent: Any, arg: str) -> CommandResult:
+    """Re-run a turn that ended on a provider error. When tools had already run, the turn's progress
+    is still in the history, so the model is asked to continue; otherwise the prompt is sent again."""
+    failed = getattr(agent, "last_failed_turn", None)
+    if not failed:
+        info("Nothing to retry: the last turn did not fail with a provider error.")
+        return CommandResult(handled=True)
+    prompt = RETRY_RESUME_PROMPT if failed.get("resume") else str(failed.get("prompt") or "")
+    if not prompt.strip():
+        info("Nothing to retry.")
+        return CommandResult(handled=True)
+    label = "resuming the failed turn" if failed.get("resume") else "sending the failed prompt again"
+    print(f"\n  {TEAL}▸ /retry{RST}  {SLATE}{label}{RST}\n")
+    agent.run_turn(prompt)
     return CommandResult(handled=True)
 
 
@@ -85,6 +119,10 @@ def handle_sessions(agent: Any, arg: str) -> CommandResult:
          usage="/delete [session-id | --all]")
 def handle_delete(agent: Any, arg: str) -> CommandResult:
     from axon.session.interactive import handle_session_delete
+    if not arg.strip() and not is_tty():
+        # Without a terminal the picker would silently take its first entry (the latest session).
+        usage("/delete <session-id> | /delete --all   (the picker needs an interactive terminal)")
+        return CommandResult(handled=True)
     handle_session_delete(agent.session, arg.strip())
     return CommandResult(handled=True)
 
@@ -470,7 +508,7 @@ _FMT_ALIASES = {"md": "md", "markdown": "md", "json": "json", "txt": "txt", "tex
 
 
 @command("export", category=CAT, description="Export the conversation (Markdown, JSON, text) to a file or the clipboard",
-         usage="/export [md|json|txt] [path]      default path: ~/.axon/exports/<session>.<ext>\n/export [md|json|txt] clipboard   copy instead of saving\n/export                          on a terminal: choose clipboard or file")
+         usage="/export [md|json|txt] [path]      default path: ~/.axon/projects/<project>/exports/<session>.<ext>\n/export [md|json|txt] clipboard   copy instead of saving\n/export                          on a terminal: choose clipboard or file")
 def handle_export(agent: Any, arg: str) -> CommandResult:
     parts = arg.strip().split(maxsplit=1)
     fmt, fname = "md", ""
@@ -486,7 +524,7 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
     if not arg.strip() and is_tty():
         from axon.ui.picker import SelectItem, Selector
         sel = Selector([SelectItem(label="Copy to clipboard (Markdown)", value="clip"),
-                        SelectItem(label="Save to a file (Markdown)", value="file", hint=f"~/.axon/exports/{agent.session.active_session_id}.md"),
+                        SelectItem(label="Save to a file (Markdown)", value="file", hint=f"~/.axon/projects/<project>/exports/{agent.session.active_session_id}.md"),
                         SelectItem(label="Save as JSON", value="json"), SelectItem(label="Save as plain text", value="txt")],
                        title="Export conversation").run()
         choice = getattr(sel, "value", None)
@@ -508,7 +546,8 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
         if not out_path.is_absolute():
             out_path = ws_of(agent) / out_path
     else:
-        out_path = _axon_home() / "exports" / f"{agent.session.active_session_id}.{fmt}"
+        from axon import storage
+        out_path = storage.project_subdir(ws_of(agent), "exports") / f"{agent.session.active_session_id}.{fmt}"
     if out_path.exists() and not confirm(f"{out_path} exists. Overwrite?", default=False):
         info("Export cancelled.")
         return CommandResult(handled=True)
@@ -544,9 +583,32 @@ def _history(agent: Any, window_only: bool) -> CommandResult:
     return CommandResult(handled=True)
 
 
+def _history_all(agent: Any, session_id: str = "") -> CommandResult:
+    """Every record of a transcript, including messages a /rewind or compaction removed."""
+    from axon.session.store import iter_history
+    sess = agent.session
+    sid = session_id or sess.active_session_id
+    path = sess._file(sid) if hasattr(sess, "_file") else getattr(sess, "active_file", None)
+    rows = list(iter_history(path)) if path is not None else []
+    header("Full transcript", f"{len(rows)} record(s) · {path}")
+    if not rows:
+        print(f"    {SLATE}(empty){RST}\n")
+        return CommandResult(handled=True)
+    for r in rows:
+        clr = {"user": TEAL, "assistant": GOLD, "tool": LBLUE}.get(r["role"], DARK_SLATE)
+        when = datetime.fromtimestamp(float(r["timestamp"])).strftime("%m-%d %H:%M:%S") if r.get("timestamp") else ""
+        text = " ".join(str(r["text"]).split())
+        print(f"    {SLATE}{r['index']:>4} {when}{RST} {clr}{r['role'] or r['type']:<9}{RST} {text[:96]}")
+    print(f"\n  {DARK_SLATE}Rewound/compacted messages stay in the transcript file; /export or the file has them in full.{RST}\n")
+    return CommandResult(handled=True)
+
+
 @command("history", category=CAT, description="List the messages in the conversation", aliases=("timeline",),
-         usage="/history [window]")
+         usage="/history [window]\n/history all [session-id]   every record of the transcript, rewound and compacted messages included")
 def handle_history(agent: Any, arg: str, window_only: bool = False) -> CommandResult:
+    parts = arg.strip().split()
+    if parts and parts[0].lower() in ("all", "full", "raw"):
+        return _history_all(agent, parts[1] if len(parts) > 1 else "")
     return _history(agent, window_only or arg.strip().lower() == "window")
 
 

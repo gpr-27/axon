@@ -1378,7 +1378,7 @@ def cmd_insights(agent: Any, arg: str) -> None:
 
 
 COMMANDS = [
-    FeatureCommand(name="/stats", handler=cmd_stats, category="Insight",
+    FeatureCommand(name="/stats", handler=cmd_stats, category="Insight", aliases=("/analytics",),
                    description="Usage analytics: cost, tokens, cache, models, sources, tools, expensive turns",
                    usage="/stats [today|7d|30d|all] [--project|--all-projects]"),
     FeatureCommand(name="/budget", handler=cmd_budget, category="Insight",

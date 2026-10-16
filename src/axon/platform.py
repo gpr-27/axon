@@ -16,7 +16,9 @@ Key names returned by ``read_key``: "up", "down", "left", "right", "ctrl-left", 
 "home", "end", "delete", "insert", "pageup", "pagedown", "enter", "shift-enter", "alt-enter",
 "ctrl-j", "backspace", "alt-backspace", "tab", "shift-tab", "esc", "ctrl-<letter>" (e.g.
 "ctrl-c", "ctrl-d"), "ctrl-_", "alt-<char>", "resize", "paste:<text>" (bracketed or detected
-paste, newlines normalized to "\\n"), or a single literal character.
+paste, newlines normalized to "\\n"), "mouse:<button>:<col>:<row>:<M|m>" (an SGR mouse report,
+only while mouse reporting is on; see ``parse_mouse()``), "cpr:<row>:<col>" (a cursor position
+report, see ``query_cursor_position()``), or a single literal character.
 """
 from __future__ import annotations
 
@@ -58,6 +60,28 @@ except ImportError:
     HAS_MSVCRT = False
 
 PASTE_PREFIX = "paste:"
+MOUSE_PREFIX = "mouse:"
+CPR_PREFIX = "cpr:"
+# SGR mouse reporting (press/release + wheel, SGR-encoded coordinates). Only the idle prompt and
+# full-screen views turn it on, and always off again in a finally block (and atexit).
+ENABLE_MOUSE = "\033[?1000h\033[?1006h"
+DISABLE_MOUSE = "\033[?1006l\033[?1000l"
+_mouse_on = False
+
+
+def set_mouse_reporting(on: bool) -> None:
+    """Turn SGR mouse reporting on/off (tracked so an exit while it is on still turns it off)."""
+    global _mouse_on
+    if IS_WINDOWS and on:
+        return  # keyboard only: console mouse input is not decoded as VT sequences here
+    if on == _mouse_on:
+        return
+    _mouse_on = on
+    _write_raw(ENABLE_MOUSE if on else DISABLE_MOUSE)
+
+
+def mouse_reporting() -> bool:
+    return _mouse_on
 ESC_TIMEOUT = 0.035  # seconds to wait for the rest of an escape sequence
 
 ENTER_ALT_SCREEN = "\033[?1049h\033[H"
@@ -200,7 +224,7 @@ def _atexit_restore() -> None:
     _restore_all_raw()
     try:
         if sys.stdout.isatty():
-            sys.stdout.write(SHOW_CURSOR)
+            sys.stdout.write((DISABLE_MOUSE if _mouse_on else "") + SHOW_CURSOR)
             sys.stdout.flush()
     except Exception:
         pass
@@ -224,6 +248,15 @@ def supports_alt_screen() -> bool:
 
 
 def term_size() -> tuple[int, int]:
+    """(columns, lines) of the real window. Asked of the terminal first: shutil prefers $COLUMNS/$LINES,
+    which a shell sets once and never updates, so resizes would go unnoticed."""
+    for stream in (sys.stdout, sys.stdin, sys.stderr):
+        try:
+            sz = os.get_terminal_size(stream.fileno())
+            if sz.columns > 0 and sz.lines > 0:
+                return max(20, sz.columns), max(5, sz.lines)
+        except (AttributeError, OSError, ValueError):
+            continue
     try:
         sz = shutil.get_terminal_size(fallback=(88, 24))
         return max(20, sz.columns), max(5, sz.lines)
@@ -553,6 +586,16 @@ def _decode_csi(getc: Callable[[float], str | None]) -> str:
         return ""
     if final == "~" and params == "200":
         return PASTE_PREFIX + _read_bracketed_paste(getc)
+    if final == "R" and params.count(";") == 1 and not params.startswith(("<", "?", ">")):
+        row, _sep, col = params.partition(";")  # cursor position report (answer to CSI 6n)
+        if row.isdigit() and col.isdigit():
+            return f"{CPR_PREFIX}{row}:{col}"
+        return ""
+    if params.startswith("<") and final in ("M", "m"):  # SGR mouse report: CSI < b ; x ; y M|m
+        parts = params[1:].split(";")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            return f"{MOUSE_PREFIX}{parts[0]}:{parts[1]}:{parts[2]}:{final}"
+        return ""
     nums: list[int] = []
     for part in params.lstrip("?<>=").split(";"):
         try:
@@ -614,6 +657,40 @@ def _read_bracketed_paste(getc: Callable[[float], str | None]) -> str:
             del buf[-6:]
             break
     return normalize_newlines("".join(buf))
+
+
+@dataclass(frozen=True)
+class MouseEvent:
+    """A decoded SGR mouse report. ``x``/``y`` are 1-based terminal columns/rows.
+
+    kind: "press" | "release" | "drag" | "wheel-up" | "wheel-down"; ``button`` 0 left, 1 middle,
+    2 right (for wheel events 0 = up, 1 = down)."""
+    kind: str
+    button: int
+    x: int
+    y: int
+    shift: bool = False
+    alt: bool = False
+    ctrl: bool = False
+
+
+def parse_mouse(key: str | None) -> MouseEvent | None:
+    """Turn a ``"mouse:<b>:<x>:<y>:<M|m>"`` key from :func:`read_key` into a :class:`MouseEvent`."""
+    if not key or not key.startswith(MOUSE_PREFIX):
+        return None
+    try:
+        b_s, x_s, y_s, fin = key[len(MOUSE_PREFIX):].split(":")
+        b, x, y = int(b_s), int(x_s), int(y_s)
+    except ValueError:
+        return None
+    mods = {"shift": bool(b & 4), "alt": bool(b & 8), "ctrl": bool(b & 16)}
+    button = b & 3
+    if b & 64:
+        kind = ("wheel-up", "wheel-down", "wheel-left", "wheel-right")[button]
+        return MouseEvent(kind, button, x, y, **mods)
+    if b & 32:
+        return MouseEvent("drag", button, x, y, **mods)
+    return MouseEvent("press" if fin == "M" else "release", button, x, y, **mods)
 
 
 def normalize_newlines(text: str) -> str:
@@ -875,6 +952,42 @@ def _backend_read(slice_s: float) -> str | None:
         time.sleep(slice_s)
         return None
     return _posix_read(slice_s)
+
+
+def parse_cpr(key: str | None) -> tuple[int, int] | None:
+    """``"cpr:<row>:<col>"`` (from :func:`read_key`) -> (row, col), 1-based."""
+    if not key or not key.startswith(CPR_PREFIX):
+        return None
+    row, _sep, col = key[len(CPR_PREFIX):].partition(":")
+    return (int(row), int(col)) if row.isdigit() and col.isdigit() else None
+
+
+def query_cursor_position(timeout: float = 0.15) -> tuple[int, int] | None:
+    """Ask the terminal where the cursor is (CSI 6n). Call inside raw_terminal(). Keys typed while
+    waiting are put back in order; returns None when the terminal does not answer in time (a late
+    answer later arrives as a harmless ``"cpr:…"`` key)."""
+    if IS_WINDOWS or not is_interactive():
+        return None
+    _write_raw("\033[6n")
+    deadline = time.monotonic() + max(0.0, timeout)
+    stash: list[str] = []
+    pos = None
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            key = read_key(timeout=left, report_resize=False)
+            if key is None:
+                break
+            pos = parse_cpr(key)
+            if pos is not None:
+                break
+            stash.append(key)
+    except EOFError:
+        pass
+    _events.extendleft(reversed(stash))
+    return pos
 
 
 def read_key(timeout: float | None = None, report_resize: bool = True) -> str | None:

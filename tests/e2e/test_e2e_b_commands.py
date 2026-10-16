@@ -61,7 +61,8 @@ def test_help_unknown_topic(axon_env: AxonEnv) -> None:
 def test_unknown_command_suggests_close_match(axon_env: AxonEnv) -> None:
     """An unknown command is not sent to the model and suggests the closest name."""
     out = cmd(axon_env, "/stauts").output
-    assert "Unknown command /stauts" in out and "Did you mean /stat" in out
+    assert "Unknown command /stauts" in out and "Did you mean:" in out
+    assert "/status" in out and "/stats" in out              # the closest names, with what they do
     assert axon_env.llm.completion_requests() == []
 
 
