@@ -1114,7 +1114,7 @@ def test_resize_at_prompt_redraws_conversation_at_new_width_and_keeps_draft(axon
         s.expect("❯ half typed", timeout=8, since=m)
         out = s.screen[m:]
         assert "● Bash  echo hi-from-tool" in out          # the conversation is drawn again
-        assert "\x1b[3J" in s._raw.decode("utf-8", "replace")  # scrollback with the old wrapping cleared
+        assert "\x1b[3J" not in s._raw.decode("utf-8", "replace")  # the scrollback is never erased: first messages stay
         assert TRACEBACK not in s.screen and s.proc.poll() is None
 
 

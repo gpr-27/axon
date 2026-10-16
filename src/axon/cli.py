@@ -897,7 +897,9 @@ def _print_turn(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> int:
 def _print_banner(agent: Any, renderer: Any, clear: bool = False) -> None:
     import axon
     if clear and sys.stdin.isatty() and sys.stdout.isatty():
-        sys.stdout.write("\033[3J\033[H\033[2J")
+        from axon.ui.theme import term_height
+        # a fresh screen without erasing the scrollback (what was shown stays reachable by scrolling up)
+        sys.stdout.write("\n" * max(1, term_height()) + "\033[H\033[2J")
         sys.stdout.flush()
     renderer.print_banner(
         version=getattr(axon, "__version__", ""),
@@ -1264,7 +1266,10 @@ def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
     if log is not None:
         log.pause()                   # the screen log already has all of it
     try:
-        sys.stdout.write("\033[3J\033[H\033[2J")
+        # Never erase the scrollback: push what is on screen up into it (like `clear -x`), then draw the
+        # conversation again below, so scrolling up still reaches the very first messages.
+        from axon.ui.theme import term_height
+        sys.stdout.write("\n" * max(1, term_height()) + "\033[H\033[2J")
         _print_banner(agent, renderer)
         msgs = list(getattr(agent.conversation, "messages", []) or [])
         path = _session_file(agent, agent.session.active_session_id)
@@ -1296,8 +1301,8 @@ def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
                 sys.stdout.write(row + "\n")
             if set_tag is not None:
                 set_tag(None)
-            print(f"  {SLATE}Redrawn for the new window width ({term_width()} columns) · Ctrl+F opens the full "
-                  f"transcript with every output{RST}\n")
+            print(f"  {SLATE}Redrawn for the new window width ({term_width()} columns) · earlier output is still above "
+                  f"in your scrollback · Ctrl+F opens the full transcript{RST}\n")
         sys.stdout.flush()
     finally:
         if log is not None:
