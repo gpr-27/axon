@@ -7,7 +7,7 @@
       powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex"
 
   Options with the one-liner: set environment variables first, for example
-      $env:AXON_INSTALL_REF = 'v0.28.0'; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+      $env:AXON_INSTALL_REF = 'v0.27.2'; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
   or pass parameters through a script block:
       & ([scriptblock]::Create((irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1))) -Uninstall
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.27.2
 
 A readable timeline
 - Every part of a turn has its own mark: `◆ Step N  LLM call` (model, how much it reads), `✻ Thinking` with the
@@ -66,7 +66,7 @@ Install
   using uv, pipx or a private venv; `--ref`, `--method`, `--dry-run` and `--uninstall` options.
 - GitHub Actions: CI on Linux, macOS and Windows (tests and installers) and a PyPI release workflow.
 
-## 0.28.0
+### Also in 0.27.2 (drafted earlier as 0.28.0)
 
 Providers and cost
 - Official provider presets for Anthropic, OpenAI, OpenRouter, DeepSeek, Gemini, Groq, Together and local

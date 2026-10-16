@@ -9,7 +9,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.28.0-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.2-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
@@ -195,7 +195,7 @@ Or by hand: `python -m venv .venv`, activate it, then `python -m pip install -e 
 
 ```bash
 # pin a branch, tag or commit
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --ref v0.28.0
+curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --ref v0.27.2
 # force a method: auto | uv | pipx | venv
 curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --method venv
 # show what it would do without changing anything
@@ -203,7 +203,7 @@ curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash 
 ```
 
 ```powershell
-$env:AXON_INSTALL_REF = "v0.28.0"; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
+$env:AXON_INSTALL_REF = "v0.27.2"; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
 ```
 
 PowerShell parameters: `-Method -Ref -Source -InstallDir -PythonExe -Uninstall -NoPath -NoShim -DryRun -Help`.

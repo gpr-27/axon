@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag such as v0.28.0 (matching __version__ in src/axon/__init__.py) to build the sdist and
+# Push a tag such as v0.27.2 (matching __version__ in src/axon/__init__.py) to build the sdist and
 # wheel, publish them to PyPI with trusted publishing, and attach them to a GitHub Release.
 #
 # One-time PyPI setup: on https://pypi.org/manage/project/axon-terminal/settings/publishing/ add a
@@ -46,6 +46,10 @@ jobs:
 
   pypi:
     needs: build
+    # Runs once trusted publishing is set up (above) and the repository variable PYPI_PUBLISH is "true"
+    # (Settings > Secrets and variables > Actions > Variables). Until then releases are uploaded by hand
+    # and this job is skipped instead of failing.
+    if: vars.PYPI_PUBLISH == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi

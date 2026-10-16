@@ -30,7 +30,7 @@ Options are environment variables set before the one-liner, or parameters passed
 block:
 
 ```powershell
-$env:AXON_INSTALL_REF = "v0.28.0"            # a branch, tag or commit instead of main
+$env:AXON_INSTALL_REF = "v0.27.2"            # a branch, tag or commit instead of main
 $env:AXON_INSTALL_METHOD = "venv"            # auto (default), uv, pipx or venv
 irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
 
