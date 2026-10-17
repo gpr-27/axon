@@ -380,7 +380,9 @@ def _one(s: Any, n: int = 90) -> str:
 def render(inv: dict[str, Any], section: str | None = None, limit: int = 10) -> list[str]:
     """Plain-text lines for /library and ``axon library``."""
     L: list[str] = []
-    want = (lambda s: section in (None, s))
+    def want(s: str) -> bool:
+        return section in (None, s)
+
     full = section is not None
     n = 10_000 if full else limit
 

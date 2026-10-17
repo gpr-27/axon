@@ -198,19 +198,19 @@ def _first_available(names: Iterable[str], available: Callable[[str], bool]) -> 
 
 # ─── Public API ────────────────────────────────────────────────────────────
 
-_LAST_RESULT: dict[tuple[int, int], Any] = {}
+# (agent, trace, result) of the latest turn. Compared by identity, never by id(): ids of freed
+# objects are reused, which made a stale result leak into an unrelated agent.
+_LAST_RESULT: list[tuple[Any, Any, Any]] = []
 
 
 def suggest_next(agent: Any, result: Any = None, *, available: Callable[[str], bool] | None = None,
                  check_git: bool = True) -> list[Suggestion]:
     """Up to three next steps for the turn that just finished, most important first."""
     trace = _last_trace(agent)
-    key = (id(agent), id(trace))  # the result belongs to this agent's latest turn only
-    if result is not None:
-        _LAST_RESULT.clear()
-        _LAST_RESULT[key] = result
-    else:
-        result = _LAST_RESULT.get(key)
+    if result is not None:  # the result belongs to this agent's latest turn only
+        _LAST_RESULT[:] = [(agent, trace, result)]
+    elif _LAST_RESULT and _LAST_RESULT[0][0] is agent and _LAST_RESULT[0][1] is trace:
+        result = _LAST_RESULT[0][2]
     avail = available or command_available
     if trace is None and result is None:
         return []
