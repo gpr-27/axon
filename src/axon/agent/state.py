@@ -245,7 +245,7 @@ class Conversation:
 class FileState:
     """Tracks (mtime_ns, sha256) per file for read-before-edit invariants."""
     def __init__(self) -> None:
-        self._seen: dict[Path, tuple[int, str]] = {}
+        self._seen: dict[Path, tuple[int, int, str]] = {}
 
     def record_read(self, p: Path) -> None:
         p = p.resolve()
@@ -253,7 +253,7 @@ class FileState:
             stat = p.stat()
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
-            self._seen[p] = (stat.st_mtime_ns, digest)
+            self._seen[p] = (stat.st_mtime_ns, stat.st_size, digest)
 
     def check_writable(self, p: Path) -> None:
         """Enforces that file was read in this session and is not stale."""
@@ -266,9 +266,10 @@ class FileState:
                 f"You have not read {p.name} in this session. "
                 f"You must Read a file before editing it."
             )
-        last_mtime, last_sha = self._seen[p]
+        last_mtime, last_size, last_sha = self._seen[p]
         curr_stat = p.stat()
-        if curr_stat.st_mtime_ns != last_mtime:
+        # mtime alone misses a write within the same clock tick (coarse on Windows), so size counts too
+        if curr_stat.st_mtime_ns != last_mtime or curr_stat.st_size != last_size:
             curr_sha = hashlib.sha256(p.read_bytes()).hexdigest()
             if curr_sha != last_sha:
                 raise StaleFileError(

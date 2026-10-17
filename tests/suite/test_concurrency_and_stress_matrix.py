@@ -102,3 +102,18 @@ def test_ledger_micro_fraction_accounting(model: str):
         ledger.record(model, Usage(input=1, output=1, cache_read=0))
     assert ledger.total() > cost1
     assert len(ledger.turn_costs) == 101
+
+
+def test_file_state_change_within_same_mtime_tick_detected(workspace: Path):
+    """Windows updates mtimes on a coarse tick: a change that keeps the mtime must still be caught."""
+    import os
+    from axon.errors import StaleFileError
+    fs = FileState()
+    p = workspace / "tick.txt"
+    p.write_text("initial")
+    fs.record_read(p)
+    before = p.stat().st_mtime_ns
+    p.write_text("modified by external process")
+    os.utime(p, ns=(before, before))
+    with pytest.raises(StaleFileError, match="has changed on disk"):
+        fs.check_writable(p)
