@@ -65,6 +65,15 @@ class SkillTool(Tool):
         text = skill_content(name, ctx.workspace, str(args.get("args") or ""))
         if text.startswith("Unknown skill"):
             raise ToolError(text)
+        try:
+            from axon.session.library import record_run
+            scope = str(getattr(skill, "scope", "") or "")
+            record_run("skill_run", {"name": name, "args": str(args.get("args") or ""), "scope": scope,
+                                     "path": "" if scope in ("", "bundled") else str(getattr(skill, "path", "")),
+                                     "source": "model", "instructions_chars": len(text)},
+                       agent=agent, workspace=ctx.workspace)
+        except Exception:
+            pass
         return f"<skill name=\"{name}\">\n{text.strip()}\n</skill>\n\nFollow these skill instructions for the current task."
 
     def render_call(self, args: dict[str, Any]) -> str:

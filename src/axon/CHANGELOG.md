@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.27.3
+
+Everything is saved, and can be shown again
+- New `/library` (alias `/saved`) and `axon library [section] [--json]`: one view of everything stored for a
+  project: sessions, subagent runs with their full reports, skills and their runs, agents, custom commands,
+  memory, hook runs, plans, todos, file history, full tool outputs and model calls.
+- Skill runs (typed `/name` or called by the model), subagent results (type, prompt, status, final report,
+  tokens, cost, time), hook runs, custom command and MCP prompt runs, and plans are now written to the session
+  transcript and the activity journal. `/resume` and `/history` show them inline; `/activity` has the new kinds
+  `skill`, `subagent`, `hook`, `custom_command`, `plan` and `saved`.
+- Every version of every skill, agent, command, memory, rule, prompt and `AXON.md` is copied to
+  `~/.axon/projects/<project>/library/`, whether it was created by a command, written by the model or edited by
+  hand (picked up at startup and by `/library`). Deleting a memory keeps its last version.
+- Approved plans (ExitPlanMode) are saved as Markdown in the project's `plans/` folder.
+
+Install
+- README and Windows guide: install from PyPI with `uv tool install axon-terminal`, `pipx install axon-terminal`
+  or `pip install axon-terminal`, with a note on the difference and on the unrelated `axon` package.
+
 ## 0.27.2
 
 A readable timeline

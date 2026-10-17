@@ -13,7 +13,7 @@ A custom command whose name collides with a built-in stays reachable as `/cmd:<n
 The tables below are generated from the command registry by `scripts/gen_docs.py`.
 
 <!-- BEGIN GENERATED: commands-reference -->
-112 built-in commands in 13 groups.
+113 built-in commands in 13 groups.
 
 Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Modes](#model--modes) · [Code & Review](#code--review) · [Agents, Skills & Tools](#agents-skills--tools) · [Memory & Project](#memory--project) · [System](#system) · [Code](#code) · [Getting started](#getting-started) · [Git](#git) · [Insight](#insight) · [Integrations](#integrations) · [Solve](#solve)
 
@@ -28,6 +28,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/exit` | `/quit` | Save the session and quit |
 | `/export` |  | Export the conversation (Markdown, JSON, text) to a file or the clipboard |
 | `/history` | `/timeline` | List the messages in the conversation |
+| `/library` | `/saved` | Everything saved: sessions, subagent runs, skills, agents, memory, hooks, plans |
 | `/loop` | `/repeat` | Repeat a prompt N times or on an interval |
 | `/project` | `/where` | Current project: name, path, data folder, sessions, journal, memory |
 | `/rename` | `/title` | Rename the current session (no name: generate one) |
@@ -94,6 +95,18 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 ```text
 /history [window]
 /history all [session-id]   every record of the transcript, rewound and compacted messages included
+```
+
+</details>
+
+<details><summary><code>/library</code> usage</summary>
+
+```text
+/library                 everything saved for this project: sessions, subagent runs, skills,
+                         agents, commands, memory, hooks, plans, todos, file history, outputs
+/library <section>       the full list for one section (sessions, subagents, skills, agents,
+                         commands, memory, hooks, plans, todos, files, outputs, library, usage)
+/library --json          the same as JSON
 ```
 
 </details>

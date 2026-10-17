@@ -284,9 +284,10 @@ character replaced by `-`. Each project folder has its own `README.md`.
 | Path | What it is |
 |---|---|
 | `project.json` | name, workspace path, created, last opened, sessions, git remote/branch |
-| `activity.jsonl` | append-only journal of everything: prompts, commands, `!` shell, `#` notes, /btw, queue, permissions, settings, turns, tools, errors, rewinds, deletes (`/activity`, `axon activity`) |
-| `sessions/<id>.jsonl` | full transcripts: messages, thinking, tool calls and results, usage, cost (`/resume`, `/history all`) |
+| `activity.jsonl` | append-only journal of everything: prompts, commands, `!` shell, `#` notes, /btw, queue, permissions, settings, turns, tools, errors, rewinds, deletes, skill runs, subagent results, hook runs, plans, saved files (`/activity`, `axon activity`) |
+| `sessions/<id>.jsonl` | full transcripts: messages, thinking, tool calls and results, usage, cost, skill runs, subagent results, hook runs, plans, saved files (`/resume`, `/history all`) |
 | `sessions/<id>_sub_<n>.jsonl` | subagent transcripts |
+| `library/<type>/<name>/` | a copy of every version of every skill, agent, command, memory, rule, prompt and AXON.md, kept even after the original is edited or deleted (`/library`, `axon library`) |
 | `outputs/<id>/` | complete tool and shell outputs that were truncated for the model |
 | `screen/<stamp>-<id>.log` | plain-text copy of everything shown in the terminal |
 | `traces/<id>.jsonl` | per-turn glass-box traces (`/trace`, `axon report`) |
@@ -327,6 +328,7 @@ Axon data for `{info.get('workspace', '')}` (generated; updated when these facts
 | `project.json` | metadata (name, path, last opened, git) |
 | `activity.jsonl` | append-only journal of every action and event (`/activity`) |
 | `sessions/` | transcripts (`/resume <id>`, `/history all`) |
+| `library/` | every version of skills, agents, commands, memory, rules and prompts (`/library`) |
 | `outputs/` | full tool/shell outputs that were truncated for the model |
 | `screen/` | plain-text copies of the terminal |
 | `traces/` | per-turn traces |

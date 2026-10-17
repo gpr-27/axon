@@ -517,6 +517,23 @@ def _build_registry(parent: Agent, agent_def: AgentDefinition) -> Any:
     return sub
 
 
+
+def _persist_subagent_run(parent: Any, task: Any, agent_type: str, model: str, prompt: str, status: str,
+                          cost: float, usage: Any, iterations: int, elapsed: float, result_text: str) -> None:
+    """Save the finished run to the parent transcript and the activity journal (never raises)."""
+    try:
+        from axon.session.library import record_run
+        parent_sess = str(getattr(parent.session, "active_session_id", "") or "").rsplit("_sub_", 1)[0]
+        record_run("subagent_result", {
+            "task_id": task.id, "index": task.index, "agent_type": agent_type, "title": task.title,
+            "model": model, "prompt": prompt, "status": status, "result": result_text,
+            "input_tokens": int(getattr(usage, "input", 0) or 0), "output_tokens": int(getattr(usage, "output", 0) or 0),
+            "cost": round(float(cost or 0), 8), "iterations": int(iterations or 0), "elapsed_s": round(elapsed, 2),
+            "sub_session_id": f"{parent_sess}_sub_{task.index}",
+        }, agent=parent)
+    except Exception:
+        pass
+
 def run_subagent(
     prompt: str,
     parent: Agent,
@@ -543,7 +560,11 @@ def run_subagent(
     task.model = model
     started = time.time()
 
-    def emit_parent(phase: str, status: str, cost: float = 0.0, usage: Any = None, iterations: int = 0) -> None:
+    def emit_parent(phase: str, status: str, cost: float = 0.0, usage: Any = None, iterations: int = 0,
+                    result_text: str = "") -> None:
+        if phase == "end":
+            _persist_subagent_run(parent, task, agent_def.name, model, prompt, status, cost, usage, iterations,
+                                  time.time() - started, result_text)
         emit = getattr(parent, "_emit", None)
         if not callable(emit):
             return
@@ -567,7 +588,7 @@ def run_subagent(
         if res is not None and getattr(res, "blocked", False):
             msg = str(getattr(res, "message", "") or "blocked")
             parent.subagents.fail(task.id, f"Blocked by SubagentStart hook: {msg}")
-            emit_parent("end", "error")
+            emit_parent("end", "error", result_text=f"Blocked by SubagentStart hook: {msg}")
             return f"[Subagent #{task.index} blocked by SubagentStart hook: {msg}]"
         if extra_ctx:
             prompt = f"{prompt}\n\n<subagent-start-hook>\n{extra_ctx}\n</subagent-start-hook>"
@@ -677,7 +698,7 @@ def run_subagent(
         except KeyboardInterrupt:
             parent.subagents.bind_thread(task.id, None)
             parent.subagents.complete(task.id, "[Cancelled by user]", sub_agent.conversation, status="cancelled")
-            emit_parent("end", "cancelled")
+            emit_parent("end", "cancelled", result_text="[Cancelled by user]")
             return f"[Subagent #{task.index} ({task.title}) was cancelled by the user before finishing.]"
         parent.subagents.bind_thread(task.id, None)
         final_text = (result.final_text or "").strip()
@@ -708,7 +729,7 @@ def run_subagent(
                 pass
         emit_parent("end", "exhausted" if result.stop_reason == "max_iterations" else
                     ("error" if result.stop_reason in ("error", "interrupted") else "completed"),
-                    cost=sub_cost, usage=agg, iterations=result.iterations)
+                    cost=sub_cost, usage=agg, iterations=result.iterations, result_text=final_text)
 
         header = f"[Subagent #{task.index} Result ({task.title}) | {tokens_total:,} tokens (in: {sub_usage.input:,} · out: {sub_usage.output:,})]"
         if result.stop_reason == "max_iterations":
@@ -724,7 +745,7 @@ def run_subagent(
         raise
     except Exception as e:
         parent.subagents.fail(task.id, str(e))
-        emit_parent("end", "error")
+        emit_parent("end", "error", result_text=f"{type(e).__name__}: {e}")
         return f"[Subagent #{task.index} failed: {type(e).__name__}: {e}]"
     finally:
         if worktree_info:

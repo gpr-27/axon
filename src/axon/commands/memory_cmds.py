@@ -604,6 +604,8 @@ def handle_prompt(agent: Any, arg: str) -> CommandResult:
         d = prompt_dirs(ws)[0 if glob else 1]
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.md").write_text(" ".join(words[1:]) + "\n", encoding="utf-8")
+        from axon.session.library import record_saved
+        record_saved(d / f"{name}.md", action="created", source="/prompt save", workspace=ws, agent=agent)
         ok(f"Saved template {BOLD}{name}{RST} → {d / (name + '.md')}")
         return CommandResult(handled=True)
     p = prompts.get(sub)

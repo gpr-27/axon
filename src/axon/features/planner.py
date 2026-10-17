@@ -313,9 +313,19 @@ def plans_dir(ws: Path) -> Path:
 def save_plan(ws: Path, plan: Plan) -> Path:
     plan.updated = time.time()
     path = plans_dir(ws) / f"{plan.id}.json"
+    try:
+        old_status = json.loads(path.read_text(encoding="utf-8")).get("status") if path.exists() else None
+    except (OSError, ValueError):
+        old_status = None
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
+    if old_status != plan.status:
+        from axon.session.library import record_run
+        record_run("plan", {"id": plan.id, "action": "created" if old_status is None else plan.status,
+                            "status": plan.status, "task": plan.task, "goal": plan.goal, "path": str(path),
+                            "steps": [s.title for s in plan.steps]},
+                   workspace=ws)
     return path
 
 

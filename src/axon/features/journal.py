@@ -305,7 +305,38 @@ def projects_main(argv: list[str]) -> int:
     return 0
 
 
+LIBRARY_USAGE = """/library                 everything saved for this project: sessions, subagent runs, skills,
+                         agents, commands, memory, hooks, plans, todos, file history, outputs
+/library <section>       the full list for one section (sessions, subagents, skills, agents,
+                         commands, memory, hooks, plans, todos, files, outputs, library, usage)
+/library --json          the same as JSON"""
+
+
+def handle_library(agent: Any, arg: str) -> bool:
+    from axon.session.library import show, sync_all
+    from axon.ui.theme import CYAN, RST
+    if arg.strip() in ("-h", "--help", "help"):
+        print("\n" + "\n".join(f"  {CYAN}{ln}{RST}" for ln in LIBRARY_USAGE.splitlines()) + "\n")
+        return True
+    ws = Path(agent.settings.workspace)
+    sync_all(ws)
+    return show(ws, arg) == 0
+
+
+def library_main(argv: list[str]) -> int:
+    """`axon library [section] [--json]`."""
+    from axon.session.library import show, sync_all
+    if any(a in ("-h", "--help") for a in argv):
+        print(LIBRARY_USAGE.replace("/library", "axon library"))
+        return 0
+    sync_all(Path.cwd())
+    return show(Path.cwd(), " ".join(argv))
+
+
 COMMANDS = [
+    FeatureCommand(name="/library", handler=handle_library, aliases=("/saved",), category="Session",
+                   description="Everything saved: sessions, subagent runs, skills, agents, memory, hooks, plans",
+                   usage=LIBRARY_USAGE),
     FeatureCommand(name="/activity", handler=handle_activity, aliases=("/journal",), category="Session",
                    description="Everything you and Axon did: prompts, commands, shell, tools, settings, errors",
                    usage=ACTIVITY_USAGE),
@@ -318,7 +349,8 @@ COMMANDS = [
                    usage="/project"),
 ]
 
-CLI_SUBCOMMANDS = {"activity": activity_main, "projects": projects_main}
+CLI_SUBCOMMANDS = {"activity": activity_main, "projects": projects_main, "library": library_main}
 
 __all__ = ["ActivityQuery", "parse_activity_args", "run_activity", "handle_activity", "activity_main",
-           "handle_restore", "handle_project", "projects_main", "COMMANDS", "CLI_SUBCOMMANDS"]
+           "handle_restore", "handle_project", "projects_main", "handle_library", "library_main",
+           "COMMANDS", "CLI_SUBCOMMANDS"]

@@ -228,7 +228,10 @@ def run_custom_command(agent: Any, cmd: CustomCommand, arguments: str) -> None:
     prompt = render_custom_command(agent, cmd, arguments)
     extra = f" {DIM}{arguments}{RST}" if arguments else ""
     print(f"\n  {TEAL}▸{RST} {BOLD}/{cmd.name}{RST}{extra}  {SLATE}{cmd.source}{RST}\n")
-    run_with_overrides(agent, prompt, model=cmd.model, allowed_tools=cmd.allowed_tools)
+    result = run_with_overrides(agent, prompt, model=cmd.model, allowed_tools=cmd.allowed_tools)
+    from axon.commands.agent_cmds import record_invocation
+    record_invocation(agent, "command_run", cmd.name, arguments, result, kind="custom_command",
+                      scope=cmd.source, path=str(cmd.path))
 
 
 def _raw_hint(value: object) -> str:

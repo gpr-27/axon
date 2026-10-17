@@ -688,6 +688,9 @@ class MemoryStore:
             f"{item.content}\n"
         )
         target.write_text(file_content, encoding="utf-8")
+        from axon.session.library import record_saved
+        record_saved(target, action="created", source="memory", workspace=self.workspace,
+                     item={"type": "memory", "name": target.stem, "scope": scope})
         return item
 
     def add(self, text: str, scope: str = "project") -> MemoryItem:
@@ -755,6 +758,10 @@ class MemoryStore:
         for directory in (self.project_memory_dir, self.global_memory_dir):
             target = directory / f"{item_id}.md"
             if target.is_file():
+                from axon.session.library import record_saved
+                record_saved(target, action="deleted", source="memory", workspace=self.workspace,
+                             item={"type": "memory", "name": target.stem,
+                                   "scope": "global" if directory == self.global_memory_dir else "project"})
                 target.unlink()
                 return True
         return False
@@ -768,8 +775,11 @@ class MemoryStore:
         """Clear all project memory items."""
         if not self.project_memory_dir.is_dir():
             return
+        from axon.session.library import record_saved
         for p in self.project_memory_dir.glob("*.md"):
             try:
+                record_saved(p, action="deleted", source="memory clear", workspace=self.workspace,
+                             item={"type": "memory", "name": p.stem, "scope": "project"})
                 p.unlink()
             except OSError:
                 pass

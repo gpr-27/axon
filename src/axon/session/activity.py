@@ -11,7 +11,7 @@ Format (one JSON object per line, never rewritten)::
 Kinds written by Axon (see :data:`KINDS`): prompt, command, shell, memory, side_question,
 queue, steer, permission, settings, settings_file, mode, turn_start, turn_end, tool, error,
 retry, clear, compact, rewind, rewind_code, resume, rename, delete, restore, tips, background,
-session_start, session_end, migration.
+session_start, session_end, migration, skill, subagent, hook, custom_command, plan, saved.
 
 Durability: every record is appended in append mode (safe with several Axon processes writing
 to the same project), flushed immediately and fsync'ed on turn end, session end and exit. A
@@ -63,6 +63,12 @@ KINDS: dict[str, str] = {
     "session_start": "Axon started",
     "session_end": "Axon exited (with unsent queued messages / draft)",
     "migration": "a legacy file was moved into its project folder",
+    "skill": "a skill ran (typed or called by the model): name, args, scope, result",
+    "subagent": "a subagent finished: type, prompt, status, final report, tokens, cost, time",
+    "hook": "a hook ran: event, blocked, message, added context, permission decision",
+    "custom_command": "a custom command or MCP prompt ran, and its result",
+    "plan": "a plan was created, approved or changed status",
+    "saved": "a skill, agent, command, memory, rule, prompt or instructions file was saved (a copy is kept in library/)",
 }
 
 _LOCK = threading.RLock()
@@ -443,6 +449,19 @@ def summary_line(e: dict[str, Any], width: int = 110) -> str:
             s += f"  (full output: {g('full_output')})"
     elif k in ("error", "retry"):
         s = g("error", "message")
+    elif k == "skill":
+        s = f"/{g('name')} {g('args')}".strip() + f"  ({g('source') or 'user'}{', ' + g('scope') if d.get('scope') else ''})"
+    elif k == "subagent":
+        s = (f"{g('agent_type')}: {g('title', 'prompt')} [{g('status')}, ${float(d.get('cost') or 0):.4f}, "
+             f"{float(d.get('elapsed_s') or 0):.0f}s] {g('result')}")
+    elif k == "hook":
+        s = f"{g('event')} {g('tool_name')}".strip() + (" BLOCKED" if d.get("blocked") else "") + f" {g('message')}"
+    elif k == "custom_command":
+        s = f"/{g('name')} {g('args')}".strip() + f"  ({g('kind')})"
+    elif k == "plan":
+        s = f"{g('action')} {g('task', 'path')}"
+    elif k == "saved":
+        s = f"{g('action')} {g('type')}/{g('name')} ({g('scope')}, {g('source')}) {g('path')}"
     else:
         s = json.dumps(d, ensure_ascii=False, default=str)
     s = " ".join(str(s).split())

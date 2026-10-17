@@ -161,6 +161,8 @@ def import_skill_from_url(url_or_repo: str, workspace: Path, *, target_root: Pat
     target_dir.mkdir(parents=True, exist_ok=True)
     from axon.session.store import atomic_write_text
     atomic_write_text(target_file, content)
+    from axon.session.library import record_saved
+    record_saved(target_file, action="imported", source=f"import {owner}/{repo}", workspace=workspace)
     return ImportedSkill(
         name=clean_name,
         description=str(desc or f"Imported from {owner}/{repo}"),

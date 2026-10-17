@@ -444,6 +444,18 @@ class Agent:
                 ))
             except Exception:
                 pass
+            try:
+                from axon.session.library import preview, record_run
+                record_run("hook_run", {
+                    "event": event, "ran": int(res.ran), "blocked": bool(res.blocked or getattr(res, "stop", False)),
+                    "message": preview(res.message or getattr(res, "stop_reason", "") or ""),
+                    "additional_context": preview(res.additional_context or ""),
+                    "permission_decision": getattr(res, "permission_decision", None),
+                    "warnings": [str(w) for w in warnings], "tool_name": str(payload.get("tool_name", "")),
+                    "tool_use_id": tool_use_id,
+                }, agent=self)
+            except Exception:
+                pass
         if warnings and self.settings.verbose:
             import sys
             for w in warnings:
@@ -480,6 +492,11 @@ class Agent:
             self.journal("session_start", {"source": source, "model": self.settings.model, "mode": self.settings.mode,
                                            "workspace": str(self.settings.workspace), "cwd": os.getcwd(),
                                            "transcript": str(getattr(self.session, "active_file", "") or "")})
+            if source == "startup":
+                # Save a version of every skill/agent/memory/... file that changed outside Axon.
+                from axon.session.library import sync_all
+                threading.Thread(target=sync_all, args=(self.settings.workspace,), daemon=True,
+                                 name="axon-library-sync").start()
         res = self._hook("SessionStart", {"source": source})
         if res is not None and getattr(res, "additional_context", ""):
             self._session_context = res.additional_context
@@ -1907,6 +1924,9 @@ class Agent:
                                   "input": summarize_input(inp), "is_error": bool(res.is_error),
                                   "duration_s": round(t1 - t0, 3), "output_chars": len(text),
                                   "output_preview": text[:300], **({"full_output": full} if full else {})})
+            if block.name in WRITE_TOOLS and not res.is_error and target:
+                from axon.session.library import record_saved
+                record_saved(str(target), action="written", source=f"model:{block.name}", agent=self)
         except Exception:
             pass
         self._emit(ToolTiming(

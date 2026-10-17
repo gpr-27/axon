@@ -235,6 +235,33 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             add(f"  {INFO}{glyph('info')} rewound{RST} {MUTED}to an earlier point ({data.get('mode', '')}); the turns "
                 f"above stay in the record{RST}")
             add("")
+        elif t in ("skill_run", "subagent_result", "hook_run", "command_run", "plan", "saved") and isinstance(data, dict):
+            lead = f"{rail}  " if state["open"] else "  "
+            if t == "subagent_result":
+                status = str(data.get("status", ""))
+                color = SUCCESS if status == "completed" else (ERROR if status == "error" else WARNING)
+                line = (f"{color}{glyph('arrow')}{RST} {BOLD}subagent {data.get('agent_type', '')}{RST} "
+                        f"{TEXT}{_one_line(data.get('title') or data.get('prompt', ''), 80)}{RST} {MUTED}{status} {dot} "
+                        f"{float(data.get('elapsed_s') or 0):.1f}s {dot} ${float(data.get('cost') or 0):.4f} {dot} "
+                        f"{int(data.get('input_tokens') or 0) + int(data.get('output_tokens') or 0):,} tokens{RST}")
+            elif t == "skill_run":
+                line = (f"{INFO}{glyph('arrow')}{RST} {BOLD}skill /{data.get('name', '')}{RST} "
+                        f"{TEXT}{_one_line(data.get('args', ''), 80)}{RST} {MUTED}{data.get('source') or 'user'}"
+                        f"{(' ' + dot + ' ' + str(data.get('scope'))) if data.get('scope') else ''}{RST}")
+            elif t == "hook_run":
+                line = (f"{(ERROR if data.get('blocked') else MUTED)}{glyph('info')} hook {data.get('event', '')}"
+                        f"{(' ' + str(data.get('tool_name'))) if data.get('tool_name') else ''}"
+                        f"{' blocked' if data.get('blocked') else ''}{RST} {MUTED}{_one_line(data.get('message', ''), 100)}{RST}")
+            elif t == "command_run":
+                line = (f"{INFO}{glyph('arrow')}{RST} {BOLD}/{data.get('name', '')}{RST} "
+                        f"{TEXT}{_one_line(data.get('args', ''), 80)}{RST} {MUTED}{data.get('kind', '')}{RST}")
+            elif t == "plan":
+                line = f"{INFO}{glyph('info')} plan {data.get('action', '')}{RST} {MUTED}{data.get('path', '')}{RST}"
+            else:
+                line = (f"{SUCCESS}{glyph('ok')}{RST} {MUTED}{data.get('action', 'saved')} {data.get('type', '')} "
+                        f"{RST}{TEXT}{data.get('name', '')}{RST} {MUTED}({data.get('scope', '')}) "
+                        f"{dot} copy kept: {data.get('copy') or data.get('path', '')}{RST}")
+            add_many(wrap_rows(line, lead, lead + "    "))
         elif t == "turn_failed" and isinstance(data, dict):
             if not state["open"]:
                 open_turn(str(data.get("prompt") or ""))

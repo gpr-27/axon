@@ -192,6 +192,8 @@ def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -
         skill_file.parent.mkdir(parents=True, exist_ok=True)
         title = clean.replace("-", " ").replace("_", " ").title()
         skill_file.write_text(TEMPLATES[tmpl][1].format(name=clean, title=title), encoding="utf-8")
+        from axon.session.library import record_saved
+        record_saved(skill_file, action="created", source="/skills create", workspace=workspace)
         skills_mgr.discover()
         ok(f"Created skill {BOLD}/{clean}{RST} {SLATE}({tmpl}) → {skill_file}{RST}")
         return
@@ -210,6 +212,8 @@ def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -
                 info(f"Copied the built-in skill to {path} (it now overrides the built-in).")
         if is_tty():
             open_in_editor(path)
+            from axon.session.library import record_saved
+            record_saved(path, action="edited", source="/skills edit", workspace=workspace)
         else:
             info(f"Edit {path} in your editor.")
         skills_mgr.discover()

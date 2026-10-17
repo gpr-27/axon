@@ -1004,6 +1004,25 @@ def _journal(kind: str, data: dict[str, Any], store: "SessionStore") -> None:
         pass
 
 
+LIBRARY_RECORD_TYPES = ("skill_run", "subagent_result", "hook_run", "command_run", "plan", "saved")
+
+
+def library_record_text(t: str, d: dict[str, Any]) -> str:
+    """One line for a library record (see axon.session.library)."""
+    if t == "skill_run":
+        return f"skill /{d.get('name', '')} {d.get('args', '')}".rstrip() + f" ({d.get('source') or 'user'})"
+    if t == "subagent_result":
+        return (f"subagent {d.get('agent_type', '')} #{d.get('index', '')} {d.get('status', '')}: "
+                f"{d.get('title') or d.get('prompt', '')} -> {str(d.get('result') or '')[:200]}")
+    if t == "hook_run":
+        return f"hook {d.get('event', '')}" + (" BLOCKED" if d.get("blocked") else "") + f" {d.get('message') or ''}".rstrip()
+    if t == "command_run":
+        return f"/{d.get('name', '')} {d.get('args', '')}".rstrip() + f" ({d.get('kind', '')})"
+    if t == "plan":
+        return f"plan {d.get('action', '')} {d.get('path', '')}".rstrip()
+    return f"{d.get('action', 'saved')} {d.get('type', '')}/{d.get('name', '')} -> {d.get('copy') or d.get('path', '')}"
+
+
 def iter_history(path: Path) -> Iterator[dict[str, Any]]:
     """Every conversation record of a transcript in file order, including messages that a rewind
     or compaction later removed: {"index", "type", "timestamp", "role", "text", "data"}."""
@@ -1012,7 +1031,7 @@ def iter_history(path: Path) -> Iterator[dict[str, Any]]:
         t = entry.get("type")
         data = entry.get("data")
         if t not in _CONTENT_TYPES and t not in ("rewind", "compaction", "side_question", "shell_command",
-                                                 "steer_message", "unsent_messages"):
+                                                 "steer_message", "unsent_messages", *LIBRARY_RECORD_TYPES):
             continue
         i += 1
         text = ""
@@ -1046,6 +1065,9 @@ def iter_history(path: Path) -> Iterator[dict[str, Any]]:
         elif t == "steer_message" and isinstance(data, dict):
             role = "user"
             text = f"[steer] {data.get('text', '')}"
+        elif t in LIBRARY_RECORD_TYPES and isinstance(data, dict):
+            role = "event"
+            text = library_record_text(t, data)
         elif t == "unsent_messages" and isinstance(data, dict):
             role = "event"
             text = f"unsent at exit: {len(data.get('queue') or [])} queued, draft {len(str(data.get('draft') or ''))} chars"

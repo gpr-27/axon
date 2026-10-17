@@ -9,12 +9,12 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.27.2-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.3-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-112 slash commands · 21 built-in tools · 15 provider presets
+113 slash commands · 21 built-in tools · 15 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -133,84 +133,44 @@ You need `3.10` or higher. If it is missing or older:
 
 ## Install
 
-Copy **one** line into your terminal and press Enter. It installs Axon in its own environment (nothing
-else on your system changes) and adds an `axon` command. Run the same line again any time to update.
+Axon is on PyPI as [`axon-terminal`](https://pypi.org/project/axon-terminal/). Pick **one** of the
+commands below. Each one adds an `axon` command to your terminal.
 
-**macOS · Linux · WSL**
+| Tool | Install | Update | Remove |
+|---|---|---|---|
+| **uv** (recommended) | `uv tool install axon-terminal` | `uv tool upgrade axon-terminal` | `uv tool uninstall axon-terminal` |
+| **pipx** | `pipx install axon-terminal` | `pipx upgrade axon-terminal` | `pipx uninstall axon-terminal` |
+| **pip** | `pip install axon-terminal` | `pip install -U axon-terminal` | `pip uninstall axon-terminal` |
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash
-```
+On Windows, use `py -m pip install axon-terminal` if `pip` is not found.
 
-**Windows (PowerShell)**
+> The package is called **`axon-terminal`**, not `axon`. `pip install axon` installs an unrelated
+> project from someone else.
 
-```powershell
-irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
-```
-
-**Windows (Command Prompt)**
-
-```bat
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex"
-```
-
-When it finishes, **close the terminal and open a new one** (so it finds the new `axon` command), then
-check it works:
+Then **open a new terminal** and check it works:
 
 ```bash
 axon --version
 ```
 
-The installer uses [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io/) if you already have
-them, and otherwise a private virtual environment in `~/.axon/venv` (`%USERPROFILE%\.axon\venv` on Windows).
+**Which one should I use?** They all install the same package from PyPI; the difference is where it goes.
 
-<details>
-<summary><b>Other ways to install</b>: uv, pipx, pip, from a clone</summary>
+- **uv** and **pipx** give Axon its own private environment and put `axon` on your PATH. Nothing else
+  in your Python setup changes, and Axon's dependencies can never clash with your projects'. If `axon` is
+  not found afterwards, run `uv tool update-shell` or `pipx ensurepath` once, then open a new terminal.
+  Get uv with `pip install uv` (or see [docs.astral.sh/uv](https://docs.astral.sh/uv/)), pipx with
+  `pip install pipx`.
+- **pip** installs into whichever Python environment is active. That is fine inside a virtual
+  environment, but on a system Python it can clash with other packages, and some systems block it
+  ("externally managed environment"). Prefer uv or pipx there.
 
-| Tool | Install | Update | Remove |
-|---|---|---|---|
-| uv | `uv tool install git+https://github.com/gpr-27/axon.git` | `uv tool upgrade axon-terminal` | `uv tool uninstall axon-terminal` |
-| pipx | `pipx install git+https://github.com/gpr-27/axon.git` | `pipx upgrade axon-terminal` | `pipx uninstall axon-terminal` |
-| pip | `pip install "git+https://github.com/gpr-27/axon.git"` | same command with `--force-reinstall` | `pip uninstall axon-terminal` |
-
-For git installs, `uv tool upgrade` and `pipx upgrade` can skip a new commit while the version number
-is unchanged. Re-running the one-line installer always picks it up.
-
-**From a clone** (editable install, for development):
+**Install a specific version:**
 
 ```bash
-git clone https://github.com/gpr-27/axon.git
-cd axon
-./install.sh        # macOS / Linux / WSL / Git Bash   -> ~/.local/bin/axon
-.\install.ps1       # PowerShell                       -> %USERPROFILE%\.axon\bin\axon.cmd
-install.bat         # cmd, or double-click
+uv tool install axon-terminal==0.27.3
+pipx install axon-terminal==0.27.3
+pip install axon-terminal==0.27.3
 ```
-
-Or by hand: `python -m venv .venv`, activate it, then `python -m pip install -e ".[dev]"`.
-`python scripts/axon_run.py` runs Axon from a checkout without installing it.
-</details>
-
-<details>
-<summary><b>Installer options</b>: pin a version, choose a method, dry run</summary>
-
-```bash
-# pin a branch, tag or commit
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --ref v0.27.2
-# force a method: auto | uv | pipx | venv
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --method venv
-# show what it would do without changing anything
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --dry-run
-```
-
-```powershell
-$env:AXON_INSTALL_REF = "v0.27.2"; irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1 | iex
-```
-
-PowerShell parameters: `-Method -Ref -Source -InstallDir -PythonExe -Uninstall -NoPath -NoShim -DryRun -Help`.
-Both installers read `AXON_INSTALL_METHOD`, `AXON_INSTALL_REF`, `AXON_INSTALL_DIR`, `AXON_BIN_DIR`,
-`AXON_INSTALL_SOURCE` (a folder, `git+` URL, archive URL or PyPI requirement), `AXON_PYTHON` and
-`AXON_NO_MODIFY_PATH=1`. Without git, the installer downloads the GitHub archive instead.
-</details>
 
 ## Set up a model
 
@@ -347,19 +307,13 @@ full-screen, where every block can be expanded or collapsed with a click.
 
 ## Update or uninstall
 
-**Update:** run the same install line again (it picks up the newest version).
+Use the same tool you installed with:
 
-**Uninstall:**
-
-```bash
-# macOS / Linux / WSL
-curl -fsSL https://raw.githubusercontent.com/gpr-27/axon/main/install.sh | bash -s -- --uninstall
-```
-
-```powershell
-# Windows
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/gpr-27/axon/main/install.ps1))) -Uninstall
-```
+| Tool | Update | Uninstall |
+|---|---|---|
+| uv | `uv tool upgrade axon-terminal` | `uv tool uninstall axon-terminal` |
+| pipx | `pipx upgrade axon-terminal` | `pipx uninstall axon-terminal` |
+| pip | `pip install -U axon-terminal` | `pip uninstall axon-terminal` |
 
 Uninstalling keeps your settings, keys and sessions in `~/.axon`. Delete that folder too if you want
 everything gone.
@@ -373,6 +327,7 @@ project. Nothing is deleted automatically.
 |---|---|---|
 | Every conversation, with full tool outputs | `~/.axon/projects/<project>/sessions/` | `/resume`, `/history`, **Ctrl+F** |
 | Everything you did (prompts, commands, settings changes, approvals) | `…/<project>/activity.jsonl` | `/activity` |
+| Subagent runs, skill runs, hook runs, plans, and every skill / agent / memory you created | `…/<project>/library/` + the transcripts | `/library`, `axon library` |
 | A plain-text copy of everything shown on screen | `…/<project>/screen/` | any text editor |
 | File snapshots for undo | `…/<project>/checkpoints/` | `/rewind` |
 | What it costs | `~/.axon/usage.jsonl` | `/cost`, `/stats`, `/report` |
@@ -477,11 +432,11 @@ Related commands:
 ## Commands
 
 <!-- BEGIN GENERATED: commands-overview -->
-112 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
+113 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
 
 | Group | Commands |
 |---|---|
-| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/loop` `/project` `/rename` `/restore` `/resume` `/retry` `/rewind` `/sessions` `/star` `/tag` |
+| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retry` `/rewind` `/sessions` `/star` `/tag` |
 | **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/faq` `/payload` `/pricing` `/recap` `/window` |
 | **Model & Modes** | `/effort` `/endpoint` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
 | **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` |
@@ -728,9 +683,9 @@ JSON). Binding to a non-loopback address requires `--allow-remote`.
 
 | Problem | Fix |
 |---|---|
-| `axon: command not found` after installing | Open a new terminal. If it persists, add `~/.local/bin` (macOS/Linux) or `%USERPROFILE%\.axon\bin` (Windows) to your PATH, or re-run the installer. |
+| `axon: command not found` after installing | Open a new terminal. If it persists, run `uv tool update-shell` (uv) or `pipx ensurepath` (pipx) and open a new terminal; with pip, run `python -m axon` or add Python's scripts folder to your PATH. |
 | `python: command not found` inside a session on macOS | macOS ships only `python3`. Axon's Bash tool uses the workspace `.venv` automatically; for your own shell, recreate a moved or broken venv with `python3 -m venv .venv` (or `uv venv`). |
-| "running scripts is disabled on this system" (Windows) | Use the `irm … \| iex` one-liner, or `powershell -ExecutionPolicy Bypass -File .\install.ps1`; both apply to that one run only. |
+| "externally managed environment" from pip | Your system Python blocks global installs. Use `uv tool install axon-terminal` or `pipx install axon-terminal` instead. |
 | A turn failed with an HTTP error from the provider | The work done so far is kept: type `continue` or `/retry`. Persistent errors: try `/model` to switch model, or `axon doctor`. |
 | "rejected the request as invalid" | The provider refused the request itself, not an outage. `/retry` once; if it repeats, `/compact` or switch model with `/model`. |
 | Garbled boxes or symbols | Set `AXON_ASCII=1` for plain ASCII output, or use a UTF-8 terminal font. |

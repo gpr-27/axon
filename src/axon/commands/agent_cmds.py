@@ -38,7 +38,24 @@ def run_skill(agent: Any, name: str, arguments: str) -> None:
         if arguments:
             prompt += f"\n\nARGUMENTS: {arguments}"
     print(f"\n  {TEAL}▸ Skill /{skill.name}{RST} {SLATE}{getattr(skill, 'scope', '')}{RST}\n")
-    run_with_overrides(agent, prompt, model=getattr(skill, "model", None), allowed_tools=allowed)
+    result = run_with_overrides(agent, prompt, model=getattr(skill, "model", None), allowed_tools=allowed)
+    record_invocation(agent, "skill_run", skill.name, arguments, result, scope=getattr(skill, "scope", ""),
+                      path="" if getattr(skill, "scope", "") == "bundled" else str(getattr(skill, "path", "")),
+                      source="user")
+
+
+def record_invocation(agent: Any, record_type: str, name: str, arguments: str, result: Any, **extra: Any) -> None:
+    """Save a skill / custom command / MCP prompt run and its result (never raises)."""
+    try:
+        from axon.session.library import preview, record_run
+        record_run(record_type, {
+            "name": name, "args": arguments, **extra,
+            "stop_reason": str(getattr(result, "stop_reason", "") or ""),
+            "error": getattr(result, "error", None),
+            "result": preview(getattr(result, "final_text", "") or ""),
+        }, agent=agent)
+    except Exception:
+        pass
 
 
 def _parse_prompt_args(spec: list[dict[str, Any]], raw: str) -> dict[str, str]:
@@ -81,7 +98,8 @@ def run_mcp_prompt(agent: Any, p: dict[str, Any], arguments: str) -> None:
             args[str(a["name"])] = val
     text = get_prompt(p["server"], p["name"], args)
     print(f"\n  {PURPLE}▸ MCP prompt{RST} {WHITE}{p['server']}/{p['name']}{RST}\n")
-    agent.run_turn(text)
+    result = agent.run_turn(text)
+    record_invocation(agent, "command_run", f"{p['server']}:{p['name']}", arguments, result, kind="mcp_prompt")
 
 
 # ─── /agents ────────────────────────────────────────────────────────────────
@@ -115,6 +133,8 @@ def create_agent_file(ws: Path, name: str, description: str, tools: list[str] | 
     path.parent.mkdir(parents=True, exist_ok=True)
     from axon.session.store import atomic_write_text
     atomic_write_text(path, render_agent_file(slug, description or f"Use for {slug.replace('-', ' ')} tasks.", tools, model, system_prompt))
+    from axon.session.library import record_saved
+    record_saved(path, action="created", source="/agents create", workspace=ws)
     return path
 
 

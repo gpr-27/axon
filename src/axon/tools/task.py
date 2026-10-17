@@ -69,4 +69,15 @@ class ExitPlanModeTool(Tool):
         plan = args.get("plan", "")
         if not plan:
             raise ToolError("ExitPlanMode requires 'plan'.")
+        try:
+            import time as _time
+            from axon import storage
+            from axon.session.library import record_run
+            agent = getattr(ctx, "agent", None)
+            path = storage.project_subdir(ctx.workspace, "plans") / f"{_time.strftime('%Y%m%d-%H%M%S')}-plan.md"
+            path.write_text(plan + "\n", encoding="utf-8")
+            record_run("plan", {"action": "approved", "source": "ExitPlanMode", "path": str(path), "plan": plan},
+                       agent=agent, workspace=ctx.workspace)
+        except Exception:
+            pass
         return f"Plan proposed for approval:\n\n{plan}"
