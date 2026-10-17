@@ -270,6 +270,7 @@ def abort_http_response(resp: Any) -> None:
     The streaming thread closes the response itself when the aborted read unwinds its ``with``.
     """
     import socket as _socket
+    import sys as _sys
 
     target = getattr(resp, "response", None) if not hasattr(resp, "extensions") else resp
     for obj in (target, resp):
@@ -278,6 +279,10 @@ def abort_http_response(resp: Any) -> None:
             sock = ns.get_extra_info("socket") if ns is not None else None
             if sock is not None:
                 sock.shutdown(_socket.SHUT_RDWR)
+                if _sys.platform == "win32":
+                    # Winsock's shutdown() does not wake a blocked (or later) recv(); closing does, and
+                    # a read on a closed Windows socket fails at once instead of polling fd -1.
+                    sock.close()
                 return
         except Exception:
             continue
@@ -355,6 +360,8 @@ class _Tracked:
             self.owner.check()
         return self.resp
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, exc_type: Any, *exc: Any) -> None:
         with self.owner._lock:
             self.owner._active.pop(self.owner._me(), None)
+        if exc_type is not None and issubclass(exc_type, Exception):
+            self.owner.check()  # the aborted read failed (Windows): report it as the cancel it was

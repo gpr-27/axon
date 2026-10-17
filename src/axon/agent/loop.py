@@ -1124,6 +1124,12 @@ class Agent:
             return result
         except BaseException as e:
             turn_error = e
+            if isinstance(e, KeyboardInterrupt):
+                # An interrupt between recording tool calls and running them leaves them unanswered.
+                try:
+                    self.conversation.repair()
+                except Exception:
+                    pass
             raise
         finally:
             try:

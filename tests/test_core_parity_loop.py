@@ -331,6 +331,28 @@ def test_cancel_current_turn_interrupts_worker(workspace: Path) -> None:
     agent.conversation.validate()  # pairing invariant kept
 
 
+def test_interrupt_before_tools_run_keeps_pairing(workspace: Path) -> None:
+    """Regression: an interrupt after the tool calls were recorded but before they ran (slow session
+    write, seen on Windows CI) left the tool_use blocks without results."""
+    agent = make_agent(FakeProvider(scripted(("Read", {"path": "a.txt"}), "x")), workspace)
+    real_append = agent.session.append_turn
+
+    def slow_append(*a: Any, **kw: Any) -> None:
+        real_append(*a, **kw)
+        time.sleep(2)
+
+    agent.session.append_turn = slow_append  # type: ignore[method-assign]
+
+    def cancel() -> None:
+        time.sleep(0.5)
+        agent.cancel_current_turn()
+
+    threading.Thread(target=cancel).start()
+    with pytest.raises(KeyboardInterrupt):
+        agent.run_turn_threaded("read")
+    agent.conversation.validate()
+
+
 # ─── prompt ─────────────────────────────────────────────────────────────────
 
 def test_prompt_override_style_repo_map_and_dirs(workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

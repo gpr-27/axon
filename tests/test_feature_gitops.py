@@ -45,7 +45,8 @@ class FakeLedger:
 
 
 def _g(ws: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=ws, check=True, capture_output=True, text=True).stdout
+    return subprocess.run(["git", *args], cwd=ws, check=True, capture_output=True, text=True,
+                          encoding="utf-8").stdout
 
 
 @pytest.fixture

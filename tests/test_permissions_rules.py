@@ -11,7 +11,7 @@ import pytest
 from axon.config import Settings
 from axon.errors import PermissionDenied
 from axon.permissions.engine import PermissionEngine, catastrophic_command
-from axon.permissions.paths import is_in_workspace, is_within, resolve_in_workspace
+from axon.permissions.paths import is_in_workspace, is_within, resolve_in_workspace, system_dirs
 from axon.permissions.rules import Rule, parse_rule, split_shell_commands
 from axon.tools import create_default_registry
 
@@ -78,7 +78,7 @@ def test_modes(workspace: Path):
     assert e.check(edit, {"path": "../outside.py"}, "acceptEdits").outcome == "ask"
     assert e.check(bash, {"command": "ls"}, "plan").outcome == "deny"
     assert e.check(task, {"prompt": "x"}, "plan").outcome == "allow"
-    assert e.check(read, {"path": "/etc/passwd"}, "bypass").outcome == "deny"
+    assert e.check(read, {"path": str(Path(system_dirs()[0]) / "passwd")}, "bypass").outcome == "deny"
     assert e.check(read, {"path": str(Path.home() / ".ssh" / "id_rsa")}, "bypass").outcome == "deny"
     assert e.check(bash, {"command": "rm -rf /"}, "bypass").outcome == "deny"
     e2 = eng(workspace, deny=["Bash(curl:*)"])

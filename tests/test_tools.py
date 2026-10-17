@@ -5,6 +5,7 @@ import pytest
 from pathlib import Path
 from axon.errors import StaleFileError, PermissionDenied
 from axon.tools.base import ToolContext
+from axon.permissions.paths import system_dirs
 from axon.tools.fs_read import ReadTool
 from axon.tools.fs_write import WriteTool, EditTool, MultiEditTool
 from axon.tools.search import GlobTool, GrepTool, LsTool
@@ -43,7 +44,7 @@ def test_path_jail_escape_attempt(workspace: Path, settings):
 
     read_tool = ReadTool()
     with pytest.raises(PermissionDenied):
-        read_tool.run({"path": "/etc/hosts"}, ctx)
+        read_tool.run({"path": str(Path(system_dirs()[0]) / "hosts")}, ctx)
 
     with pytest.raises(PermissionDenied):
         read_tool.run({"path": "~/.ssh/id_rsa"}, ctx)

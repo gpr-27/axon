@@ -264,9 +264,14 @@ def test_debug_api_filter_captures_llm_call_events(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 def test_session_worktree_created_and_reused(tmp_path: Path, isolate_user_home: Path) -> None:
+    import shutil
+    import tempfile
     from axon.agent.worktree import create_session_worktree
-    repo = tmp_path / "repo"
+    # A short repo path: under pytest's deep temp dir the worktree's git dir exceeds Windows git's
+    # path limit ("fatal: '$GIT_DIR' too big").
+    repo = Path(tempfile.mkdtemp(prefix="axwt")) / "repo"
     repo.mkdir()
+    request_cleanup = lambda: shutil.rmtree(repo.parent, ignore_errors=True)  # noqa: E731
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
     import os
     run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, env={**os.environ, **env}, check=True)  # noqa: E731
@@ -280,6 +285,7 @@ def test_session_worktree_created_and_reused(tmp_path: Path, isolate_user_home: 
     again = create_session_worktree(repo, "feat one")
     assert again is not None and not again.created and again.worktree_path == info.worktree_path
     assert create_session_worktree(tmp_path / "not-a-repo-dir", "x") is None
+    request_cleanup()
 
 
 def test_mentions_dirs_size_limit_and_disable(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

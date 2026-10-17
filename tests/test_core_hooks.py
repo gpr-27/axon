@@ -155,3 +155,11 @@ def test_hook_does_not_run_for_unrelated_events(workspace: Path, tmp_path: Path)
     agent = make_agent(prov, workspace)
     assert agent.hooks is not None and agent.hooks.describe() == []
     agent.run_turn("x")
+
+
+def test_powershell_hook_command_calls_quoted_path_and_keeps_exit_code() -> None:
+    from axon.hooks.manager import _powershell_hook_command
+    quoted = _powershell_hook_command('"C:\\py\\python.exe" "h.py"')
+    assert quoted.startswith('& "C:\\py\\python.exe" "h.py"\n')
+    assert quoted.endswith("if ($LASTEXITCODE) { exit $LASTEXITCODE }")
+    assert _powershell_hook_command("python h.py").startswith("python h.py\n")

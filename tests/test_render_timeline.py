@@ -195,6 +195,7 @@ def test_spinner_proxy_erases_line_before_foreign_writes(monkeypatch):
     monkeypatch.setattr(sys, "stdout", fake)
     monkeypatch.delenv("AXON_NO_SPINNER", raising=False)
     monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setattr("axon.ui.render.colors_enabled", lambda: True)  # Windows CI consoles lack VT mode
     sp = Spinner(interval=0.01)
     sp.start("Working")
     assert sys.stdout is not fake

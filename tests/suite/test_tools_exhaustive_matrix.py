@@ -10,6 +10,7 @@ from axon.session.ledger import Ledger
 from axon.session.checkpoint import CheckpointManager
 from axon.tools.base import ToolContext
 from axon.tools import create_default_registry
+from axon.permissions.paths import system_dirs
 
 @pytest.fixture
 def ctx(workspace: Path) -> ToolContext:
@@ -56,12 +57,12 @@ def test_read_pagination_slices(ctx: ToolContext, offset: int, limit: int, expec
 def test_read_outside_workspace_jail(ctx: ToolContext):
     reg = create_default_registry()
     with pytest.raises(PermissionDenied):
-        reg.get("Read").run({"path": "/etc/passwd"}, ctx)
+        reg.get("Read").run({"path": str(Path(system_dirs()[0]) / "passwd")}, ctx)
 
 def test_write_outside_workspace_jail(ctx: ToolContext):
     reg = create_default_registry()
     with pytest.raises(PermissionDenied):
-        reg.get("Write").run({"path": "/etc/evil.txt", "content": "bad"}, ctx)
+        reg.get("Write").run({"path": str(Path(system_dirs()[0]) / "evil.txt"), "content": "bad"}, ctx)
 
 # ─── Edit, MultiEdit & Patch Variations (20 tests) ──────────────────────────
 @pytest.mark.parametrize("initial,old_s,new_s,expected", [

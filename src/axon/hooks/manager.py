@@ -135,6 +135,19 @@ def normalize_event(name: str) -> str:
     return _EVENT_ALIASES.get(raw.lower(), raw)
 
 
+def _powershell_hook_command(command: str) -> str:
+    """Adapt a hook command written for sh (Claude Code style) to PowerShell.
+
+    A leading quoted path (``"C:\\py\\python.exe" "hook.py"``) is a string expression in PowerShell,
+    not a call, so the call operator is added; and PowerShell reduces a native command's exit code
+    to 0/1, so the real code is passed on (exit code 2 is how a hook blocks).
+    """
+    stripped = command.lstrip()
+    if stripped[:1] in ('"', "'"):
+        command = "& " + stripped
+    return command + "\nif ($LASTEXITCODE) { exit $LASTEXITCODE }"
+
+
 def platform_shell_argv(command: str) -> list[str] | str:
     """Return argv (or a cmd.exe command line) that runs ``command`` in the platform shell.
 
@@ -142,8 +155,10 @@ def platform_shell_argv(command: str) -> list[str] | str:
     back to bash/sh on POSIX and PowerShell (or cmd.exe) on Windows.
     """
     try:
-        from axon.platform import shell_command_argv  # type: ignore[attr-defined]
+        from axon.platform import shell_command_argv, shell_info  # type: ignore[attr-defined]
 
+        if shell_info().is_powershell:
+            command = _powershell_hook_command(command)
         argv = shell_command_argv(command)
         if argv:
             return argv

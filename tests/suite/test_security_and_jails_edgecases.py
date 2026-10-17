@@ -1,6 +1,9 @@
 """
 Exhaustive security guards, path jail escapes, and sensitive credential protection test matrix.
 """
+import os
+import sys
+
 import pytest
 from pathlib import Path
 from axon.errors import PermissionDenied
@@ -11,7 +14,17 @@ from axon.config import Settings
 from axon.tools import create_default_registry
 
 # ─── System Directories & Sensitive Files Matrix (25 tests) ─────────────────
+_WIN_ROOT = os.environ.get("SystemRoot") or r"C:\Windows"
+_WIN_PROGRAMS = os.environ.get("ProgramFiles") or r"C:\Program Files"
+
+
 @pytest.mark.parametrize("blocked_path", [
+    os.path.join(_WIN_ROOT, "System32", "drivers", "etc", "hosts"),
+    os.path.join(_WIN_ROOT, "System32", "config", "SAM"),
+    os.path.join(_WIN_ROOT, "win.ini"),
+    os.path.join(_WIN_ROOT, "System32", "cmd.exe"),
+    os.path.join(_WIN_PROGRAMS, "Git", "bin", "bash.exe"),
+] if sys.platform == "win32" else [
     "/etc/passwd",
     "/etc/shadow",
     "/etc/hosts",
