@@ -120,10 +120,15 @@ def test_live_timeline_structure(out):
     # timeline rows keep the rail; only response bodies (markdown) and the footer leave it
     body_rows = [r for r in rows[1:] if r.strip() and not r.startswith("  ") and not r.startswith("└")]
     assert all(r.startswith("│") for r in body_rows), body_rows
-    # nested subagent steps sit between its start and end lines
+    # a subagent's own steps stay out of the normal timeline (the monitor and /subagents show them) ...
     start = next(i for i, r in enumerate(rows) if "subagent started" in r)
     end = next(i for i, r in enumerate(rows) if "subagent completed" in r)
-    nested = [r for r in rows[start + 1:end] if "┊" in r]
+    assert not [r for r in rows[start + 1:end] if "┊" in r]
+    # ... and appear, labelled with the subagent, between its start and end lines at the detailed level
+    drows = strip_ansi(out("detailed")[0]).splitlines()
+    start = next(i for i, r in enumerate(drows) if "subagent started" in r)
+    end = next(i for i, r in enumerate(drows) if "subagent completed" in r)
+    nested = [r for r in drows[start + 1:end] if "┊" in r]
     assert len(nested) == 2 and "LLM claude-haiku-4" in nested[0] and "Bash" in nested[1]
     assert "1 message you typed during the turn sent to the model" in plain
     assert "took " in plain                           # timing under the subagent card, not glued to it

@@ -562,7 +562,8 @@ def handle_release_notes(agent: Any, arg: str) -> CommandResult:
     elif a:
         chosen = [e for e in entries if e[0] == a or e[0].startswith(a)]
         if not chosen:
-            err(f"No release notes for {a}. Versions: {', '.join(v for v, _ in entries)}")
+            more = f" … ({len(entries) - 12} older, /release-notes all)" if len(entries) > 12 else ""
+            err(f"No release notes for {a}. Recent versions: {', '.join(v for v, _ in entries[:12])}{more}")
             return _done()
     else:
         pick = _choose("Release notes", [(v, (b.splitlines() or [''])[0][:50]) for v, b in entries], entries[0][0]) if len(entries) > 1 else None

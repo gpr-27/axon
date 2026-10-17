@@ -225,7 +225,7 @@ def test_esc_interrupt_then_continue_keeps_progress(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([_bash("sleep 4; echo LATE > late.txt", "slow")], [{"text": "RESUMED-OK"}])
     with open_repl(axon_env) as s:
         m = s.submit("start the slow job")
-        s.expect(r"Bash  sleep 4", timeout=10, since=m)
+        s.expect(r"Bash  (\$ )?sleep 4", timeout=10, since=m)
         started = time.monotonic()
         time.sleep(0.5)
         s.send(ESC)

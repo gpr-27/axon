@@ -1,15 +1,27 @@
 """
 Axon terminal renderer.
 
-The ``Renderer`` turns the provider/agent ``StreamEvent`` stream into a calm, compact transcript::
+The ``Renderer`` turns the provider/agent ``StreamEvent`` stream into a calm, compact transcript.  Every
+tool call - built-in, MCP or unknown - has the same two sections: the input (header, then every argument
+the header does not show as an aligned ``key  value`` row) and the output (a summary row after ``⎿``,
+then the body: highlighted code, a diff, pretty JSON, or the head + tail of plain output)::
 
-    ● Read(src/axon/cli.py · lines 1-120)
-      ⎿  Read 120 lines
-    ● Edit(src/axon/cli.py)
-      ⎿  Updated src/axon/cli.py with 2 additions and 1 removal
-          41    context
-          42  - old line
-          42  + new line
+    ● Bash  $ pytest tests/ -q
+        Run the unit tests
+        timeout  120
+      ⎿  ✗ exit 1 · ██████▒▒ 6 passed · 2 failed · 14 lines of output · 3.2s
+         E   assert 3 == 4
+         … +10 more lines · /output 7 to view all
+    ● github › search_issues  label:bug
+        MCP tool from github
+        owner  acme
+      ⎿  JSON object · 2 keys · 147 B · 0.4s
+         {
+           "total_count": 2,
+    ● Read  src/missing.py
+        reads a file
+      ⎿  ✗ error: File not found: src/missing.py
+         ▎ Did you mean src/main.py?
 
 Assistant text streams through an incremental markdown renderer, thinking is shown dim (or
 collapsed to a one-line summary), a thread-safe spinner shows elapsed time, a token counter and the
@@ -68,6 +80,7 @@ from axon.ui.theme import (
     OUTPUT_LOCK,
     PRIMARY,
     RST,
+    STRIKE,
     SUBTLE,
     SUCCESS,
     TEXT,
@@ -233,6 +246,12 @@ _SGR_RUN = r"((?:\x1b\[[0-9;]*m)*)"
 def _dot_sep_re() -> "re.Pattern[str]":
     """' · ' separator with spaces already made non-breaking (the dot glyph depends on the encoding)."""
     return re.compile(_NBSP + _SGR_RUN + re.escape(glyph("dot")) + _SGR_RUN + _NBSP)
+
+
+def _subagent_number(task_id: Any) -> str:
+    """'sub-3' -> '3' ('' for ids that do not carry a number)."""
+    m = re.fullmatch(r"sub-(\d+)", str(task_id or ""))
+    return m.group(1) if m else ""
 
 
 def _one_line(text: Any, limit: int = 80) -> str:
@@ -460,70 +479,105 @@ def render_queue_box(queue: Any, max_width: int = 88) -> str:
 
 _TODO_DONE = ("[✓]", "[x]", "[X]")
 _TODO_ACTIVE = ("[▶]", "[>]", "[*]")
+_TODO_ITEM_RE = re.compile(r"^\s*\[(.)\]\s*(?:(\d+)[.)]\s*)?(.*)$")
+_PLAN_FULL = 25          # plans up to this many items are always shown in full
 
 
 def _todo_stats(lines: list[str]) -> tuple[int, int, int]:
-    completed = sum(1 for l in lines if any(t in l for t in _TODO_DONE))
-    active = sum(1 for l in lines if any(t in l for t in _TODO_ACTIVE))
-    pending = sum(1 for l in lines if "[ ]" in l)
-    total = completed + active + pending
+    states = [st for st, _, _ in _todo_items("\n".join(lines))]
+    completed, total = states.count("done"), sum(1 for st in states if st)
     return completed, total, int(completed / total * 100) if total else 0
 
 
-def _todo_rows(content: str, with_bar: bool = False) -> list[str]:
+def _todo_items(content: str) -> list[tuple[str, str, str]]:
+    """(state, number, text) per plan item; state is done / active / open, or "" for a free-text line."""
+    items: list[tuple[str, str, str]] = []
+    n = 0
+    for l in content.strip().splitlines():
+        s = l.strip()
+        if not s or s.startswith(("Updated todos", "Progress:", "Active Step:")):
+            continue
+        m = _TODO_ITEM_RE.match(s)
+        mark = f"[{m.group(1)}]" if m else ""
+        if m and mark in _TODO_DONE + _TODO_ACTIVE + ("[ ]",):
+            n += 1
+            state = "done" if mark in _TODO_DONE else ("active" if mark in _TODO_ACTIVE else "open")
+            items.append((state, m.group(2) or str(n), _clean(m.group(3)).strip()))
+        else:
+            items.append(("", "", _clean(s)))
+    return items
+
+
+def _plan_bar(completed: int, total: int, length: int = 16) -> str:
+    filled = int(length * completed / total) if total else 0
+    return f"{SUCCESS}{glyph('block') * filled}{SUBTLE}{glyph('shade') * (length - filled)}{RST}"
+
+
+def _todo_item_rows(state: str, num: str, text: str, num_w: int, width: int | None) -> list[str]:
+    """One plan item, numbered, wrapped under its own text (never truncated)."""
+    if not state:
+        return [f"{TEXT}{text}{RST}"]
+    lead = f"{num}.".rjust(num_w + 1)
+    if state == "done":
+        mark, body = f"{SUCCESS}{glyph('ok')}{RST}", f"{MUTED}{lead} {STRIKE}{text}{RST}"
+    elif state == "active":
+        mark = f"{ACCENT}{BOLD}{glyph('play')}{RST}"
+        body = f"{ACCENT}{BOLD}{lead} {text}{RST}  {ACCENT}{glyph('dot')} in progress{RST}"
+    else:
+        mark, body = f"{MUTED}{glyph('circle')}{RST}", f"{TEXT}{lead} {text}{RST}"
+    if not width:
+        return [f"{mark} {body}"]
+    hang = " " * (2 + num_w + 2)
+    pieces = wrap_ansi(body, max(10, width - 2)) or [""]
+    out = [f"{mark} {pieces[0]}"]
+    rest = " ".join(strip_ansi(p) for p in pieces[1:])
+    if rest:
+        style = {"done": MUTED, "active": f"{ACCENT}{BOLD}"}.get(state, TEXT)
+        out += [f"{hang}{style}{p}{RST}" for p in wrap_ansi(rest, max(10, width - len(hang)))]
+    return out
+
+
+def _todo_rows(content: str, with_bar: bool = False, width: int | None = None) -> list[str]:
+    """Every plan item, numbered: done ✓ (muted, struck through), in progress ▶ (bold accent), open ○."""
     lines = content.strip().splitlines()
     completed, total, pct = _todo_stats(lines)
     rows: list[str] = []
     if total and with_bar:
-        bar_len = 20
-        filled = int(bar_len * completed / total)
-        rows.append(f"{SUCCESS}{glyph('block') * filled}{SUBTLE}{glyph('shade') * (bar_len - filled)}{RST} {BOLD}{pct}%{RST} {MUTED}({completed}/{total} done){RST}")
-    for l in lines:
-        s = l.strip()
-        if not s or s.startswith(("Updated todos", "Progress:", "Active Step:")):
-            continue
-        clean = s
-        for t in _TODO_DONE + _TODO_ACTIVE + ("[ ]",):
-            clean = clean.replace(t, "")
-        clean = clean.strip()
-        if any(t in s for t in _TODO_DONE):
-            rows.append(f"{SUCCESS}{glyph('ok')}{RST} {MUTED}{clean}{RST}")
-        elif any(t in s for t in _TODO_ACTIVE):
-            rows.append(f"{PRIMARY}{glyph('play')}{RST} {BOLD}{clean}{RST} {MUTED}(in progress){RST}")
-        elif "[ ]" in s:
-            rows.append(f"{MUTED}{glyph('circle')} {clean}{RST}")
-        else:
-            rows.append(f"{TEXT}{s}{RST}")
+        rows.append(f"{_plan_bar(completed, total, 20)} {BOLD}{pct}%{RST} {MUTED}({completed}/{total} done){RST}")
+    items = _todo_items(content)
+    num_w = max((len(n) for st, n, _ in items if st), default=1)
+    hidden = 0
+    if total > _PLAN_FULL:          # very long plans: fold finished items into one line, keep every open one
+        hidden = sum(1 for st, _, _ in items if st == "done")
+        items = [it for it in items if it[0] != "done"]
+        rows.append(f"{SUCCESS}{glyph('ok')}{RST} {MUTED}{_plural(hidden, 'completed item')} folded{RST}")
+    for st, n, text in items:
+        rows += _todo_item_rows(st, n, text, num_w, width)
     return rows
 
 
-def _todo_summary(content: str, limit: int = 5) -> list[str]:
-    """Plan progress row + up to *limit* items (in-progress and pending first, done items collapsed)."""
+def _todo_summary(content: str, limit: int = _PLAN_FULL, width: int | None = None) -> list[str]:
+    """Plan card under a TodoWrite call: 'Plan · 2/6 done ████░░ 33%' + every item behind an accent bar.
+
+    Plans are never cut short: up to _PLAN_FULL items all show; beyond that only finished items fold."""
     lines = content.strip().splitlines()
     completed, total, pct = _todo_stats(lines)
     if not total:
-        return _todo_rows(content)[:limit] or [f"{MUTED}(empty plan){RST}"]
-    rows = _todo_rows(content)
-    done = [r for r in rows if glyph("ok") in strip_ansi(r)[:2]]
-    rest = [r for r in rows if r not in done]
-    shown = rest[:limit]
-    hidden_open = len(rest) - len(shown)
-    out = [f"Plan {BOLD}{completed}/{total}{RST} done ({pct}%)"] + shown
-    tail = []
-    if hidden_open > 0:
-        tail.append(f"+{hidden_open} more open")
-    if done:
-        tail.append(f"+{len(done)} done")
-    if tail:
-        out.append(f"{SUBTLE}{glyph('ellipsis')} {', '.join(tail)}{RST}")
-    return out
+        return [f"{ACCENT}{BOLD}Plan{RST}"] + (_todo_rows(content, width=width) or [f"{MUTED}(empty plan){RST}"])
+    active = sum(1 for st, _, _ in _todo_items(content) if st == "active")
+    head = (f"{ACCENT}{BOLD}Plan{RST} {SUBTLE}{glyph('dot')}{RST} {BOLD}{completed}/{total}{RST} done "
+            f"{_plan_bar(completed, total)} {BOLD}{pct}%{RST}")
+    if active:
+        head += f" {SUBTLE}{glyph('dot')}{RST} {ACCENT}{active} in progress{RST}"
+    rail = f"{ACCENT}{glyph('quote')}{RST} "
+    return [head] + [rail + r for r in _todo_rows(content, width=max(20, (width or _width(160) - 8) - 2))]
 
 
 def render_todo_box(content: str, max_width: int = 88) -> str:
     """Task plan checklist with progress bar."""
     completed, total, pct = _todo_stats(content.strip().splitlines())
-    rows = _todo_rows(content, with_bar=True)
-    title = f"{BOLD}Task Plan{RST} {MUTED}{completed}/{total} completed ({pct}%){RST}" if total else f"{BOLD}Task Plan{RST}"
+    rows = _todo_rows(content, with_bar=True, width=max(20, max(24, max_width) - 4))
+    title = f"{ACCENT}{BOLD}Task Plan{RST} {MUTED}{completed}/{total} completed ({pct}%){RST}" if total else f"{ACCENT}{BOLD}Task Plan{RST}"
     return box(title, rows, max_width, wrap=True)
 
 
@@ -789,29 +843,6 @@ def _plain(text: Any) -> str:
 
 # ─── Argument formatting ───────────────────────────────────────────────────
 
-def _pretty_input(inp: dict[str, Any], max_lines: int = 24, max_str: int = 240) -> list[str]:
-    """Pretty JSON of a tool input with long strings and long output truncated."""
-    import json
-
-    def clip(v: Any) -> Any:
-        if isinstance(v, str) and len(v) > max_str:
-            return v[:max_str] + f"... (+{len(v) - max_str} chars)"
-        if isinstance(v, dict):
-            return {k: clip(x) for k, x in v.items() if not str(k).startswith("_")}
-        if isinstance(v, list):
-            return [clip(x) for x in v[:50]]
-        return v
-
-    try:
-        text = json.dumps(clip(inp or {}), indent=2, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        text = repr(inp)
-    lines = text.splitlines()
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + [f"... (+{len(lines) - max_lines} lines)"]
-    return [highlight(l, "json") for l in lines]
-
-
 def _event_fields(e: Any) -> dict[str, Any]:
     """Public fields of an event/dataclass/dict (duck-typed)."""
     if isinstance(e, dict):
@@ -976,8 +1007,8 @@ def _tool_target(name: str, inp: dict[str, Any]) -> str:
         except (TypeError, ValueError):
             pass
         return path
-    if name in BASH_TOOLS:
-        return _one_line(_strip_cd_prefix(str(_first(inp, "command", "CommandLine"))), 600)   # shown in full (wraps)
+    if name in BASH_TOOLS:     # shown in full (wraps); '\'-continued lines joined
+        return _one_line(re.sub(r"[ \t]*\\\n", " ", _strip_cd_prefix(str(_first(inp, "command", "CommandLine")))), 600)
     if name in WRITE_TOOLS | EDIT_TOOLS | MULTI_EDIT_TOOLS or name in ("Patch", "CodeSymbols"):
         return path
     if name in LS_TOOLS or name == "FileTree":
@@ -999,23 +1030,40 @@ def _tool_target(name: str, inp: dict[str, Any]) -> str:
     if name == "TodoWrite":
         return _plural(len(inp.get("todos") or []), "item")
     if name == "Task":
-        return _one_line(_first(inp, "description", "title") or str(_first(inp, "prompt")).split("\n")[0], 70)
+        what = _one_line(_first(inp, "description", "title") or str(_first(inp, "prompt")).split("\n")[0], 60)
+        kind = _one_line(_first(inp, "subagent_type") or "general-purpose", 30)
+        return f"{what} {glyph('dot')} {kind}"
     if name in ("Process", "Env"):
         var = _first(inp, "variable")
         return f"{_first(inp, 'action', default='list')}" + (f" {var}" if var else "")
     if name == "Diff":
         return f"{_first(inp, 'path_a')} {glyph('arrow')} {_first(inp, 'path_b')}"
-    for v in inp.values():
-        if isinstance(v, (str, int, float)) and str(v).strip():
-            return _one_line(v, 60)
-    return ""
+    key = _generic_target_key(inp)
+    return _one_line(inp[key], 60) if key else ""
+
+
+# Keys that best name what a generic / MCP tool acts on, most telling first (the header shows that one).
+_TARGET_PREFERRED = ("query", "q", "url", "uri", "path", "file_path", "file", "filename", "pattern", "command",
+                     "name", "title", "id", "key", "text", "prompt")
+
+
+def _is_scalar(v: Any) -> bool:
+    return isinstance(v, (str, int, float)) and not isinstance(v, bool) and bool(str(v).strip())
+
+
+def _generic_target_key(inp: dict[str, Any]) -> str:
+    """The argument a generic tool's header shows: a well-known key, else the first scalar one."""
+    for k in _TARGET_PREFERRED:
+        if _is_scalar(inp.get(k)):
+            return k
+    return next((str(k) for k, v in inp.items() if not str(k).startswith("_") and _is_scalar(v)), "")
 
 
 _TOOL_PURPOSE = {
     "Read": "reads a file", "Write": "writes a file", "Edit": "edits a file", "MultiEdit": "makes several edits to a file",
     "Bash": "runs a shell command", "BashOutput": "reads a background command's output", "KillShell": "stops a background command",
     "Grep": "searches inside files", "Glob": "finds files by name", "Ls": "lists a folder", "FileTree": "shows the folder tree",
-    "WebSearch": "searches the web", "WebFetch": "fetches a web page", "Task": "hands work to a subagent",
+    "WebSearch": "searches the web", "WebFetch": "fetches a web page", "Task": "delegates to a subagent (own context, returns one report)",
     "TodoWrite": "updates the task plan", "AskUserQuestion": "asks you a question", "Git": "runs a git command",
     "Patch": "applies a patch", "NotebookEdit": "edits a notebook cell", "CodeSymbols": "lists code symbols",
     "Http": "sends an HTTP request", "ExitPlanMode": "proposes a plan for your approval", "Diff": "compares two files",
@@ -1056,6 +1104,188 @@ def _strip_cd_prefix(command: str) -> str:
     return command
 
 
+# ─── Tool call input: header, command block, argument rows ────────────────
+#
+#   ● Bash  $ pytest tests/ -q \
+#             --maxfail 1                       <- the rest of a multi-line command, aligned under it
+#       Run the unit tests                      <- what it does (the command's own description)
+#       timeout  120                            <- every argument the header does not already show
+#
+# Every tool (built-in, MCP or unknown) gets the same shape; the same rows are drawn live, by /inspect
+# (format_trace) and for restored sessions (format_conversation_replay).
+
+_PATH_KEYS = ("path", "file_path", "AbsolutePath", "TargetFile", "DirectoryPath", "notebook_path")
+# Arguments a tool's header (or its purpose line) already shows, per tool: the input rows skip them.
+_TARGET_KEYS: dict[str, tuple[str, ...]] = {}
+for _names, _keys in (
+    (READ_TOOLS, _PATH_KEYS + ("offset", "limit", "StartLine", "EndLine")),
+    (BASH_TOOLS, ("command", "CommandLine", "description")),
+    (WRITE_TOOLS | EDIT_TOOLS | MULTI_EDIT_TOOLS | LS_TOOLS | {"Patch", "CodeSymbols", "NotebookEdit", "FileTree"},
+     _PATH_KEYS),
+    ({"Glob"}, ("pattern", "path")),
+    (GREP_TOOLS, ("pattern", "Query", "path", "SearchPath")),
+    ({"Git"}, ("subcommand", "args")),
+    ({"WebSearch", "DeepResearch", "TableSearch"}, ("query",)),
+    ({"WebFetch"}, ("url",)),
+    ({"Http"}, ("method", "url")),
+    ({"TodoWrite"}, ("todos",)),
+    ({"Task", "Agent"}, ("description", "title", "subagent_type")),
+    ({"Process", "Env"}, ("action", "variable")),
+    ({"Diff"}, ("path_a", "path_b")),
+):
+    for _n in _names:
+        _TARGET_KEYS[_n] = _keys
+# Bodies the result card draws in full (the diff of an Edit, the file of a Write): hidden at the normal
+# level, a size summary at detailed, the text itself at debug.
+_BODY_KEYS = {"content", "CodeContent", "old_string", "new_string", "edits", "patch", "new_source"}
+_ARG_ROWS = (0, 2, 6, 16)          # rows per argument value, by trace detail
+_ARG_COUNT = (0, 8, 40, 200)       # arguments listed, by trace detail
+_CMD_LINES = (1, 12, 40, 400)      # lines of a multi-line shell command, by trace detail
+
+
+def tool_label(name: str) -> str:
+    """Display name of a tool: 'mcp__github__search_issues' -> 'github › search_issues'."""
+    name = _clean(name)
+    if name.startswith("mcp__"):
+        parts = [p for p in name.split("__")[1:] if p]
+        if len(parts) >= 2:
+            return f"{parts[0]} {glyph('chevron')} {'__'.join(parts[1:])}"
+    return name
+
+
+def _command_lines(inp: dict[str, Any]) -> list[str]:
+    """A shell command as the lines it was written in (a leading 'cd <workspace> &&' dropped)."""
+    cmd = _strip_cd_prefix(str(_first(inp, "command", "CommandLine")))
+    lines = [sanitize(strip_ansi(l)).rstrip().expandtabs(4) for l in cmd.strip("\n").splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def tool_header_rows(name: str, inp: dict[str, Any], detail: int = 1) -> list[tuple[int, str]]:
+    """The call header: ``[(indent, row)]`` - '● Name  target' and, for a multi-line shell command, its
+    other lines indented to sit under the first one. Compact (detail 0) is the one-line 'Name(target)'."""
+    inp = inp or {}
+    mark = f"{PRIMARY}{glyph('tool')}{RST}"
+    label = tool_label(name)
+    if name in BASH_TOOLS:
+        lines = _command_lines(inp)
+        if detail <= 0:
+            return [(0, f"{mark} {BOLD}{label}{RST}" + (f"{MUTED}({RST}{tool_target(name, inp)}{MUTED}){RST}" if lines else ""))]
+        if not lines:
+            return [(0, f"{mark} {BOLD}{label}{RST}")]
+        lead = f"{mark} {BOLD}{label}{RST}  "
+        rows = [(0, lead + f"{MUTED}${RST} {TEXT}{lines[0]}{RST}")]
+        keep = _lim(_CMD_LINES, detail)
+        indent = display_width(lead) + 2
+        rows += [(indent, f"{TEXT}{l}{RST}") for l in lines[1:keep]]
+        if len(lines) > keep:
+            rows.append((indent, f"{SUBTLE}{glyph('ellipsis')} +{_plural(len(lines) - keep, 'more line')}{RST}"))
+        return rows
+    target = tool_target(name, inp)
+    if detail <= 0:
+        return [(0, f"{mark} {BOLD}{label}{RST}" + (f"{MUTED}({RST}{target}{MUTED}){RST}" if target else ""))]
+    return [(0, f"{mark} {BOLD}{label}{RST}" + (f"  {TEXT}{target}{RST}" if target else ""))]
+
+
+def tool_purpose_row(name: str, inp: dict[str, Any], registry: Any = None, why: str = "") -> str:
+    """'runs a shell command · why: <the model's words>' (a Bash call's own description replaces the
+    generic purpose); '' when there is nothing to say."""
+    purpose = tool_purpose(name, registry)
+    desc = _one_line((inp or {}).get("description") or "", 200) if name in BASH_TOOLS else ""
+    bits = [desc or purpose] + ([f"why: {ITALIC}{_one_line(why, 400)}"] if why else [])
+    bits = [b for b in bits if b]
+    return f"{SUBTLE}" + f" {glyph('dot')} ".join(bits) + RST if bits else ""
+
+
+def _arg_value_rows(v: Any, width: int, max_rows: int) -> list[str]:
+    """One argument value as rows: scalars coloured by type, text wrapped, objects as (pretty) JSON."""
+    import json
+
+    if v is None:
+        return [f"{MUTED}null{RST}"]
+    if isinstance(v, bool):
+        return [f"{INFO}{'true' if v else 'false'}{RST}"]
+    if isinstance(v, (int, float)):
+        return [f"{INFO}{v}{RST}"]
+    if isinstance(v, (dict, list)):
+        try:
+            compact = json.dumps(v, ensure_ascii=False, default=str)
+            pretty = json.dumps(v, indent=2, ensure_ascii=False, default=str).splitlines()
+        except (TypeError, ValueError):
+            compact, pretty = repr(v), [repr(v)]
+        compact = _clean(compact)
+        if display_width(compact) <= width or max_rows <= 2:
+            return [highlight(truncate(compact, width), "json")]
+        rows = [highlight(truncate(_clean(l), width), "json") for l in pretty[:max_rows]]
+        if len(pretty) > max_rows:
+            rows.append(f"{SUBTLE}{glyph('ellipsis')} +{_plural(len(pretty) - max_rows, 'more line')}{RST}")
+        return rows
+    lines = [l.expandtabs(4) for l in _clean(v).splitlines()] or [""]
+    if len(lines) > 1 and max_rows <= 2:          # normal level: the first line and how much follows
+        more = f" {SUBTLE}{glyph('wrap')} +{_plural(len(lines) - 1, 'line')}{RST}"
+        return [f"{TEXT}{truncate(lines[0], max(8, width - display_width(more)))}{RST}{more}"]
+    rows: list[str] = []
+    for i, l in enumerate(lines):
+        rows += wrap_ansi(f"{TEXT}{l}{RST}", width) or [""]
+        if len(rows) > max_rows:
+            left = len(lines) - i - 1
+            rows = rows[:max_rows - 1] + [truncate(rows[max_rows - 1], width - 1) + f"{SUBTLE}{glyph('ellipsis')}{RST}"]
+            if left:
+                rows.append(f"{SUBTLE}{glyph('ellipsis')} +{_plural(left, 'more line')}{RST}")
+            break
+    return rows
+
+
+def _body_summary(v: Any) -> str:
+    """'12 lines · 340 B' / '3 items' for an argument the result card already draws."""
+    if isinstance(v, str):
+        return f"{MUTED}{_plural(_cards.count_lines(v), 'line')} {glyph('dot')} {_fmt_bytes(len(v.encode('utf-8', errors='replace')))}{RST}"
+    if isinstance(v, (list, dict)):
+        return f"{MUTED}{_plural(len(v), 'item')}{RST}"
+    return f"{MUTED}{_one_line(v, 40)}{RST}"
+
+
+def tool_input_rows(name: str, inp: dict[str, Any], width: int | None = None, detail: int = 1) -> list[str]:
+    """The call's arguments as aligned 'key  value' rows, leaving out what the header already shows.
+
+    compact: none · normal: every other argument (long text: its first line) · detailed: also the bodies
+    the result card draws (as a size) and longer values · debug: everything, bodies in full."""
+    if detail <= 0 or not isinstance(inp, dict):
+        return []
+    width = max(24, width or _width(160) - 10)
+    shown = set(_TARGET_KEYS[name]) if name in _TARGET_KEYS else {_generic_target_key(inp)}
+    items = [(str(k), v) for k, v in inp.items() if not str(k).startswith("_") and str(k) not in shown]
+    if detail < 2:
+        items = [(k, v) for k, v in items if k not in _BODY_KEYS and v not in (None, "", [], {})]
+    if not items:
+        return []
+    key_w = min(18, max(display_width(_clean(k)) for k, _ in items))
+    val_w = max(16, width - key_w - 2)
+    limit, max_rows = _lim(_ARG_COUNT, detail), _lim(_ARG_ROWS, detail)
+    rows: list[str] = []
+    for k, v in items[:limit]:
+        vals = [_body_summary(v)] if k in _BODY_KEYS and detail == 2 else _arg_value_rows(v, val_w, max_rows)
+        rows.append(f"{MUTED}{pad(truncate(_clean(k), key_w), key_w)}{RST}  {vals[0]}")
+        rows += [f"{' ' * key_w}  {r}" for r in vals[1:]]
+    if len(items) > limit:
+        rows.append(f"{SUBTLE}{glyph('ellipsis')} +{_plural(len(items) - limit, 'more argument')}{RST}")
+    return rows
+
+
+def tool_call_rows(name: str, inp: dict[str, Any], detail: int = 1, width: int | None = None,
+                   registry: Any = None, why: str = "") -> list[tuple[int, str]]:
+    """Header, purpose and argument rows of one tool call as ``[(indent, row)]`` (indent in columns,
+    relative to the '●'): what the live timeline, /inspect and restored sessions all print."""
+    rows = tool_header_rows(name, inp, detail)
+    if detail >= 1:
+        purpose = tool_purpose_row(name, inp, registry, why)
+        if purpose:
+            rows.append((4, purpose))
+        rows += [(4, r) for r in tool_input_rows(name, inp, (width or _width(160) - 10), detail)]
+    return rows
+
+
 def _count_lines(content: str) -> int:
     return len([l for l in content.splitlines() if l.strip()])
 
@@ -1086,6 +1316,11 @@ def _tool_summary(registry: Any, name: str, inp: dict[str, Any], content: str, i
         return ""
     try:
         tool = reg.get(name)
+        for _ in range(4):          # aliases / deferred proxies wrap the real tool
+            inner = getattr(tool, "target", None)
+            if inner is None or not callable(getattr(inner, "summarize", None)):
+                break
+            tool = inner
         try:
             from axon.tools.base import Tool as _BaseTool
 
@@ -1113,15 +1348,12 @@ def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: boo
     if changes:
         rows = rows + _cards.file_change_rows(changes, width or _width(140),
                                               _lim(_DIFF_ROWS, detail) if detail > 0 else 1 + len(changes), _MORE_HINT)
-    if not is_error and name in _CARD_HEADER_TOOLS | {"TodoWrite", "Task"}:
+    if _is_card_rows(name, rows) or (not is_error and name in _CARD_HEADER_TOOLS | {"TodoWrite", "Task"}):
         return rows  # file / diff / plan / subagent cards already carry an exact summary
-    summary = _tool_summary(registry, name, inp, content, is_error)
+    # the tool's own summary names a success better than a line count; an error keeps its full message
+    summary = "" if is_error else _tool_summary(registry, name, inp, content, is_error)
     if summary:
-        first = f"{ERROR}{summary}{RST}" if is_error else summary
-        if is_error:
-            rows = [first] + rows[1:] if rows and strip_ansi(rows[0]).strip() in summary else [first] + rows
-        else:
-            rows = [first] + rows[1:]
+        rows = [summary] + rows[1:]
     if link and rows and "\x1b]8;" not in rows[0]:
         rows[0] = hyperlink(link, rows[0])
     return rows
@@ -1202,6 +1434,7 @@ def summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_error
     if detail <= 0 and not is_error and name not in ("Task", "TodoWrite", "ExitPlanMode") and len(rows) > 1:
         # compact: one row per tool (a file / diff card keeps just its header row)
         n = len(sanitize(content or "").strip().splitlines())
+        n = max(n, len(rows) - 1)
         rows = rows[:1] + ([] if name in _CARD_HEADER_TOOLS or n <= 1 else [_cards.more_row(n, _MORE_HINT)])
     return rows
 
@@ -1214,9 +1447,8 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
     path = _short_path(str(_first(inp, "path", "file_path", "AbsolutePath", "TargetFile", "notebook_path")))
     dot = f" {SUBTLE}{glyph('dot')}{RST} "
 
-    if is_error:
-        rows = [f"{ERROR}{l}{RST}" for l in (lines or ["Tool failed"])]
-        return _preview(rows, 6)
+    if is_error and not (name in ("Task", "Agent") and text.startswith("[Subagent #")):
+        return _error_rows(lines, width, detail)
 
     if name in READ_TOOLS:
         n = len(lines)
@@ -1235,28 +1467,7 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
         body = textwrap.dedent(content.rstrip().lstrip("\n")).splitlines()     # keep the line-number column aligned
         return [head] + _preview([f"{DIM}{l}{RST}" for l in body], 3)
     if name in BASH_TOOLS:
-        if not text or text == "(Command completed with exit code 0 and no output)":
-            return [f"{MUTED}finished, no output{RST}"]
-        head = ""
-        lines = content.rstrip().lstrip("\n").splitlines()      # keep leading spaces (git status columns)
-        m = re.match(r"Command exited with non-zero code (\d+)\.?\s*", text)
-        if m:
-            head = f"{WARNING}exit code {m.group(1)}{RST}"
-            lines = [l for l in text[m.end():].splitlines() if l.strip() not in ("Output:", "")]
-        n = len(lines)
-        summary = _cards.test_summary(content)
-        if summary:
-            bar = _cards.test_bar(summary)
-            took = re.search(r"\bin ([\d.]+m?s)\b", "\n".join(lines[-3:]))
-            if n == 1 and not head:
-                return [bar + (f"{dot}{MUTED}{took.group(1)}{RST}" if took else "")]
-            first = bar + dot + (head + dot if head else "") + f"{MUTED}{_plural(n, 'line')} of output{RST}"
-        else:
-            if n == 1 and not head:
-                return [_classify_output_line(lines[0])]          # one line: show it, not a count
-            first = (head + f" {glyph('dot')} " if head else "") + (f"{_plural(n, 'line')} of output" if n else "no output")
-        h, t = _lim(_OUT_HEAD_TAIL, detail)
-        return [first] + _cards.output_rows(lines, width, h, t, _MORE_HINT)
+        return _bash_rows(content, width, detail)
     if name in EDIT_TOOLS | MULTI_EDIT_TOOLS:
         if name in MULTI_EDIT_TOOLS:
             pairs = [(e.get("old_string", ""), e.get("new_string", "")) for e in (inp.get("edits") or []) if isinstance(e, dict)]
@@ -1351,10 +1562,15 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
         n = hits or _count_lines(text)
         return [f"Found {BOLD}{n}{RST} {'match' if n == 1 else 'matches'}"
                 + (f" in {_plural(files, 'file')}" if files > 1 else "")] + body
-    if name == "FileTree":
-        return [f"{BOLD}{_count_lines(text)}{RST} entries"]
-    if name == "CodeSymbols":
-        return [f"{BOLD}{_count_lines(text)}{RST} symbol lines"]
+    if name in ("FileTree", "CodeSymbols"):
+        body = [l for l in content.rstrip().lstrip("\n").splitlines() if l.strip()]
+        head = f"{BOLD}{len(body)}{RST} " + ("entries" if name == "FileTree" else "symbol lines")
+        if name == "FileTree":
+            styled = [f"{PRIMARY}{BOLD}{l}{RST}" if l.rstrip().endswith("/") else f"{TEXT}{l}{RST}" for l in body]
+        else:
+            styled = [f"{INFO}{l}{RST}" if re.search(r"\b(def|class|func|fn|function)\b", l) else f"{TEXT}{l}{RST}" for l in body]
+        keep = _lim(_LIST_ROWS, detail)
+        return [head] + styled[:keep] + ([_cards.more_row(len(body) - keep, _MORE_HINT)] if len(body) > keep else [])
     if name == "WebSearch":
         return [strip_ansi(render_web_search_box(str(_first(inp, "query")), content)).strip()]
     if name in ("WebFetch", "Http"):
@@ -1370,9 +1586,10 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
     if name == "Git":
         return _preview([_git_line(l) for l in lines if l.strip()] or [f"{MUTED}(no output){RST}"], 6)
     if name == "TodoWrite":
-        return _todo_summary(content)
+        return _todo_summary(content, width=width)
     if name == "Task":
-        return [r[2:] for r in render_subagent_result_card(content, width=width).splitlines()]
+        # the card sits under the "⎿" gutter, so it gets the width left after that indent
+        return [r[2:] for r in render_subagent_result_card(content, width=max(40, width - 6)).splitlines()]
     if name == "ExitPlanMode":
         return [f"{ACCENT}{BOLD}Plan proposed for approval{RST}"] + format_markdown(content, max_width=width).splitlines()
     if name == "Diff":
@@ -1383,16 +1600,138 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
         answers = re.findall(r"->\s*(.+)$", text, re.MULTILINE)
         if answers:
             return [f"{SUCCESS}answered:{RST} {TEXT}{_one_line('; '.join(answers), 120)}{RST}"]
+    return _generic_rows(content, path, width, detail)
+
+
+# ─── Result bodies shared by every tool without a dedicated card ──────────
+
+_NO_OUTPUT_RE = re.compile(r"^\(Command completed with exit code 0 and no output(?: in ([\d.]+)s)?\)$")
+_CWD_NOTE_RE = re.compile(r"^\(cwd: (.+)\)$")
+_EXIT_RE = re.compile(r"^Command exited with non-zero code (-?\d+)\.?[ \t]*\n?(?:Output:[ \t]*\n?)?")
+
+
+def _trim_blank(lines: list[str]) -> list[str]:
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+    while lines and not lines[-1].strip():
+        lines = lines[:-1]
+    return lines
+
+
+def _error_rows(lines: list[str], width: int, detail: int) -> list[str]:
+    """A failed call: 'error: <message>' first, then the details behind a red accent bar (head + tail
+    when long). The bar and the word 'error' carry the meaning without colour."""
+    lines = _trim_blank(list(lines)) or ["Tool failed"]
+    msg = re.sub(r"^(?:error|Error|ERROR)\s*:\s*", "", lines[0].strip()) or "Tool failed"
+    rows = [f"{ERROR}{BOLD}error{RST}{ERROR}: {msg}{RST}"]
+    rest = _trim_blank(lines[1:])
+    if not rest:
+        return rows
+    bar = f"{ERROR}{glyph('quote')}{RST} "
+    h, t = (6, 2) if detail <= 1 else _lim(_OUT_HEAD_TAIL, detail)
+    n = len(rest)
+    head, tail = (rest, []) if n <= h + t + 1 else (rest[:h], rest[n - t:] if t else [])
+
+    def style(l: str) -> str:
+        l = l.expandtabs(4)
+        return _cards.classify_output_line(l) if _cards._TB_FILE_RE.match(l) else f"{ERROR}{l}{RST}"
+
+    rows += [bar + style(l) for l in head]
+    if tail or n > len(head):
+        rows.append(bar + _cards.more_row(n - len(head) - len(tail), _MORE_HINT))
+        rows += [bar + style(l) for l in tail]
+    return rows
+
+
+def _bash_rows(content: str, width: int, detail: int) -> list[str]:
+    """Shell result: '✓ exit 0' / '✗ exit 1' (plus a test-run bar, the line count and the shell's cwd when
+    it is not the workspace) as the header row, then the output, head + tail when long."""
+    dot = f" {SUBTLE}{glyph('dot')}{RST} "
+    text = content.strip("\n")
+    code = 0
+    m = _EXIT_RE.match(text.lstrip())
+    if m:
+        code = int(m.group(1))
+        text = text.lstrip()[m.end():]
+    lines = text.rstrip().splitlines()            # keep leading spaces (git status columns)
+    cwd = ""
+    kept: list[str] = []
+    for l in lines:
+        cm = _CWD_NOTE_RE.match(l.strip())
+        if cm:
+            cwd = cm.group(1)
+        elif not _NO_OUTPUT_RE.match(l.strip()):
+            kept.append(l)
+    lines = _trim_blank(kept)
+    status = (f"{ERROR}{BOLD}{glyph('fail')} exit {code}{RST}" if code else f"{SUCCESS}{glyph('ok')} exit 0{RST}")
+    where = f"{dot}{MUTED}in {_short_path(cwd)}{RST}" if cwd else ""
+    n = len(lines)
+    if not n:
+        return [status + dot + f"{MUTED}(no output){RST}" + where]
+    summary = _cards.test_summary("\n".join(lines))
+    if summary:
+        bar = _cards.test_bar(summary)
+        took = re.search(r"\bin ([\d.]+m?s)\b", "\n".join(lines[-3:]))
+        if n == 1 and not code:
+            return [bar + (f"{dot}{MUTED}{took.group(1)}{RST}" if took else "") + where]
+        first = (status + dot if code else "") + bar + dot + f"{MUTED}{_plural(n, 'line')} of output{RST}" + where
+    else:
+        if n == 1 and not code:
+            return [_classify_output_line(lines[0]) + where]          # one line: show it, not a count
+        first = status + dot + f"{MUTED}{_plural(n, 'line')} of output{RST}" + where
+    h, t = _lim(_OUT_HEAD_TAIL, detail)
+    return [first] + _cards.output_rows(lines, width, h, t, _MORE_HINT)
+
+
+def _json_shape(pretty: str) -> str:
+    """'JSON object · 3 keys' / 'JSON array · 12 items' (or the line count of truncated JSON)."""
+    import json
+
+    try:
+        data = json.loads(pretty)
+    except ValueError:
+        return f"JSON {glyph('dot')} {_plural(len(pretty.splitlines()), 'line')}"
+    if isinstance(data, dict):
+        return f"JSON object {glyph('dot')} {_plural(len(data), 'key')}"
+    return f"JSON array {glyph('dot')} {_plural(len(data), 'item')}"
+
+
+def _text_rows(lines: list[str], width: int, head: int, tail: int, lang: str = "") -> list[str]:
+    """Plain output rows (highlighted when *lang* is known): the first *head* and last *tail* lines with
+    a '… +N more lines · /output n' row between."""
+    n = len(lines)
+    keep_head, keep_tail = (lines, []) if n <= head + tail + 1 else (lines[:head], lines[n - tail:] if tail else [])
+
+    def style(l: str) -> str:
+        l = l.expandtabs(4)
+        return highlight(l, lang) if lang else f"{TEXT}{l}{RST}"
+
+    rows = [style(l) for l in keep_head]
+    if keep_tail or n > len(keep_head):
+        rows.append(_cards.more_row(n - len(keep_head) - len(keep_tail), _MORE_HINT))
+        rows += [style(l) for l in keep_tail]
+    return rows
+
+
+def _generic_rows(content: str, path: str, width: int, detail: int) -> list[str]:
+    """Any other tool (MCP servers, plugins): JSON pretty-printed and highlighted, other text as a line
+    count + size header and the head / tail of the output (highlighted when the call names a code file)."""
+    dot = f" {SUBTLE}{glyph('dot')}{RST} "
+    text = content.strip()
     if not text:
         return [f"{MUTED}(no output){RST}"]
-    if len(lines) == 1:
-        return [f"{TEXT}{lines[0]}{RST}"]
+    size = f"{MUTED}{_fmt_bytes(len(text.encode('utf-8', errors='replace')))}{RST}"
     found = _cards.find_json(content)
     if found:
         head, pretty = found
-        first = head.splitlines()[0] if head else f"JSON {glyph('dot')} {_plural(len(pretty.splitlines()), 'line')}"
+        first = head.splitlines()[0] if head else f"{_json_shape(pretty)}{dot}{size}"
         return [first] + _cards.json_rows(pretty, width, _lim(_JSON_LINES, detail) if detail > 0 else 0, _MORE_HINT)
-    return [f"{_plural(len(lines), 'line')} of output"] + _preview([f"{TEXT}{l}{RST}" for l in lines], 3)
+    lines = _trim_blank(content.rstrip().splitlines())
+    if len(lines) == 1:
+        return [f"{TEXT}{lines[0].strip()}{RST}"]
+    lang = _lang_for(path) if path else ""
+    h, t = _lim(_OUT_HEAD_TAIL, detail)
+    return [f"{_plural(len(lines), 'line')} of output{dot}{size}"] + _text_rows(lines, width, h, t, lang)
 
 
 # ─── Spinner ───────────────────────────────────────────────────────────────
@@ -1786,8 +2125,8 @@ class Renderer:
         """Left prefix for timeline rows (rail when a turn is open, plain indent otherwise)."""
         return (f"{BORDER}{glyph('v')}{RST} " if self._railed else "  ") + extra
 
-    def _line(self, text: str, extra: str = "", atomic: bool = False) -> None:
-        """Write one timeline row, wrapped (with hanging indent) to the terminal width.
+    def _line(self, text: str, extra: str = "", atomic: bool = False, hang: str = "  ") -> None:
+        """Write one timeline row, wrapped (with hanging indent *hang*) to the terminal width.
 
         ``atomic=True`` (stats / summary rows made of ' · '-separated facts) only wraps at the
         separators, so a unit like '6% of 200k' or '0.03s' is never split across rows."""
@@ -1795,7 +2134,7 @@ class Renderer:
             text = _dot_sep_re().sub(lambda m: f"{_NBSP}{m.group(1)}{glyph('dot')}{m.group(2)} ",
                                    text.replace(" ", _NBSP))
         lead = self._rail(extra)
-        cont = self._rail(extra + "  ")
+        cont = self._rail(extra + hang)
         # continuation rows carry the wider hanging indent: wrap to the narrower width so no row
         # (first or continuation) ever exceeds the terminal width.
         avail = max(10, term_width() - 1 - max(display_width(lead), display_width(cont)))
@@ -2273,20 +2612,21 @@ class Renderer:
         return name not in MUTATING_TOOLS
 
     def _tool_header(self, call_id: str, name: str, inp: dict[str, Any], mark_last: bool = True) -> str:
-        target = tool_target(name, inp)
-        name = _clean(name)
+        """The '● Name  target' row of a call (re-printed when another call's output came in between)."""
         if mark_last:
             self._last_header_id = call_id
-        mark = f"{PRIMARY}{glyph('tool')}{RST}"
-        if self.level >= 1:
-            return f"{mark} {BOLD}{name}{RST}" + (f"  {TEXT}{target}{RST}" if target else "")
-        return f"{mark} {BOLD}{name}{RST}" + (f"{MUTED}({RST}{target}{MUTED}){RST}" if target else "")
+        return tool_header_rows(name, inp, 1 if self.level >= 1 else 0)[0][1]
+
+    def _print_call(self, rows: list[tuple[int, str]]) -> None:
+        """Header, command block, purpose and argument rows of a call (see ``tool_call_rows``)."""
+        for indent, text in rows:
+            self._line(text, "  " + " " * indent)
 
     def _block(self, call_id: str) -> dict[str, Any]:
         """The pending output block of a parallel tool call (created on first use)."""
         b = self._batch_blocks.get(call_id)
         if b is None:
-            b = {"header": "", "why": "", "args": [], "notes": [], "rows": None, "printed": False}
+            b = {"header": "", "call": [], "notes": [], "rows": None, "printed": False}
             self._batch_blocks[call_id] = b
         return b
 
@@ -2297,20 +2637,21 @@ class Renderer:
             _tag_rows(b["uid"])
         if not self._railed:
             self._gap()
-        if b["header"]:
+        if b["call"]:
+            self._print_call(b["call"])
+        elif b["header"]:
             self._line(b["header"], "  ")
-        if b["why"]:
-            self._line(b["why"], "      ")
-        if b["args"]:
-            self._lines(b["args"], "      ")
         for note in b["notes"]:
             for row in note.split("\n"):
                 self._line(row, "      ")
         if b["rows"]:
             first, rest = b["rows"]
-            self._line(first, "    ", atomic=True)
+            if strip_ansi(first).lstrip().startswith(glyph("tl")):
+                self._lines([first], "    ")
+            else:
+                self._line(first, "    ", atomic=True, hang="   ")
             if rest:
-                self._lines(rest, "    ")
+                self._lines(rest, "    " if b.get("card") else "       ")
 
     def _flush_blocks(self, force: bool = False) -> None:
         """Print finished parallel tool blocks in the order the model called them."""
@@ -2344,24 +2685,17 @@ class Renderer:
                                                       title=f"{_clean(e.name)}  {tool_target(e.name, inp)}".rstrip(),
                                                       detail=detail, status="running", started_at=time.time(), id=e.id,
                                                       why=_plain(why)))
-        why_row = ""
-        if self.level >= 1:
-            bits = [tool_purpose(e.name, self.registry)] + ([f"why: {ITALIC}{_one_line(why, 400)}"] if why else [])
-            why_row = f"{SUBTLE}" + f" {glyph('dot')} ".join(b for b in bits if b) + RST if any(bits) else ""
-        args = _pretty_input(inp) if self.level >= 2 else []
+        call = tool_call_rows(e.name, inp, self.level, _width(160) - 12, self.registry, why)
         if self._batch_parallel and e.id in self._batch_order:
             b = self._block(e.id)
             b["uid"] = self._t_tools[e.id].uid
             b["header"] = self._tool_header(e.id, e.name, inp, mark_last=False)
-            b["why"], b["args"] = why_row, args
+            b["call"] = call
         else:
             if not self._railed:
                 self._gap()
-            self._line(self._tool_header(e.id, e.name, inp), "  ")
-            if why_row:
-                self._line(why_row, "      ")
-            if args:
-                self._lines(args, "      ")
+            self._last_header_id = e.id
+            self._print_call(call)
         running = [i for i in self._active_tools.values()]
         label = (f"Running {_clean(e.name)} {_one_line(tool_target(e.name, inp), 40)}".rstrip() if len(running) == 1
                  else f"Running {len(running)} tools")
@@ -2441,7 +2775,8 @@ class Renderer:
         entry.status = "error" if e.is_error else "ok"
         if entry.started_at:
             entry.duration = time.time() - entry.started_at
-        if e.is_error and rows:
+        card = _is_card_rows(e.name, rows)
+        if e.is_error and rows and not card:
             rows[0] = f"{ERROR}{glyph('fail')}{RST} " + rows[0]
         self._round_obs_count += 1
         if self.level >= 1 and rows:
@@ -2456,28 +2791,28 @@ class Renderer:
             if self.level >= 2:
                 facts.append(f"sent {_fmt_bytes(n_bytes)} (~{_fmt_tokens(est)} tokens) to {dest}")
             sep = f" {glyph('dot')} "
-            if e.name in ("Task", "Agent") and not e.is_error:
-                # the subagent card is a box: keep it intact and put the facts under it
+            if card:
+                # the subagent card is a box: fold the timing into its bottom border
                 if facts:
-                    rows = rows + [f"{SUBTLE}took {sep.join(facts)}{RST}"]
+                    rows = _append_box_footer(rows, f"took {sep.join(facts)}")
             elif facts:
                 rows = [rows[0] + f"{SUBTLE}{sep}{sep.join(facts)}{RST}"] + rows[1:]
-        if self.level >= 2 and not e.is_error and e.name not in CARD_TOOLS:
-            preview = [f"{DIM}{l}{RST}" for l in sanitize(e.content or "").splitlines()[:12]]
-            more = len((e.content or "").splitlines()) - 12
-            if preview and not _cards.find_json(e.content or ""):
-                rows = rows[:1] + preview + ([f"{SUBTLE}{glyph('ellipsis')} +{more} more lines {glyph('dot')} /output {out_no} to view all{RST}"] if more > 0 else [])
         if self.level >= 2 and not e.is_error and e.name not in _CARD_HEADER_TOOLS | {"Task", "TodoWrite"}:
             rows.append(f"{SUBTLE}result #{self._round_obs_count} [{(e.id or '')[:12]}] goes to the model in step {self._current_iteration + 1}{RST}")
         if in_block:
             b = self._block(e.id)
             if not b["header"]:
                 b["header"] = self._tool_header(e.id, e.name, inp, mark_last=False)
-            b["rows"] = ((f"{SUBTLE}{glyph('result')}{RST}  " + rows[0]) if rows else "", ["   " + r for r in rows[1:]])
+            if card:      # the card draws its own frame: no '⎿' in front, every row at one indent
+                b["rows"], b["card"] = (rows[0], rows[1:]), True
+            else:
+                b["rows"], b["card"] = ((f"{SUBTLE}{glyph('result')}{RST}  " + rows[0]) if rows else "", rows[1:]), False
             self._flush_blocks()
+        elif card:
+            self._lines(rows, "    ")
         elif rows:
-            self._line(f"{SUBTLE}{glyph('result')}{RST}  " + rows[0], "    ", atomic=True)
-            self._lines(["   " + r for r in rows[1:]], "    ")
+            self._line(f"{SUBTLE}{glyph('result')}{RST}  " + rows[0], "    ", atomic=True, hang="   ")
+            self._lines(rows[1:], "       ")         # under the text after '⎿  '; wraps stay inside
         if not self._active_tools:
             self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
 
@@ -2541,6 +2876,8 @@ class Renderer:
                 label, color, mark = f"{outcome or 'ask'}", WARNING, glyph("warn")
             if outcome == "allow" and source in ("mode", "") and not approval and self.level < 2:
                 return          # routine approvals (bypass mode, read-only tools) are noise at the normal level
+            if outcome == "allow" and source == "delegation" and not approval and self.level < 2:
+                return          # every Task call is allowed; the subagent's own tool calls are what get checked
             text = (f"{color}{mark}{RST} {MUTED}{label}" + (f": {_one_line(reason, 200)}" if reason else "")
                     + (f" ({_one_line(approval, 80)})" if approval else "") + RST)
             self._annotate_tool(str(_get(e, "id", default="")), str(_get(e, "tool", default="")), text)
@@ -2581,18 +2918,26 @@ class Renderer:
             phase = str(_get(e, "phase", default=""))
             title = _one_line(_get(e, "title", default="subagent"), 50)
             agent_type = _one_line(_get(e, "agent_type", default=""), 40)
-            label = f"{title}" + (f" ({agent_type})" if agent_type and agent_type != "general" else "")
+            num = _subagent_number(_get(e, "task_id", default=""))
+            label = f"#{num} {title}" if num else title
+            label += f" ({agent_type})" if agent_type else ""
             if phase == "start":
                 self._line(f"{CYAN}{glyph('play')} subagent started{RST} {TEXT}{label}{RST}" + (f" {MUTED}{dot} {_one_line(_get(e, 'model'), 60)}{RST}" if _get(e, "model") else ""), "  ")
             else:
                 status = str(_get(e, "status", default="done"))
                 color = SUCCESS if status in ("completed", "done", "ok") else (AMBER if status == "exhausted" else ERROR)
-                self._line(f"{color}{glyph('ok') if color == SUCCESS else glyph('warn')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} "
-                           f"{_get(e, 'iterations', default=0)} steps {dot} {_fmt_tokens(int(_get(e, 'input_tokens', default=0) or 0))} in {dot} "
-                           f"{_fmt_tokens(int(_get(e, 'output_tokens', default=0) or 0))} out {dot} {float(_get(e, 'duration_s', default=0) or 0):.1f}s {dot} "
-                           f"${float(_get(e, 'cost', default=0) or 0):.4f}{RST}", "  ")
+                if status in ("error", "cancelled"):
+                    reason = _one_line(_get(e, "detail", default="") or "failed", 120)
+                    self._line(f"{ERROR}{glyph('fail')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} {reason}{RST}", "  ")
+                else:
+                    self._line(f"{color}{glyph('ok') if color == SUCCESS else glyph('warn')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} "
+                               f"{_get(e, 'iterations', default=0)} steps {dot} {_fmt_tokens(int(_get(e, 'input_tokens', default=0) or 0))} in {dot} "
+                               f"{_fmt_tokens(int(_get(e, 'output_tokens', default=0) or 0))} out {dot} {float(_get(e, 'duration_s', default=0) or 0):.1f}s {dot} "
+                               f"${float(_get(e, 'cost', default=0) or 0):.4f}{RST}", "  ")
         elif kind == "SubagentStep":
-            if self.level < 1:
+            # Each subagent's own LLM and tool calls: the live monitor and /subagents <n> show them; the main
+            # timeline lists them only at the detailed and debug levels, so parallel runs don't interleave.
+            if self.level < 2:
                 return
             self._finish_stream()
             is_llm = str(_get(e, "kind", default="")) == "llm"
@@ -2614,7 +2959,8 @@ class Renderer:
             if float(_get(e, "cost", default=0) or 0):
                 facts.append(f"${float(_get(e, 'cost', default=0) or 0):.4f}")
             agent = _one_line(_get(e, "agent_type", default=""), 40)
-            tag = f"{SUBTLE}[{agent}]{RST} " if agent and self.level >= 2 else ""
+            num = _subagent_number(_get(e, "task_id", default=""))
+            tag = f"{CYAN}subagent #{num}{RST} {SUBTLE}({agent}){RST} " if num else ""
             self._line(f"{SUBTLE}{glyph('thinking_bar')}{RST} {tag}{mark} {label}" + (f" {MUTED}{dot} {f' {dot} '.join(facts)}{RST}" if facts else ""), "    ")
         elif kind == "SteerEvent":
             self._finish_stream()
@@ -2646,7 +2992,7 @@ class Renderer:
                 call_id = str(_get(e, "id", default=""))
                 text = _one_line(_get(e, "text", default=""), 140)
                 if call_id in self._active_tools:
-                    self._line(f"{SUBTLE}why: {DIM}{ITALIC}{text}{RST}", "    ")
+                    self._line(f"{SUBTLE}why: {DIM}{ITALIC}{text}{RST}", "      ")
                     if call_id in self._t_tools and not self._t_tools[call_id].why:
                         self._t_tools[call_id].why = _plain(text)
                 elif text:
@@ -2831,23 +3177,31 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
         elif kind == "tool":
             name = _one_line(d.get("name", "Tool"), 60)
             inp = d.get("input") or {}
+            inp = inp if isinstance(inp, dict) else {}
             dur = d.get("duration_s")
-            out.append(f"{v}{PRIMARY}{glyph('tool')}{RST} {BOLD}{name}{RST}  {TEXT}{tool_target(name, inp)}{RST}" + (f" {SUBTLE}{dot} {float(dur):.2f}s{RST}" if dur is not None else ""))
+            call = tool_call_rows(name, inp, max(1, lvl), width - 10, why=str(d.get("why") or d.get("rationale") or ""))
+            for i, (indent, row) in enumerate(call):
+                if i == 0 and dur is not None:
+                    row += f" {SUBTLE}{dot} {float(dur):.2f}s{RST}"
+                out += [f"{v}  {' ' * indent}{r}" for r in _hang(row, width - 4 - indent, "", "  ")]
             perm = d.get("permission")
             if isinstance(perm, dict):
-                out.append(f"{v}    {MUTED}permission: {perm.get('outcome', '')} by {perm.get('source', '')}" + (f": {perm.get('reason')}" if perm.get("reason") else "") + RST)
+                out.append(f"{v}      {MUTED}permission: {perm.get('outcome', '')} by {perm.get('source', '')}" + (f": {perm.get('reason')}" if perm.get("reason") else "") + RST)
             for hk in d.get("hooks") or []:
                 if isinstance(hk, dict):
-                    out.append(f"{v}    {MUTED}hook {hk.get('event', '')}: {'blocked' if hk.get('blocked') else 'ran'}" + (f" {dot} {_one_line(hk.get('message'), 80)}" if hk.get("message") else "") + RST)
-            if lvl >= 2:
-                out += [f"{v}    {r}" for r in _pretty_input(inp)]
+                    out.append(f"{v}      {MUTED}hook {hk.get('event', '')}: {'blocked' if hk.get('blocked') else 'ran'}" + (f" {dot} {_one_line(hk.get('message'), 80)}" if hk.get("message") else "") + RST)
             content = str(d.get("result_preview", "") or "")
-            rows = tool_result_rows(name, inp, content, bool(d.get("is_error")), width - 8, detail=min(lvl, 2))
+            is_err = bool(d.get("is_error"))
+            rows = tool_result_rows(name, inp, content, is_err, width - 12, detail=min(lvl, 2))
             if rows and d.get("bytes") is not None:
                 rows[0] += f"{SUBTLE} {dot} {int(d.get('bytes') or 0) / 1024:.1f} KB {dot} ~{_fmt_tokens(int(d.get('est_tokens') or 0))} tok {glyph('arrow')} model{RST}"
-            if lvl >= 2 and content and name not in CARD_TOOLS and not _cards.find_json(content):
-                rows = rows[:1] + [f"{DIM}{l}{RST}" for l in content.splitlines()[:12]]
-            out += [f"{v}  " + (f"{SUBTLE}{glyph('result')}{RST}  " if i == 0 else "   ") + r for i, r in enumerate(rows)]
+            if _is_card_rows(name, rows):
+                out += [f"{v}    " + r for r in rows]
+            elif rows:
+                mark = f"{ERROR}{glyph('fail')}{RST} " if is_err else ""
+                out += [f"{v}    {SUBTLE}{glyph('result')}{RST}  {r}" if i == 0 else f"{v}       {r}"
+                        for i, r in enumerate(_hang(mark + rows[0], width - 9, "", ""))]
+                out += [f"{v}       {r}" for r in rows[1:]]
         elif kind == "retry":
             out.append(f"{v}  {WARNING}{glyph('warn')} {_one_line(d.get('error', '') or 'provider error', 100)} {dot} retried in {float(d.get('delay_s') or 0):.1f}s (retry {d.get('attempt')} of {d.get('max_attempts')}){RST}")
         elif kind == "compaction":
@@ -2951,10 +3305,8 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
     spans: list[tuple[int, int, int]] = []
 
     def _tool_rows(name: str, inp: dict[str, Any], call_id: str) -> None:
-        out.append(truncate(f"{rail}  {PRIMARY}{glyph('tool')}{RST} {BOLD}{_clean(name)}{RST}  {TEXT}{tool_target(name, inp)}{RST}", width + 2))
-        purpose = tool_purpose(name, registry)
-        if purpose:
-            out.append(f"{rail}      {SUBTLE}{purpose}{RST}")
+        for indent, row in tool_call_rows(name, inp, max(1, detail), width - 8, registry):
+            out.extend(f"{rail}  {' ' * indent}{r}" for r in _hang(row, width - indent, "", "  "))
         if call_id in results:
             global _MORE_HINT
             content, is_err = results[call_id]
@@ -2963,10 +3315,13 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
                 rows = tool_result_rows(name, inp, sanitize(content), is_err, width - 8, registry, detail=detail)
             finally:
                 _MORE_HINT = "/output"
-            if rows:
+            if _is_card_rows(name, rows):
+                out.extend(f"{rail}    {r}" for r in rows)
+            elif rows:
                 mark = f"{ERROR}{glyph('fail')}{RST} " if is_err else ""
-                out.append(f"{rail}    {SUBTLE}{glyph('result')}{RST}  {mark}{rows[0]}")
-                out.extend(f"{rail}       {r}" for r in rows[1:])
+                first = _hang(mark + rows[0], width - 5, "", "")
+                out.append(f"{rail}    {SUBTLE}{glyph('result')}{RST}  {first[0]}")
+                out.extend(f"{rail}       {r}" for r in first[1:] + rows[1:])
         else:
             out.append(f"{rail}    {SUBTLE}{glyph('result')}  (no result recorded){RST}")
 
@@ -3061,92 +3416,327 @@ def _provider_label(model: str, base_url: str) -> str:
 
 # ─── Subagents ─────────────────────────────────────────────────────────────
 
+_SUB_STATES = {  # status -> (glyph name, color, word)
+    "completed": ("ok", SUCCESS, "done"), "exhausted": ("warn", AMBER, "step limit"),
+    "error": ("fail", ERROR, "failed"), "running": ("play", CYAN, "running"),
+}
+
+
+def _sub_state(status: str) -> tuple[str, str, str]:
+    g, color, word = _SUB_STATES.get(status, ("circle", MUTED, "waiting"))
+    return glyph(g), color, word
+
+
+def _fmt_secs(s: float) -> str:
+    """31.1s / 2m 05s / 1h 02m."""
+    s = max(0.0, float(s or 0))
+    if s < 60:
+        return f"{s:.1f}s"
+    if s < 3600:
+        return f"{int(s // 60)}m {int(s % 60):02d}s"
+    return f"{int(s // 3600)}h {int(s % 3600 // 60):02d}m"
+
+
+def _hang(text: str, width: int, first: str, rest: str) -> list[str]:
+    """Wrap styled *text* to *width* with prefix *first* on row one and *rest* (same width) after."""
+    avail = max(10, width - display_width(first))
+    return [(first if i == 0 else rest) + r for i, r in enumerate(wrap_ansi(text, avail) or [""])]
+
+
+def _hang_facts(text: str, width: int, first: str = "  ", rest: str = "  ") -> list[str]:
+    """Like _hang, but ' · '-separated facts only break between facts ('2m 20s wall time' stays whole)."""
+    d = re.escape(glyph("dot"))
+    held = re.sub(rf"(?<=[^\s{d}]) (?=[^\s{d}])", _NBSP, text)
+    return [r.replace(_NBSP, " ") for r in _hang(held, width, first, rest)]
+
+
+def _sub_behind_scenes(t: Any) -> str:
+    """'14 tool calls · 2 provider retries · 1 resume after an error' (only the non-zero facts)."""
+    calls, retries, resumes = (int(getattr(t, k, 0) or 0) for k in ("tool_calls", "retries", "resumes"))
+    facts = ([_plural(calls, "tool call")] if calls else []) + ([_plural(retries, "provider retry", "provider retries")] if retries else [])
+    if resumes:
+        facts.append(_plural(resumes, "resume") + " after an error")
+    return f" {glyph('dot')} ".join(facts)
+
+
 def render_subagent_dashboard(tasks: list[Any]) -> None:
-    """Subagent fan-out progress panel."""
+    """Summary table printed after a batch of parallel Task calls: one row per subagent, in call order.
+
+    Each failure is printed in full under its row (never cut), with the retries / resumes that came
+    before it; status is a glyph + word so it never relies on color alone."""
     if not tasks:
         return
-    width = min(90, term_width() - 2)
-    total = len(tasks)
-    done = sum(1 for t in tasks if t.status in ("completed", "exhausted", "error"))
-    pct = int(done / total * 100) if total else 0
+    width = max(40, min(140, term_width() - 2))
+    dot = f" {glyph('dot')} "
+    count = {k: sum(1 for t in tasks if t.status == k) for k in ("completed", "exhausted", "error")}
+    running = len(tasks) - sum(count.values())
     tok_total = sum(int(getattr(t, "tokens_consumed", 0) or 0) for t in tasks)
-    rows = [f"{PRIMARY}{BOLD}Progress: {done}/{total} completed ({pct}%){RST}" + (f" {MUTED}{glyph('dot')} {tok_total:,} tokens{RST}" if tok_total else "")]
-    for t in tasks:
-        tok = int(getattr(t, "tokens_consumed", 0) or 0)
-        tok_s = f" {glyph('dot')} {tok:,} tokens" if tok else ""
-        elapsed = float(getattr(t, "elapsed_s", 0.0) or 0.0)
-        if t.status == "completed":
-            badge, stat = f"{SUCCESS}{glyph('ok')}{RST}", f"{MUTED}{t.steps} steps {glyph('dot')} {elapsed:.1f}s{tok_s}{RST}"
+    wall = max((float(getattr(t, "elapsed_s", 0.0) or 0.0) for t in tasks), default=0.0)
+    cost = sum(float(getattr(t, "cost", 0.0) or 0.0) for t in tasks)
+    parts = [f"{SUCCESS}{count['completed']} done{RST}"]
+    if count["exhausted"]:
+        parts.append(f"{AMBER}{count['exhausted']} hit the step limit{RST}")
+    if count["error"]:
+        parts.append(f"{ERROR}{BOLD}{count['error']} failed{RST}")
+    if running:
+        parts.append(f"{CYAN}{running} running{RST}")
+    facts = [f"{tok_total:,} tokens"] if tok_total else []
+    if wall:
+        facts.append(f"{_fmt_secs(wall)} wall time")
+    if cost:
+        facts.append(f"${cost:.4f}")
+    head = (f"{WARNING}{BOLD}Subagents{RST}{MUTED}{dot}{len(tasks)} in parallel{dot}{RST}"
+            + f"{MUTED}{dot}{RST}".join(parts) + (f"{MUTED}{dot}{dot.join(facts)}{RST}" if facts else ""))
+
+    # columns sized to their content; the title takes what is left (and is only cut when it must be)
+    idx_w = max(1, max(len(str(t.index)) for t in tasks))
+    steps = [f"{t.steps}/{t.max_steps}" if t.status not in ("completed", "error") else f"{t.steps}" for t in tasks]
+    times = [_fmt_secs(getattr(t, "elapsed_s", 0.0) or 0.0) for t in tasks]
+    toks = [f"{int(getattr(t, 'tokens_consumed', 0) or 0):,}" if getattr(t, "tokens_consumed", 0) else "-" for t in tasks]
+    states = [f"{_sub_state(t.status)[0]} {_sub_state(t.status)[2]}" for t in tasks]
+    types = [_one_line(getattr(t, "agent_type", "") or "", 18) for t in tasks]
+    models = [_one_line(getattr(t, "model", "") or "", 24) for t in tasks]
+    titles = [_one_line(t.title, 400) for t in tasks]
+
+    def w(head_: str, cells: list[str]) -> int:
+        return max([display_width(head_)] + [display_width(c) for c in cells])
+
+    cols = [("#", idx_w), ("Status", w("Status", states)), ("Steps", w("Steps", steps)),
+            ("Time", w("Time", times)), ("Tokens", w("Tokens", toks))]
+    opt = [("Type", w("Type", types), any(types)), ("Model", w("Model", models), any(models))]
+    fixed = sum(c[1] for c in cols)
+    want = min(w("Subagent", titles), 44)        # an optional column only when titles still fit beside it
+    shown_opt: list[tuple[str, int]] = []
+    for name, cw, present in opt:
+        if not present:
+            continue
+        left = width - 2 - fixed - sum(c[1] for c in shown_opt) - cw - 2 * (len(cols) + len(shown_opt) + 1)
+        if left >= want:
+            shown_opt.append((name, cw))
+    left = width - 2 - fixed - sum(c[1] for c in shown_opt) - 2 * (len(cols) + len(shown_opt))
+    title_w = max(8, min(left, w("Subagent", titles)))
+    order = [cols[0], ("Subagent", title_w)] + shown_opt + cols[1:]
+
+    out = ["", *_hang_facts(head, width)]
+    out.append("  " + "  ".join(f"{MUTED}{pad(n, cw)}{RST}" for n, cw in order).rstrip())
+    rule = f"  {SUBTLE}{glyph('h') * (sum(cw for _, cw in order) + 2 * (len(order) - 1))}{RST}"
+    out.append(rule)
+    detail = "  " + " " * (idx_w + 2)
+    for i, t in enumerate(tasks):
+        g, color, word = _sub_state(t.status)
+        tparts = wrap_ansi(titles[i], title_w) or [""]     # a long title wraps inside its column (2 rows max)
+        if len(tparts) > 2:
+            tparts = [tparts[0], truncate(" ".join(tparts[1:]), title_w)]
+        cells = {"#": f"{BOLD}{t.index}{RST}", "Subagent": f"{TEXT}{BOLD}{tparts[0]}{RST}",
+                 "Type": f"{CYAN}{types[i]}{RST}", "Model": f"{MUTED}{models[i]}{RST}",
+                 "Status": f"{color}{states[i]}{RST}", "Steps": f"{MUTED}{steps[i]}{RST}",
+                 "Time": f"{MUTED}{times[i]}{RST}", "Tokens": f"{MUTED}{toks[i]}{RST}"}
+        out.append(("  " + "  ".join(pad(cells[n], cw) for n, cw in order)).rstrip())
+        out += [f"  {' ' * idx_w}  {TEXT}{BOLD}{p}{RST}" for p in tparts[1:]]
+        if t.status == "error":
+            reason = " ".join(_clean(getattr(t, "error_msg", "") or "the model call failed").split())
+            out += _hang(f"{ERROR}{reason}{RST}", width, f"{detail}{ERROR}{glyph('fail')}{RST} ", detail + "  ")
         elif t.status == "exhausted":
-            badge, stat = f"{AMBER}{glyph('warn')}{RST}", f"{AMBER}{t.steps} steps {glyph('dot')} step limit reached{tok_s}{RST}"
-        elif t.status == "error":
-            badge, stat = f"{ERROR}{glyph('fail')}{RST}", f"{ERROR}{_one_line(getattr(t, 'error_msg', '') or 'Failed', 60)}{RST}"
-        else:
-            badge, stat = f"{CYAN}{glyph('play')}{RST}", f"{CYAN}step {t.steps}/{t.max_steps}{RST}"
-        name = truncate(f"Subagent {t.index}: {_one_line(t.title, 60)}", 34)
-        rows.append(f"{badge} {BOLD}{pad(name, 34)}{RST} {stat}")
-    out = "\n" + box(f"{WARNING}{BOLD}Subagent Fan-Out{RST} {MUTED}({_plural(total, 'parallel task')}){RST}", rows, width, color=WARNING)
-    out += f"\n  {SUBTLE}{glyph('chevron')} press down arrow or type /subagents to inspect transcripts{RST}\n\n"
-    _write(out)
+            out += _hang(f"{AMBER}stopped at the step limit ({t.steps}/{t.max_steps} steps); its report says what is left{RST}",
+                         width, f"{detail}{AMBER}{glyph('warn')}{RST} ", detail + "  ")
+        extra = _sub_behind_scenes(t)
+        if extra and (t.status in ("error", "exhausted") or getattr(t, "retries", 0) or getattr(t, "resumes", 0)):
+            out += _hang(f"{MUTED}{extra}{RST}", width, f"{detail}{SUBTLE}{glyph('info')}{RST} ", detail + "  ")
+    out.append(rule)
+    foot = (f"{SUBTLE}/subagents{_NBSP}<#> opens a subagent's full transcript (prompt, every tool call, its report)"
+            f"{dot}Tab{_NBSP}/{_NBSP}0-9 switch views during a run{RST}")
+    out += [r.replace(_NBSP, " ") for r in _hang(foot, width, "  ", "  ")]
+    out.append("")
+    _write("\n".join(out) + "\n")
 
 
 def render_subagent_transcript(task: Any, show_all: bool = True) -> None:
-    """Full isolated transcript of a subagent."""
-    width = min(100, term_width() - 2)
-    hh = glyph("hh")
-    status_clr = SUCCESS if task.status == "completed" else (AMBER if task.status == "exhausted" else ERROR)
+    """Full isolated transcript of a subagent: header block, the prompt, then every message (or the
+    live activity timeline when no conversation was kept)."""
+    width = max(40, min(120, term_width() - 2))
+    hh, dot = glyph("hh"), f" {glyph('dot')} "
+    g, color, word = _sub_state(task.status)
     tok = int(getattr(task, "tokens_consumed", 0) or 0)
-    out = [
-        f"\n{WARNING}{hh * width}{RST}",
-        f"  {CYAN}{BOLD}Subagent #{task.index}: {_one_line(task.title, 200)}{RST}",
-        f"  {MUTED}Status:{RST} {status_clr}{task.status.upper()}{RST}  {MUTED}Steps:{RST} {task.steps}/{task.max_steps}  "
-        f"{MUTED}Duration:{RST} {task.elapsed_s:.1f}s" + (f"  {MUTED}Tokens:{RST} {tok:,}" if tok else ""),
-        f"  {MUTED}Task Prompt:{RST} {TEXT}{_clean(task.prompt)}{RST}",
-        f"{WARNING}{glyph('h') * width}{RST}",
-    ]
+    tin, tout = int(getattr(task, "input_tokens", 0) or 0), int(getattr(task, "output_tokens", 0) or 0)
+
+    def section(label: str) -> str:
+        return f"\n  {MUTED}{BOLD}{label}{RST} {SUBTLE}{glyph('h') * max(2, width - 3 - display_width(label))}{RST}"
+
+    facts = [f"{color}{BOLD}{g} {word}{RST}"]
+    for v in (getattr(task, "agent_type", ""), getattr(task, "model", "")):
+        if v:
+            facts.append(f"{CYAN}{_one_line(v, 40)}{RST}")
+    facts.append(f"{MUTED}{task.steps}/{task.max_steps} steps{RST}")
+    facts.append(f"{MUTED}{_fmt_secs(getattr(task, 'elapsed_s', 0.0) or 0.0)}{RST}")
+    if tok:
+        facts.append(f"{MUTED}{tok:,} tokens" + (f" (in {tin:,}{dot}out {tout:,})" if tin or tout else "") + RST)
+    extra = _sub_behind_scenes(task)
+    if extra:
+        facts.append(f"{MUTED}{extra}{RST}")
+    out = [f"\n{color}{hh * width}{RST}",
+           *_hang(f"{CYAN}{BOLD}Subagent #{task.index}{RST}{MUTED}{dot}{RST}{TEXT}{BOLD}{_one_line(task.title, 300)}{RST}", width, "  ", "  "),
+           *_hang_facts(f"{SUBTLE}{dot}{RST}".join(facts), width)]
+    if task.status == "error" and getattr(task, "error_msg", ""):
+        out += _hang(f"{ERROR}{' '.join(_clean(task.error_msg).split())}{RST}", width, f"  {ERROR}{glyph('fail')} failed:{RST} ", "    ")
+    out.append(section("Prompt"))
+    for para in _clean(task.prompt).splitlines() or [""]:
+        out += _hang(f"{TEXT}{para}{RST}", width, "    ", "    ")
+
     msgs = getattr(getattr(task, "conversation", None), "messages", []) or []
+    timeline = getattr(task, "timeline", None) or []
     if msgs:
+        out.append(section(f"Transcript{dot}{_plural(len(msgs), 'message')}"))
         for idx, m in enumerate(msgs, 1):
-            role = str(m.get("role", "unknown")).upper()
-            clr = PRIMARY if role == "USER" else (WARNING if role == "ASSISTANT" else INFO)
+            role = str(m.get("role", "unknown"))
             content = m.get("content", "")
-            out.append(f"\n  {clr}{BOLD}[{idx}] {role}{RST}")
+            blocks = content if isinstance(content, list) else []
+            if role == "assistant":
+                label, clr = "Subagent", WARNING
+            elif blocks and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+                label, clr = "Tool results", INFO
+            elif role == "user":
+                label, clr = ("Task from the parent agent" if idx == 1 else "Input"), PRIMARY
+            else:
+                label, clr = role.capitalize(), INFO
+            out.append(f"\n  {clr}{BOLD}[{idx}] {label}{RST}")
             if isinstance(content, list):
                 for b in content:
                     if not isinstance(b, dict):
                         continue
                     kind = b.get("type", "")
                     if kind == "tool_use":
-                        out.append(f"    {TEXT}{glyph('tool')}{RST} {BOLD}{_one_line(b.get('name'), 60)}{RST}{MUTED}({_one_line(tool_target(str(b.get('name')), b.get('input') or {}), 80)}){RST}")
+                        nm = _one_line(b.get("name"), 60)
+                        out += _hang(f"{BOLD}{nm}{RST}  {MUTED}{tool_target(str(b.get('name')), b.get('input') or {})}{RST}",
+                                     width, f"    {PRIMARY}{glyph('tool')}{RST} ", "      ")
                     elif kind == "tool_result":
-                        out.append(f"      {SUBTLE}{glyph('result')}{RST}  {MUTED}{_one_line(b.get('content', ''), 110)}{RST}")
+                        body = b.get("content", "")
+                        if isinstance(body, list):
+                            body = " ".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in body)
+                        err = bool(b.get("is_error"))
+                        lines = [l for l in _clean(body).splitlines() if l.strip()]
+                        keep = lines if show_all and len(lines) <= 6 else lines[:3]
+                        mark = f"{ERROR}{glyph('fail')}{RST} " if err else ""
+                        for j, l in enumerate(keep or ["(empty)"]):
+                            out.append(truncate(f"      {SUBTLE}{glyph('result') if j == 0 else ' '}{RST}  {mark if j == 0 else ''}"
+                                                f"{ERROR if err else MUTED}{l}{RST}", width))
+                        if len(lines) > len(keep):
+                            out.append(f"         {SUBTLE}{glyph('ellipsis')} {_plural(len(lines) - len(keep), 'more line')}{RST}")
                     elif kind == "text":
-                        out.append(format_markdown(str(b.get("text", "")), max_width=width - 2))
+                        out += ["  " + r for r in format_markdown(str(b.get("text", "")), max_width=width - 4).splitlines()]
             else:
                 lines = str(content).splitlines()
                 if not show_all and len(lines) > 60:
                     lines = lines[:30] + [f"{MUTED}{glyph('ellipsis')} {len(lines) - 60} lines hidden (/subagents {task.index} all){RST}"] + lines[-30:]
-                out.append("\n".join(f"  {_clean(l)}" for l in lines))
-    elif getattr(task, "result_text", ""):
-        out.append(f"\n  {CYAN}{BOLD}Final Result:{RST}\n")
-        out.append(format_markdown(task.result_text, max_width=width))
-    out.append(f"\n{WARNING}{hh * width}{RST}")
+                for l in lines:
+                    out += _hang(_clean(l) if glyph("ellipsis") not in l else l, width, "    ", "    ")
+    elif timeline:
+        out.append(section(f"Activity{dot}{_plural(len(timeline), 'event')}"))
+        marks = {"step": (glyph("diamond"), CYAN), "tool": (glyph("tool"), PRIMARY), "result": (glyph("result"), SUBTLE),
+                 "thinking": (glyph("thinking_bar"), MUTED), "retry": (glyph("warn"), AMBER),
+                 "resume": (glyph("wrap"), AMBER), "error": (glyph("fail"), ERROR)}
+        for ent in timeline:
+            if not isinstance(ent, dict):
+                continue
+            kind = str(ent.get("kind", ""))
+            mk, clr = marks.get(kind, (glyph("bullet"), MUTED))
+            if ent.get("is_error"):
+                clr = ERROR
+            indent = "      " if kind in ("result", "thinking") else "    "
+            out += _hang(f"{ERROR if ent.get('is_error') else (TEXT if kind in ('tool', 'step') else MUTED)}{_one_line(ent.get('text', ''), 2000)}{RST}",
+                         width, f"{indent}{clr}{mk}{RST} ", indent + "  ")
+    if getattr(task, "result_text", "") and not msgs:
+        out.append(section("Report"))
+        out += ["  " + r for r in format_markdown(task.result_text, max_width=width - 4).splitlines()]
+    out.append(f"\n{color}{hh * width}{RST}")
     out.append(f"  {PRIMARY}Type /main or press Esc to return to the main agent.{RST}\n")
     _write("\n".join(out) + "\n")
 
 
 _SUB_HEADER_RE = re.compile(r"^\[Subagent #(\d+)\s*([^\]]*?)\]:\s*(.*)$", re.DOTALL)
-_SUB_FAILED_RE = re.compile(r"^\[Subagent #(\d+) failed:\s*(.*)\]\s*$", re.DOTALL)
+# '[Subagent #3 (title) failed: reason]' or '[Subagent #3 (title) failed after 7 steps: reason]', optionally
+# followed (inside or after the bracket) by '\n\nProgress before the failure:\n- Read a.py\n- ...'
+_SUB_FAILED_RE = re.compile(r"^\[Subagent #(\d+)(?: \((.*?)\))? failed(?: after (\d+) steps?)?:\s*(.*?)\]?\s*$", re.DOTALL)
+_SUB_PROGRESS_RE = re.compile(r"\n\s*Progress before the failure:\s*\n", re.IGNORECASE)
+
+
+def _parse_subagent_failure(body: str) -> tuple[str, list[str]]:
+    """Failure text -> (reason, progress items)."""
+    parts = _SUB_PROGRESS_RE.split(body, maxsplit=1)
+    reason = parts[0].strip()
+    if reason.endswith("]") and reason.count("[") < reason.count("]"):
+        reason = reason[:-1].rstrip()
+    progress: list[str] = []
+    if len(parts) > 1:
+        for l in parts[1].strip().splitlines():
+            item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", l).strip()
+            if item.endswith("]") and item.count("[") < item.count("]"):
+                item = item[:-1].rstrip()
+            if item:
+                progress.append(item)
+    return reason, progress
+
+
+# First body words of a subagent that hit its step limit (axon.agent.subagent.STEP_LIMIT_PREFIX, lower-cased,
+# plus older wordings); such a subagent still writes a wrap-up report. Not imported: render must not pull
+# in the agent package at import time.
+_STEP_LIMIT_STARTS = ("stopped at the step limit", "reached the iteration limit", "reached maximum iteration ceiling")
+_STEP_PROGRESS_RE = re.compile(r"(?:^|\n)\s*Progress before the step limit:\s*\n", re.IGNORECASE)
+
+
+def _parse_step_limit_progress(body: str) -> tuple[str, list[str]]:
+    """Step-limit body -> (the wrap-up report, the '- tool' progress items after it)."""
+    parts = _STEP_PROGRESS_RE.split(body, maxsplit=1)
+    progress = []
+    if len(parts) > 1:
+        for l in parts[1].strip().splitlines():
+            item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", l).strip()
+            if item:
+                progress.append(item)
+    return parts[0].strip(), progress
+
+
+def _append_box_footer(rows: list[str], text: str) -> list[str]:
+    """Fold *text* into the bottom border of the box whose last row is in *rows* ('╰─ … · took 3.1s ──').
+    Rows are returned unchanged plus a plain row when the border cannot take it at the same width."""
+    if not rows or not strip_ansi(rows[-1]).lstrip().startswith(glyph("bl")):
+        return rows + [f"{SUBTLE}{text}{RST}"]
+    last = rows[-1]
+    m = re.search(r"((?:\x1b\[[0-9;]*m)*)(" + re.escape(glyph("h")) + r"+)((?:\x1b\[[0-9;]*m)*)$", last)
+    if not m:
+        return rows + [f"{SUBTLE}{text}{RST}"]
+    head, color, total = last[:m.start()], m.group(1), display_width(last)
+    plain_head = strip_ansi(head).strip()
+    if plain_head in (glyph("bl"), glyph("bl") + glyph("h")):        # no footer yet: '╰─ took 3.1s ──'
+        new = head + (f"{color}{glyph('h')}{RST}" if plain_head == glyph("bl") else "") + f" {SUBTLE}{text}{RST} "
+    else:
+        new = head.rstrip(" ") + f" {SUBTLE}{glyph('dot')} {text}{RST} "
+    fill = total - display_width(new)
+    if fill < 2:
+        return rows + [f"{SUBTLE}{text}{RST}"]
+    return rows[:-1] + [new + color + glyph("h") * fill + RST]
+
+
+def _is_card_rows(name: str, rows: list[str]) -> bool:
+    """True for a subagent card (rows that already draw their own box, so no '⎿' marker in front)."""
+    return name in ("Task", "Agent") and bool(rows) and strip_ansi(rows[0]).lstrip().startswith(glyph("tl"))
 
 
 def render_subagent_result_card(content: str, width: int = 84) -> str:
-    """Subagent result as a card; status comes from the result header, never from body text."""
+    """Subagent result as a card; status comes from the result header, never from body text.
+
+    ╭─ Subagent #5 · Inspect docs · ✗ Failed ──────
+    │ 7 steps before the failure
+    │ ✗ <the full reason, wrapped>
+    │ Progress before the failure
+    │   • Read a.py
+    │ → the parent agent sees this failure and can retry
+    ╰──────────────────────────────────────────────"""
     raw = (content or "").strip()
-    idx, title, tokens, body, status = "", "", "", raw, "ok"
+    idx, title, tokens, body, status, nsteps = "", "", "", raw, "ok", ""
     fm = _SUB_FAILED_RE.match(raw)
     hm = None if fm else _SUB_HEADER_RE.match(raw)
     if fm:
-        idx, body, status = fm.group(1), fm.group(2), "fail"
+        idx, title, nsteps, body, status = fm.group(1), fm.group(2) or "", fm.group(3) or "", fm.group(4), "fail"
     elif hm:
         idx, meta, body = hm.group(1), hm.group(2), hm.group(3).strip()
         if "|" in meta:
@@ -3154,19 +3744,51 @@ def render_subagent_result_card(content: str, width: int = 84) -> str:
             tokens = tokens.strip()
         tm = re.search(r"\((.*)\)", meta)
         title = (tm.group(1) if tm else meta.replace("Result", "")).strip()
-        if body.startswith("reached maximum iteration ceiling"):
+        if body.lower().startswith(_STEP_LIMIT_STARTS):
             status = "limit"
     for prefix, repl in (("Verify the file ", "Verify "), ("Explore the workspace at ", "Explore "), ("Look at ", "Inspect ")):
         if title.startswith(prefix):
             title = repl + title[len(prefix):]
-    title = truncate(_one_line(title, 200), 40)
-    badge = {"ok": f"{SUCCESS}{glyph('ok')} Completed{RST}", "fail": f"{ERROR}{glyph('fail')} Failed{RST}",
-             "limit": f"{AMBER}{glyph('warn')} Step limit{RST}"}[status]
-    short_tok = tokens.split("(")[0].strip()
-    head = f"{CYAN}{BOLD}Subagent{(' #' + idx) if idx else ''}{RST}" + (f" {MUTED}{title}{RST}" if title else "") + f" {glyph('dot')} {badge}"
-    if short_tok:
-        head += f" {MUTED}{glyph('dot')} {_one_line(short_tok, 40)}{RST}"
-    rows = format_markdown(body, max_width=max(30, width - 4)).splitlines() if body else [f"{MUTED}(no output){RST}"]
-    rows = [r[2:] if r.startswith("  ") else r for r in rows]
-    footer = f"{MUTED}{_one_line(tokens, 120)}" if tokens else ""
-    return box(head, rows, width, footer=footer, head=40, tail=8)
+    width = max(30, width)
+    color, g, word = {"ok": (SUCCESS, glyph("ok"), "Completed"), "fail": (ERROR, glyph("fail"), "Failed"),
+                      "limit": (AMBER, glyph("warn"), "Step limit")}[status]
+    badge = f"{color}{BOLD}{g} {word}{RST}"
+    label = f"Subagent{(' #' + idx) if idx else ''}"
+    room = width - 8 - len(label) - display_width(f"{g} {word}") - 6
+    full_title = _one_line(title, 300)
+    title = truncate(full_title, max(8, room)) if title else ""
+    sep = f" {SUBTLE}{glyph('dot')}{RST} "
+    head = f"{CYAN}{BOLD}{label}{RST}" + (f"{sep}{TEXT}{BOLD}{title}{RST}" if title else "") + f"{sep}{badge}"
+    inner = width - 4
+    rows: list[str] = []
+    if title and title != full_title:          # the header had to cut the title: show it whole once
+        rows += _hang(f"{TEXT}{BOLD}{full_title}{RST}", inner, "", "")
+    if status == "fail":
+        reason, progress = _parse_subagent_failure(body)
+        if nsteps:
+            rows.append(f"{MUTED}{_plural(int(nsteps), 'step')} before the failure{RST}")
+        rows += _hang(f"{ERROR}{' '.join(reason.split()) or 'the subagent stopped without a reason'}{RST}",
+                      inner, f"{ERROR}{glyph('fail')}{RST} ", "  ")
+        if progress:
+            rows.append(f"{MUTED}{BOLD}Progress before the failure{RST}")
+            for item in progress:
+                rows += _hang(f"{MUTED}{_one_line(item, 1000)}{RST}", inner, f"  {SUBTLE}{glyph('bullet')}{RST} ", "    ")
+        rows.append(f"{SUBTLE}{glyph('arrow')} the parent agent sees this failure and can retry{RST}")
+    else:
+        short_tok = tokens.split("(")[0].strip()
+        detail = re.search(r"\((.*)\)", tokens)
+        if short_tok:
+            rows.append(f"{MUTED}{_one_line(short_tok, 60)}" + (f"{sep}{MUTED}{_one_line(detail.group(1), 60)}" if detail else "") + RST)
+        progress: list[str] = []
+        if status == "limit":
+            first, _, rest = body.partition("\n")
+            rows += _hang(f"{AMBER}{' '.join(first.split())}{RST}", inner, f"{AMBER}{glyph('warn')}{RST} ", "  ")
+            body, progress = _parse_step_limit_progress(rest.strip())
+        md = format_markdown(body, max_width=max(26, inner)).splitlines() if body else (
+            [] if status == "limit" else [f"{MUTED}(no output){RST}"])
+        rows += [r[2:] if r.startswith("  ") else r for r in md]
+        if progress:
+            rows.append(f"{MUTED}{BOLD}Progress before the step limit{RST}")
+            for item in progress:
+                rows += _hang(f"{MUTED}{_one_line(item, 1000)}{RST}", inner, f"  {SUBTLE}{glyph('bullet')}{RST} ", "    ")
+    return box(head, rows, width, color=color if status != "ok" else BORDER, head=40, tail=8)

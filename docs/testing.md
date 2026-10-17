@@ -4,8 +4,8 @@ Axon has two test layers. Neither needs network access or an API key.
 
 | Layer | Location | What it exercises | Size |
 |---|---|---|---|
-| Unit and integration | `tests/*.py`, `tests/suite/` | Modules in-process, with fakes for providers, the terminal and the filesystem | about 1,500 tests, under a minute |
-| End-to-end | `tests/e2e/` (marker `e2e`) | The real `axon` CLI as a subprocess, against a local fake LLM server and a fake MCP server | about 1,000 tests |
+| Unit and integration | `tests/*.py`, `tests/suite/` | Modules in-process, with fakes for providers, the terminal and the filesystem | about 1,900 tests |
+| End-to-end | `tests/e2e/` (marker `e2e`) | The real `axon` CLI as a subprocess, against a local fake LLM server and a fake MCP server | about 1,200 tests |
 
 ## Running
 

@@ -131,6 +131,7 @@ class SubagentEvent:
     status: str = "running"
     duration_s: float = 0.0
     iterations: int = 0
+    detail: str = ""              # failure reason when status is error/cancelled
 
 
 @dataclass(frozen=True)

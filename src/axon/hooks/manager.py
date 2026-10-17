@@ -100,6 +100,8 @@ _EVENT_ALIASES: dict[str, str] = {
     "stop_failure": "StopFailure",
 }
 _EVENT_ALIASES.update({e.lower(): e for e in EVENTS})
+# snake_case spellings of every event (task_created, instructions_loaded, cwd_changed, ...)
+_EVENT_ALIASES.update({re.sub(r"(?<!^)(?=[A-Z])", "_", e).lower(): e for e in EVENTS})
 
 # Which payload key a matcher is tested against, per event.
 _MATCH_FIELD: dict[str, str] = {

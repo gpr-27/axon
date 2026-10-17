@@ -235,11 +235,14 @@ def _existing_key_menu(preset: ProviderPreset, env_var: str, key: str) -> str | 
 
 
 def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
+    """Connect to *preset*: API key -> pick a model (from the provider's live list when it has one) -> verify the
+    key with that model -> save the key and switch. The key is checked against the model you will actually use."""
     print(f"\n  {GOLD}◆{RST} {BOLD}Connecting to {preset.name}{RST}  {SLATE}{preset.base_url}{RST}")
     api_key: str | None = None
+    new_key = False
+    env_var = preset_env_vars(preset)[0] if preset.requires_key else ""
     if preset.requires_key:
         api_key = find_key(preset)
-        env_var = preset_env_vars(preset)[0]
         if api_key and plat.is_interactive():
             api_key = _existing_key_menu(preset, env_var, api_key)
             if api_key is None:
@@ -262,21 +265,37 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
             if not entered:
                 print(f"  {ROSE}An API key is required for {preset.name}.{RST}\n")
                 return False
-            try:
-                from axon.providers.verifier import verify_api_key
-                print(f"  {SLATE}Verifying key…{RST}", end="", flush=True)
-                ok, msg = verify_api_key(preset, entered)
-            except Exception as exc:  # verifier unavailable or network failure: report, don't save
-                ok, msg = False, str(exc)
-            if not ok:
-                print(f"\r\033[K  {ROSE}✗ Key check failed:{RST} {WHITE}{msg}{RST}\n")
-                return False
-            print(f"\r\033[K  {MINT}✓ API key verified{RST}")
-            saved = store_key(env_var, entered)
+            api_key, new_key = entered, True
+
+    models = _models_for(preset, api_key)
+    if models is None:
+        return False
+    while True:
+        selection = pick(models + [CUSTOM_MODEL_OPTION, RANDOM_MODEL_OPTION], title=f"Model for {preset.name}",
+                         current=preset.default_model if preset.default_model in models else (models[0] if models else None))
+        if not selection:
+            print(f"\n  {SLATE}Connection cancelled.{RST}\n")
+            return False
+        model = choose_model_option(preset, selection) or preset.default_model
+        if not new_key:
+            break
+        ok, msg = _verify(preset, api_key or "", model)
+        if ok:
+            print(f"  {MINT}✓ API key verified with {model}{RST}")
+            saved = store_key(env_var, api_key or "")
             if saved:
                 print(f"  {MINT}✓ Saved {env_var} to {saved} (owner-only){RST}")
-            api_key = entered
+            break
+        print(f"  {ROSE}✗ Check with {model} failed:{RST} {WHITE}{msg}{RST}")
+        if not _is_model_problem(msg):
+            print()
+            return False
+        print(f"  {SLATE}The key works, but this model is not available to it. Pick another model.{RST}")
+    return apply_provider(agent, preset, model, api_key)
 
+
+def _models_for(preset: ProviderPreset, api_key: str | None) -> list[str] | None:
+    """Models to offer: the provider's live list for this key, else the built-in list. None = key rejected."""
     models: list[str] = []
     if preset.id == "ollama":
         try:
@@ -284,15 +303,38 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
             models = list(fetch_local_ollama_models(preset.base_url))
         except Exception:
             models = []
+    elif api_key or not preset.requires_key:
+        from axon.providers.catalog import fetch_provider_models
+        print(f"  {SLATE}Loading the models this key can use…{RST}", end="", flush=True)
+        live, status = fetch_provider_models(preset, api_key or "")
+        print("\r\033[K", end="")
+        if status in (401, 403):
+            print(f"  {ROSE}✗ {preset.name} rejected the API key (HTTP {status}).{RST} "
+                  f"{SLATE}Check it at {preset.docs_url or preset.base_url}{RST}\n")
+            return None
+        if live:
+            print(f"  {MINT}✓ {len(live)} chat model{'s' if len(live) != 1 else ''} available{RST}")
+            return live
     for m in preset.models:
         if m not in models:
             models.append(m)
-    selection = pick(models + [CUSTOM_MODEL_OPTION, RANDOM_MODEL_OPTION], title=f"Model for {preset.name}",
-                     current=preset.default_model if preset.default_model in models else None)
-    if not selection:
-        selection = preset.default_model
-    model = choose_model_option(preset, selection) or preset.default_model
-    return apply_provider(agent, preset, model, api_key)
+    return models
+
+
+def _verify(preset: ProviderPreset, key: str, model: str) -> tuple[bool, str]:
+    try:
+        from axon.providers.verifier import verify_api_key
+        print(f"  {SLATE}Verifying key with {model}…{RST}", end="", flush=True)
+        ok, msg = verify_api_key(preset, key, model=model)
+    except Exception as exc:  # verifier unavailable or network failure: report, don't save
+        ok, msg = False, str(exc)
+    print("\r\033[K", end="")
+    return ok, msg
+
+
+def _is_model_problem(msg: str) -> bool:
+    m = msg.lower()
+    return "http 404" in m or "does not exist" in m or "model_not_found" in m or "not found" in m and "model" in m
 
 
 def _fallback_provider_picker(agent: Agent) -> bool:

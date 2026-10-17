@@ -187,7 +187,8 @@ def _python_exe(ws: Path) -> str:
             return str(p.absolute())
     for name in ("python3", "python"):
         found = shutil.which(name)
-        if found:
+        # Windows' WindowsApps\python*.exe are Microsoft Store stubs that only print "Python was not found".
+        if found and "windowsapps" not in found.replace("/", "\\").lower().split("\\"):
             return found
     return sys.executable
 
@@ -988,6 +989,9 @@ def gather_fix_target(agent: Any, arg: str) -> tuple[str, str, list[Failure]] | 
     last = _state(agent).get("last_verify") or []
     failing = [r for r in last if not r.ok]
     if failing:
+        # Consumed: once handed to the agent these results are stale (the files have changed), so a
+        # second /fix must not resend them; /verify records fresh ones.
+        _state(agent).pop("last_verify", None)
         output = "\n\n".join(f"$ {r.check.display}\n{_tail(r.output, 60)}" for r in failing)
         fails = [f for r in failing for f in r.failures]
         return " && ".join(r.check.display for r in failing), output, fails
@@ -1044,12 +1048,13 @@ def _diff_failures(before: list[Failure], after: list[Failure]) -> str:
 
 
 def _git_stat(ws: Path) -> str:
-    if not (ws / ".git").exists() or not shutil.which("git"):
+    git = shutil.which("git")
+    if not git:
         return ""
-    try:
-        res = subprocess.run(["git", "diff", "--stat"], cwd=str(ws), capture_output=True, timeout=10,
+    try:  # also works when the workspace is a subdirectory of the repository
+        res = subprocess.run([git, "diff", "--stat"], cwd=str(ws), capture_output=True, timeout=10,
                              stdin=subprocess.DEVNULL)
-        return _decode(res.stdout).strip()[-2000:]
+        return _decode(res.stdout).strip()[-2000:] if res.returncode == 0 else ""
     except Exception:
         return ""
 
@@ -1060,6 +1065,7 @@ def autofix(agent: Any, checks: list[Check], ws: Path, max_attempts: int = 3,
     Rows are appended to `sink` as they complete, so a Ctrl+C still leaves a partial table."""
     rows: list[dict[str, Any]] = sink if sink is not None else []
     results = run_checks(checks, ws, timeout, _announce)
+    _state(agent)["last_verify"] = results
     before = _count(results)
     if before == 0:
         return rows
@@ -1080,6 +1086,7 @@ def autofix(agent: Any, checks: list[Check], ws: Path, max_attempts: int = 3,
                          "time": time.time() - t0, "status": "agent stopped"})
             break
         results = run_checks(checks, ws, timeout, _announce)
+        _state(agent)["last_verify"] = results  # /fix afterwards works on what is failing now
         after = _count(results)
         new_failures = [f for r in results if not r.ok for f in r.failures]
         rows.append({"attempt": attempt, "before": before, "after": after, "cost": cost,

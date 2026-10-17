@@ -201,7 +201,9 @@ def changes_since(snap: Snapshot, root: Path | None = None) -> list[FileChange]:
     files = _list_files(root, snap.git, deadline)
     if files is None:
         return []
-    now = _stats(root, files, deadline) or {}
+    now = _stats(root, files, deadline)
+    if now is None:   # too slow to stat this time: report nothing rather than every file as deleted
+        return []
     changes: list[FileChange] = []
     for rel in sorted(set(now) | set(snap.stats)):
         if len(changes) >= MAX_CHANGES:

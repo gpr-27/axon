@@ -51,8 +51,13 @@ def _find(token: str) -> Any:
     t = (token or "").strip().lower()
     if not t:
         return None
-    return get_preset_by_id(t) or next((p for p in _presets() if p.name.lower() == t), None) or \
-        next((p for p in _presets() if t in p.id.lower() or t in p.name.lower()), None)
+    exact = get_preset_by_id(t) or next((p for p in _presets() if p.name.lower() == t), None)
+    if exact is not None:
+        return exact
+    # A partial name must be unambiguous: "/endpoint set ai <url>" must not silently redirect
+    # whichever provider happens to contain "ai" (and send its key to that URL).
+    partial = [p for p in _presets() if t in p.id.lower() or t in p.name.lower()]
+    return partial[0] if len(partial) == 1 else None
 
 
 def _configured() -> Any:

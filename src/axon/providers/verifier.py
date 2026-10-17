@@ -4,6 +4,7 @@ key is saved. Uses the same endpoint/auth rules as the streaming providers.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 try:
@@ -18,6 +19,7 @@ from axon.providers.transport import (
     chat_completions_url,
     default_headers,
     extract_error_detail,
+    is_agentrouter,
     is_azure,
     is_local_url,
     is_official_anthropic,
@@ -85,18 +87,29 @@ def verify_api_key(
 
     test_model = model or (preset.default_model if preset else "deepseek-v4-flash")
     endpoint, headers, payload = build_ping_request(preset, clean_key, active_url, test_model)
-    try:
-        resp = httpx.post(endpoint, headers=headers, json=payload, timeout=timeout)
-    except httpx.TimeoutException:
-        return False, f"Connection timed out ({timeout}s) connecting to {endpoint}"
-    except Exception as e:
-        return False, f"Connection error: {e}"
+    # A server error says nothing about the key; AgentRouter in particular answers valid requests with an
+    # intermittent 500, so retry those a few times before reporting (never as "bad key").
+    attempts = 4 if is_agentrouter(active_url) else 2
+    for attempt in range(attempts):
+        try:
+            resp = httpx.post(endpoint, headers=headers, json=payload, timeout=timeout)
+        except httpx.TimeoutException:
+            return False, f"Connection timed out ({timeout}s) connecting to {endpoint}"
+        except Exception as e:
+            return False, f"Connection error: {e}"
+        if resp.status_code < 500 or attempt == attempts - 1:
+            break
+        time.sleep(0.5 * (attempt + 1))
     if resp.status_code == 200:
         return True, "OK"
+    if resp.status_code == 429:
+        return True, "OK (the key was accepted; the provider is rate limiting right now)"
     try:
         msg = extract_error_detail(resp.json())
     except Exception:
         msg = ""
     if not msg:
         msg = f"HTTP {resp.status_code}"
+    if resp.status_code >= 500:
+        return False, f"{msg} (HTTP {resp.status_code}: a server error, not a problem with the key; try again)"
     return False, f"{msg} (HTTP {resp.status_code})"

@@ -113,7 +113,7 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
     if sub in ("add", "learn", "+"):
         scope = "project"
         for pfx in ("--global ", "global ", "--user ", "user "):
-            if rest.startswith(pfx):
+            if rest.startswith(pfx) or rest == pfx.strip():
                 scope, rest = "global", rest[len(pfx):].strip()
         if not rest:
             usage("/memory add [--global] <text>")
@@ -145,7 +145,10 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
 
     if sub in ("edit", "open"):
         target, _, new_text = rest.partition(" ")
-        files = {label: p for label, p in _instruction_files(ws) if label in ("user", "project", "local")}
+        files: dict[str, Path] = {}
+        for label, fp in _instruction_files(ws):  # first file per label: "project" is AXON.md, not CLAUDE.md
+            if label in ("user", "project", "local"):
+                files.setdefault(label, fp)
         if target in files or not target:
             p = files.get(target or "project")
             if p is None:
@@ -530,7 +533,7 @@ def load_prompts(ws: Path) -> dict[str, tuple[str, str, str]]:
             except OSError:
                 continue
             desc = fm.get("description") if isinstance(fm.get("description"), str) else ""
-            out[f.stem] = (str(desc or body.splitlines()[0][:60] if body else ""), body.strip(), str(f))
+            out[f.stem] = (str(desc or (body.splitlines()[0][:60] if body else "")), body.strip(), str(f))
     return out
 
 
@@ -601,6 +604,9 @@ def handle_prompt(agent: Any, arg: str) -> CommandResult:
             usage("/prompt save <name> [--global] <template text with {placeholders}>")
             return CommandResult(handled=True)
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", words[0]).strip("-").lower()
+        if not name:
+            err("Template names may contain letters, digits, - and _.")
+            return CommandResult(handled=True)
         d = prompt_dirs(ws)[0 if glob else 1]
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.md").write_text(" ".join(words[1:]) + "\n", encoding="utf-8")

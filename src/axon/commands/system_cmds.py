@@ -152,7 +152,7 @@ _CONFIG_KEYS: dict[str, str] = {
     "thinking": "stream reasoning (true/false)",
     "max_tokens": "max output tokens per call",
     "max_iterations": "max LLM calls per turn",
-    "compact_at": "auto-compact threshold (0-1 of the window)",
+    "compact_at": "auto-compact threshold (0.85, 85% or 500k tokens)",
     "max_history_turns": "sliding window in turns (0 = unlimited)",
     "parallel_tools": "max parallel read-only tools",
     "bash_timeout_s": "Bash timeout in seconds",
@@ -359,9 +359,14 @@ def handle_config(agent: Any, arg: str) -> CommandResult:
         from axon.commands.model_cmds import handle_mode
         return handle_mode(agent, value)
     try:
-        new_val = _coerce(getattr(agent.settings, key), value)
-        if key == "compact_at" and not 0.1 <= float(new_val) <= 0.99:
-            raise ValueError("must be between 0.1 and 0.99")
+        if key == "compact_at":  # same forms as /autocompact: 0.85, 85, 85%, 500k
+            try:
+                window = int(agent.context.context_window(agent.settings.model))
+            except Exception:
+                window = 200_000
+            new_val = parse_compact_threshold(value, window)
+        else:
+            new_val = _coerce(getattr(agent.settings, key), value)
         if isinstance(new_val, int) and not isinstance(new_val, bool) and new_val < 0:
             raise ValueError("must be >= 0")
     except ValueError as e:

@@ -330,13 +330,28 @@ def _cmd_remove(ctx: _Ctx, args: list[str]) -> None:
             return
         args = [choice]
     scope = None
-    if len(args) >= 3 and args[1] in ("--scope", "-s"):
-        try:
-            scope = normalize_scope(args[2])
-        except ValueError as e:
-            _err(str(e))
-            return
-    name = args[0]
+    rest: list[str] = []
+    i = 0
+    while i < len(args):  # --scope may come before or after the name; --scope=X works too
+        tok = args[i]
+        if tok in ("--scope", "-s") or tok.startswith("--scope="):
+            val = tok.split("=", 1)[1] if "=" in tok else (args[i + 1] if i + 1 < len(args) else "")
+            i += 1 if "=" in tok else 2
+            try:
+                scope = normalize_scope(val) if val else None
+            except ValueError as e:
+                _err(str(e))
+                return
+            if scope is None:
+                _err("--scope needs a value (user, project or local)")
+                return
+            continue
+        rest.append(tok)
+        i += 1
+    if not rest:
+        _out(f"  {SLATE}Usage: /mcp remove <name> [--scope user|project|local]{RST}")
+        return
+    name = rest[0]
     ctx.bridge.disconnect_server(name)
     if ctx.config.remove_server(name, scope):
         _ok(f"Removed MCP server '{name}' and unregistered its tools.")
@@ -459,7 +474,7 @@ def _cmd_logs(ctx: _Ctx, args: list[str]) -> None:
         _err("usage: /mcp logs <name> [lines]")
         return
     path = log_path_for(args[0])
-    n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 40
+    n = max(1, int(args[1])) if len(args) > 1 and args[1].isdigit() else 40
     if not path.is_file():
         _out(f"  {SLATE}No log yet at {path}{RST}")
         return

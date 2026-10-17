@@ -10,6 +10,7 @@ Evaluation order (first match wins):
   5. Tool ``default_permission == "deny"``                                    -> deny
   6. bypass mode (unless permissions.disableBypassPermissionsMode = "disable") -> allow
   7. Paths outside the workspace and the additional dirs (/add-dir)         -> ask
+  7b. Plan mode: read-only tools inside the workspace                         -> allow
   8. acceptEdits: file edits                                                  -> allow
   9. Tool ``default_permission`` ("allow" -> allow, otherwise ask)
 
@@ -300,15 +301,16 @@ class PermissionEngine:
         if mode == "bypass":
             return Decision("allow", "Bypass mode active.")
 
+        # 7. Outside-workspace paths always need a human (plan mode included: read-only exploration
+        #    is free inside the workspace, not across the whole disk)
+        outside = [p for p in paths if not self._inside_or_allowlisted(p, name)]
+        if outside:
+            return Decision("ask", f"'{name}' targets a path outside the workspace: {outside[0]}")
+
         if mode == "plan":
             if name in PLAN_MODE_ALLOWED or default_perm == "allow" or self._readonly_git(name, args):
                 return Decision("allow", "Plan mode permits read-only exploration.")
             return Decision("ask", f"'{name}' requires approval.")
-
-        # 7. Outside-workspace paths always need a human
-        outside = [p for p in paths if not self._inside_or_allowlisted(p, name)]
-        if outside:
-            return Decision("ask", f"'{name}' targets a path outside the workspace: {outside[0]}")
 
         # 8. acceptEdits
         if mode == "acceptEdits" and name in EDIT_TOOLS:

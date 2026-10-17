@@ -486,7 +486,9 @@ class EditorState:
     def delete(self) -> None:
         if self.pos < len(self.buf):
             self._snapshot()
-            self.buf = self.buf[:self.pos] + self.buf[self.pos + 1:]
+            # A paste chip starting at the cursor goes as a whole (like backspace at its end).
+            m = PASTE_CHIP_RE.match(self.buf, self.pos)
+            self.buf = self.buf[:self.pos] + self.buf[(m.end() if m else self.pos + 1):]
             self._changed()
 
     def set_text(self, text: str, pos: int | None = None) -> None:
@@ -1310,8 +1312,12 @@ def read_input(
     if ahead:
         initial = f"{initial}{ahead}" if initial else ahead
     global _RESIZE_DRAFT
-    if _RESIZE_DRAFT:              # what was typed before a window resize redrew the screen
-        initial, _RESIZE_DRAFT = _RESIZE_DRAFT, ""
+    restored = _RESIZE_DRAFT
+    if restored is not None:       # what was typed before a window resize redrew the screen
+        _RESIZE_DRAFT = None
+        initial = ""
+        st.set_text(restored[0], restored[1])
+        st.pastes = dict(restored[2])   # [Pasted text #N] chips still expand to their content
     if initial:
         st.set_text(str(initial))
     editor = PromptEditor(st)
@@ -1363,7 +1369,7 @@ def read_input(
                     if term_width() != width0:
                         # The terminal re-wrapped everything already printed: hand back so the REPL redraws
                         # the conversation at the new width (the draft is kept).
-                        _RESIZE_DRAFT = st.buf
+                        _RESIZE_DRAFT = _resize_draft(st)
                         return (RESIZE_REDRAW, changed_mode(), 0)
                     frame.render(*build_frame(st, chrome))
                     if clicks is not None:
@@ -1374,7 +1380,7 @@ def read_input(
                     if target is not None:
                         _open_transcript_from_prompt(agent, target)
                         if term_width() != width0:
-                            _RESIZE_DRAFT = st.buf
+                            _RESIZE_DRAFT = _resize_draft(st)
                             return (RESIZE_REDRAW, changed_mode(), 0)
                         frame.render(*build_frame(st, chrome))
                         if clicks is not None:
@@ -1410,7 +1416,12 @@ def read_input(
 
 
 RESIZE_REDRAW = "__RESIZE_REDRAW__"
-_RESIZE_DRAFT = ""
+# (text, cursor, paste chips) of the draft handed back for a resize redraw; None when there is none.
+_RESIZE_DRAFT: "tuple[str, int, dict[int, str]] | None" = None
+
+
+def _resize_draft(st: EditorState) -> "tuple[str, int, dict[int, str]] | None":
+    return (st.buf, st.pos, dict(st.pastes)) if st.buf else None
 
 
 class ClickMap:

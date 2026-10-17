@@ -29,6 +29,7 @@ class ToolContext:
     ledger: Ledger | None = None
     agent: Agent | None = None  # For sub-agent dispatch
     checkpoints: CheckpointManager | None = None
+    tool_use_id: str = ""  # the model's id for this call (Task uses it to keep subagent numbers in call order)
 
 
 class Tool(ABC):

@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.27.6
+
+Parallel subagents are clear and correct
+- Subagents are numbered in the order the model asked for them, not in the order their threads happened to start.
+- A failed subagent is shown as failed everywhere: its card says `Failed` with the reason (for example
+  `HTTP 400 Bad Request`), the summary counts it as failed rather than done, and the live view shows the reason.
+  Previously the card said `Completed` and the body was the parent's retry advice.
+- The summary is one aligned table (number, subagent and type, status, steps, time, tokens) instead of a box
+  with uneven rows. Every `Task` call shows its agent type, and its routine "allowed by delegation" line is hidden.
+- The live view (0 overview, 1-9 one subagent, Q queue) shows what each subagent was asked, its model and its
+  failure reason. Subagent steps are labelled with their number, so two subagents' steps can be told apart.
+- While the live view is drawn, output from the subagents is held and printed after it closes, so the view no
+  longer leaves stacked copies or stray lines in the transcript.
+- `/subagents` marks a restored failed subagent as failed and shows its reason when it is opened.
+
+Subagents finish on AgentRouter
+- AgentRouter's `HTTP 500 Upstream rejected the request as invalid` is intermittent: the same request failed on
+  20-70% of attempts and passed on others, more often as the conversation grew. It was retried only twice, so a
+  long subagent almost always lost one call and died. On AgentRouter it is now retried up to 8 times (other
+  providers keep the short budget, since there the request really is malformed). In a 5-subagent test run 53 of
+  123 requests were rejected and all five subagents finished; before, three of five failed.
+- A subagent whose model call still fails resumes from where it stopped (its tool results are kept), up to twice.
+  If it gives up, the parent gets the reason plus the tool calls that already ran, so it can retry or finish the
+  work without redoing it.
+- Read-only subagents (explore, plan) are listed as having no shell, so the model no longer asks them to run
+  `git diff`, which made them waste steps hunting for a Bash tool.
+
+Subagent and plan views
+- Live view: a header with running/done/failed counts, tokens, wall time and a progress strip; tabs that always
+  show number and status and shorten titles to fit; one block per subagent with steps, time, tool calls, tokens,
+  retries and resumes, and what it is doing right now; a failed subagent's full reason. Opening a subagent shows
+  what it was asked and a timeline of its steps, tool calls, results, thinking, retries and resumes.
+- Summary table: full titles, type column, the full failure reason under the row, and a line with tool calls,
+  retries and resumes. Result cards say `Subagent #n · title · status`, list the progress made before a failure,
+  and carry the run time in the card border (no more `└ ┌` double corner).
+- Plans (TodoWrite) show every item, numbered, with a progress bar; the item in progress is highlighted, done
+  items are struck through, and long items wrap instead of being cut.
+- After a fan-out the timeline shows the summary of that batch only (earlier subagents are no longer repeated),
+  then each Task card in the order the model asked for them. Each subagent's own LLM and tool calls are no
+  longer replayed into the main timeline (they were already in the live view); `/subagents <n>` and the
+  `detailed` trace level still show them, labelled `subagent #n (type)`.
+- Notes typed during a run say they go to the main agent and run after the subagents; the confirmation and the
+  result of `/q` commands appear inside the live view instead of stacking lines above it.
+- Steps read `step 12 · limit 25` while a subagent runs and `2 steps` once it finished (no half-empty bar).
+
+Images
+- SVG files are no longer attached as images (providers cannot decode them), and paths in a subagent's prompt,
+  which the model writes, are never turned into image attachments. A subagent asked to read `docs/assets/*.svg`
+  failed every call with `fail to decode image config(webp)`.
+- An image the provider cannot decode is reported as such and not retried (it said "temporarily unavailable").
+
+Subagent step limit
+- A subagent is told three steps before its step limit to wrap up, and at the limit it makes one last call to
+  write its report (what it found, what it did, what is left) instead of being cut off with nothing. The parent
+  gets that report plus the tool calls that already ran. The main agent gets the warning too; `--max-turns N`
+  still makes exactly N calls.
+- The Task tool takes `max_steps` (default 25, or `maxTurns` from the agent's definition), capped by
+  `max_iterations`. `maxTurns` was not capped before.
+- Step-limit cards say `⚠ Step limit` (they said `Completed`).
+
+Tool calls are drawn the same way for every tool
+- Input: `● Name  target`, then every other argument as an aligned `key  value` row, typed and wrapped (not
+  dropped, not raw JSON). Bash shows `$ command` with multi-line commands kept readable and its own
+  description as the purpose; MCP tools read `server › tool`.
+- Output: one summary row (`✓ exit 0` / `✗ exit 1`, test bar, line counts, size, `in <cwd>` when it is not the
+  workspace), then the body: JSON pretty-printed with its shape, code highlighted, errors first in full behind
+  a `▎` bar, `(no output)` when empty. /inspect, restored sessions and the redraw after a resize use the same
+  rows as the live view.
+
+Connecting to a provider
+- After the API key, Axon lists the models that key can use (the provider's own `/models`, chat models only),
+  you pick one, and the key is checked with that model before it is saved. A model the key cannot use lets you
+  pick again; a rejected key stops before the list; Esc cancels. Groq's preset lists its current models
+  (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`); it failed with "model
+  llama-3.3-70b-versatile does not exist".
+- The key check retries server errors (AgentRouter's intermittent 500) and treats a 429 as a working key.
+- `~/.axon/.env` values ignore a trailing `# comment` and a UTF-8 BOM.
+
+Reliability
+- Every retryable AgentRouter 5xx gets the 8-retry budget (529 overload still fails over quickly). A 5xx asking for
+  `reasoning_content` is repaired at once instead of retried.
+- Stream errors inside an HTTP 200 (Anthropic `overloaded_error`, an OpenAI-format error chunk) are retried when
+  nothing was shown yet and reported with their real status, not "HTTP 200".
+- Orphaned or duplicate tool results no longer make the Anthropic API reject the request.
+- An interrupted fan-out stops its subagents (they kept running in the background); a cancel arriving as a
+  subagent finished could crash the turn.
+- Automatic compaction is saved to the session, so a resumed session replays the compacted history.
+
+Permissions and tools
+- Patch is checked against the paths inside the diff: it could write outside the workspace in acceptEdits mode,
+  and Edit deny rules did not apply to it. Plan mode asks before reading outside the workspace; Glob with an
+  absolute or `../` pattern asks too. "Always allow" sticks for compound commands with glob characters.
+- Patch: creating a file that exists is refused (it prepended), renames with changes work, `-U0` insertions land
+  on the right line.
+- Bash keeps `SSH_AUTH_SOCK` and git identity variables, keeps lines ending in `\r`, names the signal that killed
+  a command, and says when a failing command printed nothing.
+- Edit says when a file had to be converted to UTF-8; CodeSearch reads files with a BOM; Grep without ripgrep no
+  longer hangs on a FIFO; temp files of parallel writes no longer collide.
+
+Commands, sessions, hooks, MCP
+- `/inspect`, `/explain`, `/debug` and `/bug` find saved traces after a resume; `/help <word>` searches commands;
+  `/tools <name>` handles MCP schemas with list types; `/endpoint set` needs an unambiguous provider name;
+  `/memory edit project` opens AXON.md; `/test -k "a and b"` keeps the quotes; `/config compact_at 85%` works;
+  `/agents delete` and `/skills delete` keep a library copy first.
+- `/compact` usage counts in a resumed session's cost; `/rewind` timestamps skip tool results; branch names with
+  `/` are kept whole.
+- Skill arguments are substituted in one pass (`$5` in an argument was eaten); frontmatter with a BOM is read;
+  hooks accept snake_case event names; MCP `${VAR}` may refer to the server's own `env`, and one malformed server
+  entry no longer stops all MCP servers from loading.
+
+Terminal and input
+- Enter on an empty line in the live subagent view, or a non-ASCII digit there or in pickers and vim mode, no
+  longer crashes; long input with wide characters keeps the typing end visible.
+- A window resize keeps paste chips and the cursor; forward-delete removes a whole paste chip.
+- Print mode with `--output-format json|stream-json` prints JSON for an empty prompt or Ctrl+C, and `-c -p` no
+  longer replays the conversation first. Ctrl+C during `!cmd` keeps the output captured so far.
+
+Features and docs
+- `/git` status shows renamed files by their new name; `/changes` in a repo without commits marks new files
+  added; `/fix` no longer resends `/verify` failures it already handled; `/autofix` works from a subfolder and
+  updates what `/fix` reads; `/verify` skips the Windows Store python stub; `/plan-resume` gives each step its
+  retries again; `axon setup --provider X` keeps the configured mode and trace level.
+- Docs corrected against the code (write-tool references, bypass mode and outside paths, the Bash output cap, test
+  counts, `/stats`, `axon setup`), and the subagent docs cover step limits, resumes and read-only agents.
+
 ## 0.27.5
 
 Restored sessions show what the live view showed

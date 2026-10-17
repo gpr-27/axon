@@ -424,6 +424,7 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
     print(f"\n  {TEAL}⚡ Compacting {before_n} messages (~{fmt_tokens(before_tok)} tokens){'  · focus: ' + arg if arg else ''}…{RST}")
     ctx = getattr(agent, "context", None)
     used_llm = False
+    u = None
     if ctx is not None and hasattr(ctx, "summarize_with_provider"):
         try:
             u = ctx.summarize_with_provider(conv, agent.provider, agent.settings.model, instructions=arg, keep_turns=1)
@@ -444,8 +445,13 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
     if after_n >= before_n and after_tok >= before_tok:
         info("Nothing to compact yet (the conversation is a single turn).")
         return CommandResult(handled=True)
+    record: dict[str, Any] = {"messages": conv.messages, "instructions": arg}
+    if u is not None and hasattr(u, "input"):
+        # the summary call's usage, so a resumed session's ledger (/cost) still counts it
+        record["model"] = agent.settings.model
+        record["usage"] = {k: int(getattr(u, k, 0) or 0) for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
     try:
-        agent.session.append("compaction", {"messages": conv.messages, "instructions": arg})
+        agent.session.append("compaction", record)
     except Exception:
         pass
     how = "LLM summary" if used_llm else "heuristic summary"
@@ -601,7 +607,8 @@ def handle_cost(agent: Any, arg: str) -> CommandResult:
     cache_read = sum(int(r.get("cache_read", 0)) for r in rows_data)
     sub_cost = sum(Decimal(str(r.get("cost", 0))) for r in rows_data if str(r.get("source", "")).startswith("subagent"))
     main_calls = sum(int(r.get("calls", 0)) for r in rows_data if str(r.get("source", "main")) == "main")
-    user_turns = sum(1 for m in getattr(agent.conversation, "messages", []) if m.get("role") == "user" and isinstance(m.get("content"), str)) if hasattr(agent, "conversation") else 0
+    from axon.session.store import is_user_prompt
+    user_turns = sum(1 for m in getattr(agent.conversation, "messages", []) if isinstance(m, dict) and is_user_prompt(m)) if hasattr(agent, "conversation") else 0
     print()
     kv("Total", f"{GOLD}{BOLD}{fmt_usd(total, 5)}{RST}  {SLATE}{calls} calls · {fmt_tokens(tok_in)} in · {fmt_tokens(tok_out)} out{RST}")
     if tok_in:

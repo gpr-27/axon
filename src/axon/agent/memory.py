@@ -213,7 +213,9 @@ def expand_braces(pattern: str, budget: int = BRACE_BUDGET) -> list[str]:
 
 def glob_to_regex(pattern: str) -> re.Pattern[str] | None:
     """Glob with ``**`` (any depth), ``*``, ``?`` and ``[...]``; invalid ``[`` -> matches nothing."""
-    pat = pattern.replace("\\", "/").lstrip("./") if not pattern.startswith("/") else pattern.replace("\\", "/")
+    pat = pattern.replace("\\", "/")
+    while pat.startswith("./"):   # only a leading "./" is dropped: ".github/**" must keep its dot
+        pat = pat[2:]
     i, out = 0, ""
     while i < len(pat):
         c = pat[i]
@@ -350,6 +352,16 @@ def _rule_files(directory: Path) -> list[Path]:
         return []
 
 
+def _rule_root(rule: InstructionFile, workspace: Path) -> Path:
+    """Directory a rule's ``paths:`` globs are relative to: the project that holds its ``.axon/rules`` (or
+    ``.claude/rules``) folder, also for rules in subfolders of it; user and managed rules use the workspace."""
+    if rule.scope == "project":
+        for anc in rule.path.parents:
+            if anc.name == "rules" and anc.parent.name in (".axon", ".claude"):
+                return anc.parent.parent
+    return workspace
+
+
 def _ancestor_chain(ws: Path) -> list[Path]:
     return list(reversed([ws, *ws.parents]))
 
@@ -452,9 +464,7 @@ class MemoryLoader:
                     if node:
                         new.append(node)
         for rule in list(self.pending_rules):
-            root = rule.path.parent
-            while root.name in ("rules",) or root.name in (".axon", ".claude"):
-                root = root.parent
+            root = _rule_root(rule, self.workspace)
             try:
                 rel = fp.relative_to(root).as_posix()
             except ValueError:

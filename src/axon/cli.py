@@ -518,7 +518,8 @@ def _session_file(agent: Any, session_id: str) -> Any:
     from axon.ui.history_view import session_file
     return session_file(agent, session_id)
 
-def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mode: bool = True) -> bool:
+def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mode: bool = True,
+            replay: bool = True) -> bool:
     try:
         agent.session.open(session_id)
         agent.conversation = agent.session.load(session_id)
@@ -551,7 +552,7 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
     name = f" \"{state['title']}\"" if state.get("title") else ""
     say(f"Resumed session {session_id}{name} ({len(agent.conversation.messages)} msgs · {tot_tok:,} tokens · ${agent.ledger.total():.5f})")
     replayed = False
-    if state.get("turns") and sys.stdout.isatty() and agent.conversation.messages:
+    if replay and state.get("turns") and sys.stdout.isatty() and agent.conversation.messages:
         try:   # interactive: redraw the conversation like it looked live (prompts, tools, results, answers)
             from axon.session.interactive import render_restored_conversation
             render_restored_conversation(agent.conversation, session_id, ledger=agent.ledger, path=_session_file(agent, session_id))
@@ -608,9 +609,9 @@ def run_shell_shortcut(cmd_shell: str, sink: list[str] | None = None) -> int:
         if sink is not None:
             sink.append(f"Command failed to start: {e}")
         return 1
+    chunks: list[str] = []
     try:
         if sink is not None and proc.stdout is not None:
-            chunks: list[str] = []
             total = 0
             while True:
                 data = proc.stdout.read1(65536) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
@@ -634,8 +635,9 @@ def run_shell_shortcut(cmd_shell: str, sink: list[str] | None = None) -> int:
         except Exception:
             proc.kill()
         print(f"\n  {ROSE}Interrupted.{RST}\n")
-        if sink is not None:
-            sink.append("[interrupted by user]")
+        if sink is not None:   # what it printed before the interrupt still reaches the model
+            sink.append("".join(chunks) + ("\n" if chunks and not chunks[-1].endswith("\n") else "")
+                        + "[interrupted by user]")
         return 130
     if code:
         print(f"\n  {ROSE}exit code {code}{RST}")
@@ -825,8 +827,7 @@ def run_print_mode(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> i
     """Headless single-prompt execution. Slash commands and '#' quick memories are dispatched like
     in the REPL; prompts they queue (e.g. /loop 2x) run before exit, within --max-turns and the budget."""
     if not prompt.strip():
-        sys.stderr.write("axon: no prompt given (pass it as an argument or pipe it on stdin)\n")
-        return 2
+        return _print_error(fmt, "no prompt given (pass it as an argument or pipe it on stdin)", 2, "no_prompt")
     if prompt.startswith(("/", "#")):
         from axon.commands.builtin import dispatch_command
         res = dispatch_command(prompt, agent)
@@ -837,6 +838,20 @@ def run_print_mode(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> i
             finally:
                 _stop_loops(agent)
     return _print_turn(agent, prompt, fmt, renderer)
+
+
+def _print_error(fmt: str, message: str, code: int, subtype: str) -> int:
+    """A print-mode failure: text on stderr, plus one JSON error object on stdout for --output-format
+    json / stream-json, so scripts always get parseable output."""
+    sys.stderr.write(f"axon: {message}\n")
+    if fmt in ("json", "stream-json"):
+        payload = {"type": "error", "subtype": subtype, "is_error": True, "error": message, "exit_code": code}
+        try:
+            sys.stdout.write(json.dumps(payload, indent=2 if fmt == "json" else None, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+    return code
 
 
 def _drain_print_queue(agent: Any, fmt: str, renderer: Any, code: int) -> int:
@@ -869,8 +884,8 @@ def _print_turn(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> int:
     try:
         result = agent.run_turn(prompt)
     except KeyboardInterrupt:
-        sys.stderr.write("\naxon: interrupted\n")
-        return 130
+        sys.stderr.write("\n")
+        return _print_error(fmt, "interrupted", 130, "interrupted")
     elapsed = time.time() - t0
     try:
         agent._last_print_stop = result.stop_reason
@@ -1393,7 +1408,7 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
                 print(f"\n  {TEAL}Goodbye! Total cost: {GOLD}${agent.get_combined_cost():.5f}{RST}\n")
                 return 0
             last_interrupt = now
-            print(f"\n  {SLATE}(Input cleared · press Ctrl+C again, {_eof_hint()} or /exit to quit){RST}\n")
+            print(f"\n  {SLATE}Press Ctrl+C again to quit (or {_eof_hint()}, /exit){RST}\n")
             continue
         except EOFError:
             print(f"\n\n  {TEAL}Session closed. Total cost: {GOLD}${agent.get_combined_cost():.5f}{RST}\n")
@@ -1401,12 +1416,15 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
 
         line = (line or "").strip()
         if not line:
-            if getattr(agent, "busy", False):
-                continue
-            nxt = agent.message_queue.pop() if len(agent.message_queue) else None
-            if nxt is None:
-                continue
-            line = nxt.text
+            # Woken with an empty prompt (/loop, a finished background turn): run what is queued, each
+            # prompt echoed with its [Queued #N] banner like any other queued prompt.
+            if not getattr(agent, "busy", False) and len(agent.message_queue):
+                try:
+                    if not drain_queue(agent, renderer):
+                        return 0
+                except KeyboardInterrupt:
+                    print(f"\n\n  {TEAL}Stopped by user.{RST}\n")
+            continue
 
         try:
             if not process_line(agent, renderer, line):
@@ -1487,14 +1505,7 @@ def run_doctor_subcommand(args: list[str]) -> int:
 def _startup_error(args: Any, message: str, code: int, subtype: str = "error") -> int:
     """Report a failure before the agent runs: plain text on stderr, plus one JSON error object on
     stdout for --output-format json / stream-json (so scripts always get parseable output)."""
-    sys.stderr.write(f"axon: {message}\n")
-    fmt = getattr(args, "output_format", "text")
-    if fmt in ("json", "stream-json"):
-        payload = {"type": "error", "subtype": subtype, "is_error": True, "error": message, "exit_code": code}
-        out = json.dumps(payload, indent=2 if fmt == "json" else None, ensure_ascii=False)
-        sys.stdout.write(out + "\n")
-        sys.stdout.flush()
-    return code
+    return _print_error(getattr(args, "output_format", "text"), message, code, subtype)
 
 
 class _Terminated(SystemExit):
@@ -1670,7 +1681,7 @@ def main(argv: list[str] | None = None) -> int:
         if not latest:
             sys.stderr.write("No conversation found to continue\n")
             return 1
-        if not _resume(agent, latest, announce, restore_mode=args.mode is None):
+        if not _resume(agent, latest, announce, restore_mode=args.mode is None, replay=not headless):
             return 1
         source = "resume"
     elif args.resume_id is not None:
@@ -1691,7 +1702,7 @@ def main(argv: list[str] | None = None) -> int:
                     sys.stderr.write(f"No conversation found with session ID: {args.resume_id}\n")
                 return 1
         if target:
-            if not _resume(agent, target, announce, restore_mode=args.mode is None):
+            if not _resume(agent, target, announce, restore_mode=args.mode is None, replay=not headless):
                 return 1
             source = "resume"
     if args.fork_session and source == "resume":

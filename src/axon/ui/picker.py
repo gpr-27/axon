@@ -408,7 +408,7 @@ class Selector:
             self.refresh_items()
         elif not self.filterable and key in ("q", "Q"):
             self.finish(None)
-        elif not self.filterable and key.isdigit() and key != "0" and int(key) <= n:
+        elif not self.filterable and len(key) == 1 and key in "123456789" and int(key) <= n:
             self.index = int(key) - 1
             self.finish(self.current())
 

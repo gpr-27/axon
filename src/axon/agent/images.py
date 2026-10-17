@@ -14,7 +14,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".tiff")
+# Raster formats only: SVG is XML text that vision APIs cannot decode (the Read tool reads it as text).
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff")
 
 @dataclass
 class ImageAttachment:

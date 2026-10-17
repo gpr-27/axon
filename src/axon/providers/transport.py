@@ -229,12 +229,22 @@ def backoff_delay(attempt: int, retry_after: float | None = None, *, base: float
     return exp * (0.5 + random.random() * 0.5)
 
 
-# Gateways (AgentRouter in particular) report an upstream "invalid request" rejection as HTTP 5xx
-# ("Upstream rejected the request as invalid"). When the request really is malformed, retrying the
-# identical body fails every time, so such answers get a reduced retry budget instead of the full one.
-# They are still retried a little because AgentRouter also returns that exact wording intermittently
-# for valid requests (it spreads traffic over several upstream channels).
+# Gateways report an upstream "invalid request" rejection as HTTP 5xx ("Upstream rejected the request
+# as invalid"). When the request really is malformed, retrying the identical body fails every time, so
+# such answers get a reduced retry budget instead of the full one.
 MAX_INVALID_5XX_RETRIES = 2
+# AgentRouter is the exception: it spreads traffic over several upstream channels and some of them reject
+# valid requests. Measured on deepseek-v4-flash, the same body failed on 20-70% of attempts and succeeded
+# on the others, more often as the conversation grows, so a long subagent run hit three failures in a row
+# on some call almost every time. There, the rejection gets at least this many retries.
+AGENTROUTER_INVALID_RETRIES = 8
+# Every other AgentRouter 5xx ("upstream error", 502/503/504 from a channel) gets the same budget. Each
+# attempt is routed to a channel afresh, so a failure from one channel says as little about the next
+# attempt as the "invalid" rejection does, and an answer that says the request was *invalid* (the more
+# likely of the two to be deterministic) must not get more retries than one that says the server failed.
+# A real outage costs about half a minute of visible retries before the error; giving up early costs the
+# whole turn (or subagent). 529 "overloaded" keeps the setting (see is_agentrouter_5xx).
+AGENTROUTER_5XX_RETRIES = AGENTROUTER_INVALID_RETRIES
 
 _INVALID_REQUEST_MARKERS = (
     "rejected the request as invalid",
@@ -258,12 +268,63 @@ def is_invalid_request_body(body: Any) -> bool:
     return any(m in text for m in _INVALID_REQUEST_MARKERS)
 
 
-def should_retry_status(status: int | None, body: Any, attempt: int) -> bool:
+_BAD_IMAGE_MARKERS = ("decode image", "invalid image", "image_parse_error", "could not process image")
+
+
+def is_bad_image_body(body: Any) -> bool:
+    """True when an error body says an attached image could not be decoded: retrying sends the same bytes."""
+    if body is None:
+        return False
+    raw = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    return any(m in raw.lower() for m in _BAD_IMAGE_MARKERS)
+
+
+def _body_text(body: Any) -> str:
+    if body is None:
+        return ""
+    if isinstance(body, (bytes, bytearray)):
+        return body.decode("utf-8", "replace")
+    if isinstance(body, str):
+        return body
+    try:
+        return json.dumps(body)
+    except (TypeError, ValueError):
+        return str(body)
+
+
+def is_passback_complaint(body: Any) -> bool:
+    """A thinking-mode API asking for reasoning_content on tool-call turns. The identical body fails every
+    time; the OpenAI-compatible provider repairs the request itself instead of retrying it."""
+    text = _body_text(body).lower()
+    return "reasoning_content" in text and ("passed back" in text or "missing" in text)
+
+
+def is_flaky_invalid_rejection(status: int | None, body: Any, base_url: str | None) -> bool:
+    """An AgentRouter 5xx "rejected the request as invalid": intermittent, so worth many retries."""
+    return status is not None and status >= 500 and is_agentrouter(base_url) and is_invalid_request_body(body)
+
+
+def is_agentrouter_5xx(status: int | None, base_url: str | None) -> bool:
+    """A retryable AgentRouter 5xx: each attempt goes to a channel afresh, so they get the long budget.
+    529 "overloaded" is left out: it is the capacity signal a configured fallback model exists for, so it
+    keeps the short budget and fails over quickly."""
+    return (status is not None and status >= 500 and status != 529 and status in RETRYABLE_STATUS
+            and is_agentrouter(base_url))
+
+
+def retry_budget(retries: int, status: int | None, body: Any, base_url: str | None) -> int:
+    """How many retries a failed answer gets: *retries* (the setting), raised for AgentRouter's 5xx answers."""
+    if is_agentrouter_5xx(status, base_url) and not is_bad_image_body(body) and not is_passback_complaint(body):
+        return max(retries, AGENTROUTER_5XX_RETRIES)
+    return retries
+
+
+def should_retry_status(status: int | None, body: Any, attempt: int, base_url: str | None = None) -> bool:
     """Whether a non-2xx answer is worth retrying. *attempt* is the 0-based index of the failed try."""
-    if status not in RETRYABLE_STATUS:
+    if status not in RETRYABLE_STATUS or is_bad_image_body(body) or is_passback_complaint(body):
         return False
     if status is not None and status >= 500 and is_invalid_request_body(body):
-        return attempt < MAX_INVALID_5XX_RETRIES
+        return is_agentrouter(base_url) or attempt < MAX_INVALID_5XX_RETRIES
     return True
 
 
@@ -449,18 +510,27 @@ def classify_error(
         return err(f"HTTP 413 from {label}: request too large. Remove large attachments or run `/compact`.{suffix}")
     if status == 429:
         return err(f"HTTP 429 Rate limited by {label} after several retries. Wait a moment and try again, or switch models with `/model`.{suffix}")
+    if is_bad_image_body(body if body is not None else detail):
+        e = err(f"{label} could not decode an image attached to the request (HTTP {status}). Retrying would send "
+                f"the same image.\n  How to fix: remove the image from your prompt (or convert it to PNG/JPEG) and "
+                f"/retry; if it came from an earlier message, run `/compact` or `/clear`.{suffix}")
+        e.retryable = False  # type: ignore[attr-defined]
+        return e
     if status is not None and status >= 500 and is_invalid_request_body(body if body is not None else detail):
         e = err(
             f"{label} rejected the request as invalid (HTTP {status}). This is a rejection of the request "
             f"itself, not an outage.\n"
-            f"  How to fix: retry once more (AgentRouter also sends this intermittently for valid requests); "
-            f"if it keeps failing, run `/compact` to rebuild the conversation sent to the model, or switch "
-            f"models with `/model`.{suffix}"
+            + (f"  AgentRouter sends this intermittently for valid requests; Axon already retried it "
+               f"{AGENTROUTER_INVALID_RETRIES} times. " if is_agentrouter(base_url) and not is_passback_complaint(
+                   body if body is not None else detail) else "  ")
+            + f"How to fix: /retry; if it keeps failing, run `/compact` to rebuild the conversation sent to "
+            f"the model, or switch models with `/model`.{suffix}"
         )
         e.retryable = False  # type: ignore[attr-defined]
         return e
     if status is not None and status >= 500:
-        return err(f"HTTP {status} from {label}: the provider is temporarily unavailable (retries exhausted). Try again shortly.{suffix}")
+        tries = f" after {AGENTROUTER_5XX_RETRIES} retries" if is_agentrouter_5xx(status, base_url) else " (retries exhausted)"
+        return err(f"HTTP {status} from {label}: the provider is temporarily unavailable{tries}. Try again shortly.{suffix}")
     if status is not None:
         return err(f"HTTP {status} from {label}.{suffix}")
 

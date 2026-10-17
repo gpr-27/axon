@@ -21,6 +21,7 @@ _HUNK_RE = re.compile(r"^@@+\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@+")
 @dataclass
 class Hunk:
     old_start: int | None          # 1-based; None when the header had no numbers
+    old_count: int | None = None   # length of the old range from the header ("-5,0" = pure insertion after line 5)
     lines: list[tuple[str, str]] = field(default_factory=list)  # (op, text) op in " ", "-", "+"
     no_eol_old: bool = False
     no_eol_new: bool = False
@@ -75,7 +76,8 @@ def parse_patch(text: str) -> list[FilePatch]:
                 cur = FilePatch(None, None)
                 files.append(cur)
             m = _HUNK_RE.match(line)
-            hunk = Hunk(int(m.group(1)) if m else None)
+            hunk = Hunk(int(m.group(1)) if m else None,
+                        (int(m.group(2)) if m.group(2) is not None else 1) if m else None)
             cur.hunks.append(hunk)
             i += 1
             continue
@@ -137,6 +139,9 @@ def apply_hunks(text: str, hunks: list[Hunk], label: str) -> str:
         old, new = h.old, h.new
         if h.old_start is None:
             expected = used_until
+        elif h.old_count == 0 and not old:
+            # "@@ -N,0 +M,k @@" inserts *after* old line N (diff -U0 style), not before it.
+            expected = max(0, h.old_start + offset)
         else:
             expected = max(0, h.old_start - 1 + offset) if h.old_start > 0 else 0
         pos = _find(lines, old, expected, used_until)
@@ -191,7 +196,9 @@ class PatchTool(Tool):
             if len(files) > 1:
                 raise ToolError("'path' can only be used with a single-file patch; this patch touches several files.")
             fp = files[0]
-            if fp.new_path is None and fp.old_path is not None:
+            if fp.new_path is None and fp.old_path is None:  # headerless hunks: modify `path`
+                fp.old_path = fp.new_path = raw_path
+            elif fp.new_path is None:
                 fp.old_path = raw_path
             else:
                 fp.new_path = raw_path
@@ -212,21 +219,30 @@ class PatchTool(Tool):
                 ctx.file_state.check_writable(p)
                 plans.append(("delete", p, None, "utf-8", "\n"))
                 continue
-            if fp.old_path is None and not p.exists():  # creation
+            if fp.old_path is None:  # creation
+                if p.exists():
+                    raise ToolError(
+                        f"Cannot create {label}: the file already exists. Read it and patch it with "
+                        f"'--- a/{fp.new_path}' headers (or use Write/Edit)."
+                    )
                 body = "\n".join(t for h in fp.hunks for op, t in h.lines if op == "+")
                 if fp.hunks and not fp.hunks[-1].no_eol_new:
                     body += "\n"
                 plans.append(("create", p, body, "utf-8", "\n"))
                 continue
-            if not p.exists():
-                raise ToolError(f"Cannot patch non-existent file: {label}")
-            ctx.file_state.check_writable(p)
-            tf = read_text_file(p)
+            src_path = resolve_path(ctx, fp.old_path) if fp.old_path and fp.old_path != fp.new_path else None
+            if src_path == p:
+                src_path = None
+            renaming = src_path is not None and src_path.exists() and not p.exists()
+            source = src_path if renaming else p
+            if not source.exists():
+                raise ToolError(f"Cannot patch non-existent file: {display_path(source, ctx.workspace)}")
+            ctx.file_state.check_writable(source)
+            tf = read_text_file(source)  # a rename (--- a/old +++ b/new) patches old's content into new
             text = tf.text if tf.newline else normalize_newlines(tf.text)
             new_text = apply_hunks(text, fp.hunks, label)
-            src_path = resolve_path(ctx, fp.old_path) if fp.old_path and fp.old_path != fp.new_path else None
-            plans.append(("modify", p, new_text, tf.encoding, tf.newline or "\n"))
-            if src_path is not None and src_path != p and src_path.exists():
+            plans.append(("create" if renaming else "modify", p, new_text, tf.encoding, tf.newline or "\n"))
+            if src_path is not None and src_path.exists():
                 ctx.file_state.check_writable(src_path)
                 plans.append(("delete", src_path, None, "utf-8", "\n"))  # rename
 

@@ -68,6 +68,55 @@ def fetch_local_lmstudio_models(base_url: str = "http://localhost:1234/v1", time
     return _local_models(base_url, "/v1/models", "data", "id", timeout)
 
 
+# Model ids a provider lists that are not chat models (speech, TTS, safety classifiers, embeddings, images).
+_NON_CHAT_MARKERS = ("whisper", "tts", "orpheus", "prompt-guard", "safeguard", "embed", "moderation", "transcribe",
+                     "dall-e", "image", "audio", "rerank", "distil-whisper")
+
+
+def is_chat_model_id(model_id: str) -> bool:
+    m = model_id.lower()
+    return not any(k in m for k in _NON_CHAT_MARKERS)
+
+
+def fetch_provider_models(preset: "ProviderPreset", api_key: str, base_url: str | None = None,
+                          timeout: float = 6.0) -> tuple[list[str] | None, int | None]:
+    """The chat models *api_key* can use on *preset*, from the provider's own /models list.
+
+    Returns (models, http_status). models is None when the list could not be read (no endpoint, network error,
+    401/403 for a bad key); callers then fall back to the preset's built-in list. Hard-coded lists go stale
+    (Groq retired llama-3.3-70b-versatile), so the live list is preferred whenever the provider has one."""
+    try:
+        import httpx
+        from axon.providers.transport import _api_root, default_headers, is_azure, is_official_anthropic
+        url = base_url or effective_base_url(preset)
+        if not url or is_azure(url):
+            return None, None
+        headers = default_headers(url)
+        if preset.api_format == "anthropic":
+            endpoint = f"{url.rstrip('/').removesuffix('/v1')}/v1/models"
+            headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+            if not is_official_anthropic(url):
+                headers["authorization"] = f"Bearer {api_key}"
+        else:
+            endpoint = f"{_api_root(url)}/models"
+            if api_key:
+                headers["authorization"] = f"Bearer {api_key}"
+        resp = httpx.get(endpoint, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            return None, resp.status_code
+        data = resp.json()
+        items = data.get("data", data.get("models")) if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return None, resp.status_code
+        ids = [str(it.get("id") or it.get("name") or "") if isinstance(it, dict) else str(it) for it in items]
+        ids = sorted({i for i in ids if i and is_chat_model_id(i)})
+        # Keep the preset's own order (curated, best first) for the models still offered, then the rest.
+        ordered = [m for m in preset.models if m in ids] + [m for m in ids if m not in preset.models]
+        return (ordered or None), resp.status_code
+    except Exception:
+        return None, None
+
+
 PROVIDER_PRESETS: list[ProviderPreset] = [
     # AgentRouter (primary default)
     ProviderPreset(
@@ -189,11 +238,13 @@ PROVIDER_PRESETS: list[ProviderPreset] = [
     ProviderPreset(
         id="groq",
         name="Groq",
-        description="Ultra-fast LPU inference · Llama, GPT-OSS, Kimi K2",
+        description="Ultra-fast LPU inference · GPT-OSS, Qwen",
         category="Popular Cloud",
         base_url="https://api.groq.com/openai/v1",
-        default_model="llama-3.3-70b-versatile",
-        models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b", "moonshotai/kimi-k2-instruct", "qwen/qwen3-32b"],
+        default_model="openai/gpt-oss-120b",
+        # Groq's chat models as of 2026-10-18 (it retired the Llama 3.x and Kimi models); the picker also reads
+        # the live /models list with your key, so new models show up without an update.
+        models=["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
         env_vars=("GROQ_API_KEY",),
         namespaced_models=True,
         strict_messages=True,
@@ -319,7 +370,8 @@ def read_env_file(path: Path | None = None) -> dict[str, str]:
     p = path or axon_env_file()
     out: dict[str, str] = {}
     try:
-        text = p.read_text(encoding="utf-8", errors="ignore")
+        from axon.config import decode_config_bytes, dotenv_value
+        text = decode_config_bytes(p.read_bytes())  # strips a UTF-8 BOM (Windows Notepad), handles UTF-16
     except OSError:
         return out
     for line in text.splitlines():
@@ -331,7 +383,7 @@ def read_env_file(path: Path | None = None) -> dict[str, str]:
         k, v = s.split("=", 1)
         k = k.strip()
         if _ENV_NAME.match(k):
-            out[k] = _clean_value(v)
+            out[k] = dotenv_value(v).strip()  # drops a trailing "# comment" the way python-dotenv does
     return out
 
 

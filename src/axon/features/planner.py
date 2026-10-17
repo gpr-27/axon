@@ -617,6 +617,7 @@ def execute_plan(agent: Any, plan: Plan, ws: Path, choose: ChooseFn | None = Non
             print_checklist(plan)
             _out(f"  {_c('ACCENT')}{_c('BOLD')}Step {i + 1}/{len(plan.steps)}{_c('RST')} · {step.title}")
             retry_note = ""
+            attempts0 = step.attempts  # attempts persist across /plan-resume; the retry limit is per run
             while True:
                 run_step(agent, plan, i, ws, retry_note)
                 save_plan(ws, plan)
@@ -625,7 +626,7 @@ def execute_plan(agent: Any, plan: Plan, ws: Path, choose: ChooseFn | None = Non
                 _out(f"  {_c('ERROR')}{_g('✗', 'X')} step {i + 1} failed{_c('RST')}: {step.error[:300]}")
                 decision = choose(step, i)
                 if decision == "retry":
-                    if step.attempts <= max_retries:
+                    if step.attempts - attempts0 <= max_retries:
                         retry_note = step.error + ("\n\n" + step.summary[-3000:] if step.summary else "")
                         continue
                     _out(f"  {_c('WARNING')}Retry limit ({max_retries}) reached for step {i + 1}.{_c('RST')}")

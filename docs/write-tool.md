@@ -17,9 +17,9 @@ The model never types a `python` or `echo` command to create the file. It emits 
 
 ## 2. How the model knows which tool to use
 
-The tool registry (`create_default_registry`, `src/axon/tools/__init__.py:95`) builds the list of tools. Each tool publishes a `name`, a `description`, and a JSON `schema` for its arguments. That list is sent to the model with every request. The model chooses a tool from those descriptions.
+The tool registry (`create_default_registry`, `src/axon/tools/__init__.py:101`) builds the list of tools. Each tool publishes a `name`, a `description`, and a JSON `schema` for its arguments. That list is sent to the model with every request. The model chooses a tool from those descriptions.
 
-For `Write`, the schema requires `path` and `content` (`src/axon/tools/fs_write.py:107-115`). The description tells the model to Read existing files before overwriting them and to prefer `Edit` for changes to existing files.
+For `Write`, the schema requires `path` and `content` (`src/axon/tools/fs_write.py:108-116`). The description tells the model to Read existing files before overwriting them and to prefer `Edit` for changes to existing files.
 
 The choice is the model's, guided by descriptions. It is not a hard-coded rule. Two examples of how it works in practice:
 
@@ -30,7 +30,7 @@ The choice is the model's, guided by descriptions. It is not a hard-coded rule. 
 
 ## 3. What happens inside a single tool call
 
-When the model's response contains a tool call, `AgentLoop._run_one_inner` (`src/axon/agent/loop.py:1962`) runs these steps in order:
+When the model's response contains a tool call, `Agent._run_one_inner` (`src/axon/agent/loop.py:2154`) runs these steps in order:
 
 1. **Lookup.** `registry.get(name)` finds the tool. An unknown name becomes an error result that is sent back to the model.
 2. **Hooks.** A `PreToolUse` hook may block the call or change its input.
@@ -43,13 +43,13 @@ The model then reads that result and decides what to do next: finish, call anoth
 
 ## 4. What `Write` does inside `run()`
 
-`WriteTool.run` (`src/axon/tools/fs_write.py:119`):
+`WriteTool.run` (`src/axon/tools/fs_write.py:120`):
 
 1. **Validate.** `path` must be non-empty. `content` must be present; an empty string is allowed and creates an empty file.
-2. **Resolve the path.** `resolve_path` (`src/axon/tools/base.py:116`) strips quotes and `file://` prefixes, then passes the path through the workspace path jail. Paths outside the workspace are caught here or by the permission check.
+2. **Resolve the path.** `resolve_path` (`src/axon/tools/base.py:117`) strips quotes and `file://` prefixes, then passes the path through the workspace path jail. Paths outside the workspace are caught here or by the permission check.
 3. **Inspect.** If the file exists, check that it is writable, then read its encoding and line endings so they can be kept. Binary or oversized files are overwritten as UTF-8.
 4. **Checkpoint.** `capture_checkpoint` saves the old content before anything changes, so `/rewind` can undo the write.
-5. **Write atomically.** `atomic_write_text` (`src/axon/tools/textio.py:160`) calls `atomic_write_bytes` (`textio.py:128`), which:
+5. **Write atomically.** `atomic_write_text` (`src/axon/tools/textio.py:171`) calls `atomic_write_bytes` (`textio.py:138`), which:
    - creates parent directories (`mkdir(parents=True)`),
    - writes to a temporary file in the same directory,
    - flushes and fsyncs it,
@@ -62,11 +62,11 @@ The model then reads that result and decides what to do next: finish, call anoth
 
 So when the call runs, the file is created on disk at that moment, with its directories. There is no separate "initialize the file" step. If you want an empty file, the model sends `content: ""`.
 
-`Edit` does not create files. If the file is missing it fails with "Use Write to create new files" (`fs_write.py:31`).
+`Edit` does not create files. If the file is missing it fails with "Use Write to create new files" (`fs_write.py:32`).
 
 ## 5. Permissions: why Write asks, and what bypass changes
 
-`PermissionEngine.check` (`src/axon/permissions/engine.py:252`) evaluates rules in this order; the first match wins:
+`PermissionEngine.check` (`src/axon/permissions/engine.py:253`) evaluates rules in this order; the first match wins:
 
 1. Hard invariants: catastrophic shell commands and protected credential or system paths are always denied.
 2. Deny rules.
@@ -77,12 +77,12 @@ So when the call runs, the file is created on disk at that moment, with its dire
 7. Bypass mode: everything else is allowed.
 8. Paths outside the workspace always need approval.
 9. `acceptEdits` mode: file edits inside the workspace are allowed.
-10. The tool's own default. `Write` and `Bash` both use `ask` (`fs_write.py:117`, `shell.py:264`).
+10. The tool's own default. `Write` and `Bash` both use `ask` (`fs_write.py:118`, `shell.py:281`).
 
 What this means for your terminal:
 
 - `Write  can modify · default ask` means: in normal mode, Write asks before writing.
-- `mode bypass` means step 7 applies. Writes inside the workspace go through without asking. The hard invariants and deny rules still apply, and paths outside the workspace still need approval.
+- `mode bypass` means step 7 applies. Writes go through without asking, including paths outside the workspace (step 8 comes after bypass). The hard invariants, deny rules and ask rules still apply.
 
 ## 6. What happens without Bash
 
@@ -107,9 +107,9 @@ For "create the file, then run it", the model needs both tools. `Write` makes th
 
 ## 7. How a Bash command is executed
 
-`BashTool.run` (`src/axon/tools/shell.py:317`) does this:
+`BashTool.run` (`src/axon/tools/shell.py:334`) does this:
 
-1. **Check the command.** The permission engine first checks it against the catastrophic-command list and the credential-path list (`engine.py:262-268`).
+1. **Check the command.** The permission engine first checks it against the catastrophic-command list and the credential-path list (`engine.py:263-270`).
 2. **Pick the working directory.** The shell's working directory is tracked across calls. A `cd` in one call still applies to the next.
 3. **Wrap the command.** On POSIX, the command is run as:
 
@@ -120,11 +120,11 @@ For "create the file, then run it", the model needs both tools. `Write` makes th
    exit $__axon_ec
    ```
 
-   The sentinel line carries the final directory back to Axon, which records it (`_extract_cwd`, `shell.py:302`). The exit code is preserved.
+   The sentinel line carries the final directory back to Axon, which records it (`_extract_cwd`, `shell.py:319`). The exit code is preserved.
 4. **Build the argv.** `plat.shell_command_argv` (`src/axon/platform.py:1160`) returns `[shell, "-c", command]` on POSIX. PowerShell gets `-EncodedCommand`, and cmd.exe gets `chcp 65001` plus the command.
 5. **Start the process.** `subprocess.Popen` runs it with `stdin` set to `DEVNULL`, stdout and stderr merged, and its own process group, so a timeout can kill the whole tree.
-6. **Collect output.** Output is read in chunks, and carriage-return progress lines are collapsed. Output is capped at 30,000 characters by default.
-7. **Time out.** The default is 180 seconds, with a maximum of 1800 (`shell.py:27`). Long-running processes (dev servers, watchers) can use `run_in_background`, which returns a shell id to read with `BashOutput` and stop with `KillShell`.
+6. **Collect output.** Output is read in chunks, and carriage-return progress lines are collapsed. Output is capped at `tool_output_cap` characters (150,000 by default).
+7. **Time out.** The default is 180 seconds, with a maximum of 1800 (`shell.py:38`); the default comes from `bash_timeout_s`. Long-running processes (dev servers, watchers) can use `run_in_background`, which returns a shell id to read with `BashOutput` and stop with `KillShell`.
 8. **Return.** Output and the exit code go back to the model as the tool result.
 
 Bash does not write the model's code. It runs whatever command the model asked for. This is why it is powerful and why it asks for approval by default.
@@ -153,4 +153,4 @@ If step 5 fails, for example with a `SyntaxError`, the model receives the error 
 | Does Write need Bash? | No. |
 | Does running the file need Bash? | Yes, or another tool that runs processes. |
 | Who decides which tool? | The model, from the tool descriptions and the request. |
-| What asks for permission? | Both `Write` and `Bash` ask by default. Bypass mode allows in-workspace work. |
+| What asks for permission? | Both `Write` and `Bash` ask by default. Bypass mode runs them without asking (deny and ask rules still apply). |

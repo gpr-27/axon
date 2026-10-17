@@ -56,6 +56,7 @@ from axon.providers.transport import (
     parse_retry_after,
     request_timeout_for,
     responses_url,
+    retry_budget,
     should_retry_status,
 )
 from axon.providers import transport as _transport
@@ -619,7 +620,10 @@ class OpenAICompatProvider:
     def _attempt_with_retries(self, url: str, body: dict[str, Any], outcome: _Outcome, state: StreamState,
                               acc: dict[int, _ToolAcc], stop: list[StopReason], thinking: bool, *, responses: bool) -> Iterator[StreamEvent]:
         retries = max_retries_for(self.settings)
-        for attempt in range(retries + 1):
+        base_url = str(self.settings.base_url)
+        attempt = -1
+        while attempt < retries:
+            attempt += 1
             outcome.status = None
             outcome.transport_exc = None
             delay: float | None = None
@@ -635,6 +639,19 @@ class OpenAICompatProvider:
                         for ev in parser(resp, state, acc, stop, thinking, outcome):
                             outcome.events_yielded = True
                             yield ev
+                        if outcome.stream_error is not None and not outcome.events_yielded:
+                            # An error sent in place of the first chunk (OpenRouter / gateways answer 200, then
+                            # `{"error": {"code": 502}}`): nothing was shown yet, so it is retried like a 5xx.
+                            err_status = _status_of_stream_error(outcome.stream_error)
+                            budget = retry_budget(retries, err_status, outcome.stream_error, base_url)
+                            if err_status is not None and attempt < budget and should_retry_status(
+                                    err_status, outcome.stream_error, attempt, base_url):
+                                retries = budget
+                                detail = extract_error_detail(outcome.stream_error)
+                                outcome.stream_error = None
+                                _reset_stream(state, acc, stop)
+                                delay = backoff_delay(min(attempt, 4))
+                                reason = f"HTTP {err_status} from {self.endpoint_label()}" + (f": {detail[:160]}" if detail else "")
                     else:
                         try:
                             resp.read()
@@ -642,8 +659,10 @@ class OpenAICompatProvider:
                             pass
                         txt = getattr(resp, "text", "")
                         outcome.text = txt if isinstance(txt, str) else str(txt)
-                        if attempt < retries and should_retry_status(status, outcome.text, attempt):
-                            delay = backoff_delay(attempt, parse_retry_after(outcome.headers))
+                        budget = retry_budget(retries, status, outcome.text, base_url)
+                        if attempt < budget and should_retry_status(status, outcome.text, attempt, base_url):
+                            retries = budget
+                            delay = backoff_delay(min(attempt, 4), parse_retry_after(outcome.headers))
                             detail = extract_error_detail(outcome.text)
                             reason = f"HTTP {status} from {self.endpoint_label()}" + (f": {detail[:160]}" if detail else "")
             except Exception as e:
@@ -936,6 +955,15 @@ def _status_of_stream_error(err: Any) -> int | None:
             if "overloaded" in t or "server_error" in t:
                 return 503
     return None
+
+
+def _reset_stream(state: StreamState, acc: dict[int, _ToolAcc], stop: list[StopReason]) -> None:
+    """Forget what a failed attempt accumulated without showing it, before the request is sent again."""
+    state.text_parts.clear()
+    state.thinking_parts.clear()
+    state.usage = Usage()
+    acc.clear()
+    stop[0] = "end_turn"
 
 
 def _strip_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

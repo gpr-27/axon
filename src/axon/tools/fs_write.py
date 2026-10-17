@@ -18,6 +18,7 @@ from axon.tools.textio import (
     atomic_write_text,
     normalize_newlines,
     read_text_file,
+    reencoding_note,
 )
 
 
@@ -155,7 +156,8 @@ class WriteTool(Tool):
             change = f"Overwrote file (+{added} −{removed})"
         else:
             change = "Overwrote file"
-        return f"Successfully wrote {len(content):,} characters ({n_lines} lines) to {rel}. {change}."
+        return (f"Successfully wrote {len(content):,} characters ({n_lines} lines) to {rel}. {change}."
+                f"{reencoding_note(text, encoding) if existed else ''}")
 
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
@@ -170,7 +172,9 @@ class WriteTool(Tool):
 def _edit_summary(output: str, is_error: bool) -> str:
     if is_error:
         return default_summary(output, True)
-    m = re.search(r"\((.*)\)\.?$", output.strip())
+    # Anchor on the counts group: paths may contain parentheses (Next.js "app/(group)/page.tsx") and a
+    # re-encoding note may follow the closing parenthesis.
+    m = re.search(r"\((\d+ (?:occurrence|replacement)[^()]*)\)", output)
     return m.group(1) if m else default_summary(output, False)
 
 
@@ -218,7 +222,7 @@ class EditTool(Tool):
         ctx.file_state.record_read(p)
         return (
             f"Successfully applied edit to {rel} ({count} occurrence{'s' if count != 1 else ''} replaced, "
-            f"{_summarize_change(tf.text, new_text)})."
+            f"{_summarize_change(tf.text, new_text)}).{reencoding_note(new_text, tf.encoding)}"
         )
 
 
@@ -293,7 +297,7 @@ class MultiEditTool(Tool):
         ctx.file_state.record_read(p)
         return (
             f"Successfully applied {len(edits)} edits to {rel} ({total} replacement{'s' if total != 1 else ''}, "
-            f"{_summarize_change(tf.text, text)})."
+            f"{_summarize_change(tf.text, text)}).{reencoding_note(text, tf.encoding)}"
         )
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:

@@ -59,7 +59,10 @@ class WorktreeManager:
         if not cls.is_git_repo(workspace):
             return None
 
-        clean_id = "".join(c for c in task_id if c.isalnum() or c in ("-", "_"))
+        import uuid
+        # Task ids ("sub-1") repeat across sessions and /clear: a unique suffix keeps another session's live
+        # worktree from being found "existing" below and wiped.
+        clean_id = "".join(c for c in task_id if c.isalnum() or c in ("-", "_")) + f"-{uuid.uuid4().hex[:8]}"
         branch_name = f"axon-subagent-{clean_id}"
         try:
             from axon import storage

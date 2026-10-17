@@ -168,7 +168,7 @@ def test_no_false_test_summary():
 def test_bash_summary_row_has_pass_fail_bar():
     content = "Command exited with non-zero code 1.\nOutput:\n..F.F...\nFAILED t.py::a\nFAILED t.py::b\n2 failed, 6 passed in 0.21s"
     rows = _plain(tool_result_rows("Bash", {"command": "pytest"}, content, width=80))
-    assert rows[0].startswith("█████████▒▒▒ 6 passed · 2 failed · exit code 1")
+    assert rows[0].startswith("✗ exit 1 · █████████▒▒▒ 6 passed · 2 failed")
     one = _plain(tool_result_rows("Bash", {"command": "pytest"}, "5 passed in 0.19s", width=80))
     assert one == ["████████████ 5 passed · 0.19s"]
 
@@ -306,7 +306,7 @@ def test_result_rows_link_to_full_output_and_card_paths_to_the_file(monkeypatch,
     summary = next(l for l in out.splitlines() if "⎿" in l)
     m = re.search(r"\x1b\]8;;(file://[^\x1b]+)\x1b\\", summary)
     assert m and "axon-outputs-" in m.group(1)                    # the summary row opens the full output
-    assert strip_ansi(summary).strip().startswith("⎿  2 lines of output")
+    assert strip_ansi(summary).strip().startswith("⎿  ✓ exit 0 · 2 lines of output")
     r.on_event(ToolExecutionStart(id="w", name="Write", input={"path": "new.py", "content": "x = 1\n"}))
     r.on_event(ToolExecutionResult(id="w", name="Write", input={}, content="Created file."))
     out = capsys.readouterr().out

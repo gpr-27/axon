@@ -527,12 +527,26 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
             line = line[len("export "):].strip()
         k, v = line.split("=", 1)
         k = k.strip().lstrip("﻿")
-        v = v.strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-            v = v[1:-1]
+        v = dotenv_value(v)
         if k:
             out[k] = v
     return out
+
+
+def dotenv_value(raw: str) -> str:
+    """The value of a dotenv ``KEY=value`` line: quotes removed, and a trailing ``# comment`` dropped
+    (``KEY="sk-1" # work`` and ``KEY=sk-1  # work`` both give ``sk-1``, as python-dotenv reads them)."""
+    v = raw.strip()
+    if v[:1] in ("'", '"'):
+        end = v.find(v[0], 1)
+        if end > 0 and (end == len(v) - 1 or v[end + 1:].lstrip().startswith("#")):
+            return v[1:end]
+        if len(v) >= 2 and v[-1] == v[0]:
+            return v[1:-1]
+    for i, ch in enumerate(v):
+        if ch == "#" and i > 0 and v[i - 1] in " \t":
+            return v[:i].rstrip()
+    return v
 
 
 def preset_key_env_vars() -> list[str]:

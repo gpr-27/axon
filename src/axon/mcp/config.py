@@ -108,6 +108,11 @@ class ServerSpec:
         args = raw.get("args") or []
         if isinstance(args, str):
             args = [args]
+        elif not isinstance(args, list):
+            raise ValueError(f"MCP server '{name}': 'args' must be a list")
+        for key in ("env", "headers"):
+            if raw.get(key) is not None and not isinstance(raw.get(key), dict):
+                raise ValueError(f"MCP server '{name}': '{key}' must be an object")
         return cls(
             name=name,
             type=infer_type(raw),
@@ -173,10 +178,14 @@ class ServerSpec:
         for k, v in list(self.env.items()) + list(self.headers.items()):
             if is_placeholder(v):
                 problems.append(f"{k} is a placeholder ('{v}')")
+        for v in self.env.values():
             for var in missing_vars(v):
                 problems.append(f"${{{var}}} is not set")
-        for text in [self.command, self.url, *self.args]:
-            for var in missing_vars(text):
+        # command/args/url/headers may reference the server's own env (resolved() expands them that way)
+        lookup = dict(os.environ)
+        lookup.update({k: expand_vars(v) for k, v in self.env.items()})
+        for text in [self.command, self.url, *self.args, *(self.headers.values())]:
+            for var in missing_vars(text, lookup):
                 problems.append(f"${{{var}}} is not set")
         return sorted(set(problems))
 
@@ -318,7 +327,7 @@ class MCPConfig:
             return None
         data = _read_json(spec.source)
         servers = data.get("mcpServers")
-        if not isinstance(servers, dict) or name not in servers:
+        if not isinstance(servers, dict) or not isinstance(servers.get(name), dict):
             return None
         if disabled:
             servers[name]["disabled"] = True

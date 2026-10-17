@@ -109,7 +109,7 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
             sys.stdout.write("\n" + "\n".join(header) + "\n")
             sys.stdout.flush()
             chosen = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key,
-                              footer="↑↓ move · enter choose · 1/2/3 quick pick · y yes · a session · n/esc deny").run()
+                              footer=f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny").run()
             result: ApprovalResult = chosen.value if isinstance(chosen, SelectItem) else "deny"
         else:
             print("\n" + "\n".join(header))

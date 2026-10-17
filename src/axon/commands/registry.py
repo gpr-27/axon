@@ -266,6 +266,14 @@ def render_help(agent: Any, topic: str = "") -> None:
                 print(f"  {SLATE}Arguments:{RST} {cc.argument_hint}")
             print()
             return
+        hits = search_commands(topic, agent)
+        if hits:
+            name_w = max(len(n) for n, _ in hits) + 2
+            print(f"\n  {GOLD}{BOLD}Commands matching '{topic}'{RST}  {SLATE}{len(hits)} found{RST}")
+            for n, d in hits:
+                print(f"    {WHITE}{'/' + n:<{name_w}}{RST} {SLATE}{_one_line_desc(d)}{RST}")
+            print(f"\n  {DIM}/help <command> for details{RST}\n")
+            return
         print(f"\n  {ROSE}No command named /{topic}.{RST}\n")
         return
 
@@ -311,6 +319,21 @@ def render_help(agent: Any, topic: str = "") -> None:
     if collisions:
         print(f"\n  {GOLD}!{RST} {SLATE}Shadowed by built-ins (use the prefixed form): {', '.join(collisions)}{RST}")
     print(f"\n  {DARK_SLATE}Shortcuts: {WHITE}?{DARK_SLATE} help · {WHITE}#text{DARK_SLATE} quick memory · {WHITE}!cmd{DARK_SLATE} shell · {WHITE}@file{DARK_SLATE} attach · {WHITE}Ctrl+F{DARK_SLATE} transcript · {WHITE}Ctrl+D{DARK_SLATE} exit{RST}\n")
+
+
+def search_commands(word: str, agent: Any = None, limit: int = 12) -> list[tuple[str, str]]:
+    """Commands whose name or description mentions ``word`` (what ``/help <word>`` lists):
+    name hits first, then description hits. [(name without '/', description)]."""
+    w = word.strip().lower()
+    if not w:
+        return []
+    try:
+        entries = [(n.lstrip("/"), d or "") for n, d in list_command_names(_workspace(agent), agent)]
+    except Exception:
+        entries = [(c.name, c.description) for c in visible_commands()]
+    by_name = [(n, d) for n, d in entries if w in n.lower()]
+    by_desc = [(n, d) for n, d in entries if w not in n.lower() and w in d.lower()]
+    return (by_name + by_desc)[:limit]
 
 
 def shadowed_names(agent: Any) -> list[str]:

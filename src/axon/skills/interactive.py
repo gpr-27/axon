@@ -231,6 +231,11 @@ def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -
             info("Cancelled.")
             return
         try:
+            from axon.session.library import record_saved
+            record_saved(skill.path, action="deleted", source="/skills delete", workspace=workspace)  # keep a last copy
+        except Exception:
+            pass
+        try:
             roots = {r.resolve() for r, _ in skills_mgr.skill_roots()}
             folder = skill.path.parent.resolve()
             if skill.path.name == "SKILL.md" and folder.parent in roots:

@@ -47,9 +47,56 @@ def tool_paths(tool_name: str, args: dict[str, Any]) -> list[str]:
         v = args.get(k)
         if isinstance(v, str) and v.strip():
             out.append(v.strip())
+    if tool_name == "Glob":
+        base = _glob_pattern_base(args.get("pattern"))
+        if base:
+            out.append(base)  # Glob re-roots absolute / ~ / ../ patterns at their literal prefix
+    if tool_name in ("Patch", "ApplyPatch", "apply_patch") and not out:
+        # The files a unified diff touches are named in its ---/+++ headers, not in a path argument;
+        # without them acceptEdits, deny rules and the outside-workspace check would never see them.
+        out.extend(patch_paths(args.get("patch") or args.get("diff")))
     if not out and tool_name in ("Ls", "Glob", "Grep", "CodeSearch", "FileTree"):
         out.append(".")  # these default to the workspace root
     return out
+
+
+def patch_paths(patch: Any) -> list[str]:
+    """File paths named by a unified diff's ``--- a/x`` / ``+++ b/x`` header pairs (/dev/null skipped),
+    parsed the same way as axon.tools.patch.parse_patch."""
+    if not isinstance(patch, str):
+        return []
+    lines = patch.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    for i, line in enumerate(lines[:-1]):
+        if not (line.startswith("--- ") and lines[i + 1].startswith("+++ ")):
+            continue
+        for raw in (line[4:], lines[i + 1][4:]):
+            p = raw.strip().split("\t")[0].strip()
+            if len(p) >= 2 and p[0] == p[-1] == '"':
+                p = p[1:-1]
+            if not p or p == "/dev/null":
+                continue
+            if p.startswith(("a/", "b/")):
+                p = p[2:]
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def _glob_pattern_base(pattern: Any) -> str | None:
+    """Literal directory prefix of a Glob pattern that points outside its search root
+    ("/abs/**/*.py", "~/x/*", "../other/*"), mirroring GlobTool's re-rooting; None otherwise."""
+    if not isinstance(pattern, str):
+        return None
+    pat = pattern.strip().replace("\\", "/")
+    if not (os.path.isabs(pat) or re.match(r"^[A-Za-z]:/", pat) or pat.startswith(("../", "~")) or pat == ".."):
+        return None
+    lit: list[str] = []
+    for part in pat.split("/"):
+        if any(ch in part for ch in "*?[{"):
+            break
+        lit.append(part)
+    return "/".join(lit) or "/"
 
 
 # ─── Shell parsing ──────────────────────────────────────────────────────────
@@ -86,8 +133,8 @@ def split_shell_commands(cmd: str) -> list[str]:
         if ch in ";\n|&":
             # '&&', '||', '|&', '&', '|', ';', newline all separate commands;
             # keep redirections like 2>&1 intact.
-            if ch == "&" and buf and buf[-1] == ">":
-                buf.append(ch)
+            if ch == "&" and ((buf and buf[-1] in "<>") or cmd[i + 1:i + 2] == ">"):
+                buf.append(ch)  # 2>&1, <&3 and the bash "&>file" / "&>>file" redirections
                 i += 1
                 continue
             parts.append("".join(buf))
@@ -353,8 +400,9 @@ class Rule:
             cmd = str(args.get("command", "")).strip()
             if not cmd:
                 return False
-            exact = not pat.endswith(":*") and not any(c in pat for c in _GLOB_CHARS)
-            if exact and _command_matches(pat, cmd):  # an exact rule may name a whole compound line
+            # A rule that is literally the whole command line matches it, even a compound line or one
+            # containing glob characters ("always allow" stores such commands verbatim).
+            if " ".join(pat.split()) == " ".join(cmd.split()):
                 return True
             subs = split_shell_commands(cmd)
             if for_deny:

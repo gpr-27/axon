@@ -85,7 +85,9 @@ class WebFetchTool(Tool):
             footer = f"\n\n[... {total - start - max_chars:,} more chars. Continue with start_char={start + max_chars} ...]"
         if res.truncated:
             footer += "\n[Download stopped at the 5 MB size cap.]"
-        if not window.strip():
+        if start and start >= total:
+            window = f"(start_char={start:,} is past the end of the content, which has {total:,} chars)"
+        elif not window.strip():
             window = "(no readable text content)"
         out = "\n".join(header) + "\n\n" + window + footer
         return cap_text(out, output_cap(ctx, max_chars + 2000))

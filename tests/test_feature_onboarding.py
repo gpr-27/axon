@@ -198,3 +198,15 @@ def test_unknown_provider_flag() -> None:
 def test_feature_contract_exports() -> None:
     assert "setup" in ob.CLI_SUBCOMMANDS
     assert any(c.name == "/setup" for c in ob.COMMANDS)
+
+
+def test_scripted_setup_keeps_configured_mode_and_trace(axon_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `axon setup --provider X` without --mode/--trace must not reset the user's choices
+    monkeypatch.setattr(ob, "_port_open", lambda *a, **k: False)
+    (axon_home / "config.toml").write_text('mode = "plan"\ntrace_level = "detailed"\n', encoding="utf-8")
+    code, res = ob.run_setup(["--provider", "ollama", "--model", "llama3.1:8b"], interactive=False,
+                             detect_local=lambda: {})
+    assert code == 0 and res is not None
+    data = tomllib.loads((axon_home / "config.toml").read_text(encoding="utf-8"))
+    assert data["mode"] == "plan" and data["trace_level"] == "detailed"
+    assert res.mode == "plan" and res.trace_level == "detailed"

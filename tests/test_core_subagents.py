@@ -91,3 +91,91 @@ def test_subagent_without_approver_cannot_run_ask_tools(workspace: Path) -> None
     out = run_subagent("write z", parent)
     assert "gave up" in out
     assert not (workspace / "z.txt").exists()
+
+
+class _FlakyProvider(FakeProvider):
+    """FakeProvider whose script may contain exceptions: those calls fail with a provider error."""
+
+    def stream(self, **kw: Any):  # type: ignore[override]
+        if self._turns and isinstance(self._turns[0], BaseException):
+            self.requests.append({"messages": list(kw["messages"])})
+            raise self._turns.pop(0)
+        return super().stream(**kw)
+
+
+def _rejected() -> Exception:
+    from axon.errors import ProviderError
+    e = ProviderError("AgentRouter rejected the request as invalid (HTTP 500). This is a rejection of the request itself.",
+                      status=500)
+    e.retryable = False  # type: ignore[attr-defined]  # as classify_error marks it: the provider already retried
+    return e
+
+
+def test_subagent_resumes_after_a_provider_error_and_keeps_its_work(workspace: Path, monkeypatch: Any) -> None:
+    import axon.agent.subagent as sa
+    monkeypatch.setattr(sa, "SUBAGENT_RESUME_DELAY_S", 0)
+    (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+    prov = _FlakyProvider(scripted(("Read", {"path": "a.py"})) + [_rejected()] + scripted("a.py sets x"))
+    parent = make_agent(prov, workspace)
+    parent.session.open("sess_p")
+    out = run_subagent("inspect a.py", parent, subagent_type="explore", description="inspect a")
+    assert "a.py sets x" in out and "failed" not in out
+    task = parent.subagents.all_tasks()[0]
+    assert task.status == "completed" and task.resumes == 1
+    assert [e["kind"] for e in task.timeline if e["kind"] in ("tool", "resume")] == ["tool", "resume"]
+    # The resumed call still carries the Read call and its result: nothing was redone.
+    resumed = prov.requests[-1]["messages"]
+    assert any(m.get("role") == "assistant" and "tool_use" in str(m.get("content")) for m in resumed)
+    assert "continue" in str(resumed[-1].get("content"))
+
+
+def test_subagent_that_keeps_failing_reports_its_progress(workspace: Path, monkeypatch: Any) -> None:
+    import axon.agent.subagent as sa
+    monkeypatch.setattr(sa, "SUBAGENT_RESUME_DELAY_S", 0)
+    (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+    prov = _FlakyProvider(scripted(("Read", {"path": "a.py"})) + [_rejected() for _ in range(sa.SUBAGENT_RESUMES + 1)])
+    parent = make_agent(prov, workspace)
+    parent.session.open("sess_p")
+    out = run_subagent("inspect a.py", parent, subagent_type="explore", description="inspect a")
+    first = out.splitlines()[0]
+    assert first.startswith("[Subagent #1 (inspect a) failed after") and "rejected the request as invalid" in first
+    assert f"Progress before the failure (resumed {sa.SUBAGENT_RESUMES}x before giving up):" in out
+    assert "- Read a.py" in out
+    task = parent.subagents.all_tasks()[0]
+    assert task.status == "error" and task.resumes == sa.SUBAGENT_RESUMES
+    assert task.timeline[-1]["kind"] == "error"
+
+
+def test_system_prompt_warns_that_readonly_subagents_have_no_shell(workspace: Path) -> None:
+    from axon.agent.prompt import subagents_block
+    block = subagents_block(load_agent_definitions(workspace))
+    explore = next(l for l in block.splitlines() if l.startswith("- **explore**"))
+    assert "no Bash" in explore and "cannot run git" in explore
+    general = next(l for l in block.splitlines() if l.startswith("- **general-purpose**"))
+    assert "no Bash" not in general
+
+
+def test_paths_in_a_subagent_prompt_are_not_attached_as_images(workspace: Path) -> None:
+    (workspace / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    prov = FakeProvider(scripted("read it"))
+    parent = make_agent(prov, workspace)
+    parent.session.open("sess_p")
+    run_subagent(f"Read {workspace / 'logo.png'} and describe it", parent, subagent_type="explore", description="x")
+    first_user = next(m for m in prov.requests[0]["messages"] if m.get("role") == "user")
+    assert isinstance(first_user["content"], str)            # no image blocks from a model-written prompt
+
+
+def test_svg_is_not_treated_as_an_image() -> None:
+    from axon.agent.images import IMAGE_EXTENSIONS
+    assert ".svg" not in IMAGE_EXTENSIONS
+
+
+def test_auto_compaction_is_saved_so_a_resume_replays_the_compacted_history(workspace: Path) -> None:
+    agent = make_agent(FakeProvider([]), workspace)
+    agent.session.open("sess_c")
+    for i in range(8):
+        agent.conversation.messages += [{"role": "user", "content": f"q{i} " + "x" * 400},
+                                        {"role": "assistant", "content": f"a{i} " + "y" * 400}]
+    assert agent.compact(trigger="auto", summary="SUMMARY OF EARLIER WORK")
+    restored = agent.session.read_conversation("sess_c").messages
+    assert restored == agent.conversation.messages and "SUMMARY OF EARLIER WORK" in str(restored)

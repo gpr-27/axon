@@ -313,6 +313,8 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
             open_in_editor(src)
             return CommandResult(handled=True)
         if confirm(f"Delete {src}?", default=not is_tty()):
+            from axon.session.library import record_saved
+            record_saved(src, action="deleted", source="/agents delete", workspace=ws)  # keep a last copy
             src.unlink()
             ok(f"Deleted agent {d.name}")
         return CommandResult(handled=True)
@@ -396,7 +398,11 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
     _clear_screen()
     from axon.session.interactive import render_restored_conversation
     render_restored_conversation(agent.conversation, sub_id, ledger=agent.ledger, path=_session_file(agent, sub_id))
-    print(f"  {CYAN}⚡ Viewing subagent #{task.index} ({task.title}){RST} · {SLATE}/main returns to the main session{RST}\n")
+    print(f"  {CYAN}⚡ Viewing subagent #{task.index} ({task.title}){RST} · {SLATE}/main returns to the main session{RST}")
+    if getattr(task, "status", "") == "error":
+        reason = " ".join(str(getattr(task, "error_msg", "") or "the model call failed").split())
+        print(f"  {ROSE}✗ This subagent failed:{RST} {WHITE}{reason}{RST}")
+    print()
 
 
 @command("subagents", category=CAT, description="Open a subagent's transcript from this session as a chat",
@@ -749,8 +755,11 @@ def handle_tools(agent: Any, arg: str) -> CommandResult:
             if props:
                 section("Parameters")
                 for pn, ps in props.items():
+                    ps = ps if isinstance(ps, dict) else {}
                     mark = f"{ROSE}*{RST}" if pn in req else " "
-                    print(f"    {mark}{WHITE}{pn:<16}{RST} {DARK_SLATE}{ps.get('type', 'any'):<8}{RST} {SLATE}{str(ps.get('description', ''))[:80]}{RST}")
+                    ptype = ps.get("type", "any")
+                    ptype = "|".join(map(str, ptype)) if isinstance(ptype, list) else str(ptype)  # e.g. ["string", "null"]
+                    print(f"    {mark}{WHITE}{pn:<16}{RST} {DARK_SLATE}{ptype:<8}{RST} {SLATE}{str(ps.get('description', ''))[:80]}{RST}")
             print()
         return CommandResult(handled=True)
     mode = agent.settings.mode
@@ -790,7 +799,8 @@ def _traces(agent: Any) -> list[Any]:
         return tr
     try:
         from axon.agent.trace import load_traces
-        return load_traces(agent.session.session_dir, agent.session.active_session_id)
+        return load_traces(ws_of(agent), agent.session.active_session_id,
+                           legacy_session_dir=getattr(agent.session, "session_dir", None))
     except Exception:
         return []
 

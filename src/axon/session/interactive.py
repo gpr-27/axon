@@ -260,7 +260,15 @@ def handle_branch(agent: Agent, name: str = "") -> None:
     store.open(new_id)
     for m in agent.conversation.messages:
         role = m.get("role")
-        if role == "user":
+        content = m.get("content")
+        if role == "user" and isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            # Tool results go back as tool_results records, so the branch's prompts (rewind points,
+            # retry, titles) are only the prompts the user typed.
+            store.append("tool_results", [
+                {"tool_use_id": b.get("tool_use_id"), "content": b.get("content", ""),
+                 "is_error": bool(b.get("is_error"))} for b in content])
+        elif role == "user":
             store.append("user_message", {"role": "user", "content": m.get("content", "")})
         elif role == "assistant":
             store.append("assistant_turn", {"native": dict(m), "text": "", "tool_uses": [], "usage": None})

@@ -319,6 +319,11 @@ def _scan(path: Path, default_model: str | None) -> _Summary:
         if t == "session_star":
             s.starred = bool(data.get("starred", False))
             continue
+        if t == "compaction" and isinstance(data.get("usage"), dict):  # /compact summary call
+            usage = _usage_from(data["usage"])
+            s.tokens += usage.input + usage.output
+            s.cost += estimate_cost(data.get("model") or default_model, usage)
+            continue
         if t not in _CONTENT_TYPES:
             continue
         s.count += 1
@@ -501,6 +506,8 @@ class SessionStore:
             if t == "turn_failed" and isinstance(data, dict) and data.get("rolled_back") and out:
                 out.pop()  # that prompt is not in the replayed history
             elif t == "user_message":
+                if isinstance(data, dict) and not is_user_prompt({"role": "user", **data}):
+                    continue  # a tool-result carrier (e.g. a branched transcript), not a prompt
                 try:
                     out.append(float(entry.get("timestamp") or 0.0))
                 except (TypeError, ValueError):
@@ -689,7 +696,8 @@ class SessionStore:
         found: dict[str, Path] = {}
         for d in reversed(self._dirs()):
             for p in d.glob(f"{glob_escape(session_id)}_sub_*.jsonl"):
-                found[p.name] = p
+                if not p.name.endswith(".traces.jsonl"):  # legacy per-subagent trace files are not transcripts
+                    found[p.name] = p
         return [found[k] for k in sorted(found)]
 
     def load_ledger(self, session_id: str, model: str, include_subagents: bool = True) -> Ledger:
@@ -706,12 +714,14 @@ class SessionStore:
         if not path.exists():
             return
         for entry in iter_records(path):
-            if entry.get("type") != "assistant_turn":
+            t = entry.get("type")
+            if t not in ("assistant_turn", "compaction"):
                 continue
             data = entry.get("data", {})
             u = data.get("usage") if isinstance(data, dict) else None
-            if isinstance(u, dict):
-                _ledger_record(ledger, str(data.get("model") or model), _usage_from(u), source)
+            if isinstance(u, dict):  # a /compact record carries the summary call's usage
+                _ledger_record(ledger, str(data.get("model") or model), _usage_from(u),
+                               "compaction" if t == "compaction" else source)
 
     def load_workspace_ledger(self, model: str) -> Ledger:
         """Cumulative ledger across this workspace's sessions (subagents included)."""
@@ -846,7 +856,8 @@ class SessionStore:
         """Every file/dir that belongs to a session: transcript, subagents, traces, checkpoints,
         todos and full-output files (current and legacy locations)."""
         main_file = self._file(session_id)
-        items: list[Path] = [main_file, *self._subagent_files(session_id),
+        sub_traces = [p for d in self._dirs() for p in d.glob(f"{glob_escape(session_id)}_sub_*.traces.jsonl")]
+        items: list[Path] = [main_file, *self._subagent_files(session_id), *sub_traces,
                              main_file.with_name(f"{session_id}.traces.jsonl"),
                              self.workspace / ".axon" / "checkpoints" / session_id]
         try:

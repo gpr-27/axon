@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from axon.providers.base import StreamEvent
 
 DEFAULT_SUBAGENT_ITERATIONS = 25
+STEP_LIMIT_PREFIX = "Stopped at the step limit"   # first body line of an exhausted result (the UI keys on it)
 # Model names in Claude agent files that mean "use the parent's model".
 _INHERIT_MODELS = {"", "inherit", "default", "sonnet", "opus", "haiku"}
 
@@ -333,11 +334,24 @@ class SubagentTask:
     live_logs: list[str] = field(default_factory=list)
     agent_type: str = "general-purpose"
     model: str = ""
+    # What the UI shows while it runs. *activity* is one line ("Read src/x.py", "Thinking", "Retrying ...");
+    # *timeline* holds structured entries {"kind", "text", "is_error", "t"} where kind is one of
+    # step | tool | result | thinking | retry | resume | error.
+    activity: str = ""
+    timeline: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: int = 0
+    retries: int = 0          # provider retries (a request was rejected and sent again)
+    resumes: int = 0          # turn-level resumes after a provider error (work kept, run continued)
 
     def add_log(self, msg: str) -> None:
         self.live_logs.append(msg)
         if len(self.live_logs) > 30:
             self.live_logs.pop(0)
+
+    def add_entry(self, kind: str, text: str, is_error: bool = False) -> None:
+        self.timeline.append({"kind": kind, "text": text, "is_error": is_error, "t": time.time()})
+        if len(self.timeline) > 300:
+            del self.timeline[:50]
 
 
 class SubagentManager:
@@ -347,12 +361,24 @@ class SubagentManager:
         self._tasks: list[SubagentTask] = []
         self._counter: int = 0
         self._threads: dict[str, int] = {}
+        self._reserved: dict[str, int] = {}  # tool_use_id -> number, handed out in call order
         self.on_update: Callable[[list[SubagentTask]], None] | None = None
 
-    def register(self, prompt: str, max_steps: int = 15, title: str | None = None, agent_type: str = "general-purpose") -> SubagentTask:
+    def reserve(self, call_id: str) -> int:
+        """Give the Task call *call_id* its subagent number now (the batch calls this in call order)."""
         with self._lock:
             self._counter += 1
-            idx = self._counter
+            self._reserved[call_id] = self._counter
+            return self._counter
+
+    def register(self, prompt: str, max_steps: int = 15, title: str | None = None, agent_type: str = "general-purpose",
+                 call_id: str = "") -> SubagentTask:
+        with self._lock:
+            if call_id and call_id in self._reserved:
+                idx = self._reserved.pop(call_id)
+            else:
+                self._counter += 1
+                idx = self._counter
             source = (title or "").strip() or (prompt.strip().splitlines()[0] if prompt.strip() else "")
             clean_title = source.strip("#* -:").replace("[Subtask]", "").strip()
             if len(clean_title) > 42:
@@ -420,7 +446,7 @@ class SubagentManager:
 
     def all_tasks(self) -> list[SubagentTask]:
         with self._lock:
-            return list(self._tasks)
+            return sorted(self._tasks, key=lambda t: t.index)
 
     def get_task(self, query: str) -> SubagentTask | None:
         with self._lock:
@@ -435,6 +461,7 @@ class SubagentManager:
             self._tasks.clear()
             self._counter = 0
             self._threads.clear()
+            self._reserved.clear()
 
     # ── cancellation (Ctrl+X Ctrl+K) ──
     def bind_thread(self, task_id: str, ident: int | None) -> None:
@@ -447,14 +474,16 @@ class SubagentManager:
     def cancel(self, task_id: str) -> bool:
         """Interrupt one running subagent (KeyboardInterrupt raised in its thread)."""
         import ctypes
+        # Signal under the lock: once bind_thread(task_id, None) has run, the thread can no longer be interrupted
+        # (an interrupt landing after the run would escape into the tool pool and the parent's turn).
         with self._lock:
             ident = self._threads.get(task_id)
-        if not ident:
-            return False
-        try:
-            return ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(KeyboardInterrupt)) == 1
-        except Exception:
-            return False
+            if not ident:
+                return False
+            try:
+                return ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(KeyboardInterrupt)) == 1
+            except Exception:
+                return False
 
     def cancel_all(self) -> int:
         """Interrupt every running subagent; returns how many were signalled."""
@@ -534,12 +563,61 @@ def _persist_subagent_run(parent: Any, task: Any, agent_type: str, model: str, p
     except Exception:
         pass
 
+# Turn-level resumes after a provider error (on top of the provider's own retries), with a growing pause.
+SUBAGENT_RESUMES = 2
+SUBAGENT_RESUME_DELAY_S = 3.0
+_RESUME_PROMPT = ("continue (the previous request failed with a provider error; pick up where you left off "
+                  "using the tool results above)")
+
+
+def _failure_report(task: Any, reason: str) -> str:
+    """What the delegating agent sees when a subagent fails: the reason plus the tool calls that already ran,
+    so it can retry, narrow the task or do the rest itself without repeating finished work."""
+    steps = int(getattr(task, "steps", 0) or 0)
+    when = f" after {steps} step{'s' if steps != 1 else ''}" if steps else ""
+    head = f"[Subagent #{task.index} ({task.title}) failed{when}: {reason}]"
+    resumed = f" (resumed {task.resumes}x before giving up)" if getattr(task, "resumes", 0) else ""
+    progress = _progress_section(task, f"the failure{resumed}")
+    return f"{head}\n\n{progress}" if progress else head
+
+
+def _progress_section(task: Any, before: str) -> str:
+    """'Progress before <before>:' and the last 20 tool calls the subagent made ('' when it made none)."""
+    tools = [e["text"] for e in getattr(task, "timeline", []) if e.get("kind") == "tool"]
+    if not tools:
+        return ""
+    shown = tools[-20:]
+    more = f"\n- … {len(tools) - len(shown)} earlier tool calls" if len(tools) > len(shown) else ""
+    return f"Progress before {before}:{more}\n" + "\n".join(f"- {t}" for t in shown)
+
+
+def _step_limit(parent: Any, agent_def: AgentDefinition, requested: Any) -> int:
+    """Steps (model calls) for one subagent: the Task call's max_steps, else the agent's maxTurns, else 25;
+    always within [1, the session's max_iterations]."""
+    cap = max(1, int(getattr(parent.settings, "max_iterations", DEFAULT_SUBAGENT_ITERATIONS) or 1))
+    want = requested if requested not in (None, "", 0) else (agent_def.max_turns or DEFAULT_SUBAGENT_ITERATIONS)
+    try:
+        want = int(want)
+    except (TypeError, ValueError):
+        want = DEFAULT_SUBAGENT_ITERATIONS
+    return max(1, min(want, cap))
+
+
+def _sub_error_text(result: Any) -> str:
+    """The one-line reason a subagent's model call failed (the parent's retry advice is dropped)."""
+    raw = str(getattr(result, "error", None) or getattr(result, "final_text", "") or "")
+    first = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+    first = first.removeprefix("Provider error: ").strip()
+    return first or "the model call failed"
+
+
 def run_subagent(
     prompt: str,
     parent: Agent,
     max_iterations: int | None = None,
     subagent_type: str | None = None,
     description: str = "",
+    call_id: str = "",
 ) -> str:
     """Run an isolated subagent turn and return its final report.
 
@@ -554,9 +632,10 @@ def run_subagent(
         available = ", ".join(sorted(d.name for d in load_agent_definitions(parent.settings.workspace)))
         raise ToolError(f"Unknown subagent_type '{subagent_type}'. Available: {available}")
 
-    max_iter = int(max_iterations or agent_def.max_turns or min(DEFAULT_SUBAGENT_ITERATIONS, max(1, parent.settings.max_iterations)))
+    max_iter = _step_limit(parent, agent_def, max_iterations)
     model = _resolve_model(parent, agent_def)
-    task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name)
+    task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name,
+                                     call_id=call_id)
     task.model = model
     started = time.time()
 
@@ -575,6 +654,7 @@ def run_subagent(
                 cost=cost, input_tokens=int(getattr(usage, "input", 0) or 0),
                 output_tokens=int(getattr(usage, "output", 0) or 0), status=status,
                 duration_s=time.time() - started if phase == "end" else 0.0, iterations=iterations,
+                detail=result_text if status in ("error", "cancelled") else "",
             ))
         except Exception:
             pass
@@ -589,7 +669,7 @@ def run_subagent(
             msg = str(getattr(res, "message", "") or "blocked")
             parent.subagents.fail(task.id, f"Blocked by SubagentStart hook: {msg}")
             emit_parent("end", "error", result_text=f"Blocked by SubagentStart hook: {msg}")
-            return f"[Subagent #{task.index} blocked by SubagentStart hook: {msg}]"
+            return f"[Subagent #{task.index} ({task.title}) failed: blocked by SubagentStart hook: {msg}]"
         if extra_ctx:
             prompt = f"{prompt}\n\n<subagent-start-hook>\n{extra_ctx}\n</subagent-start-hook>"
 
@@ -604,6 +684,7 @@ def run_subagent(
             pass
 
     pending_args: dict[str, str] = {}
+    thinking_buf: list[str] = []
 
     def sub_on_event(event: StreamEvent) -> None:
         task.events.append(event)
@@ -626,24 +707,58 @@ def run_subagent(
             nested("tool", name=event.name,
                    summary=(f"{args_txt} -> " if args_txt else "") + f"{event.lines} lines · ~{event.est_tokens} tok",
                    is_error=event.is_error, duration_s=event.duration_s)
-        if isinstance(event, LLMCallStart):
+        if isinstance(event, LLMCallStart) and event.iteration > max_iter:
+            # The extra call at the step limit: the subagent writes its report (no tools run).
+            parent.subagents.update_progress(task.id, max_iter)
+            task.add_log("Step limit reached: writing the final report")
+            task.add_entry("step", f"Step limit ({max_iter}) reached · writing the final report")
+            task.activity = "Step limit reached · writing the final report"
+            thinking_buf.clear()
+        elif isinstance(event, LLMCallStart):
             parent.subagents.update_progress(task.id, event.iteration)
             task.add_log(f"Step {event.iteration}: model call")
+            task.add_entry("step", f"Step {event.iteration} · asking {model}")
+            task.activity = f"Step {event.iteration} · waiting for {model}"
+            thinking_buf.clear()
         elif isinstance(event, ToolExecutionStart):
             arg_str = str(event.input)
             if len(arg_str) > 50:
                 arg_str = arg_str[:47] + "..."
             task.add_log(f"{event.name}({arg_str})")
+            task.tool_calls += 1
+            target = _short_args(event.input, 120)
+            task.add_entry("tool", f"{event.name} {target}".rstrip())
+            task.activity = f"{event.name} {_short_args(event.input, 60)}".rstrip()
         elif isinstance(event, ToolExecutionResult):
             st = "Error" if event.is_error else "Result"
             c_str = str(event.content).strip().replace("\n", " ")
             if len(c_str) > 55:
                 c_str = c_str[:52] + "..."
             task.add_log(f"  -> {st}: {c_str}")
+            raw = str(event.content or "")
+            first = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "(no output)")
+            n = len(raw.splitlines())
+            task.add_entry("result", f"{first[:140]}" + (f"  ({n} lines)" if n > 1 else ""), is_error=bool(event.is_error))
         elif isinstance(event, ThinkingDelta):
             th = (getattr(event, "text", "") or "").strip()
             if len(th) > 10:
                 task.add_log(f"Thinking: {th[:55]}...")
+            thinking_buf.append(getattr(event, "text", "") or "")
+            text = " ".join("".join(thinking_buf).split())
+            if text:
+                task.activity = f"Thinking · {text[-70:]}"
+                if task.timeline and task.timeline[-1]["kind"] == "thinking":
+                    task.timeline[-1]["text"] = text[:400]
+                else:
+                    task.add_entry("thinking", text[:400])
+        elif type(event).__name__ in ("RetryEvent", "ProviderRetry"):
+            task.retries += 1
+            why = _sub_error_text(type("E", (), {"error": getattr(event, "error", "")})())
+            att, mx, delay = getattr(event, "attempt", 0), getattr(event, "max_attempts", 0), float(getattr(event, "delay_s", 0) or 0)
+            line = f"Retry {att}/{mx} in {delay:.1f}s · {why}"
+            task.add_log(line)
+            task.add_entry("retry", line, is_error=True)
+            task.activity = f"Retrying ({att}/{mx}) · {why}"
 
     from axon.agent.loop import Agent
     from axon.session.store import SessionStore
@@ -690,19 +805,43 @@ def run_subagent(
             f"{prompt}\n\n"
             "When you are done, reply with a concise final report for the agent that delegated this task: what you did or "
             "found, exact file paths (with line numbers where useful), and any open issues. Your final message is the only "
-            "thing the delegating agent will see."
+            f"thing the delegating agent will see. You have at most {max_iter} steps (model calls); budget them so the "
+            "report gets written."
         )
         parent.subagents.bind_thread(task.id, threading.get_ident())
         try:
             result = sub_agent.run_turn(sub_prompt)
+            spent = [result.usage]
+            # A provider error ends the turn, but the tool calls and results so far stay in the subagent's
+            # history: resume from there (or resend the prompt if nothing ran) instead of losing the run.
+            while result.stop_reason == "error" and task.resumes < SUBAGENT_RESUMES:
+                task.resumes += 1
+                why = _sub_error_text(result)
+                failed = getattr(sub_agent, "last_failed_turn", None) or {}
+                again = _RESUME_PROMPT if failed.get("resume") else sub_prompt
+                line = f"Resume {task.resumes}/{SUBAGENT_RESUMES} after: {why}"
+                task.add_log(line)
+                task.add_entry("resume", line, is_error=True)
+                task.activity = f"Resuming ({task.resumes}/{SUBAGENT_RESUMES}) · {why}"
+                time.sleep(SUBAGENT_RESUME_DELAY_S * task.resumes)
+                result = sub_agent.run_turn(again)
+                spent.append(result.usage)
+            # Unbound inside the try: a cancel signalled just before this still lands in the handler below.
+            parent.subagents.bind_thread(task.id, None)
         except KeyboardInterrupt:
             parent.subagents.bind_thread(task.id, None)
             parent.subagents.complete(task.id, "[Cancelled by user]", sub_agent.conversation, status="cancelled")
-            emit_parent("end", "cancelled", result_text="[Cancelled by user]")
-            return f"[Subagent #{task.index} ({task.title}) was cancelled by the user before finishing.]"
-        parent.subagents.bind_thread(task.id, None)
+            parent.subagents.fail(task.id, "Stopped by the user")
+            emit_parent("end", "cancelled", result_text="Stopped by the user")
+            return f"[Subagent #{task.index} ({task.title}) failed: stopped by the user before it finished.]"
         final_text = (result.final_text or "").strip()
-        sub_usage = result.usage
+        sub_usage = Usage(
+            input=sum(int(getattr(u, "input", 0) or 0) for u in spent),
+            output=sum(int(getattr(u, "output", 0) or 0) for u in spent),
+            cache_read=sum(int(getattr(u, "cache_read", 0) or 0) for u in spent),
+            cache_write=sum(int(getattr(u, "cache_write", 0) or 0) for u in spent),
+            reasoning=sum(int(getattr(u, "reasoning", 0) or 0) for u in spent),
+        )
         tokens_total = (sub_usage.input or 0) + (sub_usage.output or 0)
 
         if worktree_info:
@@ -727,32 +866,51 @@ def run_subagent(
                 sub_cost = float(record_usage(parent.ledger, model, agg, source=agent_def.name) or 0)
             except Exception:
                 pass
-        emit_parent("end", "exhausted" if result.stop_reason == "max_iterations" else
-                    ("error" if result.stop_reason in ("error", "interrupted") else "completed"),
+        if result.stop_reason in ("error", "interrupted"):
+            reason = _sub_error_text(result) if result.stop_reason == "error" else "stopped before it finished"
+            if result.stop_reason == "error":
+                task.add_entry("error", reason, is_error=True)
+            parent.subagents.complete(task.id, reason, sub_agent.conversation, status="error", usage=sub_usage)
+            parent.subagents.fail(task.id, reason)
+            emit_parent("end", "error", cost=sub_cost, usage=agg, iterations=result.iterations, result_text=reason)
+            return _failure_report(task, reason)
+
+        emit_parent("end", "exhausted" if result.stop_reason == "max_iterations" else "completed",
                     cost=sub_cost, usage=agg, iterations=result.iterations, result_text=final_text)
 
         header = f"[Subagent #{task.index} Result ({task.title}) | {tokens_total:,} tokens (in: {sub_usage.input:,} · out: {sub_usage.output:,})]"
         if result.stop_reason == "max_iterations":
-            parent.subagents.complete(task.id, final_text or "[Exhausted iteration ceiling]", sub_agent.conversation, status="exhausted", usage=sub_usage)
-            return f"{header}:\nReached the iteration limit ({max_iter} steps) before finishing.\n{final_text}".rstrip()
+            parent.subagents.complete(task.id, final_text or "[Stopped at the step limit]", sub_agent.conversation, status="exhausted", usage=sub_usage)
+            return _exhausted_report(header, task, max_iter, final_text)
         if not final_text:
             parent.subagents.complete(task.id, "No text output", sub_agent.conversation, status="completed", usage=sub_usage)
             return f"{header}:\nCompleted ({result.iterations} steps) with no text output."
-        status = "error" if result.stop_reason in ("error", "interrupted") else "completed"
-        parent.subagents.complete(task.id, final_text, sub_agent.conversation, status=status, usage=sub_usage)
+        parent.subagents.complete(task.id, final_text, sub_agent.conversation, status="completed", usage=sub_usage)
         return f"{header}:\n{final_text}"
     except ToolError:
         raise
     except Exception as e:
         parent.subagents.fail(task.id, str(e))
         emit_parent("end", "error", result_text=f"{type(e).__name__}: {e}")
-        return f"[Subagent #{task.index} failed: {type(e).__name__}: {e}]"
+        return f"[Subagent #{task.index} ({task.title}) failed: {type(e).__name__}: {e}]"
     finally:
         if worktree_info:
             try:
                 WorktreeManager.cleanup(worktree_info)
             except Exception:
                 pass
+
+def _exhausted_report(header: str, task: Any, max_iter: int, report: str) -> str:
+    """What the delegating agent sees when a subagent hit its step limit: the header, the limit, the report the
+    subagent wrote at the limit, and the tool calls it made (so finished work is not repeated)."""
+    parts = [f"{header}:\n{STEP_LIMIT_PREFIX} ({max_iter} steps) before finishing."]
+    if report:
+        parts.append(report)
+    progress = _progress_section(task, "the step limit")
+    if progress:
+        parts.append(progress)
+    return "\n\n".join(parts)
+
 
 def _short_args(inp: Any, limit: int = 80) -> str:
     if isinstance(inp, dict):
@@ -852,6 +1010,14 @@ def sync_subagents_for_session(agent: Agent) -> None:
 
                                 if res_match:
                                     task.result_text = res_content
+                                    fail_m = re.match(r"^\[Subagent #\d+ (?:\(.*?\) )?failed:\s*(.*)\]\s*$",
+                                                      str(res_content or ""), re.DOTALL)
+                                    if fail_m:
+                                        task.status = "error"
+                                        task.error_msg = fail_m.group(1).strip()
+                                    elif re.match(r"^\[Subagent #\d+ Result[^\]]*\]:\s*(?:Stopped at the step limit|Reached the iteration limit)",
+                                                  str(res_content or "")):
+                                        task.status = "exhausted"
                                     from axon.agent.state import Conversation
                                     sub_file = getattr(agent, "session", None) and (agent.session.session_dir / f"{parent_sess_id}_sub_{task_idx}.jsonl")
                                     if sub_file and sub_file.exists():

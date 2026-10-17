@@ -257,7 +257,11 @@ def handle_simplify(agent: Any, arg: str) -> CommandResult:
 
 
 def _detect_tests(ws: Path, extra: str) -> tuple[list[str], str]:
-    extra_args = extra.split() if extra else []
+    import shlex
+    try:  # quoted arguments stay whole: /test -k "login and not slow"
+        extra_args = shlex.split(extra, posix=(sys.platform != "win32")) if extra else []
+    except ValueError:
+        extra_args = extra.split()
     if (ws / "pyproject.toml").exists() or (ws / "pytest.ini").exists() or (ws / "setup.cfg").exists() or (ws / "tests").is_dir():
         if shutil.which("pytest"):
             return ["pytest", "-q", *extra_args], "pytest"
@@ -647,7 +651,7 @@ def handle_btw(agent: Any, arg: str) -> CommandResult:
     from axon.ui.render import render_side_question_box
     question = arg.strip()
     if not question:
-        print(f"\n  {GOLD}Usage: /btw <question>{RST} {SLATE}— a quick side question that is not added to the conversation.{RST}\n")
+        usage("/btw <question>   (a quick side question that is not added to the conversation)")
         return CommandResult(handled=True)
     context = session_context(agent)
     note = f" {SLATE}(with context of the last {context[1]} message(s)){RST}" if context[1] else ""

@@ -68,6 +68,7 @@ class Skill:
 def parse_frontmatter(text: str) -> tuple[dict[str, str | list[str]], str]:
     """Split ``---`` frontmatter from the body. Supports scalars, quoted strings,
     block scalars (``|`` ``>`` ``|-`` ``>-``) and ``- item`` lists."""
+    text = text.removeprefix("﻿")  # files saved "UTF-8 with BOM" (common on Windows)
     if not text.startswith("---"):
         return {}, text
     lines = text.splitlines()
@@ -169,18 +170,31 @@ def substitute_arguments(body: str, arguments: str, names: list[str] | None = No
         positional = shlex.split(arguments) if arguments else []
     except ValueError:
         positional = arguments.split()
-    used = "$ARGUMENTS" in body or re.search(r"\$[1-9]\b", body) is not None
-    out = body
+    named: dict[str, str] = {}
+    valid = [n for n in (names or []) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n) and n != "ARGUMENTS"]
     for i, name in enumerate(names or []):
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        if name not in valid:
             continue
-        val = (" ".join(positional[i:]) if i == len(names or []) - 1 else (positional[i] if i < len(positional) else "")) if positional else ""
-        pat = re.compile(r"\$\{" + name + r"\}|\$" + name + r"\b")
-        if pat.search(out):
-            used = True
-            out = pat.sub(lambda _m: val, out)
-    out = out.replace("$ARGUMENTS", arguments)
-    out = re.sub(r"\$([1-9])\b", lambda m: positional[int(m.group(1)) - 1] if int(m.group(1)) <= len(positional) else "", out)
+        last = i == len(names or []) - 1
+        named[name] = (" ".join(positional[i:]) if last else (positional[i] if i < len(positional) else "")) if positional else ""
+    # One pass over the body: text that was substituted in (e.g. an argument "costs $5") is never
+    # scanned again for placeholders.
+    alts = [r"\$ARGUMENTS", r"\$[1-9]\b"] + [r"\$\{" + n + r"\}|\$" + n + r"\b" for n in sorted(named, key=len, reverse=True)]
+    rx = re.compile("|".join(f"(?:{a})" for a in alts))
+    used = False
+
+    def repl(m: re.Match[str]) -> str:
+        nonlocal used
+        used = True
+        tok = m.group(0)
+        if tok == "$ARGUMENTS":
+            return arguments
+        if len(tok) == 2 and tok[1].isdigit():
+            k = int(tok[1])
+            return positional[k - 1] if k <= len(positional) else ""
+        return named.get(tok.strip("${}"), "")
+
+    out = rx.sub(repl, body)
     if arguments and not used:
         out = f"{out.rstrip()}\n\nARGUMENTS: {arguments}"
     return out

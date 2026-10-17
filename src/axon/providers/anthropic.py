@@ -36,6 +36,7 @@ from axon.providers.base import StreamCanceller, retry_event
 from axon.providers.transport import (
     backoff_delay,
     parse_retry_after,
+    retry_budget,
     should_retry_status,
     canonical_effort,
     classify_error,
@@ -181,31 +182,60 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         out.append({"role": role, "content": blocks})
 
-    # Pair tool_use with tool_result.
+    # Pair tool_use with tool_result: every tool_use is answered in the next user message, and a
+    # tool_result whose call is not in the turn just before it (history trimmed, a dropped empty
+    # assistant turn, a duplicate) is kept as plain text: the API rejects it as a tool_result.
     fixed: list[dict[str, Any]] = []
     i = 0
     while i < len(out):
         m = out[i]
-        fixed.append(m)
         i += 1
-        if m["role"] != "assistant":
+        if m["role"] == "user":
+            prev = fixed[-1] if fixed and fixed[-1]["role"] == "assistant" else None
+            cleaned = _answer_tool_uses(m, _tool_use_ids(prev) if prev is not None else [])
+            if cleaned is not None:
+                fixed.append(cleaned)
             continue
-        ids = [b.get("id") for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")]
-        if not ids:
-            continue
-        nxt = out[i] if i < len(out) else None
-        answered: set[str] = set()
-        if nxt is not None and nxt["role"] == "user":
-            answered = {b.get("tool_use_id") for b in nxt["content"] if isinstance(b, dict) and b.get("type") == "tool_result"}
-        missing = [t for t in ids if t not in answered]
-        if not missing:
-            continue
-        stubs = [{"type": "tool_result", "tool_use_id": t, "content": "[Tool execution was interrupted]", "is_error": True} for t in missing]
-        if nxt is not None and nxt["role"] == "user":
-            nxt["content"] = stubs + list(nxt["content"])
-        else:
-            fixed.append({"role": "user", "content": stubs})
+        fixed.append(m)
+        ids = _tool_use_ids(m)
+        if ids and (i >= len(out) or out[i]["role"] != "user"):
+            fixed.append({"role": "user", "content": _interrupted_stubs(ids)})
     return fixed
+
+
+def _tool_use_ids(msg: dict[str, Any]) -> list[str]:
+    return [b["id"] for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")]
+
+
+def _interrupted_stubs(ids: list[str]) -> list[dict[str, Any]]:
+    return [{"type": "tool_result", "tool_use_id": t, "content": "[Tool execution was interrupted]", "is_error": True} for t in ids]
+
+
+def _result_text(block: dict[str, Any]) -> str:
+    c = block.get("content", "")
+    if isinstance(c, list):
+        return "\n".join(str(x.get("text", "")) for x in c if isinstance(x, dict) and x.get("type") == "text")
+    return c if isinstance(c, str) else json.dumps(c)
+
+
+def _answer_tool_uses(msg: dict[str, Any], ids: list[str]) -> dict[str, Any] | None:
+    """*msg* (a user message) with exactly one tool_result per id in *ids*, first; None when left empty."""
+    results: dict[str, dict[str, Any]] = {}
+    others: list[dict[str, Any]] = []
+    for b in msg["content"]:
+        if isinstance(b, dict) and b.get("type") == "tool_result":
+            tid = b.get("tool_use_id")
+            if tid in ids:
+                results.setdefault(tid, b)
+                continue
+            text = _result_text(b)
+            if text:
+                others.append({"type": "text", "text": f"[Result of an earlier tool call]\n{text}"})
+        else:
+            others.append(b)
+    answered = [results[t] if t in results else _interrupted_stubs([t])[0] for t in ids]
+    content = answered + others
+    return {**msg, "content": content} if content else None
 
 
 def limit_cache_breakpoints(system: list[dict[str, Any]], tools: list[dict[str, Any]], messages: list[dict[str, Any]]) -> tuple[list, list, list]:
@@ -278,6 +308,27 @@ def normalize_tools_for_anthropic(tools: list[dict[str, Any]]) -> list[dict[str,
         else:
             out.append(t)
     return out
+
+
+# Anthropic error types (https://docs.anthropic.com/en/api/errors) -> the HTTP status they stand for.
+_ERROR_TYPE_STATUS = {
+    "invalid_request_error": 400, "authentication_error": 401, "billing_error": 402, "permission_error": 403,
+    "not_found_error": 404, "request_too_large": 413, "rate_limit_error": 429, "api_error": 500,
+    "timeout_error": 504, "overloaded_error": 529,
+}
+
+
+def stream_error_status(body: Any) -> int | None:
+    """HTTP status for an error event sent inside a 200 stream (None when the type is unknown)."""
+    err = body.get("error", body) if isinstance(body, dict) else None
+    etype = err.get("type") if isinstance(err, dict) else None
+    if isinstance(etype, str) and etype in _ERROR_TYPE_STATUS:
+        return _ERROR_TYPE_STATUS[etype]
+    text = str(body or "").lower()
+    for etype, code in _ERROR_TYPE_STATUS.items():
+        if etype in text:
+            return code
+    return None
 
 
 class AnthropicProvider:
@@ -380,6 +431,11 @@ class AnthropicProvider:
                 self._canceller.check()  # an aborted read surfaces as a transport error: report Esc/Ctrl+C
                 status = getattr(e, "status_code", None)
                 body = getattr(e, "body", None)
+                in_stream = isinstance(status, int) and 200 <= status < 300
+                if in_stream:
+                    # An `event: error` inside the stream (overloaded_error, api_error, ...): the SDK raises it
+                    # with the HTTP status of the stream itself (200). Use the status the error type stands for.
+                    status = stream_error_status(body)
                 text = f"{getattr(e, 'message', '')} {body or ''} {e}".lower()
                 if (not emitted[0] and not stripped_thinking and status == 400 and "extra_body" in kwargs
                         and any(k in text for k in ("thinking", "effort", "output_config", "budget_tokens", "adaptive"))):
@@ -396,19 +452,24 @@ class AnthropicProvider:
                         kwargs["tools"] = t_
                     kwargs["messages"] = m_
                     continue
-                retryable = should_retry_status(status, text, retry_no) if isinstance(status, int) else is_retryable_exception(e)
-                if not emitted[0] and retryable and retry_no < self._max_retries:
+                base_url = str(self.settings.base_url)
+                retryable = should_retry_status(status, text, retry_no, base_url) if isinstance(status, int) else is_retryable_exception(e)
+                budget = retry_budget(self._max_retries, status, text, base_url)
+                if not emitted[0] and retryable and retry_no < budget:
                     resp = getattr(e, "response", None)
-                    delay = backoff_delay(retry_no, parse_retry_after(getattr(resp, "headers", None)))
+                    delay = backoff_delay(min(retry_no, 4), parse_retry_after(getattr(resp, "headers", None)))
                     retry_no += 1
-                    yield retry_event(retry_no, self._max_retries, delay,
+                    state.text_parts.clear()  # unshown leftovers of the failed attempt (thinking when hidden)
+                    state.thinking_parts.clear()
+                    yield retry_event(retry_no, budget, delay,
                                       f"HTTP {status} from anthropic" if status else f"{type(e).__name__}: {e}")
                     _transport._sleep(delay)
                     continue
                 if status is None and is_retryable_exception(e):
                     raise connection_error(e, str(self.settings.base_url)) from e
                 raise classify_error(status=status, body=body if body is not None else getattr(e, "message", None),
-                                     base_url=str(self.settings.base_url), model=model, exc=e if status is None else None) from e
+                                     base_url=str(self.settings.base_url), model=model,
+                                     exc=e if status is None and not in_stream else None) from e
 
     def cancel(self, thread_ident: int | None = None) -> bool:
         """Abort the in-flight stream (of *thread_ident*, default all) from another thread."""

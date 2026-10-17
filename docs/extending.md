@@ -192,6 +192,16 @@ Definitions are loaded in this order, and later sources override earlier ones: b
 `--agents '<json>'`. Use `/agents` to list them or create one with a wizard, `--agent <name>` to
 run the main session as an agent, and `/subagents` to open a subagent's transcript.
 
+Each subagent has a step limit (25 by default, `maxTurns` in its definition, or `max_steps` on the
+Task call, capped by `max_iterations`). Three steps before the limit it is told to wrap up; at the
+limit it writes its report without tools, so its findings are kept.
+
+A `readonly: true` agent (and every subagent while the session is in `plan` mode) gets only
+read-only tools, so it has no shell. If a subagent's model call fails after the provider's own
+retries, the run resumes from where it stopped, up to 2 times; when it still fails, its report
+lists the progress it made before the failure. Paths in a subagent's prompt are files for it to
+read: images are never attached to the prompt automatically.
+
 ## Output styles
 
 An output style is a named addition to the system prompt that changes how answers are written. The

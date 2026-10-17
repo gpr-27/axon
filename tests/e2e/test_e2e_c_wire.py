@@ -371,13 +371,15 @@ def test_openai_length_truncated_tool_call_is_dropped_not_executed(xenv: AxonEnv
 
 
 def test_openai_midstream_error_chunk_is_reported(xenv: AxonEnv) -> None:
-    """An in-band SSE `{"error": ...}` chunk ends the turn with a readable error, not a traceback."""
-    xenv.llm.enqueue([{"raw_chunks": [{"error": {"message": "upstream exploded mid-stream", "code": 500}}],
-                       "stop_after": True}])
+    """An in-band SSE `{"error": ...}` chunk ends the turn with a readable error, not a traceback.
+    Sent before any content, a 5xx error chunk is retried like an HTTP 5xx (1 try + 3 retries here)."""
+    err = [{"raw_chunks": [{"error": {"message": "upstream exploded mid-stream", "code": 500}}], "stop_after": True}]
+    xenv.llm.enqueue(*[err] * 4)
     r = xenv.run(["-p", "--output-format", "json", "go"], timeout=40)
     no_traceback(r)
     assert r.code == 1, str(r)
     assert "upstream exploded mid-stream" in r.json()["result"], r.json()
+    assert len(xenv.llm.completion_requests()) == 4
 
 
 def test_openai_tool_name_split_across_chunks(xenv: AxonEnv) -> None:

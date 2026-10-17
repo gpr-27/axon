@@ -75,7 +75,7 @@ class MultiLanguageSymbolExtractor:
         rel = rel_path or file_path.name
 
         try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
+            content = file_path.read_text(encoding="utf-8-sig", errors="replace")
         except Exception:
             return []
 
@@ -523,7 +523,7 @@ class CodeSearchTool(Tool):
         pat = re.compile(r"\b" + re.escape(name) + r"\b")
         for fp in files:
             try:
-                text = fp.read_text(encoding="utf-8", errors="replace")
+                text = fp.read_text(encoding="utf-8-sig", errors="replace")
             except OSError:
                 continue
             if not pat.search(text):
@@ -557,7 +557,7 @@ class CodeSearchTool(Tool):
         docs: list[tuple[SymbolNode, list[str], str]] = []
         for fp in files:
             try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").split("\n")
+                lines = fp.read_text(encoding="utf-8-sig", errors="replace").split("\n")
             except OSError:
                 continue
             rel = display_path(fp, ctx.workspace)

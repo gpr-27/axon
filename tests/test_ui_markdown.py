@@ -171,7 +171,7 @@ def test_renderer_tool_execution_events(capsys):
     renderer.on_event(ToolExecutionStart(id="t2", name="Bash", input={"command": "python3 -m pytest"}))
     renderer.on_event(ToolExecutionResult(id="t2", name="Bash", input={"command": "python3 -m pytest"}, content="14 passed in 0.1s"))
     plain2 = strip_ansi(capsys.readouterr().out)
-    assert "● Bash  python3 -m pytest" in plain2
+    assert "● Bash  $ python3 -m pytest" in plain2
 
     renderer.on_event(ToolExecutionStart(id="t3", name="Read", input={"path": "src/axon/ui/render.py", "offset": 1, "limit": 100}))
     renderer.on_event(ToolExecutionResult(id="t3", name="Read", input={"path": "src/axon/ui/render.py"}, content="     1→line\n" * 100))

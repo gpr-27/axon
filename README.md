@@ -9,7 +9,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.27.5-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.6-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
@@ -52,19 +52,20 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 │        … +43 more lines · /output 1 to view all
 │   ● Grep  "def total" in src/
 │       searches inside files
+│       output_mode  content
 │     ⎿  1 match in 1 file · 0.04s
 │        src/shop/cart.py · 1 match
 │           31:     def total(self) -> Decimal:
 │ 
 │ ◆ Step 2  LLM call · claude-sonnet-4-5 · reads 4 messages (~12.5k tokens)
 │   ↪ replied in 1.4s · 12.5k in (94% cached) · 96 out · $0.0052 · ctx 6%/200k
-│   ● Bash  pytest -q tests/test_cart.py
-│       runs a shell command
+│   ● Bash  $ pytest -q tests/test_cart.py
+│       Run the cart tests
 │       ✓ allowed by rule: Bash(pytest *)
 │     ⎿  ██████████▒▒ 4 passed · 1 failed · 3 lines of output · 1.80s
 │        F....
 │        FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') ==
-│       Decimal('10.00')
+│          Decimal('10.00')
 │        1 failed, 4 passed in 0.21s
 │ 
 │ ◆ Step 3  LLM call · claude-sonnet-4-5 · reads 6 messages (~12.7k tokens)
@@ -79,8 +80,8 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 │ 
 │ ◆ Step 4  LLM call · claude-sonnet-4-5 · reads 8 messages (~12.9k tokens)
 │   ↪ replied in 1.2s · 12.9k in (97% cached) · 88 out · $0.0049 · ctx 7%/200k
-│   ● Bash  pytest -q tests/test_cart.py
-│       runs a shell command
+│   ● Bash  $ pytest -q tests/test_cart.py
+│       Re-run the cart tests
 │       ✓ allowed by rule: Bash(pytest *)
 │     ⎿  ████████████ 5 passed · 2 lines of output · 1.70s
 │        .....
@@ -167,9 +168,9 @@ axon --version
 **Install a specific version:**
 
 ```bash
-uv tool install axon-terminal==0.27.5
-pipx install axon-terminal==0.27.5
-pip install axon-terminal==0.27.5
+uv tool install axon-terminal==0.27.6
+pipx install axon-terminal==0.27.6
+pip install axon-terminal==0.27.6
 ```
 
 ## Set up a model
@@ -180,8 +181,9 @@ Run the guided setup once:
 axon setup
 ```
 
-It asks three things: **which provider**, **your API key** (typed hidden, checked live before it is
-saved) and **which model**. Keys are stored in `~/.axon/.env` on your machine only.
+It asks **which provider**, **your API key** (typed hidden, checked live before it is saved) and
+**which model**, then your default permission mode and trace level. Keys are stored in `~/.axon/.env`
+on your machine only.
 
 **Where to get a key:**
 
@@ -240,7 +242,7 @@ step as it goes ([what each mark means](#reading-a-turn)). Things to know:
 | Switch model / provider | `/model` · `/provider` |
 | Add or replace an API key | `/keys` |
 | Change any setting | `/settings` |
-| See what a turn cost | `/cost` · `/stats` (all-time) |
+| See what a turn cost | `/cost` · `/stats` (last 7 days; `/stats all` for all time) |
 | See how full the context is | `/context` · change its size with `/context limit` (128k default, 256k, 1M) |
 | Attach a file to your message | `@path/to/file` (`Ctrl+P` opens a fuzzy finder) |
 | Run a shell command | `!command` |
@@ -392,7 +394,7 @@ and key follow the model you select. Keys are read from the environment, then fr
 | `openai` | OpenAI | `https://api.openai.com/v1` | `OPENAI_API_KEY` | `gpt-5` |
 | `anthropic` | Anthropic | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
 | `xai` | xAI Grok | `https://api.x.ai/v1` | `XAI_API_KEY` | `grok-4` |
-| `groq` | Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+| `groq` | Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
 | `mistral` | Mistral AI | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` | `mistral-large-latest` |
 | `deepseek` | DeepSeek | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 | `together` | Together AI | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
@@ -451,8 +453,9 @@ Related commands:
 | **Solve** | `/autofix` `/fix` `/plan-resume` `/plan-run` `/plans` `/verify` |
 <!-- END GENERATED: commands-overview -->
 
-Subcommands run outside the REPL: `axon setup`, `axon doctor`, `axon mcp …`, `axon stats`,
-`axon report`, `axon serve`, `axon map`, `axon new` and `axon purge`. For every flag, see
+Subcommands run outside the REPL: `axon setup`, `axon doctor`, `axon mcp …`, `axon keys …`,
+`axon endpoint …`, `axon stats`, `axon report`, `axon serve`, `axon map`, `axon new`,
+`axon activity`, `axon projects`, `axon library` and `axon purge`. For every flag, see
 [docs/commands.md](docs/commands.md#command-line).
 
 ## Tools
@@ -525,6 +528,13 @@ on stdin. Exit code `2` blocks the action, and JSON on stdout can allow, ask, de
 `general-purpose`, `explore`, `plan`, `code-reviewer`, `test-runner` and `analytics`. Use `/agents`
 to create your own, `/subagents` to open a subagent's transcript, and `--agent <name>` to run the
 whole session as one.
+
+When the model starts several `Task` calls in one step they run in parallel. Each one is numbered
+in the order the model asked for it (`#1`, `#2`, …) and gets a live view: `0` shows the overview,
+`1`–`9` opens one subagent's feed (what it was asked, its model, its steps and its reason if it
+failed), `Q` shows the prompt queue, `Tab` / arrows move between them and `Esc` returns to the
+overview. When they finish, one table lists each subagent with its status, steps, time and tokens;
+a failed subagent shows its reason there and in its own card. `/subagents <n>` opens its transcript.
 
 **Output styles.** Built-in styles are `default`, `explanatory`, `learning` and `concise`, plus any
 custom Markdown style you add. Switch with `/output-style`.
@@ -687,7 +697,7 @@ JSON). Binding to a non-loopback address requires `--allow-remote`.
 | `python: command not found` inside a session on macOS | macOS ships only `python3`. Axon's Bash tool uses the workspace `.venv` automatically; for your own shell, recreate a moved or broken venv with `python3 -m venv .venv` (or `uv venv`). |
 | "externally managed environment" from pip | Your system Python blocks global installs. Use `uv tool install axon-terminal` or `pipx install axon-terminal` instead. |
 | A turn failed with an HTTP error from the provider | The work done so far is kept: type `continue` or `/retry`. Persistent errors: try `/model` to switch model, or `axon doctor`. |
-| "rejected the request as invalid" | The provider refused the request itself, not an outage. `/retry` once; if it repeats, `/compact` or switch model with `/model`. |
+| "rejected the request as invalid" | The provider refused the request itself, not an outage. AgentRouter also sends this for valid requests now and then, so Axon retries it up to 8 times there before showing it. `/retry` once; if it repeats, `/compact` or switch model with `/model`. |
 | Garbled boxes or symbols | Set `AXON_ASCII=1` for plain ASCII output, or use a UTF-8 terminal font. |
 | Too much or too little detail | `Ctrl+O` cycles the trace level; `/trace compact` is the quietest, `/thinking` hides the full reasoning. |
 | Tips or suggestions are distracting | `/tips off`, or set `suggestions = false`. |
@@ -705,7 +715,7 @@ python -m pytest -q -m "not e2e"          # unit and integration suite
 python -m pytest -q -m e2e tests/e2e      # end-to-end: the real CLI against a fake LLM server
 ```
 
-The end-to-end suite (about 1,000 tests) starts the real `axon` process against a local fake
+The end-to-end suite (about 1,200 tests) starts the real `axon` process against a local fake
 OpenAI/Anthropic-compatible server and a fake MCP server, so it needs no network access and no API
 key. For details, see [docs/testing.md](docs/testing.md).
 

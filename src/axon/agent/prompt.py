@@ -246,6 +246,9 @@ def subagents_block(agents: list[Any] | None) -> str:
     for a in sorted(agents, key=lambda x: getattr(x, "name", "")):
         tools = getattr(a, "tools", None)
         tool_note = f" [tools: {', '.join(tools)}]" if tools else ""
+        if getattr(a, "readonly", False) and not tools:
+            # Without this, read-only subagents get told to "run git diff" and burn steps looking for a shell.
+            tool_note = " [read-only tools only: no Bash, so it cannot run git or other commands; ask for files to read]"
         lines.append(f"- **{a.name}**: {a.description}{tool_note}")
     return "\n".join(lines)
 

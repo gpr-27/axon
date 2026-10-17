@@ -244,3 +244,16 @@ def test_plan_run_usage_and_provider_errors(tmp_path: Path, capsys: pytest.Captu
 def test_commands_registered() -> None:
     cmds = {c.name: c for c in planner.COMMANDS}
     assert set(cmds) == {"/plan-run", "/plans", "/plan-resume"} and "/solve" in cmds["/plan-run"].aliases
+
+
+def test_retry_limit_is_per_run_after_resume(tmp_path: Path) -> None:
+    # A step that used up its retries in an earlier run can still be retried after /plan-resume.
+    fail = SimpleNamespace(final_text="", stop_reason="error", tool_calls_count=0, error="boom")
+    plan = _plan(tmp_path)
+    agent = FakeAgent(tmp_path, results=[fail] * 3)
+    planner.execute_plan(agent, plan, tmp_path, choose=lambda s, i: "retry", max_retries=2)
+    assert plan.steps[0].attempts == 3
+    plan.steps[0].status = "pending"
+    agent2 = FakeAgent(tmp_path, results=[fail, ok(), ok(), ok()])
+    res = planner.execute_plan(agent2, plan, tmp_path, choose=lambda s, i: "retry", max_retries=2)
+    assert res.status == "done" and len(agent2.prompts) == 4

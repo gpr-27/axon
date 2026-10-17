@@ -467,8 +467,11 @@ def handle_settings(agent: Any, arg: str) -> CommandResult:
         code = print_settings(agent, arg.strip())
         return CommandResult(handled=True, success=code == 0)
     if it.kind == "command":
-        if it.key == "purge" and not is_tty():
-            hint("    Without a terminal use: axon purge [project|caches|all] --yes")
+        if it.key == "purge":
+            if not is_tty():
+                hint("    Without a terminal use: axon purge [project|caches|all] --yes")
+            else:
+                _purge_flow(agent)  # it has no slash command of its own
             return CommandResult(handled=True)
         from axon.commands.registry import dispatch_command
         rest = words[1] if len(words) > 1 else ""

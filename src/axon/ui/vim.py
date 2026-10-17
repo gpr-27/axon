@@ -206,7 +206,7 @@ class VimState:
             self.reset_pending()
             return False  # Enter, ctrl-*, arrows, tab, paste: regular editor
         # counts
-        if key.isdigit() and (key != "0" or (self.op_count if self.op else self.count)):
+        if key in "0123456789" and (key != "0" or (self.op_count if self.op else self.count)):
             if self.op:
                 self.op_count += key
             else:

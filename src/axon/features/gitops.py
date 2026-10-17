@@ -106,9 +106,11 @@ def repo_status(cwd: Path) -> RepoStatus:
         elif item.startswith("? "):
             st.untracked.append(item[2:])
         elif item.startswith(("1 ", "2 ")):
-            parts = item.split(" ", 8)
+            # "1 XY sub mH mI mW hH hI path" (9 fields); "2 ... X<score> path" (10 fields)
+            is_rename = item.startswith("2 ")
+            parts = item.split(" ", 9 if is_rename else 8)
             xy, path = parts[1], parts[-1]
-            if item.startswith("2 "):
+            if is_rename:
                 i += 1  # skip original path of a rename/copy
             if xy[0] != ".":
                 st.staged.append(path)
@@ -718,7 +720,7 @@ def handle_changes(agent: Any, arg: str) -> None:
             return
         has_head = run_git(root, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
         changes = numstat(root, "HEAD") if has_head else numstat(root, "--cached")
-        codes = _name_status(root, "HEAD") if has_head else {}
+        codes = _name_status(root, "HEAD") if has_head else _name_status(root, "--cached")
         for ch in changes:
             ch.status = codes.get(ch.path, "M")
         for u in repo_status(root).untracked:

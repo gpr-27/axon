@@ -17,7 +17,7 @@ from typing import Any, Iterable
 
 from axon.ui.markdown import format_markdown
 from axon.ui.theme import (
-    ACCENT, BOLD, BORDER, DIM, ERROR, INFO, ITALIC, MUTED, PRIMARY, RST, SUBTLE, SUCCESS, TEXT, WARNING,
+    ACCENT, BOLD, BORDER, DIM, ERROR, INFO, ITALIC, MUTED, RST, SUBTLE, SUCCESS, TEXT, WARNING,
     glyph, layout_width, sanitize, truncate, wrap_ansi,
 )
 
@@ -67,7 +67,7 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
     row for click-to-expand; ``tool_tags`` maps tool_use_id -> tag)."""
     from axon.ui.input import format_user_prompt_banner
     from axon.ui.render import (
-        Renderer, _clean, _fmt_bytes, _fmt_tokens, _one_line, _plural, _usage_line, tool_purpose, tool_result_rows, tool_target,
+        Renderer, _clean, _fmt_bytes, _fmt_tokens, _one_line, _plural, _usage_line, tool_result_rows,
     )
     _SHELL_CTX = Renderer._SHELL_CTX_RE
 
@@ -130,11 +130,10 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
         call_id = str(tu.get("id", ""))
         tag = (tool_tags or {}).get(call_id)
         state["tools"] += 1
-        add_many(wrap_rows(f"{PRIMARY}{glyph('tool')}{RST} {BOLD}{name}{RST}  {TEXT}{tool_target(name, inp)}{RST}",
-                           f"{rail}  ", f"{rail}      "), tag)
-        purpose = tool_purpose(name, registry)
-        if purpose:
-            add(f"{rail}      {SUBTLE}{purpose}{RST}", tag)
+        # The same header, purpose and argument rows the live timeline prints for this call.
+        from axon.ui.render import tool_call_rows
+        for indent, row in tool_call_rows(name, inp, 1, width - 8, registry):
+            add_many(wrap_rows(row, f"{rail}  {' ' * indent}", f"{rail}  {' ' * (indent + 4)}"), tag)
         res = results.get(call_id)
         if res is None:
             add(f"{rail}    {SUBTLE}{glyph('result')}  (no result recorded){RST}", tag)

@@ -5,7 +5,7 @@ from axon.agent.loop import Agent, TurnResult
 from axon.config import Settings
 from axon.errors import AxonError, ToolError, PermissionDenied
 
-__version__ = "0.27.5"
+__version__ = "0.27.6"
 
 __all__ = [
     "Agent",

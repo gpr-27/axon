@@ -479,6 +479,25 @@ def _default_verifier() -> Callable[..., tuple[bool, str]]:
         return lambda *a, **k: (False, "verifier unavailable")
 
 
+def _configured_value(name: str, cfg: Path) -> str:
+    """``name`` from config.toml, else the Settings default (what a session will actually use)."""
+    try:
+        try:
+            import tomllib  # type: ignore[import-not-found]
+        except ModuleNotFoundError:  # Python 3.10
+            import tomli as tomllib  # type: ignore[no-redef]
+        val = tomllib.loads(cfg.read_text(encoding="utf-8")).get(name)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    try:
+        from axon.config import Settings
+        return str(Settings.model_fields[name].default)
+    except Exception:
+        return ""
+
+
 def _current(settings: Any, name: str, default: str) -> str:
     val = getattr(settings, name, None) if settings is not None else None
     return str(val) if val else default
@@ -654,8 +673,8 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
         modes = [m for m, _ in PERMISSION_MODES]
         mode = io.choose("Permission mode", [Choice(m, m, d) for m, d in PERMISSION_MODES],
                          modes.index(cur) if cur in modes else 0)
-    else:
-        mode = _current(settings, "mode", "default")
+    else:  # scripted: keep what is configured (None = leave config.toml's value alone)
+        mode = _current(settings, "mode", "") or None
     if args.trace:
         trace = args.trace
     elif interactive:
@@ -664,7 +683,7 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
         trace = io.choose("Trace level (how much of each turn Axon shows)", [Choice(t, t, d) for t, d in TRACE_LEVELS],
                           levels.index(cur_t) if cur_t in levels else 1)
     else:
-        trace = _current(settings, "trace_level", "normal")
+        trace = _current(settings, "trace_level", "") or None
 
     if interactive:
         _ok(f"Permission mode: {mode} {glyph('dot')} trace level: {trace}")
@@ -679,6 +698,8 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
         _err(str(e))
         return 4, None
     _ok(f"Wrote {cfg}")
+    mode = mode or _configured_value("mode", cfg)
+    trace = trace or _configured_value("trace_level", cfg)
     result = SetupResult(provider=preset.id, model=model, mode=mode, trace_level=trace, base_url=base_url,
                          config_path=cfg, key_saved_to=key_saved_to, verified=verified, latency_s=latency,
                          api_key=key)

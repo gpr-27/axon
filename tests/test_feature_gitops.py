@@ -175,3 +175,22 @@ def test_changes_from_checkpoints_and_git(repo, capsys):
 def test_not_a_repo(tmp_path, capsys):
     go.handle_git(_agent(tmp_path), "")
     assert "Not inside a git repository" in capsys.readouterr().out
+
+
+def test_status_rename_reports_new_path(repo):
+    # porcelain v2 rename entries have an extra "X<score>" field before the path
+    _g(repo, "mv", "app.py", "main.py")
+    st = go.repo_status(repo)
+    assert st.staged == ["main.py"]
+
+
+def test_changes_in_repo_without_commits_marks_added(tmp_path, capsys):
+    ws = tmp_path / "fresh"
+    ws.mkdir()
+    _g(ws, "init", "-q")
+    (ws / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _g(ws, "add", "a.py")
+    go.handle_changes(_agent(ws), "")
+    out = capsys.readouterr().out
+    assert "a.py" in out
+    assert any(line.lstrip().startswith("A ") and "a.py" in line for line in out.splitlines())

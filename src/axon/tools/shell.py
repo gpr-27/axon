@@ -24,6 +24,17 @@ from axon.errors import ToolError
 from axon.tools.base import Tool, ToolContext
 
 _SCRUB_ENV_SUBSTRINGS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
+# Variables that match a scrub substring but hold no secret, and that tools need: the ssh-agent
+# socket (git over ssh), the X11 cookie path, and git's commit identity (GIT_AUTHOR_*).
+_ENV_KEEP = frozenset({"SSH_AUTH_SOCK", "XAUTHORITY"})
+
+
+def _is_secret_env(name: str) -> bool:
+    up = name.upper()
+    if up in _ENV_KEEP:
+        return False
+    up = up.replace("AUTHOR", "")  # GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL are identity, not credentials
+    return any(sub in up for sub in _SCRUB_ENV_SUBSTRINGS)
 MAX_TIMEOUT_S = 1800
 
 
@@ -117,7 +128,7 @@ def _python_hint(env: dict[str, str]) -> str:
 
 
 def _child_env(workspace: Path | None = None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not any(sub in k.upper() for sub in _SCRUB_ENV_SUBSTRINGS)}
+    env = {k: v for k, v in os.environ.items() if not _is_secret_env(k)}
     if workspace is not None:
         _apply_python_env(env, Path(workspace))
     env.update({"TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat", "PYTHONIOENCODING": "utf-8",
@@ -172,6 +183,7 @@ class _Capture:
     def add(self, text: str) -> None:
         if not text:
             return
+        chunk = text
         with self.lock:
             if self.spill is None and not self.spill_path and self.total + len(text) > 2 * (self.cap // 2):
                 self._open_spill()
@@ -194,7 +206,7 @@ class _Capture:
                     self.tail_len -= len(self.tail.popleft())
         if self.on_text is not None:
             try:
-                self.on_text(text)
+                self.on_text(chunk)
             except Exception:
                 self.on_text = None
 
@@ -216,12 +228,15 @@ def _session_of(ctx: Any) -> tuple[Path, str]:
     return Path(ctx.workspace), sid
 
 
-def _persist_spill(spill: str, ctx: Any, cmd: str) -> str:
-    """Move a spooled full output into the project's outputs/ folder; returns a note for the model."""
+def _persist_spill(spill: str, ctx: Any, cmd: str, post: Callable[[str], str] | None = None) -> str:
+    """Move a spooled full output into the project's outputs/ folder; returns a note for the model.
+    ``post`` cleans the text further (Bash strips its cwd-tracking sentinel line)."""
     try:
         from axon import storage
         with open(spill, "r", encoding="utf-8", errors="replace") as f:
             full = _clean_output(f.read())
+        if post is not None:
+            full = post(full).strip("\n") + "\n"
         ws, sid = _session_of(ctx)
         name = "bash-" + re.sub(r"[^A-Za-z0-9]+", "-", cmd)[:40].strip("-")
         saved = storage.save_full_output(ws, sid, name, full)
@@ -239,7 +254,9 @@ def _clean_output(text: str) -> str:
     text = plat.strip_ansi(text).replace("\r\n", "\n")
     # Collapse carriage-return progress redraws to their final state.
     if "\r" in text:
-        text = "\n".join(line.rsplit("\r", 1)[-1] if line.strip("\r") else "" for line in text.split("\n"))
+        # A trailing "\r" (progress line that ended without a newline, or a "\r\n" split across reads)
+        # is not a redraw: keep the text before it.
+        text = "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
     return text
 
 
@@ -335,7 +352,12 @@ class BashTool(Tool):
                 log_path = storage.outputs_dir(ws, sid or "no-session") / f"background-{int(time.time() * 1000)}.log"
             except Exception:
                 log_path = None
-            shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path)
+            try:
+                shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path)
+            except FileNotFoundError as e:
+                raise ToolError(f"Shell not found ({info.name}): {e}. Set AXON_SHELL to a valid shell.") from e
+            except OSError as e:
+                raise ToolError(f"Failed to start {info.name}: {e}") from e
             logged = f"\nIts complete output is also logged to {log_path}." if log_path else ""
             return (f"Started background shell {shell.id} (pid {shell.proc.pid}) in {cwd}.\n"
                     f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.{logged}")
@@ -378,7 +400,7 @@ class BashTool(Tool):
         full_note = ""
         spill = capture.close_spill() if not detached else ""
         if spill:
-            full_note = _persist_spill(spill, ctx, cmd)
+            full_note = _persist_spill(spill, ctx, cmd, self._extract_cwd)
             marker = "characters elided by Axon ...]"
             if full_note and marker in output:  # keep the tail intact: the note goes inside the marker
                 output = output.replace(marker, f"characters elided by Axon {full_note} ...]", 1)
@@ -400,7 +422,16 @@ class BashTool(Tool):
             notes.append(full_note)
         suffix = ("\n" + "\n".join(notes)) if notes else ""
         if code not in (0, None):
-            return f"Command exited with non-zero code {code}.\nOutput:\n{output}{suffix}"
+            why = f"non-zero code {code}"
+            if code < 0:  # POSIX: terminated by a signal
+                try:
+                    import signal
+                    why += f" (killed by {signal.Signals(-code).name})"
+                except (ValueError, AttributeError):
+                    pass
+            if not output:
+                return f"Command exited with {why} and no output.{suffix}"
+            return f"Command exited with {why}.\nOutput:\n{output}{suffix}"
         if not output:
             return f"(Command completed with exit code 0 and no output in {elapsed:.1f}s){suffix}"
         return output + suffix
@@ -596,5 +627,9 @@ class KillShellTool(Tool):
     default_permission: ClassVar[str] = "allow"
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        shell = BACKGROUND.kill(str(args.get("shell_id", "")).strip())
+        shell_id = str(args.get("shell_id", "")).strip()
+        if BACKGROUND.get(shell_id).proc.poll() is not None:
+            shell = BACKGROUND.get(shell_id)
+            return f"{shell.id} ({shell.command}) had already {shell.status}; nothing to kill."
+        shell = BACKGROUND.kill(shell_id)
         return f"Killed {shell.id} ({shell.command}); {shell.status}."

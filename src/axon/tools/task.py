@@ -12,7 +12,9 @@ class TaskTool(Tool):
         "Delegate a task to a subagent with its own isolated context and returns only its final report. "
         "Choose subagent_type from the subagents listed in the system prompt (general-purpose, explore, plan, "
         "code-reviewer, test-runner, or a custom agent). Independent Task calls in one turn run in parallel. "
-        "Give the subagent a complete, self-contained prompt: it cannot see this conversation."
+        "Give the subagent a complete, self-contained prompt: it cannot see this conversation. "
+        "A subagent has a step limit (default 25 model calls); at the limit it stops and reports what it found and "
+        "what is left. For a large task, ask for more steps with max_steps or split it into several Task calls."
     )
     schema: ClassVar[dict[str, Any]] = {
         "type": "object",
@@ -22,6 +24,11 @@ class TaskTool(Tool):
             "subagent_type": {
                 "type": "string",
                 "description": "Agent type to use (default: general-purpose)",
+            },
+            "max_steps": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Step limit for this subagent (default 25, max = the session's max_iterations)",
             },
         },
         "required": ["prompt"],
@@ -39,12 +46,20 @@ class TaskTool(Tool):
         if ctx.agent is None:
             raise ToolError("Subagent execution requires parent agent context.")
 
+        steps = args.get("max_steps")
+        if steps not in (None, ""):
+            try:
+                steps = int(steps)
+            except (TypeError, ValueError):
+                raise ToolError(f"max_steps must be a whole number of steps, got {steps!r}.") from None
         from axon.agent.subagent import run_subagent
         return run_subagent(
             prompt,
             parent=ctx.agent,
+            max_iterations=steps or None,
             subagent_type=str(args.get("subagent_type") or "general-purpose"),
             description=str(args.get("description") or ""),
+            call_id=ctx.tool_use_id,
         )
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 from fnmatch import fnmatch
 from pathlib import Path
@@ -409,7 +410,9 @@ class GrepTool(Tool):
                 if hit == neg:
                     continue
             try:
-                if fp.stat().st_size > MAX_GREP_FILE_BYTES:
+                st = fp.stat()
+                # FIFOs/sockets/devices would block or never end; only search regular files.
+                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_GREP_FILE_BYTES:
                     continue
                 data = fp.read_bytes()
             except OSError:

@@ -110,6 +110,16 @@ def encode_for_disk(text: str, newline: str, encoding: str) -> bytes:
         return text.encode("utf-8")
 
 
+def reencoding_note(text: str, encoding: str) -> str:
+    """Note for the tool result when ``text`` cannot be written back in the file's original
+    encoding, so encode_for_disk falls back to UTF-8 (the model was promised encoding preservation)."""
+    try:
+        text.encode(encoding)
+        return ""
+    except (UnicodeEncodeError, LookupError):
+        return f" Note: the new text has characters {encoding} cannot represent, so the file was re-encoded as UTF-8."
+
+
 def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> None:
     """os.replace with backoff: on Windows the target may be transiently locked
     (WinError 5 / 32) by an editor, antivirus or search indexer."""
@@ -128,7 +138,8 @@ def _replace_with_retry(src: str, dst: str, attempts: int = 6) -> None:
 def atomic_write_bytes(target: Path, data: bytes) -> None:
     """Atomically replace `target` with `data` (binary mode: no newline translation)."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.parent / f".{target.name}.{os.getpid()}.axon-tmp"
+    # pid + random suffix: concurrent writers in one process (parallel subagents) must not share a temp file
+    tmp = target.parent / f".{target.name}.{os.getpid()}.{os.urandom(3).hex()}.axon-tmp"
     try:
         with open(tmp, "wb") as f:
             f.write(data)

@@ -113,8 +113,9 @@ class Conversation:
     def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
         self.messages: list[dict[str, Any]] = list(messages or [])
 
-    def append_user(self, text: str) -> None:
-        processed = _extract_images_and_text(text) if isinstance(text, str) else text
+    def append_user(self, text: str, attach_images: bool = True) -> None:
+        """*attach_images*: turn image paths in the text into image blocks (the user's own prompts only)."""
+        processed = _extract_images_and_text(text) if isinstance(text, str) and attach_images else text
         self.messages.append({"role": "user", "content": processed})
 
     def append_assistant(self, turn: AssistantTurn) -> None:

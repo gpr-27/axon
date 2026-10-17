@@ -48,7 +48,7 @@ def test_render_subagent_dashboard_output():
         sys.stdout = old_stdout
 
     output = buffer.getvalue()
-    assert "Subagent Fan-Out" in output
+    assert "Subagents" in output and "1 done" in output and "1 running" in output
     assert "Explore database" in output
     assert "Inspect auth routes" in output
 

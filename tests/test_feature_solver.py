@@ -276,3 +276,45 @@ def test_autofix_ctrl_c_stops_cleanly(tmp_path: Path, capsys: pytest.CaptureFixt
 def test_commands_registered() -> None:
     names = {c.name for c in solver.COMMANDS}
     assert names == {"/verify", "/fix", "/autofix"}
+
+
+def test_fix_does_not_resend_consumed_verify_results(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ws, flag = _workspace_with_flag_check(tmp_path, 1)
+    agent = FakeAgent(ws, lambda p: flag.write_text("0", encoding="utf-8"))
+    solver.cmd_verify(agent, "")
+    solver.cmd_fix(agent, "")
+    solver.cmd_fix(agent, "")  # the first /fix fixed it: stale failures must not be sent again
+    assert len(agent.prompts) == 1
+    assert "Nothing to fix" in capsys.readouterr().out
+
+
+def test_autofix_updates_last_verify(tmp_path: Path) -> None:
+    ws, flag = _workspace_with_flag_check(tmp_path, 2)
+    solver_agent = FakeAgent(ws, lambda p: flag.write_text("1", encoding="utf-8"))
+    solver.cmd_verify(solver_agent, "")
+    solver.cmd_autofix(solver_agent, "--max 1")
+    last = solver_agent._axon_solver_state["last_verify"]
+    assert [f.location for f in last[0].failures] == ["mod.py:1"]
+
+
+def test_git_stat_from_repo_subdirectory(tmp_path: Path) -> None:
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("git"):
+        pytest.skip("git not installed")
+    _sp.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("x\n", encoding="utf-8")
+    _sp.run(["git", "add", "."], cwd=tmp_path, check=True)
+    _sp.run(["git", "-c", "user.email=t@e", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+             "commit", "-qm", "i"], cwd=tmp_path, check=True)
+    (tmp_path / "pkg" / "a.py").write_text("y\n", encoding="utf-8")
+    assert "a.py" in solver._git_stat(tmp_path / "pkg")
+
+
+def test_python_exe_skips_windows_store_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    monkeypatch.setattr(solver.shutil, "which", lambda name: stub)
+    assert solver._python_exe(tmp_path) == sys.executable
+    monkeypatch.setattr(solver.shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None)
+    assert solver._python_exe(tmp_path) == "/usr/bin/python3"

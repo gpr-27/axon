@@ -140,9 +140,9 @@ def test_timeline_step_rows(timeline_out: str) -> None:
 
 
 def test_timeline_tool_row_and_result_summary(timeline_out: str) -> None:
-    """A tool call renders as `● Bash  <command>` followed by a `⎿` summary with the output."""
+    """A tool call renders as `● Bash  $ <command>` followed by a `⎿` summary with the output."""
     out = timeline_out
-    assert "● Bash  echo hi-from-tool" in out
+    assert "● Bash  $ echo hi-from-tool" in out
     assert re.search(r"⎿\s+hi-from-tool · [\d.]+s", out), out[-2500:]
     assert "auto-allowed" not in out           # routine bypass-mode approvals are hidden at normal level
 
@@ -170,9 +170,9 @@ def test_timeline_feedback_row_between_steps(timeline_out: str) -> None:
 
 TRACE_MARKERS = {
     "compact": (["● Bash(echo hi-from-tool)", "✓ Done"], ["┌ Turn", "◆ Step", "request: system", "LLMCallStart"]),
-    "normal": (["┌ Turn", "◆ Step 1", "● Bash  echo hi-from-tool", "└ ✓ Done"],
-               ["request: system", '"command": "echo hi-from-tool"', "LLMCallStart", "usage: input="]),
-    "detailed": (["┌ Turn", "request: system", '"command": "echo hi-from-tool"', "result #1"],
+    "normal": (["┌ Turn", "◆ Step 1", "● Bash  $ echo hi-from-tool", "└ ✓ Done"],
+               ["request: system", "result #1 [", "LLMCallStart", "usage: input="]),
+    "detailed": (["┌ Turn", "request: system", "runs 1 tool may change files", "result #1"],
                  ["LLMCallStart", "usage: input=", "timing: id="]),
     "debug": (["┌ Turn", "request: system", "LLMCallStart", "usage: input=", "timing: id="], []),
 }
@@ -224,7 +224,7 @@ def test_ctrl_o_cycles_through_all_trace_levels(idle) -> None:
 
 
 def test_ctrl_o_detailed_applies_to_next_turn(axon_env: AxonEnv) -> None:
-    """After one Ctrl+O the next turn renders the detailed tool-input JSON but no debug fields."""
+    """After one Ctrl+O the next turn renders the detailed trace (batch row, what goes back) but no debug fields."""
     axon_env.llm.enqueue(*tool_turn())
     with open_repl(axon_env, ("--mode", "bypass")) as s:
         m = s.mark()
@@ -232,21 +232,21 @@ def test_ctrl_o_detailed_applies_to_next_turn(axon_env: AxonEnv) -> None:
         s.expect("Trace level detailed:", since=m)
         s.ready(since=m)
         out = s.turn("go")
-        assert '"command": "echo hi-from-tool"' in out
+        assert "runs 1 tool may change files" in out and "result #1" in out
         assert "LLMCallStart" not in out
 
 
 # ─── /inspect ──────────────────────────────────────────────────────────────
 
 def test_inspect_replays_last_turn_with_answer(axon_env: AxonEnv) -> None:
-    """`/inspect` replays the last turn: header, steps, full tool input, `├─ Answer` and footer."""
+    """`/inspect` replays the last turn: header, steps, the tool call as drawn live, `├─ Answer` and footer."""
     axon_env.llm.enqueue(*tool_turn("echo inspected-out", "FIN-INSPECT"))
     with open_repl(axon_env, ("--mode", "bypass")) as s:
         s.turn("do it")
         out = s.command("/inspect", r"└ ✓ Done")
         assert '┌ Turn 1 · "do it"' in out
         assert "◆ Step 1" in out and "◆ Step 2" in out
-        assert '"command": "echo inspected-out"' in out
+        assert "● Bash  $ echo inspected-out" in out and "run a command" in out
         assert "├─ Answer" in out and "FIN-INSPECT" in out
         assert "permission: allow by mode" in out
 
@@ -389,7 +389,7 @@ def test_double_ctrl_c_on_empty_prompt_exits(axon_env: AxonEnv) -> None:
     with open_repl(axon_env) as s:
         m = s.mark()
         s.send(CTRL_C)
-        s.expect(r"press Ctrl\+C again|ctrl\+c again", timeout=8, since=m)
+        s.expect(r"[Pp]ress Ctrl\+C again|ctrl\+c again", timeout=8, since=m)
         s.ready(since=m)
         time.sleep(0.5)
         s.send(CTRL_C)
@@ -849,7 +849,7 @@ def _start_slow(axon_env: AxonEnv, s, kind: str) -> int:
         axon_env.llm.enqueue([{"tool": "Bash", "args": {"command": "sleep 3; echo SLEPT-$((40+2))", "description": "s"}}],
                              [{"text": "after tool"}])
         m = s.submit("long tool")
-        s.expect("Bash  sleep 3", timeout=10, since=m)
+        s.expect(r"Bash  \$ sleep 3", timeout=10, since=m)
     time.sleep(0.5)
     return m
 
@@ -899,7 +899,7 @@ def _approval(axon_env: AxonEnv, target: str = "approved.txt"):
     s = open_repl(axon_env, ("--mode", "default"))
     m = s.submit("run bash")
     s.expect(r"⚠ Allow Bash\?", timeout=15, since=m)
-    s.expect(r"1/2/3 quick pick", timeout=5, since=m)
+    s.expect(r"1(/2/3|-\d) quick pick", timeout=5, since=m)
     s.drain(0.3)
     return s, m
 
@@ -1113,7 +1113,7 @@ def test_resize_at_prompt_redraws_conversation_at_new_width_and_keeps_draft(axon
         s.expect(r"Redrawn for the new window width \(64 columns\)", timeout=10, since=m)
         s.expect("❯ half typed", timeout=8, since=m)
         out = s.screen[m:]
-        assert "● Bash  echo hi-from-tool" in out          # the conversation is drawn again
+        assert re.search(r"● Bash  (\$ )?echo hi-from-tool", out)   # the conversation is drawn again
         assert "\x1b[3J" not in s._raw.decode("utf-8", "replace")  # the scrollback is never erased: first messages stay
         assert TRACEBACK not in s.screen and s.proc.poll() is None
 

@@ -58,7 +58,7 @@ def test_renderer_human_readable_observation_tracking(capsys):
     )
     plain1 = strip_ansi(capsys.readouterr().out)
     assert "● FileTree" in plain1
-    assert '"max_depth": 2' in plain1                      # detailed: full input JSON
+    assert "max_depth  2" in plain1                         # detailed: every input argument as key  value
     assert "to step 2" in plain1                           # where the result goes
     assert "axon/" in plain1                               # detailed: result preview
     assert "result #1 [call_00_H1bn] goes to the model in step 2" in plain1
@@ -157,6 +157,6 @@ def test_renderer_tool_plan_and_invocation(capsys):
     renderer.on_event(ToolExecutionStart(id="call_03_bash", name="Bash", input={"command": "echo 'hello from bash'"}, mode="bypass"))
     renderer.on_event(PermissionDecisionEvent(id="call_03_bash", tool="Bash", outcome="allow", reason="bypass mode", source="mode"))
     bash_out = strip_ansi(capsys.readouterr().out)
-    assert "● Bash  echo 'hello from bash'" in bash_out
+    assert "● Bash  $ echo 'hello from bash'" in bash_out
     assert "auto-allowed" not in bash_out          # routine bypass-mode approvals are hidden at normal level
 

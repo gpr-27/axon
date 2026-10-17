@@ -86,6 +86,16 @@ STEER_PREFIX = "[User added while you were working]:"
 SHELL_CONTEXT_CAP = 30_000
 POST_COMPACT_FILES = 5
 POST_COMPACT_FILE_CHARS = 8_000
+# Step limit: a note goes out with the tool results once this many steps (model calls) are left, and at a
+# subagent's limit one last call (no tool may run) asks for its report instead of cutting it off mid-work.
+STEP_WARNING_LEFT = 3
+STEP_WARNING_SUB = ("[Axon: {left} step{s} left before your step limit ({limit}). Stop exploring soon and write "
+                    "your final report.]")
+STEP_WARNING_MAIN = ("[Axon: {left} step{s} left before the step limit ({limit}). Finish the current change soon "
+                     "and wrap up with a summary.]")
+WRAP_UP_NOTE = ("[Axon: you reached the step limit ({limit} steps). Tools are no longer available; do not call any. "
+                "Write your final report now: what you found (exact file paths and line numbers), what you did "
+                "(files changed, commands run and their results), and what remains undone or unverified.]")
 
 # Thinking keywords (most specific first) -> effort tier for that turn.
 THINK_KEYWORDS: tuple[tuple[str, str], ...] = (
@@ -379,6 +389,7 @@ class Agent:
         self._trace: TurnTrace | None = None
         self._last_call_window: tuple[float, float] = (0.0, 0.0)
         self._batch_parallel = False
+        self._held_events: list[Any] | None = None  # subagent events queued while the live monitor is drawn
         self._cache = CacheTracker()
         self._memory: Any = None
         self._memory_text: str | None = None
@@ -407,13 +418,20 @@ class Agent:
     def _emit(self, event: Any) -> None:
         if _log.isEnabledFor(logging.DEBUG):
             _debug_event(self.agent_name, event)
+        if self._held_events is not None:
+            # The live subagent monitor owns the screen while it is drawn; worker threads must not print into it.
+            self._held_events.append(event)
+            return
+        self._deliver(event)
+
+    def _deliver(self, event: Any, show: bool = True) -> None:
         trace = self._trace
         if trace is not None:
             try:
                 trace.record(event)
             except Exception:
                 pass
-        if self.on_event:
+        if self.on_event and show:
             self.on_event(event)
 
     @property
@@ -1062,6 +1080,16 @@ class Agent:
                                  "tokens_before": tokens_before, "changed": changed, "cost_usd": round(float(cost or 0), 6)})
         if changed:
             self.last_compaction = trigger
+            # A typed record, so a resumed session replays the compacted history (not everything before it)
+            # and its ledger still counts the summary call.
+            record: dict[str, Any] = {"messages": self.conversation.messages, "trigger": trigger}
+            if usage is not None and hasattr(usage, "input"):
+                record["model"] = model
+                record["usage"] = {k: int(getattr(usage, k, 0) or 0) for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
+            try:
+                self.session.append("compaction", record)
+            except Exception:
+                pass
             # Re-read instructions and git state from disk, and let SessionStart hooks re-inject context.
             self._git_snapshot = None
             self._repo_map = None
@@ -1238,10 +1266,7 @@ class Agent:
                 for t in texts:
                     self.message_queue.push(t)
             return results
-        note = "\n".join(f"{STEER_PREFIX} {t}" for t in texts)
-        last = results[-1]
-        results = results[:-1] + [ToolResultBlock(tool_use_id=last.tool_use_id,
-                                                   content=f"{last.content}\n\n{note}", is_error=last.is_error)]
+        results = self._with_note(results, "\n".join(f"{STEER_PREFIX} {t}" for t in texts))
         self._emit(SteerEvent(count=len(texts), texts=tuple(t[:500] for t in texts), iteration=iteration))
         self.journal("steer", {"action": "delivered", "texts": texts, "iteration": iteration})
         try:
@@ -1250,6 +1275,126 @@ class Agent:
         except Exception:
             pass
         return results
+
+    @staticmethod
+    def _with_note(results: list[ToolResultBlock], note: str) -> list[ToolResultBlock]:
+        """*note* appended to the last tool result (same user message: pairing and alternation stay valid)."""
+        if not results:
+            return results
+        last = results[-1]
+        return results[:-1] + [ToolResultBlock(tool_use_id=last.tool_use_id, content=f"{last.content}\n\n{note}",
+                                               is_error=last.is_error)]
+
+    def _merge_user_note(self, note: str) -> Callable[[], None]:
+        """Add *note* as user text after the last message without breaking provider rules: merged into a trailing
+        user message (Anthropic tool_result blocks come first, then the text), else a new user message (after
+        OpenAI role=tool results). Returns a function that takes the note out again."""
+        msgs = self.conversation.messages
+        last = msgs[-1] if msgs else None
+        merged = last is not None and last.get("role") == "user" and isinstance(last.get("content"), (str, list))
+        if merged:
+            c = last["content"]
+            new = {**last, "content": f"{c}\n\n{note}" if isinstance(c, str) else list(c) + [{"type": "text", "text": note}]}
+            msgs[-1] = new
+        else:
+            new = {"role": "user", "content": note}
+            msgs.append(new)
+
+        def restore() -> None:
+            ms = self.conversation.messages
+            idx = next((i for i, m in enumerate(ms) if m is new), None)
+            if idx is not None and merged:
+                ms[idx] = last
+            elif idx is not None:
+                del ms[idx]
+        return restore
+
+    def _record_call(self, turn: AssistantTurn | None, outcome: str, err: BaseException | None, iteration: int,
+                     fingerprint: dict[str, Any] | None, context_tokens: int) -> tuple[float, str]:
+        """Ledger, usage log, LLMCallEnd and cache status for one finished model call. Returns (cost, model)."""
+        cost = 0.0
+        call_model = (getattr(turn, "model", None) if turn is not None else None) or self.settings.model
+        if turn is not None:
+            cost = _as_float(record_usage(self.ledger, call_model, turn.usage, source="main" if not self.is_subagent else self.agent_name))
+        t0, t1 = self._last_call_window
+        cache_status = None
+        if turn is not None and fingerprint is not None:
+            cache_status = self._cache_status(fingerprint, turn.usage, iteration, context_tokens)
+        if turn is not None:
+            self._log_usage(call_model, turn.usage, cost, self.agent_name if self.is_subagent else "main", t1 - t0)
+        self._emit(LLMCallEnd(
+            iteration=iteration,
+            model=call_model,
+            usage=turn.usage if turn is not None else Usage(),
+            cost=cost,
+            duration_s=max(0.0, t1 - t0),
+            stop_reason=turn.stop_reason if turn is not None else "error",
+            started_at=t0,
+            ended_at=t1,
+            tool_use_count=len(turn.tool_uses) if turn is not None else 0,
+            text_chars=len(turn.text) if turn is not None else 0,
+            outcome=outcome,
+            error=str(err) if err else "",
+            cost_breakdown=cost_breakdown(call_model, turn.usage) if turn is not None else {},
+            cache_miss_cause=cache_status.cause if cache_status is not None else "",
+            context_used=context_tokens,
+            context_window=self.context.context_window(self.settings.model),
+        ))
+        if cache_status is not None:
+            self._emit(cache_status)
+        return cost, call_model
+
+    def _step_limit_wrap_up(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]],
+                            iterations: int, last_round: list[dict[str, Any]], user_input: str) -> tuple[str | None, Usage]:
+        """At the step limit, one last call that asks for the final report (found / did / left undone) instead of
+        losing the work. The tool definitions are still sent (Anthropic rejects tool_use history without them, and
+        the prompt cache stays warm) but the note forbids calls and any that come back are dropped unexecuted.
+        Returns (report or None when the call failed or wrote nothing, usage of the call)."""
+        limit = max(1, int(self.settings.max_iterations))
+        note = WRAP_UP_NOTE.format(limit=limit)
+        restore = self._merge_user_note(note)
+        iteration = iterations + 1
+        try:
+            self.context.prepare(self.conversation, system_blocks, tool_schemas, model=self.settings.model)
+            tokens_in = self.context.projected_tokens(self.conversation, system_blocks, tool_schemas)
+            self._emit(LLMCallStart(iteration=iteration, max_iterations=self.settings.max_iterations,
+                                    model=self.display_model(), message_count=len(self.conversation.messages),
+                                    tokens_in=tokens_in, tools_ingested=list(last_round), user_prompt=user_input,
+                                    mode=self.settings.mode))
+            self._think_blocks = []
+            self._call_meta = {"message_count": len(self.conversation.messages), "tokens_in": tokens_in,
+                               "provider": self._provider_name(self.display_model()),
+                               "fed_back": [_fed_back_fact(t) for t in last_round], "wrap_up": True}
+            try:
+                fingerprint = self._cache.fingerprint(self.settings.model, str(self.settings.effort), system_blocks, tool_schemas, self.conversation.messages)
+            except Exception:
+                fingerprint = None
+            turn, outcome, err = self._call_model(system_blocks, tool_schemas, iteration)
+            cost, call_model = self._record_call(turn, outcome, err, iteration, fingerprint, tokens_in)
+        except Exception:
+            restore()
+            return None, Usage()
+        usage = turn.usage if turn is not None else Usage()
+        text = (turn.text or "").strip() if turn is not None and outcome == "ok" else ""
+        if not text:
+            restore()
+            return None, usage
+        clean = turn if not turn.tool_uses else AssistantTurn(blocks=[TextBlock(text=text)], stop_reason="end_turn",
+                                                              usage=turn.usage, model=turn.model)
+        self.conversation.append_assistant(clean)
+        t0, t1 = self._last_call_window
+        try:
+            # A typed record, not a user message: a resumed session replays results -> report, which stays valid.
+            self.session.append("step_limit", {"limit": limit, "note": note})
+        except Exception:
+            pass
+        try:
+            self.session.append_turn(clean, model=call_model, cost=cost, duration_s=max(0.0, t1 - t0),
+                                     call=self._call_meta, thinking_s=list(self._think_blocks))
+        except TypeError:
+            self.session.append_turn(clean)
+        self.journal("step_limit", {"limit": limit, "report_chars": len(text), "dropped_tool_calls": len(turn.tool_uses)})
+        return text, usage
 
     def _stop_result(self, text: str, reason: str, iterations: int, tool_calls: int, usage: Usage, error: str | None = None) -> TurnResult:
         return TurnResult(final_text=text, stop_reason=reason, iterations=iterations, tool_calls_count=tool_calls, usage=usage, error=error)
@@ -1280,7 +1425,8 @@ class Agent:
             user_input = f"{pending}\n\n{user_input}" if user_input.strip() else pending
         self.conversation.repair()
         user_msg_index = len(self.conversation.messages)
-        self.conversation.append_user(user_input)
+        # A subagent's prompt is written by the model: paths in it are files to read, not images to attach.
+        self.conversation.append_user(user_input, attach_images=not self.is_subagent)
         self.session.append_user(user_input)
         self._current_turn_prompt = user_input
 
@@ -1292,8 +1438,10 @@ class Agent:
         last_round: list[dict[str, Any]] = []
         system_blocks = self.system_blocks()
         tool_schemas = self.tool_schemas()
+        limit = max(1, int(self.settings.max_iterations))
+        step_warned = False
 
-        while iterations < max(1, int(self.settings.max_iterations)):
+        while iterations < limit:
             if iterations > 0:
                 if ceiling > 0 and self.ledger.total() >= ceiling:
                     return self._stop_result(
@@ -1360,37 +1508,10 @@ class Agent:
                 fingerprint = None
             context_tokens = self.context.projected_tokens(self.conversation, system_blocks, tool_schemas)
             turn, outcome, err = self._call_model(system_blocks, tool_schemas, iterations)
-            cost = 0.0
-            call_model = (getattr(turn, "model", None) if turn is not None else None) or self.settings.model
             if turn is not None:
                 total_usage = total_usage + turn.usage
-                cost = _as_float(record_usage(self.ledger, call_model, turn.usage, source="main" if not self.is_subagent else self.agent_name))
+            cost, call_model = self._record_call(turn, outcome, err, iterations, fingerprint, context_tokens)
             t0, t1 = self._last_call_window
-            cache_status = None
-            if turn is not None and fingerprint is not None:
-                cache_status = self._cache_status(fingerprint, turn.usage, iterations, context_tokens)
-            if turn is not None:
-                self._log_usage(call_model, turn.usage, cost, self.agent_name if self.is_subagent else "main", t1 - t0)
-            self._emit(LLMCallEnd(
-                iteration=iterations,
-                model=call_model,
-                usage=turn.usage if turn is not None else Usage(),
-                cost=cost,
-                duration_s=max(0.0, t1 - t0),
-                stop_reason=turn.stop_reason if turn is not None else "error",
-                started_at=t0,
-                ended_at=t1,
-                tool_use_count=len(turn.tool_uses) if turn is not None else 0,
-                text_chars=len(turn.text) if turn is not None else 0,
-                outcome=outcome,
-                error=str(err) if err else "",
-                cost_breakdown=cost_breakdown(call_model, turn.usage) if turn is not None else {},
-                cache_miss_cause=cache_status.cause if cache_status is not None else "",
-                context_used=context_tokens,
-                context_window=self.context.context_window(self.settings.model),
-            ))
-            if cache_status is not None:
-                self._emit(cache_status)
 
             if outcome == "error":
                 msg = f"Provider error: {err}"
@@ -1493,10 +1614,26 @@ class Agent:
                 self._hook("PostToolBatch", {"tool_calls": [{"tool_name": tu.name, "tool_use_id": tu.id} for tu in tool_uses],
                                              "errors": sum(1 for r in results if r.is_error)})
             results = self._deliver_steer(results, iterations)
+            left = limit - iterations
+            if not step_warned and 0 < left <= STEP_WARNING_LEFT:
+                step_warned = True
+                warning = STEP_WARNING_SUB if self.is_subagent else STEP_WARNING_MAIN
+                results = self._with_note(results, warning.format(left=left, s="" if left == 1 else "s", limit=limit))
+                self.journal("step_warning", {"left": left, "limit": limit, "iteration": iterations})
             self.conversation.append_tool_results(results, provider_encoder=self._encoder())
             self._append_results(results)
             last_round = self._observations(tool_uses, results, iterations)
 
+        budget = int(self.settings.turn_token_budget or 0)
+        over_budget = (ceiling > 0 and self.ledger.total() >= ceiling) or (
+            budget > 0 and (total_usage.input + total_usage.output) >= budget)
+        # Subagents only: their report is all the delegating agent gets. The main agent keeps exactly
+        # max_iterations calls (--max-turns N means N); the user sees its work and can say "continue".
+        if self.is_subagent and not over_budget:
+            report, wrap_usage = self._step_limit_wrap_up(system_blocks, tool_schemas, iterations, last_round, user_input)
+            total_usage = total_usage + wrap_usage
+            if report:
+                return self._stop_result(report, "max_iterations", iterations, total_tool_calls, total_usage)
         return self._stop_result(
             (final_text + "\n\n" if final_text else "") + f"[Axon reached the maximum iteration ceiling ({self.settings.max_iterations} iterations) without concluding.]",
             "max_iterations", iterations, total_tool_calls, total_usage,
@@ -1784,15 +1921,25 @@ class Agent:
 
         if parallel:
             pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="axon-tool")
+            # Number the batch's subagents in the order the model asked for them, before any thread starts,
+            # so "Subagent 1" is always the first Task call (not whichever thread happened to run first).
+            batch_nums: set[int] = set()
+            for tu in tool_uses:
+                if tu.name == "Task" and isinstance(tu.input, dict) and str(tu.input.get("prompt") or tu.input.get("subtask") or "").strip():
+                    batch_nums.add(self.subagents.reserve(tu.id))  # same check TaskTool.run makes, so rejected calls leave no gap
             try:
                 future_map = {pool.submit(self._run_one, tu): idx for idx, tu in enumerate(tool_uses)}
                 if has_tasks and self._interactive_monitor():
+                    self._held_events = []
                     try:
                         from axon.ui.subagent_monitor import run_live_subagent_monitor
                         with _pause_input():
                             run_live_subagent_monitor(future_map, self.subagents, agent=self)
                     except ImportError:
                         pass
+                    finally:
+                        held, self._held_events = self._held_events or [], None
+                        self._deliver_after_monitor(held, tool_uses, batch_nums)
                 pending = set(future_map)
                 while pending:
                     done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
@@ -1804,6 +1951,13 @@ class Agent:
                             results[idx] = self._error_result(tool_uses[idx], f"Tool error: {type(e).__name__}: {e}")
             except BaseException:
                 pool.shutdown(wait=False, cancel_futures=True)
+                if has_tasks:
+                    # Nobody waits for the batch any more: stop its subagents instead of letting them keep
+                    # calling the model and editing files in the background.
+                    try:
+                        self.subagents.cancel_all()
+                    except Exception:
+                        pass
                 raise
             pool.shutdown(wait=True)
         else:
@@ -1814,13 +1968,24 @@ class Agent:
         for r, tu in zip(results, tool_uses):
             final.append(r if r is not None else self._error_result(tu, "Tool execution did not produce a result."))
 
-        if has_tasks and self.subagents.all_tasks() and self._interactive_monitor():
+        return final
+
+    def _deliver_after_monitor(self, held: list[Any], tool_uses: list[ToolUseBlock], batch_nums: set[int]) -> None:
+        """Print a fan-out once the live monitor closes: the summary of this batch's subagents, then each Task
+        call with its result card, in the order the model asked for them. The subagents' own step-by-step events
+        were already on screen in the monitor; they go to the trace (and /subagents <n>) but are not replayed."""
+        tasks = [t for t in self.subagents.all_tasks() if t.index in batch_nums]
+        if tasks:
             try:
                 from axon.ui.render import render_subagent_dashboard
-                render_subagent_dashboard(self.subagents.all_tasks())
+                render_subagent_dashboard(tasks)
             except Exception:
                 pass
-        return final
+        order = {tu.id: i for i, tu in enumerate(tool_uses)}
+        quiet = ("SubagentEvent", "SubagentStep", "RetryEvent", "ProviderRetry")
+        rank = lambda ev: order.get(getattr(ev, "id", None) or getattr(ev, "tool_use_id", None), -1)  # noqa: E731
+        for ev in sorted(held, key=rank):
+            self._deliver(ev, show=type(ev).__name__ not in quiet)
 
     def _interactive_monitor(self) -> bool:
         if self.is_subagent or self.on_event is None:
@@ -2084,6 +2249,7 @@ class Agent:
             ledger=self.ledger,
             agent=self,
             checkpoints=self.checkpoints,
+            tool_use_id=block.id,
         )
         snapshot = self._snapshot_files(tool.name, tool_input)
         try:

@@ -133,6 +133,28 @@ def test_subagent_status_not_inferred_from_body():
     assert "Step limit" in limit
 
 
+def test_step_limit_card_shows_the_report_and_the_progress_list():
+    from axon.agent.subagent import STEP_LIMIT_PREFIX
+    body = (f"[Subagent #4 Result (Map repo) | 900 tokens]:\n{STEP_LIMIT_PREFIX} (8 steps) before finishing.\n\n"
+            "Mapped src/; tests/ is left.\n\nProgress before the step limit:\n- Read a.py\n- Grep foo")
+    card = strip_ansi(render_subagent_result_card(body, width=80))
+    assert "⚠ Step limit" in card and "Completed" not in card
+    assert "⚠ Stopped at the step limit (8 steps) before finishing." in card
+    assert "Mapped src/; tests/ is left." in card
+    assert "Progress before the step limit" in card and "• Read a.py" in card and "• Grep foo" in card
+    assert "- Read a.py" not in card                      # bullets drawn like the failure card's progress list
+
+
+def test_dashboard_says_an_exhausted_subagent_still_reported(capsys):
+    from axon.agent.subagent import SubagentTask
+    from axon.ui.render import render_subagent_dashboard
+    t = SubagentTask(id="sub-1", index=1, title="Map repo", prompt="p", status="exhausted", steps=8, max_steps=8)
+    render_subagent_dashboard([t])
+    out = " ".join(strip_ansi(capsys.readouterr().out).split())
+    assert "stopped at the step limit (8/8 steps); its report says what is left" in out
+    assert "before writing its report" not in out
+
+
 def test_footer_narrow_and_tip_once(capsys, monkeypatch):
     monkeypatch.setattr("axon.ui.render.term_width", lambda: 30)
     monkeypatch.setattr("axon.ui.theme.term_width", lambda: 30)
@@ -173,7 +195,7 @@ def test_format_trace_from_real_turn_trace():
     text = strip_ansi(format_trace(t))
     assert '┌ Turn 3 · "fix"' in text
     assert "Step 1  LLM call · m · reads 2 messages" in text and "1.0k in (50% cached)" in text
-    assert "● Read  x.py" in text and '"path": "x.py"' in text
+    assert "● Read  x.py" in text and "reads a file" in text
     assert "Answer" in text and "Final answer" in text
     assert "└ ✓ Done" in text
     assert strip_ansi(format_trace(t.to_dict())) == text
@@ -246,7 +268,7 @@ def test_restored_conversation_replay_shows_tools_results_and_answers():
     ]
     out = strip_ansi("\n".join(format_conversation_replay(msgs, width=80)))
     assert "› list files" in out and "Turn 1 (restored)" in out
-    assert "● Bash  ls" in out and "runs a shell command" in out
+    assert "● Bash  $ ls" in out and "runs a shell command" in out
     assert "a.py" in out and "b.py" in out                 # the result is shown, not just the call
     assert "thought › I should run ls." in out
     assert "▎ There are two files." in out

@@ -99,7 +99,11 @@ def git_info(workspace: Path) -> dict[str, str]:
                 if not git.is_absolute():
                     git = (root / git).resolve()
         head = (git / "HEAD").read_text(encoding="utf-8").strip()
-        out["branch"] = head.rsplit("/", 1)[-1] if head.startswith("ref:") else head[:12]
+        if head.startswith("ref:"):
+            ref = head[4:].strip()  # branch names may contain '/', e.g. feature/login
+            out["branch"] = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref.rsplit("/", 1)[-1]
+        else:
+            out["branch"] = head[:12]
     except OSError:
         pass
     try:

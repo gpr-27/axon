@@ -158,12 +158,34 @@ def test_explicit_passback_rejection_is_repaired_once_and_remembered() -> None:
 def test_invalid_request_500_is_reported_honestly_with_reduced_retries() -> None:
     rec = Recorder(*[httpx.Response(500, json=INVALID_500) for _ in range(6)])
     with pytest.raises(ProviderError) as exc:
-        run(provider(rec), [{"role": "user", "content": "hi"}])
+        run(provider(rec, "https://api.example.com/v1"), [{"role": "user", "content": "hi"}])
     msg = str(exc.value)
     assert len(rec.requests) == 1 + transport.MAX_INVALID_5XX_RETRIES < 1 + 3
     assert "rejected the request as invalid (HTTP 500)" in msg and "temporarily unavailable" not in msg
     assert "/compact" in msg and "request id: 2026101623291121" in msg
     assert exc.value.status == 500 and getattr(exc.value, "retryable", None) is False
+
+
+def test_agentrouter_invalid_500_gets_the_long_retry_budget() -> None:
+    # AgentRouter rejects valid requests on some of its upstream channels; the same body passes on a retry.
+    n = transport.AGENTROUTER_INVALID_RETRIES
+    rec = Recorder(*[httpx.Response(500, json=INVALID_500) for _ in range(n + 3)])
+    with pytest.raises(ProviderError) as exc:
+        run(provider(rec), [{"role": "user", "content": "hi"}])
+    msg = str(exc.value)
+    assert len(rec.requests) == 1 + n
+    assert f"already retried it {n} times" in msg
+    assert "rejected the request as invalid (HTTP 500)" in msg and "temporarily unavailable" not in msg
+    assert "/compact" in msg and "request id: 2026101623291121" in msg
+    assert exc.value.status == 500 and getattr(exc.value, "retryable", None) is False
+
+
+def test_agentrouter_invalid_500_recovers_after_several_rejections() -> None:
+    rec = Recorder(*[httpx.Response(500, json=INVALID_500) for _ in range(5)], httpx.Response(200, content=OK_STREAM))
+    events = run(provider(rec), [{"role": "user", "content": "hi"}])
+    retries = [e for e in events if type(e).__name__ in ("RetryEvent", "ProviderRetry")]
+    assert len(rec.requests) == 6 and len(retries) == 5
+    assert retries[-1].max_attempts == transport.AGENTROUTER_INVALID_RETRIES
 
 
 def test_invalid_request_500_still_recovers_when_a_retry_succeeds() -> None:
@@ -176,14 +198,62 @@ def test_invalid_request_500_still_recovers_when_a_retry_succeeds() -> None:
 def test_plain_500_keeps_full_retry_budget_and_outage_wording() -> None:
     rec = Recorder(*[httpx.Response(500, json={"error": {"message": "internal error"}}) for _ in range(4)])
     with pytest.raises(ProviderError) as exc:
-        run(provider(rec), [{"role": "user", "content": "hi"}])
+        run(provider(rec, "https://api.example.com/v1"), [{"role": "user", "content": "hi"}])
     assert len(rec.requests) == 4 and "temporarily unavailable" in str(exc.value)
+
+
+def test_agentrouter_plain_5xx_gets_the_long_budget_too() -> None:
+    # Each AgentRouter attempt goes to an upstream channel afresh: an "upstream error" is no less transient
+    # than the "rejected as invalid" answer, so it must not get fewer retries.
+    n = transport.AGENTROUTER_5XX_RETRIES
+    rec = Recorder(*[httpx.Response(502, json={"error": {"message": "upstream error"}}) for _ in range(n + 2)])
+    with pytest.raises(ProviderError) as exc:
+        run(provider(rec), [{"role": "user", "content": "hi"}])
+    assert len(rec.requests) == 1 + n
+    assert "temporarily unavailable" in str(exc.value) and f"after {n} retries" in str(exc.value)
+
+
+def test_passback_complaint_in_a_5xx_is_repaired_not_retried() -> None:
+    # The identical body fails every time: no retries, the provider adds reasoning_content and resends.
+    msgs = [{"role": "user", "content": "x"}, tool_call("c1"), {"role": "tool", "tool_call_id": "c1", "content": "r"}]
+    rec = Recorder(httpx.Response(500, json=PASSBACK_400), httpx.Response(200, content=OK_STREAM))
+    events = run(provider(rec), msgs, model="thinker-1")
+    assert len(rec.requests) == 2
+    assert not [e for e in events if type(e).__name__ in ("RetryEvent", "ProviderRetry")]
+    assert assistants(rec.body(1))[0]["reasoning_content"] == REASONING_PLACEHOLDER
+
+
+def test_error_chunk_before_any_content_is_retried() -> None:
+    err = sse({"error": {"code": 502, "message": "Upstream provider returned 502"}})
+    rec = Recorder(httpx.Response(200, content=err), httpx.Response(200, content=OK_STREAM))
+    prov = provider(rec, "https://openrouter.ai/api/v1")
+    events = run(prov, [{"role": "user", "content": "hi"}], model="openai/gpt-4o")
+    retries = [e for e in events if type(e).__name__ in ("RetryEvent", "ProviderRetry")]
+    assert len(rec.requests) == 2 and len(retries) == 1 and "HTTP 502" in retries[0].error
+    assert "".join(e.text for e in events if type(e).__name__ == "TextDelta") == "done"
+
+
+def test_error_chunk_after_content_is_not_retried() -> None:
+    body = sse({"choices": [{"index": 0, "delta": {"content": "par"}}]}, {"error": {"code": 502, "message": "boom"}})
+    rec = Recorder(httpx.Response(200, content=body))
+    with pytest.raises(ProviderError):
+        run(provider(rec, "https://openrouter.ai/api/v1"), [{"role": "user", "content": "hi"}], model="openai/gpt-4o")
+    assert len(rec.requests) == 1
 
 
 def test_should_retry_status_rules() -> None:
     assert transport.should_retry_status(500, "internal error", 2)
     assert transport.should_retry_status(500, INVALID_500, 0)
     assert not transport.should_retry_status(500, json.dumps(INVALID_500), transport.MAX_INVALID_5XX_RETRIES)
+    assert transport.should_retry_status(500, json.dumps(INVALID_500), 5, AGENTROUTER)
+    assert transport.retry_budget(3, 500, INVALID_500, AGENTROUTER) == transport.AGENTROUTER_INVALID_RETRIES
+    assert transport.retry_budget(3, 500, INVALID_500, "https://api.example.com/v1") == 3
+    assert transport.retry_budget(3, 500, "internal error", AGENTROUTER) == transport.AGENTROUTER_5XX_RETRIES
+    assert transport.retry_budget(3, 503, "", "https://api.example.com/v1") == 3
+    assert transport.retry_budget(3, 429, "", AGENTROUTER) == 3  # rate limits keep the setting
+    assert transport.retry_budget(3, 529, "overloaded", AGENTROUTER) == 3  # overload fails over quickly
+    assert transport.retry_budget(12, 500, "", AGENTROUTER) == 12  # a larger setting is never lowered
+    assert not transport.should_retry_status(500, PASSBACK_400, 0, AGENTROUTER)
     assert not transport.should_retry_status(400, PASSBACK_400, 0)
     assert transport.should_retry_status(429, "invalid request rate", 2)  # only 5xx is capped
 
@@ -357,3 +427,13 @@ def test_context_limit_default_and_command(workspace: Path, capsys: pytest.Captu
     assert "auto-compact at 192.0k (75%)" in capsys.readouterr().out
     dispatch_command("/context limit max", agent)
     assert agent.context.context_window("deepseek-v4-flash") == 1_000_000
+
+
+def test_undecodable_image_is_not_retried_and_says_so() -> None:
+    body = {"error": {"message": "fail to decode image config(webp): riff: missing RIFF chunk header (request id: x1)"}}
+    rec = Recorder(*[httpx.Response(500, json=body) for _ in range(5)])
+    with pytest.raises(ProviderError) as exc:
+        run(provider(rec), [{"role": "user", "content": "hi"}])
+    assert len(rec.requests) == 1
+    msg = str(exc.value)
+    assert "could not decode an image" in msg and "temporarily unavailable" not in msg
