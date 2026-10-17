@@ -75,4 +75,5 @@ def test_restored_step_shows_what_the_live_step_showed(tmp_path: Path) -> None:
     assert "LLM call · deepseek-v4-flash (AgentRouter) · reads 2 messages (~900 tokens)" in out
     assert "reads 16 messages (~14.1k tokens)" in out
     assert "includes 1 tool result from step 1 (10.6 KB · ~2.9k tokens)" in out
+    assert "✓ Write hi1.txt · 1 lines · 10,900 bytes · ~2.9k tok" in out   # the tool call fed into the step
     assert "thought for 0.2s" in out and "thought for 0.0s" in out

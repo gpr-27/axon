@@ -67,7 +67,7 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
     row for click-to-expand; ``tool_tags`` maps tool_use_id -> tag)."""
     from axon.ui.input import format_user_prompt_banner
     from axon.ui.render import (
-        Renderer, _fmt_bytes, _fmt_tokens, _one_line, _plural, _usage_line, tool_purpose, tool_result_rows, tool_target,
+        Renderer, _clean, _fmt_bytes, _fmt_tokens, _one_line, _plural, _usage_line, tool_purpose, tool_result_rows, tool_target,
     )
     _SHELL_CTX = Renderer._SHELL_CTX_RE
 
@@ -194,6 +194,12 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                 if errors:
                     line += f" {dot} {ERROR}{_plural(errors, 'error')}{RST}{MUTED}"
                 add(f"{rail}  {MUTED}{line}{RST}")
+                # Each tool call fed into this step, in the same format as the live verbose rows.
+                for f in fed:
+                    status = f"{ERROR}{glyph('fail')}{RST}" if f.get("is_error") else f"{SUCCESS}{glyph('ok')}{RST}"
+                    add(f"{rail}    {status} {BOLD}{_clean(f.get('name', 'Tool'))}{RST} {MUTED}{_clean(f.get('target') or '')}{RST} "
+                        f"{SUBTLE}{dot} {int(f.get('lines') or 0)} lines {dot} {int(f.get('bytes') or 0):,} bytes {dot} "
+                        f"~{_fmt_tokens(int(f.get('tokens') or 0))} tok{RST}")
             thinking = str(data.get("thinking") or "").strip()
             if thinking and show_thinking:
                 add(f"{rail}  {SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}")
