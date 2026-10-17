@@ -78,7 +78,7 @@ def test_generated_python_projects_pass_their_tests(template: str, tmp_path: Pat
 def test_generated_node_cli_passes_its_tests(tmp_path: Path) -> None:
     dest = tmp_path / "ncli"
     sc.scaffold("node-cli", dest)
-    proc = subprocess.run(["node", "--test", "test/"], cwd=dest, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(["node", "--test"], cwd=dest, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     run = subprocess.run(["node", "bin/cli.js", "Ada", "--shout"], cwd=dest, capture_output=True, text=True, timeout=60)
     assert run.stdout.strip() == "HELLO, ADA!"
