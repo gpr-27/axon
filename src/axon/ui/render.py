@@ -1106,7 +1106,13 @@ def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: boo
 
     *detail* follows the trace level (0 compact: the summary row only, 1 normal, 2+ detailed: longer
     previews); *link* (a file:// URI of the full output) makes the summary row an OSC 8 hyperlink."""
+    changes = list(inp.get("_changes") or ())
+    content, listed = _split_file_changes(content)
+    changes = changes or listed
     rows = summarize_tool_result(name, inp, content, is_error, width, detail=detail)
+    if changes:
+        rows = rows + _cards.file_change_rows(changes, width or _width(140),
+                                              _lim(_DIFF_ROWS, detail) if detail > 0 else 1 + len(changes), _MORE_HINT)
     if not is_error and name in _CARD_HEADER_TOOLS | {"TodoWrite", "Task"}:
         return rows  # file / diff / plan / subagent cards already carry an exact summary
     summary = _tool_summary(registry, name, inp, content, is_error)
@@ -1119,6 +1125,32 @@ def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: boo
     if link and rows and "\x1b]8;" not in rows[0]:
         rows[0] = hyperlink(link, rows[0])
     return rows
+
+
+_CHANGES_RE = re.compile(r"\n?\[Files changed by this command: (.*)\]\s*$", re.S)
+_CHANGE_ITEM_RE = re.compile(r"(created|modified|deleted) (.+?)(?: \((\+\d+)?\s*([−-]\d+)?\))?$")
+_RENAME_ITEM_RE = re.compile(r"renamed (.+?) → (.+)$")
+
+
+def _split_file_changes(content: str) -> tuple[str, list[Any]]:
+    """The output without its '[Files changed by this command: …]' line, and that line's changes
+    (paths and counts only: restored history has no texts to diff)."""
+    m = _CHANGES_RE.search(content or "")
+    if not m:
+        return content, []
+    from axon.agent.filechanges import FileChange
+    changes = []
+    for item in m.group(1).split(", "):
+        rm = _RENAME_ITEM_RE.match(item.strip())
+        if rm:
+            changes.append(FileChange(rm.group(2), "renamed", None, None, old_path=rm.group(1)))
+            continue
+        im = _CHANGE_ITEM_RE.match(item.strip())
+        if im:
+            added = int(im.group(3)[1:]) if im.group(3) else None
+            removed = int(im.group(4)[1:]) if im.group(4) else None
+            changes.append(FileChange(im.group(2), im.group(1), added, removed))
+    return content[:m.start()], changes
 
 
 # Tools whose first row is a file / diff card header (it links to the file itself, not the output).
@@ -1250,17 +1282,25 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
     if name in WRITE_TOOLS:
         code = str(_first(inp, "content", "CodeContent"))
         prev = inp.get("_prev_content")
-        if isinstance(prev, str):
+        if isinstance(prev, str):            # live: the old content is known, so always show the diff
             if prev == code:
                 return [_cards.code_card_header(path, code, "Overwrote") + f"{dot}{MUTED}no changes{RST}"]
             a, r = _diff_counts(prev, code)
-            if a + r < max(8, len(code.splitlines()) * 0.8):     # a real edit: show what changed
-                header = _cards.diff_header(path, a, r, "Overwrote", _plural(_cards.count_lines(code), "line"))
-                if detail <= 0:
-                    return [header]
-                return [header] + diff_rows(prev, code, 1, width, _lang_for(path), max_rows=_lim(_DIFF_ROWS, detail))
-        verb = "Overwrote" if isinstance(prev, str) or "Overwrote" in text else "Created"
-        return _cards.code_card(path, code, width, _lim(_CODE_LINES, detail), _MORE_HINT, verb)
+            header = _cards.diff_header(path, a, r, "Overwrote", _plural(_cards.count_lines(code), "line"))
+            if detail <= 0:
+                return [header]
+            return [header] + diff_rows(prev, code, 1, width, _lang_for(path), max_rows=_lim(_DIFF_ROWS, detail))
+        if "Overwrote" in text:              # restored history: the counts the tool reported, then the file
+            m = re.search(r"Overwrote file \(\+(\d+) [−-](\d+)\)", text)
+            counts = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+            header = _cards.code_card_header(path, code, "Overwrote", *counts)
+            if detail <= 0:
+                return [header]
+            return [header] + _cards.code_body(code, path, width, _lim(_CODE_LINES, detail), _MORE_HINT)
+        header = _cards.code_card_header(path, code, "Created", _cards.count_lines(code))
+        if detail <= 0 or not code:
+            return [header]                  # a new file: every line is an addition
+        return [header] + diff_rows("", code, 1, width, _lang_for(path), max_rows=_lim(_CODE_LINES, detail))
     if name == "Patch":
         patch = str(inp.get("patch") or "")
         files, body = _cards.patch_rows(patch, width, _lim(_DIFF_ROWS, detail), _MORE_HINT)
@@ -2386,6 +2426,8 @@ class Renderer:
         inp = {**(info.get("input") or {}), **(e.input or {})}
         if "prev" in info:
             inp["_prev_content"] = info["prev"]
+        if getattr(e, "changes", ()):
+            inp["_changes"] = e.changes
         if e.id in self._t_tools:
             _tag_rows(self._t_tools[e.id].uid)
         out_no = _save_tool_output(e.content, _clean(e.name), tool_target(e.name, inp))

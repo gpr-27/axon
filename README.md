@@ -9,7 +9,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.27.3-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.4-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
@@ -167,9 +167,9 @@ axon --version
 **Install a specific version:**
 
 ```bash
-uv tool install axon-terminal==0.27.3
-pipx install axon-terminal==0.27.3
-pip install axon-terminal==0.27.3
+uv tool install axon-terminal==0.27.4
+pipx install axon-terminal==0.27.4
+pip install axon-terminal==0.27.4
 ```
 
 ## Set up a model

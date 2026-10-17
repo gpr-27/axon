@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any, Callable, Iterator
 from axon.config import Settings
 from axon.errors import ToolError
+from axon.agent import filechanges
 from axon.agent.state import Conversation, FileState, TodoState, record_usage
 from axon.agent.prompt import build_system
 from axon.agent.context import ContextManager
@@ -77,6 +78,7 @@ INTERRUPTED_NOTE = "[Response interrupted by user]"
 FILE_PATH_KEYS = ("path", "file_path", "notebook_path")
 FILE_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "Patch", "NotebookEdit"})
 WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "Patch", "NotebookEdit"})
+SHELL_TOOLS = frozenset({"Bash"})   # their file changes are detected by a workspace snapshot
 MAX_THRASH_COMPACTIONS = 3
 _BASH_READ_RE = None
 STEER_PREFIX = "[User added while you were working]:"
@@ -2045,6 +2047,7 @@ class Agent:
             agent=self,
             checkpoints=self.checkpoints,
         )
+        snapshot = self._snapshot_files(tool.name, tool_input)
         try:
             out = tool.run(tool_input, ctx)
             self._note_full_output(block, str(out))
@@ -2053,6 +2056,9 @@ class Agent:
             content, is_error = self._cap_output(str(e), block), True
         except Exception as e:
             content, is_error = f"Unexpected {type(e).__name__}: {e}", True
+        changes = self._file_changes(snapshot)
+        if changes:
+            content = f"{content}\n{filechanges.summary_line(changes)}"
 
         if not is_error:
             content = self._after_file_access(tool.name, tool_input, content)
@@ -2077,5 +2083,23 @@ class Agent:
             if fail is not None and getattr(fail, "additional_context", ""):
                 content = f"{content}\n\n[PostToolUseFailure hook context]\n{fail.additional_context}"
         res = ToolResultBlock(tool_use_id=block.id, content=content, is_error=is_error)
-        self._emit(ToolExecutionResult(id=block.id, name=block.name, input=tool_input, content=res.content, is_error=res.is_error))
+        self._emit(ToolExecutionResult(id=block.id, name=block.name, input=tool_input, content=res.content,
+                                       is_error=res.is_error, changes=tuple(changes)))
         return res
+
+    def _snapshot_files(self, tool_name: str, tool_input: dict[str, Any]) -> filechanges.Snapshot | None:
+        """Before a foreground shell command: the workspace's files, so the files it changes can be shown."""
+        if tool_name not in SHELL_TOOLS or tool_input.get("run_in_background"):
+            return None
+        try:
+            return filechanges.take_snapshot(self.settings.workspace)
+        except Exception:
+            return None
+
+    def _file_changes(self, snapshot: filechanges.Snapshot | None) -> list[filechanges.FileChange]:
+        if snapshot is None:
+            return []
+        try:
+            return filechanges.changes_since(snapshot)
+        except Exception:
+            return []

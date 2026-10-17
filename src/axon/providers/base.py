@@ -121,6 +121,7 @@ class ToolExecutionResult:
     input: dict[str, Any]
     content: str
     is_error: bool = False
+    changes: tuple[Any, ...] = ()   # axon.agent.filechanges.FileChange: files a shell command changed
 
 @dataclass(frozen=True)
 class TurnComplete:

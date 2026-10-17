@@ -24,7 +24,7 @@ or `pipx ensurepath` once and open another new terminal.
 
 ```powershell
 # a specific version
-uv tool install axon-terminal==0.27.3
+uv tool install axon-terminal==0.27.4
 # upgrade
 uv tool upgrade axon-terminal         # or: pipx upgrade axon-terminal / py -m pip install -U axon-terminal
 # uninstall (settings and sessions in %USERPROFILE%\.axon are kept)

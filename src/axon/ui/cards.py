@@ -166,11 +166,15 @@ def code_body(content: str, path: str, width: int, max_lines: int, hint: str = "
     return rows
 
 
-def code_card_header(path: str, content: str, verb: str = "Created") -> str:
-    """'✚ Created src/shop/cart.py · ■ Python · 42 lines · 1.2 KB'."""
+def code_card_header(path: str, content: str, verb: str = "Created", added: int | None = None,
+                     removed: int | None = None) -> str:
+    """'✚ Created src/shop/cart.py · +42 · ■ Python · 42 lines · 1.2 KB' (counts when known)."""
     dot = f" {SUBTLE}{glyph('dot')}{RST} "
     mark = {"Created": (SUCCESS, glyph("created")), "Overwrote": (WARNING, glyph("overwrote"))}.get(verb, (INFO, glyph("edited")))
     head = f"{mark[0]}{mark[1]} {verb}{RST} {BOLD}{_path_link(path)}{RST}"
+    counts = count_badge(added, removed)
+    if counts:
+        head += dot + counts
     facts = [lang_badge(path), f"{MUTED}{_plural(count_lines(content), 'line')}{RST}",
              f"{MUTED}{fmt_bytes(len(content.encode('utf-8', errors='replace')))}{RST}"]
     return head + dot + dot.join(f for f in facts if f)
@@ -362,6 +366,62 @@ def diff_counts(old_text: str, new_text: str) -> tuple[int, int]:
 def change_badge(added: int, removed: int) -> str:
     """'+3 −1' (green / red)."""
     return f"{SUCCESS}+{added}{RST} {ERROR}{glyph('minus')}{removed}{RST}"
+
+
+def count_badge(added: int | None, removed: int | None) -> str:
+    """Like ``change_badge`` but leaves out a side that is unknown: '+12', '−3', '+3 −1' or ''."""
+    parts = ([f"{SUCCESS}+{added}{RST}"] if added is not None else []) + \
+            ([f"{ERROR}{glyph('minus')}{removed}{RST}"] if removed is not None else [])
+    return " ".join(parts)
+
+
+_CHANGE_KINDS = {   # kind -> (verb, glyph, colour)
+    "created": ("Created", "created", "SUCCESS"),
+    "modified": ("Modified", "overwrote", "INFO"),
+    "deleted": ("Deleted", "deleted", "ERROR"),
+    "renamed": ("Renamed", "renamed", "ACCENT"),
+}
+
+
+def file_change_rows(changes: list[Any], width: int = 80, max_rows: int = 60, hint: str = "") -> list[str]:
+    """Files a shell command changed: a totals row, one aligned row per file, then each file's diff
+    (created files as additions, deleted files as removals) within *max_rows*.
+
+    '✎ 3 files changed · +5 −4'
+    '  ✚ Created  docs/new.md  +3'
+    '  ⟳ Modified keep.py      +2 −1'
+    '  ✖ Deleted  gone.txt     −3'
+    '  ➜ Renamed  hi.txt       from hi.tht · same content'"""
+    if not changes:
+        return []
+    added = sum(c.added or 0 for c in changes)
+    removed = sum(c.removed or 0 for c in changes)
+    dot = f" {SUBTLE}{glyph('dot')}{RST} "
+    rows = [f"{INFO}{glyph('edited')} {BOLD}{_plural(len(changes), 'file')} changed{RST}{dot}{change_badge(added, removed)}"]
+    verb_w = max(len(v) for v, _, _ in _CHANGE_KINDS.values())
+    path_w = min(max(display_width(c.path) for c in changes), max(12, width - verb_w - 20))
+    for c in changes:
+        verb, mark, color = _CHANGE_KINDS.get(c.kind, _CHANGE_KINDS["modified"])
+        col = {"SUCCESS": SUCCESS, "INFO": INFO, "ERROR": ERROR, "ACCENT": ACCENT}[color]
+        shown = truncate(c.path, path_w)
+        if c.kind == "renamed":
+            same = c.old is not None and c.old == c.new
+            note = f"{MUTED}from {RST}{_path_link(c.old_path or '')}" + (f"{dot}{MUTED}same content{RST}" if same else "")
+        else:
+            note = count_badge(c.added, c.removed) or (f"{MUTED}contents not shown{RST}" if c.kind != "deleted" else "")
+        rows.append(f"  {col}{glyph(mark)} {verb.ljust(verb_w)}{RST} {BOLD}{_path_link(c.path, pad(shown, path_w))}{RST}  {note}")
+    budget = max_rows - len(rows)
+    for c in changes:
+        if budget <= 0:
+            break
+        old, new = (c.old or "") if c.kind != "created" else "", (c.new or "") if c.kind != "deleted" else ""
+        if (c.kind in ("modified", "renamed") and (c.old is None or c.new is None)) or old == new:
+            continue
+        body = diff_rows(old, new, 1, width, lang_for_path(c.path), max_rows=max(4, budget - 1), hint=hint)
+        rows.append(_hunk_sep(3, width, c.path))
+        rows += body
+        budget -= len(body) + 1
+    return rows
 
 
 def diff_header(path: str, added: int, removed: int, verb: str = "Edited", extra: str = "") -> str:

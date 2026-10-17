@@ -601,6 +601,8 @@ GLYPHS: dict[str, tuple[str, str]] = {
     "created": ("✚", "+"),
     "edited": ("✎", "~"),
     "overwrote": ("⟳", "*"),
+    "deleted": ("✖", "x"),
+    "renamed": ("➜", ">"),
     "minus": ("−", "-"),
     "chip": ("■", ""),
     "hunk": ("┈", "-"),

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.27.4
+
+Every file change is shown
+- Write always shows what changed. Overwriting a file draws a coloured diff with `+added −removed`, including
+  full rewrites (these used to fall back to a plain listing of the new file with no counts). A new file is drawn
+  as green additions with `+N` in its header.
+- Files changed by shell commands are tracked. Around each Bash command Axon snapshots the workspace and then
+  lists every file the command created, modified, renamed or deleted (`✚ Created`, `⟳ Modified`, `➜ Renamed`,
+  `✖ Deleted`) with line counts, followed by each file's diff. Files in git-ignored folders are included;
+  dependency and cache folders (`node_modules`, `.venv`, `dist`, …) are skipped, and the contents of secret files
+  such as `.env` or `*.pem` are never shown, only that they changed.
+- The model sees a one-line summary of those changes, and restored sessions and `/inspect` show the counts too.
+
+Windows
+- Hooks run under PowerShell: a quoted command path is invoked, and a hook's exit code (2 blocks) is kept.
+- Esc and Ctrl+C stop a streaming response on Windows.
+- An interrupt between a tool call and its result no longer leaves the conversation invalid.
+- An edit made outside Axon within the same modification-time tick is detected (file size is compared too).
+
+Wording
+- Axon is described as "the AI coding agent that shows its work".
+
 ## 0.27.3
 
 Everything is saved, and can be shown again

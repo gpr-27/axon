@@ -477,7 +477,7 @@ def test_release_notes(agent: Agent, capsys):
     from axon.commands.prefs_cmds import changelog_path, parse_changelog
     import axon
     entries = parse_changelog(changelog_path().read_text(encoding="utf-8"))
-    assert entries[0][0] == axon.__version__ and "MCP" in entries[0][1]
+    assert entries[0][0] == axon.__version__ and entries[0][1].strip() and "## " not in entries[0][1]
     dispatch_command("/release-notes", agent)
     assert f"Axon {axon.__version__}" in capsys.readouterr().out
     dispatch_command("/release-notes 9.9", agent)

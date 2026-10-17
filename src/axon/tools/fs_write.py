@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+from axon.agent.filechanges import diff_counts
 from axon.errors import ToolError
 from axon.tools.base import (
     Tool, ToolContext, bool_arg, capture_checkpoint, default_summary, display_path, human_size, plural, resolve_path,
@@ -132,11 +133,12 @@ class WriteTool(Tool):
 
         existed = p.exists()
         encoding, newline = "utf-8", "\n"
+        old_text: str | None = None
         if existed:
             ctx.file_state.check_writable(p)
             try:
                 tf = read_text_file(p)
-                encoding, newline = tf.encoding, tf.newline or "\n"
+                encoding, newline, old_text = tf.encoding, tf.newline or "\n", tf.text
             except ToolError:
                 pass  # binary/oversized: overwrite as UTF-8
         capture_checkpoint(ctx, p)
@@ -146,8 +148,14 @@ class WriteTool(Tool):
         atomic_write_text(p, text, encoding=encoding, newline=newline if newline == "\r\n" else "")
         ctx.file_state.record_read(p)
         n_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        verb = "Overwrote" if existed else "Created"
-        return f"Successfully wrote {len(content):,} characters ({n_lines} lines) to {rel}. {verb} file."
+        if not existed:
+            change = f"Created file (+{n_lines})"
+        elif old_text is not None:
+            added, removed = diff_counts(normalize_newlines(old_text), normalize_newlines(content))
+            change = f"Overwrote file (+{added} −{removed})"
+        else:
+            change = "Overwrote file"
+        return f"Successfully wrote {len(content):,} characters ({n_lines} lines) to {rel}. {change}."
 
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
