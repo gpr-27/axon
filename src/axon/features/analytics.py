@@ -4,7 +4,7 @@ Usage analytics: ``/stats``, ``/budget``, ``/report`` and ``axon report`` / ``ax
 Everything is computed from real persisted data (see :mod:`axon.storage`):
 
 * ``~/.axon/usage.jsonl``          one record per LLM call (tokens, cost, source, latency)
-* ``projects/<key>/traces/*.jsonl`` per-turn glass-box traces (tool calls, timings, errors)
+* ``projects/<key>/traces/*.jsonl`` per-turn traces (tool calls, timings, errors)
 * ``projects/<key>/sessions/*.jsonl`` transcripts (session titles / turn counts as fallback)
 
 The HTML report is a single self-contained file (inline CSS + SVG, no scripts or external

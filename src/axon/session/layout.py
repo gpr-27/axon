@@ -290,7 +290,7 @@ character replaced by `-`. Each project folder has its own `README.md`.
 | `library/<type>/<name>/` | a copy of every version of every skill, agent, command, memory, rule, prompt and AXON.md, kept even after the original is edited or deleted (`/library`, `axon library`) |
 | `outputs/<id>/` | complete tool and shell outputs that were truncated for the model |
 | `screen/<stamp>-<id>.log` | plain-text copy of everything shown in the terminal |
-| `traces/<id>.jsonl` | per-turn glass-box traces (`/trace`, `axon report`) |
+| `traces/<id>.jsonl` | per-turn traces (`/trace`, `axon report`) |
 | `checkpoints/<id>/` | file snapshots for `/rewind`; `rewound/` keeps what a rewind replaced |
 | `memory/` | auto memory for this project |
 | `todos/<id>.json` | todo lists |

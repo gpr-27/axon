@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "axon-terminal"
 dynamic = ["version"]
-description = "A glass-box agentic coding assistant for the terminal: see every LLM call, tool, token, cache hit and cent."
+description = "The AI coding agent that shows its work: see every LLM call, tool, token, cache hit and cent, right in your terminal."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Praneeth" }]

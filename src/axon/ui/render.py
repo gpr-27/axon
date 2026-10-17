@@ -2465,7 +2465,7 @@ class Renderer:
 
     # Extended trace events (axon.agent.trace, duck-typed) ----------------
     def _on_trace_event(self, e: Any) -> None:
-        """Glass-box events from ``axon.agent.trace`` (matched by class name; all optional)."""
+        """Trace events from ``axon.agent.trace`` (matched by class name; all optional)."""
         kind = type(e).__name__
         dot = glyph("dot")
         if kind == "LLMCallEnd":

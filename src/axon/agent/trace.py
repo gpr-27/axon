@@ -1,5 +1,5 @@
 """
-Glass-box tracing: structured events emitted by the agent loop and the per-turn
+Turn tracing: structured events emitted by the agent loop and the per-turn
 timeline (:class:`TurnTrace`) built from them.
 
 Renderers consume these events through ``Agent.on_event`` (unknown event types must

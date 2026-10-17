@@ -4,7 +4,7 @@
 
 # Axon
 
-**A glass-box coding agent for your terminal.**
+**The AI coding agent that shows its work, right in your terminal.**
 See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
@@ -27,7 +27,7 @@ numbered timeline: the model that was called and why, the tokens it consumed, ho
 came from cache, which tools ran with which arguments, what each one fed back to the model, who
 approved it, which hooks fired, and what it all cost, to four decimal places.
 
-<p align="center"><img src="https://raw.githubusercontent.com/gpr-27/axon/main/docs/assets/demo.svg" alt="Axon rendering a turn as a glass-box timeline" width="860"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/gpr-27/axon/main/docs/assets/demo.svg" alt="Axon rendering a turn as a step-by-step timeline" width="860"></p>
 
 <details>
 <summary>The same turn as plain text (<code>NO_COLOR=1</code>)</summary>
@@ -102,7 +102,7 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 [Your first task](#your-first-task) · [Cheat sheet](#cheat-sheet) · [Reading a turn](#reading-a-turn) ·
 [Update or uninstall](#update-or-uninstall) · [Your data](#your-data) · [FAQ](#faq) · [Troubleshooting](#troubleshooting)
 
-**Reference:** [Highlights](#highlights) · [Providers](#providers) · [Glass-box tracing](#glass-box-tracing) ·
+**Reference:** [Highlights](#highlights) · [Providers](#providers) · [Tracing](#tracing) ·
 [Commands](#commands) · [Tools](#tools) · [Extending Axon](#extending-axon) · [Memory](#memory) ·
 [Settings](#settings) · [Storage](#storage-layout) · [Analytics](#analytics) · [Solver](#solver-verify-fix-plan) ·
 [SDK and HTTP API](#sdk-and-http-api) · [Testing](#testing) · [Project structure](#project-structure) · [Docs](#documentation)
@@ -367,7 +367,7 @@ is not used; Axon's model comes from `/model`.
 | **Readable timeline** | Thinking, LLM calls, tool calls (with what each tool does and why it was called) and the model's answer each have their own mark; live timers while tools run; previews of every result; resumed sessions are redrawn the same way. |
 | **Smart shell** | `!cmd` runs a command and the model responds to its output. Type while it works to queue messages; `/btw` asks a side question. |
 | **Tips that fit** | Usage tips are written by the model from what you are doing, checked against the real command list, and shown under the spinner and after turns. |
-| **Glass-box trace** | Four trace levels, from one line per tool up to the raw request. `/inspect` replays any stored turn, `/explain` summarises one without an LLM call, and `/payload` shows the exact prompt that was sent. |
+| **Full trace** | Four trace levels, from one line per tool up to the raw request. `/inspect` replays any stored turn, `/explain` summarises one without an LLM call, and `/payload` shows the exact prompt that was sent. |
 | **Cost you can audit** | Per-call pricing including cache reads and writes, `/cost` by source and model, cache hit rate and savings, a cache-miss explanation, budget guards, and an HTML usage report. |
 | **Any model** | Anthropic, OpenAI, OpenRouter, Gemini, DeepSeek, xAI, Groq, Mistral, Together, Fireworks, Cerebras, Azure, AgentRouter, plus local Ollama and LM Studio. Fallback chains handle 429, 5xx and overload errors. |
 | **Claude Code compatible** | Reads `CLAUDE.md`, `.claude/settings.json`, `.claude/commands`, `.claude/agents`, `.claude/skills` and `.mcp.json`, and uses the same hook protocol, so an existing setup works as-is. |
@@ -404,7 +404,7 @@ and key follow the model you select. Keys are read from the environment, then fr
 Any other OpenAI-compatible endpoint works with `--base-url` and `AXON_API_KEY`. Use `/pricing` to
 see per-model token prices and `/keys` to check which keys are configured.
 
-## Glass-box tracing
+## Tracing
 
 Every turn is recorded as a structured trace and rendered live at one of four levels. Set the level
 with `--trace`, `/trace`, `Ctrl+O`, or `trace_level` in settings.
@@ -605,7 +605,7 @@ every file, and `/project` (alias `/where`) shows which project you opened and w
     sessions/<session-id>.jsonl                       full transcript (+ _sub_<n> subagents)
     outputs/<session-id>/                             full tool/shell outputs cut for the model
     screen/<stamp>-<session-id>.log                   plain-text copy of the terminal
-    traces/<session-id>.jsonl                         per-turn glass-box traces
+    traces/<session-id>.jsonl                         per-turn traces
     checkpoints/<session-id>/                         file snapshots for /rewind (+ rewound/)
     memory/MEMORY.md                                  auto memory for this project
     todos/<session-id>.json                           todo list state

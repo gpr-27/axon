@@ -22,7 +22,7 @@ All state lives under one home directory (default ``~/.axon``, override with
                                                           tool calls, results, usage, cost
         outputs/<session-id>/                             full tool / shell outputs that were
                                                           truncated for the model
-        traces/<session-id>.jsonl                         per-turn glass-box traces
+        traces/<session-id>.jsonl                         per-turn traces
         checkpoints/<session-id>/                         file snapshots for /rewind
                                    (rewound/)             snapshots undone by /rewind (kept)
         memory/MEMORY.md (+ topic files)                  auto memory for this project

@@ -17,7 +17,7 @@ and the SDK all consume that same event stream.
 | `axon/agent/prompt.py` · `context.py` | System prompt assembly (identity, environment, memory, skills, output style, goal), context accounting and compaction |
 | `axon/agent/memory.py` | The AXON.md / CLAUDE.md hierarchy, rules, `@imports`, auto memory and saved items |
 | `axon/agent/subagent.py` | Agent definitions (built-in, plugin, user, project, `--agents`), the `Task` runner and progress tracking |
-| `axon/agent/trace.py` | Glass-box events (`LLMCallEnd`, `ToolTiming`, `PermissionDecisionEvent`, `HookEvent`, `CacheStatus`, …) and `TurnTrace` |
+| `axon/agent/trace.py` | Trace events (`LLMCallEnd`, `ToolTiming`, `PermissionDecisionEvent`, `HookEvent`, `CacheStatus`, …) and `TurnTrace` |
 | `axon/agent/worktree.py` | `--worktree` and isolated git worktrees for subagents |
 | `axon/providers/` | `anthropic.py` (native Messages API) and `openai_compat.py` (every OpenAI-compatible endpoint). Also `catalog.py` (presets), `registry.py` (model to provider routing), `pricing.py`, `failover.py`, `transport.py` (HTTP, retries) and `verifier.py` (live key checks) |
 | `axon/tools/` | Built-in tools (`Read`, `Edit`, `Bash`, `Grep`, `Task`, …), the `ToolRegistry`, and the path helpers shared by file tools |

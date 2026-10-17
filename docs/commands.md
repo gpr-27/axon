@@ -1149,7 +1149,7 @@ options:
                         max
   --provider PROVIDER   Provider preset id (e.g. anthropic, openai, openrouter, ollama)
   --base-url BASE_URL   Provider API base URL
-  --mode MODE, --permission-mode MODE
+  --mode, --permission-mode MODE
                         Permission mode: default, acceptEdits, plan, bypass (also
                         bypassPermissions, manual)
   --effort {reflex,balanced,synapse,quantum,low,medium,high,xhigh,max}
@@ -1157,22 +1157,22 @@ options:
   --workspace WORKSPACE
                         Workspace root directory
   -c, --continue        Resume the latest session
-  -r [RESUME_ID], --resume [RESUME_ID]
+  -r, --resume [RESUME_ID]
                         Resume a session by ID or name (no value: open the session picker)
   --fork-session        With --continue/--resume: copy the history to a new session
-  -n SESSION_NAME, --name SESSION_NAME
+  -n, --name SESSION_NAME
                         Name the session
   --trace {compact,normal,detailed,debug}
-                        Glass-box trace detail level
+                        Trace detail level
   --max-budget-usd MAX_BUDGET_USD
                         Session budget guard in USD
   --settings SETTINGS_FILE
                         Extra settings JSON file or inline JSON (highest file layer)
   --max-turns MAX_TURNS
                         Maximum agent iterations per prompt
-  --allowedTools RULE [RULE ...], --allowed-tools RULE [RULE ...]
+  --allowedTools, --allowed-tools RULE [RULE ...]
                         Tools/rules to allow without asking, e.g. "Read" "Bash(git *)"
-  --disallowedTools RULE [RULE ...], --disallowed-tools RULE [RULE ...]
+  --disallowedTools, --disallowed-tools RULE [RULE ...]
                         Tools to remove or rules to deny, e.g. "WebFetch" "Bash(rm *)"
   --append-system-prompt APPEND_SYSTEM_PROMPT
                         Extra text appended to the system prompt
@@ -1200,7 +1200,7 @@ options:
                         or "!mcp"
   --debug-file DEBUG_FILE
                         Write the debug log to this file
-  -w [NAME], --worktree [NAME]
+  -w, --worktree [NAME]
                         Run the session in a git worktree (created or reused)
 
 Subcommands: `axon mcp <list|add|remove|...>` MCP servers, `axon doctor` checks your setup, `axon

@@ -121,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Resume a session by ID or name (no value: open the session picker)")
     parser.add_argument("--fork-session", action="store_true", help="With --continue/--resume: copy the history to a new session")
     parser.add_argument("-n", "--name", dest="session_name", help="Name the session")
-    parser.add_argument("--trace", choices=["compact", "normal", "detailed", "debug"], help="Glass-box trace detail level")
+    parser.add_argument("--trace", choices=["compact", "normal", "detailed", "debug"], help="Trace detail level")
     parser.add_argument("--max-budget-usd", dest="max_budget_usd", type=float, help="Session budget guard in USD")
     parser.add_argument("--settings", dest="settings_file", help="Extra settings JSON file or inline JSON (highest file layer)")
     parser.add_argument("--max-turns", dest="max_turns", type=int, help="Maximum agent iterations per prompt")

@@ -10,7 +10,7 @@
   <rect x="4" y="4" width="120" height="120" rx="28" fill="none" stroke="url(#axon-g)" stroke-width="3" opacity="0.55"/>
   <!-- the "A": two strokes of a signal path meeting at a node -->
   <path d="M34 96 L64 32 L94 96" fill="none" stroke="url(#axon-g)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- crossbar as a glass-box trace: three steps on a rail -->
+  <!-- crossbar as a trace: three steps on a rail -->
   <path d="M46 74 H82" fill="none" stroke="#E4E6EC" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
   <circle cx="64" cy="32" r="9" fill="#16181F" stroke="#5ED2C8" stroke-width="5"/>
   <circle cx="46" cy="74" r="6" fill="#5ED2C8"/>
