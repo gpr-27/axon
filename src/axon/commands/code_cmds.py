@@ -260,6 +260,8 @@ def _detect_tests(ws: Path, extra: str) -> tuple[list[str], str]:
     import shlex
     try:  # quoted arguments stay whole: /test -k "login and not slow"
         extra_args = shlex.split(extra, posix=(sys.platform != "win32")) if extra else []
+        # Non-POSIX splitting (Windows, so backslashes in paths survive) keeps the quotes themselves.
+        extra_args = [a[1:-1] if len(a) >= 2 and a[0] == a[-1] and a[0] in "\"'" else a for a in extra_args]
     except ValueError:
         extra_args = extra.split()
     if (ws / "pyproject.toml").exists() or (ws / "pytest.ini").exists() or (ws / "setup.cfg").exists() or (ws / "tests").is_dir():
