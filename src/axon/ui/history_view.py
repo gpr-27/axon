@@ -66,7 +66,9 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
     """Rows for the whole session in ``path`` (``row_tags`` receives the transcript-entry tag of each
     row for click-to-expand; ``tool_tags`` maps tool_use_id -> tag)."""
     from axon.ui.input import format_user_prompt_banner
-    from axon.ui.render import Renderer, _one_line, _plural, _usage_line, tool_purpose, tool_result_rows, tool_target
+    from axon.ui.render import (
+        Renderer, _fmt_bytes, _fmt_tokens, _one_line, _plural, _usage_line, tool_purpose, tool_result_rows, tool_target,
+    )
     _SHELL_CTX = Renderer._SHELL_CTX_RE
 
     width = width or max(40, layout_width(4))
@@ -170,16 +172,36 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             state["step"] += 1
             state["calls"] += 1
             model = str(data.get("model") or "")
+            call = data.get("call") if isinstance(data.get("call"), dict) else {}
             if state["step"] > 1:
                 add(rail.rstrip())
+            # Same header as the live step row: model (provider) · reads N messages (~tokens).
+            prov = str(call.get("provider") or "")
+            reads = int(call.get("message_count") or 0)
+            size = f" (~{_fmt_tokens(int(call.get('tokens_in') or 0))} tokens)" if call.get("tokens_in") else ""
             add(truncate(f"{rail}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {state['step']}{RST}  {TEXT}LLM call{RST}"
-                         + (f" {MUTED}{dot}{RST} {TEXT}{model}{RST}" if model else ""), width + 2))
+                         + (f" {MUTED}{dot}{RST} {TEXT}{model}{RST}" if model else "")
+                         + (f" {MUTED}({prov}){RST}" if prov else "")
+                         + (f" {MUTED}{dot} reads {_plural(reads, 'message')}{size}{RST}" if reads else ""), width + 2))
+            # Same "includes" line the live view draws from the results it fed back into this call.
+            fed = [f for f in (call.get("fed_back") or []) if isinstance(f, dict)]
+            if state["step"] > 1 and fed:
+                total_bytes = sum(int(f.get("bytes") or 0) for f in fed)
+                total_tok = sum(int(f.get("tokens") or 0) for f in fed)
+                errors = sum(1 for f in fed if f.get("is_error"))
+                line = (f"{glyph('arrow')} includes {_plural(len(fed), 'tool result')} from step {state['step'] - 1} "
+                        f"({_fmt_bytes(total_bytes)} {dot} ~{_fmt_tokens(total_tok)} tokens)")
+                if errors:
+                    line += f" {dot} {ERROR}{_plural(errors, 'error')}{RST}{MUTED}"
+                add(f"{rail}  {MUTED}{line}{RST}")
             thinking = str(data.get("thinking") or "").strip()
             if thinking and show_thinking:
                 add(f"{rail}  {SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}")
                 for para in thinking.splitlines():
                     add_many(wrap_rows(f"{DIM}{ITALIC}{para}{RST}", f"{rail}  {SUBTLE}{glyph('thinking_bar')}{RST} ",
                                        f"{rail}  {SUBTLE}{glyph('thinking_bar')}{RST} "))
+                for secs in data.get("thinking_s") or []:
+                    add(f"{rail}  {SUBTLE}{glyph('star')} thought for {float(secs):.1f}s{RST}")
             text = str(data.get("text") or "").strip()
             if text:
                 for r in format_markdown(text, max_width=width - 2).splitlines():

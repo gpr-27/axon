@@ -1928,19 +1928,7 @@ class Renderer:
         agent = getattr(self, "_agent", None)
         if agent is None:
             return ""
-        settings = getattr(agent, "settings", None)
-        base = str(getattr(settings, "base_url", "") or "")
-        pid = str(getattr(settings, "provider", "") or "")
-        try:
-            if pid:          # an explicit provider preset names itself
-                from axon.providers.catalog import PROVIDER_PRESETS
-                preset = next((x for x in PROVIDER_PRESETS if getattr(x, "id", "") == pid), None)
-                if preset is not None and getattr(preset, "name", ""):
-                    return _one_line(preset.name, 40)
-            label = _provider_label(model or "", base)
-        except Exception:
-            return ""
-        return "" if label in ("", "API") else _one_line(label, 40)
+        return provider_name(getattr(agent, "settings", None), model)
 
     def _open_turn(self, prompt: str, model: str, mode: str) -> None:
         # `!cmd` output travels with the next prompt as context; the header shows what the user asked
@@ -3028,6 +3016,23 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
         for a, b, uid in spans:
             row_tags[a:b] = [uid] * (b - a)
     return out
+
+
+def provider_name(settings: Any, model: str) -> str:
+    """Provider shown next to a model in the timeline (shared by the live view, the saved transcript and
+    the restored view, so all three name it the same way). '' when it cannot be determined."""
+    base = str(getattr(settings, "base_url", "") or "")
+    pid = str(getattr(settings, "provider", "") or "")
+    try:
+        if pid:          # an explicit provider preset names itself
+            from axon.providers.catalog import PROVIDER_PRESETS
+            preset = next((x for x in PROVIDER_PRESETS if getattr(x, "id", "") == pid), None)
+            if preset is not None and getattr(preset, "name", ""):
+                return _one_line(preset.name, 40)
+        label = _provider_label(model or "", base)
+    except Exception:
+        return ""
+    return "" if label in ("", "API") else _one_line(label, 40)
 
 
 def _provider_label(model: str, base_url: str) -> str:

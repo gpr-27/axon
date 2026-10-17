@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.27.5
+
+Restored sessions show what the live view showed
+- A restored step is drawn the same as it was live: the header with the provider and "reads N messages (~tokens)",
+  the "includes N tool results from step K" line, and "thought for X.Xs" after each thinking block.
+- These facts are saved with each LLM call from now on. Sessions recorded before this release keep their
+  messages, tool calls and outputs, but not those numbers, because they were never saved.
+
 ## 0.27.4
 
 Every file change is shown

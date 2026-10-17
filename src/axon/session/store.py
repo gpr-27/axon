@@ -436,7 +436,8 @@ class SessionStore:
         self.append("user_message", {"role": "user", "content": text})
 
     def append_turn(self, turn: AssistantTurn, model: str | None = None, cost: float | None = None,
-                    duration_s: float | None = None) -> None:
+                    duration_s: float | None = None, call: dict[str, Any] | None = None,
+                    thinking_s: list[float] | None = None) -> None:
         """Persist an assistant turn: text, thinking, full tool inputs, usage, cost and timing."""
         u = turn.usage
         model = model or getattr(turn, "model", None) or self.model
@@ -456,6 +457,12 @@ class SessionStore:
                 "cache_write": u.cache_write, "reasoning": u.reasoning,
             } if u else None,
         }
+        # What the timeline showed for this call (context size, provider, results fed back) and how long each
+        # thinking block took, so a restored session draws the same rows as the live one.
+        if call:
+            turn_data["call"] = call
+        if thinking_s:
+            turn_data["thinking_s"] = thinking_s
         self.append("assistant_turn", turn_data)
 
     def append_results(self, results: list[ToolResultBlock], timings: dict[str, float] | None = None,

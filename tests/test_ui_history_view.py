@@ -47,3 +47,32 @@ def test_row_tags_follow_tool_blocks(tmp_path: Path) -> None:
     assert len(tags) == len(rows)
     grep_rows = [i for i, r in enumerate(rows) if "● Grep" in strip_ansi(r)]
     assert grep_rows and tags[grep_rows[0]] == 42
+
+
+def test_restored_step_shows_what_the_live_step_showed(tmp_path: Path) -> None:
+    """The context line, the provider, the tool results fed back and the thinking time are saved with each call
+    and drawn in the restored view exactly as the live view drew them."""
+    store = SessionStore(tmp_path, session_dir=tmp_path / "sessions")
+    sid = store.open(None)
+    store.append("user_message", {"role": "user", "content": "make hi files"})
+    store.append("assistant_turn", {"stop_reason": "tool_use", "text": "", "thinking": "Plan the files.",
+                                    "tool_uses": [{"id": "w1", "name": "Write", "input": {"path": "hi1.txt"}}],
+                                    "model": "deepseek-v4-flash", "cost": 0.01, "duration_s": 1.0,
+                                    "usage": {"input": 100, "output": 9},
+                                    "call": {"message_count": 2, "tokens_in": 900, "provider": "AgentRouter",
+                                             "fed_back": []},
+                                    "thinking_s": [0.2]})
+    store.append("tool_results", [{"tool_use_id": "w1", "content": "Created hi1.txt", "is_error": False}])
+    store.append("assistant_turn", {"stop_reason": "end_turn", "text": "Done.", "thinking": "Check it.",
+                                    "tool_uses": [], "model": "deepseek-v4-flash", "cost": 0.005, "duration_s": 0.8,
+                                    "usage": {"input": 300, "output": 8},
+                                    "call": {"message_count": 16, "tokens_in": 14100, "provider": "AgentRouter",
+                                             "fed_back": [{"id": "w1", "name": "Write", "target": "hi1.txt",
+                                                           "lines": 1, "bytes": 10900, "tokens": 2900,
+                                                           "is_error": False}]},
+                                    "thinking_s": [0.0]})
+    out = strip_ansi("\n".join(format_session_history(Path(store._file(sid)), width=110)))
+    assert "LLM call · deepseek-v4-flash (AgentRouter) · reads 2 messages (~900 tokens)" in out
+    assert "reads 16 messages (~14.1k tokens)" in out
+    assert "includes 1 tool result from step 1 (10.6 KB · ~2.9k tokens)" in out
+    assert "thought for 0.2s" in out and "thought for 0.0s" in out

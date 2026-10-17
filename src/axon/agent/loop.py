@@ -59,6 +59,7 @@ from axon.providers.base import (
     StreamEvent,
     TextBlock,
     TextDelta,
+    ThinkingDelta,
     ToolBatchStart,
     ToolExecutionResult,
     ToolExecutionStart,
@@ -253,6 +254,11 @@ def make_provider(model: str, settings: Any, role: str = "main") -> Any:
         return provider_for(model, settings, role=role)
     except TypeError:
         return provider_for(model, settings)
+
+
+def _fed_back_fact(t: dict[str, Any]) -> dict[str, Any]:
+    """The facts the timeline shows for one tool result fed into the next call (no full output)."""
+    return {k: t.get(k) for k in ("id", "name", "target", "lines", "bytes", "tokens", "is_error") if k in t}
 
 
 def _as_float(v: Any) -> float:
@@ -543,6 +549,14 @@ class Agent:
 
     def end_session(self, reason: str = "exit") -> Any:
         return self._hook("SessionEnd", {"reason": reason})
+
+    def _provider_name(self, model: str) -> str:
+        """Provider shown next to the model in the timeline; '' when it cannot be determined."""
+        try:
+            from axon.ui.render import provider_name
+            return provider_name(self.settings, model)
+        except Exception:
+            return ""
 
     def display_model(self) -> str:
         """The model actually called: an alias such as "opus" or "default" resolved to the real id the
@@ -1117,6 +1131,8 @@ class Agent:
         self._trace = trace
         result: TurnResult | None = None
         self._full_outputs: dict[str, str] = {}
+        self._call_meta: dict[str, Any] = {}
+        self._think_blocks: list[float] = []
         self.journal("turn_start", {"turn": trace.turn, "prompt": user_input, "model": self.settings.model,
                                     "mode": self.settings.mode})
         boost = self._apply_thinking_boost(user_input)
@@ -1315,18 +1331,28 @@ class Agent:
                 return stop
             self.context.prepare(self.conversation, system_blocks, tool_schemas, model=self.settings.model)
 
+            tokens_in = self.context.projected_tokens(self.conversation, system_blocks, tool_schemas)
             self._emit(
                     LLMCallStart(
                         iteration=iterations,
                         max_iterations=self.settings.max_iterations,
                         model=self.display_model(),
                         message_count=len(self.conversation.messages),
-                        tokens_in=self.context.projected_tokens(self.conversation, system_blocks, tool_schemas),
+                        tokens_in=tokens_in,
                         tools_ingested=list(last_round),
                         user_prompt=user_input,
                         mode=self.settings.mode,
                     )
                 )
+            # The same context facts the live timeline shows, saved with this call's turn so a restored
+            # session draws the step exactly as it was drawn live.
+            self._think_blocks = []
+            self._call_meta = {
+                "message_count": len(self.conversation.messages),
+                "tokens_in": tokens_in,
+                "provider": self._provider_name(self.display_model()),
+                "fed_back": [_fed_back_fact(t) for t in last_round],
+            }
 
             try:
                 fingerprint = self._cache.fingerprint(self.settings.model, str(self.settings.effort), system_blocks, tool_schemas, self.conversation.messages)
@@ -1394,7 +1420,8 @@ class Agent:
             assert turn is not None
             self.conversation.append_assistant(turn)
             try:
-                self.session.append_turn(turn, model=call_model, cost=cost, duration_s=max(0.0, t1 - t0))
+                self.session.append_turn(turn, model=call_model, cost=cost, duration_s=max(0.0, t1 - t0),
+                                         call=self._call_meta, thinking_s=list(self._think_blocks))
             except TypeError:
                 self.session.append_turn(turn)
             final_text = turn.text
@@ -1625,12 +1652,23 @@ class Agent:
                         effort=self.settings.effort,
                         thinking=self.settings.thinking,
                     )
+                    think_started: float | None = None
                     for event in stream:
                         if isinstance(event, (TextDelta, ToolUseStart)):
                             emitted = True
                         if isinstance(event, TextDelta):
                             partial_text.append(event.text)
+                        # Thinking blocks are timed the way the live view times them: from the first thinking
+                        # chunk to the first text or tool call (or the end of the stream).
+                        if isinstance(event, ThinkingDelta):
+                            if think_started is None:
+                                think_started = time.time()
+                        elif think_started is not None and isinstance(event, (TextDelta, ToolBatchStart)):
+                            self._think_blocks.append(round(max(0.1, time.time() - think_started), 3))
+                            think_started = None
                         self._emit(event)
+                    if think_started is not None:
+                        self._think_blocks.append(round(max(0.1, time.time() - think_started), 3))
                     turn = self.provider.finalize()
                 self._last_call_window = (started, time.time())
                 return self._normalize_turn(turn), "ok", None
