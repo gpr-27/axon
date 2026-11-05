@@ -36,6 +36,9 @@ class ProviderPreset:
     strict_messages: bool = False
     docs_url: str = ""
     api_version: str | None = None
+    # False: the endpoint silently drops the `tools` request field, so tools go into the prompt instead
+    # (see providers/prompt_tools.py). Set per endpoint with `native_tools = false` in config.toml.
+    native_tools: bool = True
 
     def __post_init__(self) -> None:
         if not self.env_vars and self.env_var:
@@ -70,7 +73,7 @@ def fetch_local_lmstudio_models(base_url: str = "http://localhost:1234/v1", time
 
 # Model ids a provider lists that are not chat models (speech, TTS, safety classifiers, embeddings, images).
 _NON_CHAT_MARKERS = ("whisper", "tts", "orpheus", "prompt-guard", "safeguard", "embed", "moderation", "transcribe",
-                     "dall-e", "image", "audio", "rerank", "distil-whisper")
+                     "dall-e", "image", "audio", "rerank", "distil-whisper", "veo", "imagen", "sora", "video")
 
 
 def is_chat_model_id(model_id: str) -> bool:
@@ -525,6 +528,19 @@ def _load_custom_models() -> list[Any]:
         return []
 
 
+def find_custom_model_preset(model: str) -> ProviderPreset | None:
+    """The provider a model was saved under in ``custom_models`` (config.toml), if any."""
+    wanted = (model or "").strip()
+    if not wanted:
+        return None
+    for entry in _load_custom_models():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("model", "")).strip() == wanted and entry.get("provider"):
+            return get_preset_by_id(str(entry["provider"]))
+    return None
+
+
 def get_linked_providers(agent: Any = None) -> list[ProviderPreset]:
     """ProviderPresets that are actively linked/configured (AgentRouter always offered as fallback)."""
     linked = [p for p in PROVIDER_PRESETS if is_provider_linked(p, agent)]
@@ -669,11 +685,17 @@ def find_preset_for_model(model_name: str) -> ProviderPreset | None:
     m_clean = (model_name or "").strip()
     low = m_clean.lower()
 
+    saved = find_custom_model_preset(m_clean)
+    if saved is not None:
+        return saved
+
     for p in PROVIDER_PRESETS:
         if m_clean in p.models or m_clean == p.default_model:
             return p
 
     prefixed, rest = split_provider_prefix(m_clean)
+    if prefixed is not None and prefixed.category == "Custom":
+        return prefixed
     if prefixed is not None and prefixed.id != "openrouter":
         if rest in prefixed.models or prefixed.id in ("ollama", "lmstudio", "agentrouter", "azure"):
             return prefixed

@@ -585,7 +585,12 @@ def _decode_csi(getc: Callable[[float], str | None]) -> str:
     if not final:
         return ""
     if final == "~" and params == "200":
-        return PASTE_PREFIX + _read_bracketed_paste(getc)
+        global _inside_bracketed_paste
+        _inside_bracketed_paste = True
+        try:
+            return PASTE_PREFIX + _read_bracketed_paste(getc)
+        finally:
+            _inside_bracketed_paste = False
     if final == "R" and params.count(";") == 1 and not params.startswith(("<", "?", ">")):
         row, _sep, col = params.partition(";")  # cursor position report (answer to CSI 6n)
         if row.isdigit() and col.isdigit():
@@ -644,17 +649,24 @@ def _keycode_name(code: int, mod: int) -> str:
     return ""
 
 
+# A paste ends with the terminal's end marker. Terminals such as VS Code send long pastes in chunks with
+# pauses in between, so a short pause must not end the paste: the rest would arrive as typed keys and each
+# newline would act as Enter.
+PASTE_END = "\x1b[201~"
+PASTE_IDLE_SECONDS = 5.0      # give up only after this long with no data at all
+PASTE_MAX_SECONDS = 120.0     # hard stop for a terminal that never sends the end marker
+
+
 def _read_bracketed_paste(getc: Callable[[float], str | None]) -> str:
     buf: list[str] = []
-    end = "\x1b[201~"
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + PASTE_MAX_SECONDS
     while time.monotonic() < deadline:
-        c = getc(0.5)
+        c = getc(PASTE_IDLE_SECONDS)
         if c is None:
             break
         buf.append(c)
-        if c == "~" and "".join(buf[-6:]) == end:
-            del buf[-6:]
+        if c == "~" and "".join(buf[-len(PASTE_END):]) == PASTE_END:
+            del buf[-len(PASTE_END):]
             break
     return normalize_newlines("".join(buf))
 
@@ -713,6 +725,10 @@ def _check_resize() -> bool:
 
 _PASTE_MIN_CHARS = 200
 
+# True while a bracketed paste (ESC[200~ ... ESC[201~) is being read. A long paste arrives in several
+# 64 KB chunks; the chunks without a marker must stay part of that paste instead of being guessed at.
+_inside_bracketed_paste = False
+
 
 def _looks_like_paste(text: str) -> bool:
     """Heuristic for a *non-bracketed* paste read in one chunk.
@@ -751,7 +767,7 @@ def _posix_fill(timeout: float) -> bool:
     text = _decoder.decode(data)
     if not text:
         return True  # incomplete utf-8 sequence; wait for the rest
-    if _looks_like_paste(text):
+    if not _inside_bracketed_paste and _looks_like_paste(text):
         # Non-bracketed multi-line chunk: treat as a paste so it does not submit line by line.
         _events.append(PASTE_PREFIX + normalize_newlines(text))
         return True

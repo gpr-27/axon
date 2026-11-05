@@ -4,8 +4,10 @@ Axon top-level CLI: argument parsing, print mode, subcommands and the interactiv
 from __future__ import annotations
 import argparse
 import json
+import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -15,7 +17,7 @@ from typing import Any, Callable
 from axon.config import ConfigError, PermissionConfig, Settings
 from axon.errors import AxonError
 
-SUBCOMMANDS = ("mcp", "doctor", "purge")
+SUBCOMMANDS = ("mcp", "doctor", "purge", "agents")
 _FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_budget", "max_iterations"}
 _ESCAPE_FRAGMENTS = {"[A", "[B", "[C", "[D", "OA", "OB", "OC", "OD", "\x1b"}
 
@@ -97,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="axon",
         description="A terminal-native agentic coding assistant.",
         epilog="Subcommands: `axon mcp <list|add|remove|...>` MCP servers, `axon doctor` checks your setup, "
-               "`axon setup` guided provider setup, `axon purge` deletes stored sessions/traces, "
+               "`axon setup` guided provider setup, `axon purge` deletes stored sessions, "
                "`axon new <template>` starter project, `axon map` repository map, `axon stats` / "
                "`axon report` usage analytics, `axon serve` local HTTP/SSE API, `axon activity` the journal "
                "of everything you did, `axon projects` every project and its data folder, `axon keys` API keys "
@@ -109,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text", help="Print-mode output format")
     parser.add_argument("--model", help="Model to use")
     parser.add_argument("--context-limit", metavar="SIZE",
-                        help="How much of the model's context window to use: 128k (default), 256k, 1m or max")
+                        help="How much of the model's context window to use: auto (default: the model's full window), 128k, 256k or 1m")
     parser.add_argument("--provider", help="Provider preset id (e.g. anthropic, openai, openrouter, ollama)")
     parser.add_argument("--base-url", dest="base_url", help="Provider API base URL")
     parser.add_argument("--mode", "--permission-mode", dest="mode", type=_permission_mode, metavar="MODE",
@@ -164,11 +166,25 @@ def _permission_mode(value: str) -> str:
     return mode
 
 
+def _provider_override(provider: str | None, base_url: str | None) -> str | None:
+    """``--base-url`` alone: when the URL belongs to a known provider, switch to that provider (a saved
+    provider would otherwise win in routing). An unknown URL keeps the saved provider, so its key is used
+    through that proxy or gateway."""
+    if provider or not base_url:
+        return provider
+    try:
+        from axon.providers.catalog import find_preset_by_url
+        preset = find_preset_by_url(base_url)
+    except Exception:
+        preset = None
+    return preset.id if preset else None
+
+
 def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "model": args.model,
         "context_limit": _context_limit_arg(getattr(args, "context_limit", None)),
-        "provider": args.provider,
+        "provider": _provider_override(args.provider, args.base_url),
         "base_url": args.base_url,
         "mode": args.mode,
         "effort": args.effort,
@@ -218,7 +234,7 @@ def _apply_prompt_flags(settings: Settings, args: argparse.Namespace) -> Setting
     return settings.model_copy(update=updates) if updates else settings
 
 
-def _apply_agent_flag(settings: Settings, name: str) -> tuple[Settings, Any]:
+def _apply_agent_flag(settings: Settings, name: str, explicit_mode: bool = False) -> tuple[Settings, Any]:
     """--agent <name>: the main session takes that agent's prompt, model and tool list."""
     from axon.agent.subagent import get_agent_definition, load_agent_definitions
     d = get_agent_definition(settings.workspace, name)
@@ -231,7 +247,56 @@ def _apply_agent_flag(settings: Settings, name: str) -> tuple[Settings, Any]:
         updates["model"] = model
     if d.max_turns:
         updates["max_iterations"] = int(d.max_turns)
+    if d.permission_mode and not explicit_mode:
+        from axon.config import normalize_mode
+        mode = normalize_mode(d.permission_mode)
+        if mode and mode != "bypass":
+            updates["mode"] = mode
+    if d.effort:
+        try:
+            updates["effort"] = Settings.normalize_effort(d.effort)
+        except Exception:
+            pass
     return (settings.model_copy(update=updates) if updates else settings), d
+
+
+class _DebugFileHandler(logging.FileHandler):
+    """File handler whose file can be moved (see :func:`rehome_debug_log`) while logging continues."""
+    rehomable = False
+
+    def retarget(self, path: Path) -> None:
+        self.acquire()
+        try:
+            old = Path(self.baseFilename)
+            if self.stream is not None:
+                self.stream.flush()
+                self.stream.close()
+                self.stream = None  # type: ignore[assignment]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if old.is_file() and old != path:
+                with open(old, "rb") as src, open(path, "ab") as dst:  # append: never clobber an earlier run
+                    shutil.copyfileobj(src, dst)
+                old.unlink()
+            self.baseFilename = os.path.abspath(path)
+            self.stream = self._open()
+        finally:
+            self.release()
+
+
+def rehome_debug_log(agent: Any) -> Path | None:
+    """Move the boot-time --debug log into the settled session's folder (``<session>/debug.log``)."""
+    import logging
+    from axon import storage
+    for h in logging.getLogger("axon").handlers:
+        if isinstance(h, _DebugFileHandler) and h.rehomable:
+            try:
+                dest = storage.session_file(Path(agent.settings.workspace), str(agent.session.active_session_id), "debug.log")
+                h.retarget(dest)
+                h.rehomable = False
+                return dest
+            except Exception:
+                return None
+    return None
 
 
 def setup_debug_logging(filter_spec: str | None, file: str | None, session_id: str = "") -> Path | None:
@@ -244,7 +309,10 @@ def setup_debug_logging(filter_spec: str | None, file: str | None, session_id: s
         path = Path(os.path.expanduser(file))
     else:
         from axon import storage
-        path = storage.project_subdir(None, "debug") / f"{session_id or time.strftime('%Y%m%d-%H%M%S')}.log"
+        # The session is not known yet at boot: log next to the unattached artifacts and let
+        # rehome_debug_log() move it into <session>/debug.log once the session is settled.
+        path = (storage.session_file(Path.cwd(), session_id, "debug.log") if session_id
+                else storage.session_subdir(Path.cwd(), storage.UNATTACHED, "debug") / f"{time.strftime('%Y%m%d-%H%M%S')}.log")
     path.parent.mkdir(parents=True, exist_ok=True)
     api = ("axon.providers", "axon.agent.api")  # provider modules + the agent's LLM-call events
     cats: dict[str, tuple[str, ...]] = {
@@ -264,7 +332,8 @@ def setup_debug_logging(filter_spec: str | None, file: str | None, session_id: s
                 return False
             return not include or any(name.startswith(x) for x in include)
 
-    handler = logging.FileHandler(path, encoding="utf-8")
+    handler = _DebugFileHandler(path, encoding="utf-8")
+    handler.rehomable = not file and not session_id
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     handler.addFilter(_Filter())
     root = logging.getLogger("axon")
@@ -306,6 +375,7 @@ def _apply_tool_rules(settings: Settings, allowed: list[str], disallowed: list[s
     perms = PermissionConfig(
         allow=list(dict.fromkeys(list(settings.permissions.allow) + allowed)),
         deny=list(dict.fromkeys(list(settings.permissions.deny) + deny_rules)),
+        ask=list(settings.permissions.ask),
     )
     return settings.model_copy(update={"permissions": perms})
 
@@ -349,9 +419,11 @@ def build_agent(
             import atexit
             atexit.register(shutdown_mcp_bridge)
             # With registry=, servers that finish connecting later register their tools live.
-            mcp_tools = [] if strict_mcp else initialize_mcp_bridge(settings.workspace, registry=tools)
+            mcp_tools = [] if strict_mcp else initialize_mcp_bridge(
+                settings.workspace, registry=tools, extra_roots=list(settings.additional_dirs or []))
             if mcp_specs:
                 bridge = get_bridge(settings.workspace)
+                bridge.extra_roots = [Path(d) for d in (settings.additional_dirs or [])]
                 bridge.attach_registry(tools)
                 mcp_tools = list(mcp_tools) + list(bridge.connect_all(mcp_specs) or [])
             for mcp_tool in mcp_tools:
@@ -385,7 +457,13 @@ def build_agent(
     context = ContextManager(settings)
     try:
         from axon.tools.interactive import defer_mcp_tools
-        search = defer_mcp_tools(tools, context.context_window(settings.model))
+        window = context.context_window(settings.model)
+        try:
+            from axon.mcp.bridge import get_bridge
+            get_bridge().context_window = window   # servers that connect later use the same rule
+        except Exception:
+            pass
+        search = defer_mcp_tools(tools, window)
         if search is not None and announce and settings.verbose:
             announce(f"MCP: {len(search.deferred)} tool schema(s) deferred behind ToolSearch")
     except Exception:
@@ -405,11 +483,19 @@ def build_agent(
     )
     if agent_def is not None:
         agent.main_agent_name = agent_def.name
-    if settings.small_model and getattr(settings, "auto_title", True) and not provider_given:
+        if getattr(agent_def, "spawn_types", None):
+            agent.allowed_subagent_types = list(agent_def.spawn_types)     # tools: Agent(a, b)
+        try:   # preloaded skills, persistent memory and the agent's own hooks apply to the main session too
+            from axon.agent.subagent import _role_prompt, _scoped_hooks
+            agent.extra_system = _role_prompt(agent, agent_def, settings.workspace) or agent.extra_system
+            agent.hooks = _scoped_hooks(agent, agent_def)
+        except Exception:
+            pass
+    if getattr(settings, "auto_title", True) and getattr(settings, "title_llm", True) and not provider_given:
         try:
             from axon.agent.loop import make_provider
-            agent.title_provider = make_provider(settings.small_model, settings.model_copy(update={"model": settings.small_model}),
-                                                 role="title")
+            title_model = settings.small_model or settings.model   # a short call: about 24 tokens out
+            agent.title_provider = make_provider(title_model, settings, role="title")
         except Exception:
             agent.title_provider = None
     return agent
@@ -428,7 +514,7 @@ def find_session(agent: Any, query: str) -> tuple[str | None, list[str]]:
     ids = [m.session_id for m in metas]
     if q in ids:
         return q, []
-    if (agent.session.session_dir / f"{q}.jsonl").is_file():
+    if agent.session.exists(q):
         return q, []
     pref = [i for i in ids if i.startswith(q)]
     if len(pref) == 1:
@@ -447,16 +533,20 @@ def fork_session(agent: Any, say: Callable[[str], None]) -> str:
     """Copy the active session's transcript to a new session ID and switch to it."""
     import shutil
     old_id = agent.session.active_session_id
-    old_file = agent.session.session_dir / f"{old_id}.jsonl"
+    old_file = agent.session._file(old_id)
     new_id = agent.session._generate_session_id() if hasattr(agent.session, "_generate_session_id") else None
     new_id = agent.session.open(new_id)
     try:
         if old_file.is_file():
-            shutil.copyfile(old_file, agent.session.session_dir / f"{new_id}.jsonl")
+            dest = agent.session.path_for(new_id)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(old_file, dest)
         from axon.agent.trace import trace_file
         old_traces = trace_file(agent.settings.workspace, old_id)
         if old_traces.is_file():
-            shutil.copyfile(old_traces, trace_file(agent.settings.workspace, new_id))
+            new_traces = trace_file(agent.settings.workspace, new_id)
+            new_traces.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(old_traces, new_traces)
     except OSError as e:
         say(f"Could not copy transcript: {e}")
     say(f"Forked session {old_id} -> {new_id}")
@@ -510,7 +600,7 @@ def _context_limit_arg(value: str | None) -> int | None:
     try:
         return parse_token_count(value)
     except ValueError as e:
-        raise SystemExit(f"axon: --context-limit: {e} (use 128k, 256k, 1m or max)")
+        raise SystemExit(f"axon: --context-limit: {e} (use auto, 128k, 256k or 1m)")
 
 
 def _session_file(agent: Any, session_id: str) -> Any:
@@ -735,6 +825,36 @@ def _expand_resources(line: str, limit: int) -> str:
     return line
 
 
+_AGENT_MENTION_RE = re.compile(r'@agent-([\w:.\-]+)|@"([^"\n]+?) \(agent\)"')
+
+
+def expand_agent_mentions(line: str, workspace: Path) -> str:
+    """``@agent-<name>`` / ``@"name (agent)"``: the named subagent is guaranteed to run. The mention reads as the
+    plain name and a note tells the model to delegate to that subagent with the Task tool."""
+    if "@" not in line or line.startswith("/"):
+        return line
+    found: list[str] = []
+
+    def repl(m: re.Match[str]) -> str:
+        name = (m.group(1) or m.group(2) or "").strip()
+        try:
+            from axon.agent.subagent import get_agent_definition
+            d = get_agent_definition(workspace, name)
+        except Exception:
+            d = None
+        if d is None or d.fork:
+            return m.group(0)
+        if d.name not in found:
+            found.append(d.name)
+        return f"the {d.name} subagent"
+
+    out = _AGENT_MENTION_RE.sub(repl, line)
+    if not found:
+        return line
+    note = "; ".join(f'subagent_type="{n}"' for n in found)
+    return f"{out}\n\n[The user @-mentioned a subagent: delegate the relevant work to it with the Task tool ({note}).]"
+
+
 def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000) -> str:
     """Inline `@path` mentions: files as fenced context, directories as a listing, and
     `@server:uri` MCP resources. Files over 256 KB are skipped; AXON_DISABLE_FILE_MENTIONS=1 disables it."""
@@ -879,7 +999,7 @@ def _stop_loops(agent: Any) -> None:
 
 def _print_turn(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> int:
     _journal("prompt", {"text": prompt, "source": "print", "format": fmt}, agent=agent)
-    prompt = expand_file_mentions(prompt, agent.settings.workspace)
+    prompt = expand_file_mentions(expand_agent_mentions(prompt, agent.settings.workspace), agent.settings.workspace)
     t0 = time.time()
     try:
         result = agent.run_turn(prompt)
@@ -1041,8 +1161,35 @@ def _use_turn_thread(agent: Any) -> bool:
         return False
 
 
+def _interrupted_result(agent: Any) -> Any:
+    """A TurnResult for a turn that Esc stopped outside a model call (a tool, a hook, a back-off):
+    what it did so far, taken from the turn's trace."""
+    from axon.agent.loop import INTERRUPTED_NOTE, TurnResult
+    from axon.providers.base import Usage
+    traces = getattr(agent, "traces", None) or []
+    trace = traces[-1] if traces else None
+    usage = Usage(input=int(getattr(trace, "input_tokens", 0) or 0),
+                  output=int(getattr(trace, "output_tokens", 0) or 0),
+                  cache_read=int(getattr(trace, "cache_read_tokens", 0) or 0),
+                  cache_write=int(getattr(trace, "cache_write_tokens", 0) or 0))
+    return TurnResult(final_text=INTERRUPTED_NOTE, stop_reason="interrupted",
+                      iterations=int(getattr(trace, "llm_calls", 0) or 0),
+                      tool_calls_count=int(getattr(trace, "tool_calls", 0) or 0), usage=usage)
+
+
+def _report_interrupted_turn(agent: Any, renderer: Any, elapsed: float) -> None:
+    """Close a turn stopped by Esc like any stopped turn: the ✗ Interrupted line and the usage so far."""
+    from axon.ui.theme import RST, TEAL
+    try:
+        shown = render_turn_footer(renderer, agent, _interrupted_result(agent), elapsed)
+    except Exception:
+        shown = False
+    if not shown:
+        print(f"\n\n  {TEAL}Stopped by user.{RST}\n")
+
+
 def _run_agent_turn(agent: Any, renderer: Any, turn_input: str, label: str) -> None:
-    from axon.ui.theme import CYAN, ROSE, RST, SLATE, TEAL
+    from axon.ui.theme import CYAN, ROSE, RST, SLATE
     try:
         from axon.ui.in_flight import InFlightInputListener
         listener: Any = InFlightInputListener(agent)
@@ -1057,7 +1204,7 @@ def _run_agent_turn(agent: Any, renderer: Any, turn_input: str, label: str) -> N
             else:
                 res = agent.run_turn(turn_input)
     except KeyboardInterrupt:
-        print(f"\n\n  {TEAL}Stopped by user.{RST}\n")
+        _report_interrupted_turn(agent, renderer, time.time() - t0)
         return
     except AxonError as e:
         _journal("error", {"where": label, "error": str(e), "prompt": turn_input[:500]}, agent=agent)
@@ -1189,17 +1336,21 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
                 return False
             return True
 
-    _journal("prompt", {"text": line, "source": "queue" if from_queue else "typed"}, agent=agent)
-    line = expand_file_mentions(line, agent.settings.workspace)
-
+    # Split ";;" follow-ups off the typed text first: a mentioned file's content may contain ";;" itself.
+    follow_ups: list[str] = []
     if not from_queue and ";;" in line and not line.startswith("/"):
         parts = [p.strip() for p in line.split(";;") if p.strip()]
         if len(parts) > 1:
-            line = parts[0]
-            for extra in parts[1:]:
-                agent.message_queue.push(extra)
-            n = len(parts) - 1
-            print(f"\n  {MINT}Queued {n} follow-up question{'s' if n > 1 else ''} (in queue: {len(agent.message_queue)}){RST}\n")
+            line, follow_ups = parts[0], parts[1:]
+
+    _journal("prompt", {"text": line, "source": "queue" if from_queue else "typed"}, agent=agent)
+    line = expand_file_mentions(expand_agent_mentions(line, agent.settings.workspace), agent.settings.workspace)
+
+    if follow_ups:
+        for extra in follow_ups:
+            agent.message_queue.push(extra)
+        n = len(follow_ups)
+        print(f"\n  {MINT}Queued {n} follow-up question{'s' if n > 1 else ''} (in queue: {len(agent.message_queue)}){RST}\n")
 
     try:
         from axon.agent.images import compact_image_paths
@@ -1242,17 +1393,17 @@ def drain_queue(agent: Any, renderer: Any) -> bool:
 
 
 def _start_screen_log(agent: Any) -> Any:
-    """Record everything shown in this REPL to ~/.axon/projects/<project>/screen/<started>-<session>.log."""
+    """Record everything shown in this REPL to ~/.axon/projects/<project>/sessions/<session>/screen.log."""
     if not sys.stdout.isatty():
         return None
     try:
-        from axon.storage import project_dir
+        from axon.storage import session_file
         from axon.ui.screen_log import ScreenLog, click_expand_enabled
         keep_file = bool(getattr(agent.settings, "screen_log", True))
         if not keep_file and not click_expand_enabled(agent.settings):
             return None
         sid = str(getattr(agent.session, "active_session_id", "") or "session")
-        path = project_dir(Path(agent.settings.workspace)) / "screen" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sid}.log"
+        path = session_file(Path(agent.settings.workspace), sid, "screen.log")
         # without a file it still tracks which transcript entry each row shows (click-to-expand)
         log = ScreenLog(sys.stdout, path if keep_file else None)
         log.mark(f"Axon · {agent.settings.workspace} · session {sid}")
@@ -1299,13 +1450,14 @@ def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
                     from axon.ui.render import get_transcript
                     tool_tags = {e.id: e.uid for e in get_transcript() if e.kind == "tool" and e.id}
                     rows = format_session_history(path, registry=getattr(agent, "registry", None), width=width,
-                                                  row_tags=tags, tool_tags=tool_tags)
+                                                  row_tags=tags, tool_tags=tool_tags,
+                                                  trace_level=getattr(renderer, "trace_level", "normal"))
                 except Exception:
                     rows, tags = [], []
             if not rows:
                 tags = []
                 rows = format_conversation_replay(msgs, registry=getattr(agent, "registry", None), width=width, tag="",
-                                                  row_tags=tags)
+                                                  row_tags=tags, detail=max(1, getattr(renderer, "level", 1)))
             try:
                 from axon.ui.screen_log import set_tag
             except ImportError:
@@ -1340,6 +1492,8 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
     if sys.stdin.isatty() and sys.stdout.isatty():
         sys.stdout.write("\033[2J\033[H\n")
         sys.stdout.flush()
+        if hasattr(agent, "suggestions"):
+            agent.suggestions.live = True    # only a real terminal shows next-prompt ghost text
     _print_banner(agent, renderer)
     try:
         from axon.agent.subagent import sync_subagents_for_session
@@ -1450,6 +1604,12 @@ def run_mcp_subcommand(args: list[str]) -> int:
     except (ImportError, AttributeError) as e:
         sys.stderr.write(f"axon: MCP support is unavailable: {e}\n")
         return 1
+    if args and args[0] == "serve":  # stdout carries the protocol: no agent, no banners
+        from axon.mcp.serve import serve_stdio
+        try:
+            return serve_stdio(Path.cwd())
+        except KeyboardInterrupt:
+            return 130
     try:
         settings = _load_settings_lenient()
         agent = build_agent(settings, connect_mcp=False)
@@ -1463,6 +1623,35 @@ def run_mcp_subcommand(args: list[str]) -> int:
     except Exception as e:
         sys.stderr.write(f"axon mcp: {type(e).__name__}: {e}\n")
         return 1
+    return 0
+
+
+def run_agents_subcommand(args: list[str]) -> int:
+    """`axon agents [--json] [--workspace DIR]`: every subagent definition that would load (built-in, plugin, user,
+    project), with its source, model and tools, and the files that were skipped and why."""
+    ws = Path.cwd()
+    as_json = "--json" in args
+    if "--workspace" in args:
+        i = args.index("--workspace")
+        if i + 1 < len(args):
+            ws = Path(args[i + 1]).expanduser().resolve()
+    from axon.agent.subagent import load_agent_definitions
+    problems: list[str] = []
+    defs = sorted(load_agent_definitions(ws, report=problems), key=lambda d: (d.source != "builtin", d.name))
+    if as_json:
+        print(json.dumps({"agents": [
+            {"name": d.name, "source": str(d.source), "description": d.description, "model": d.model or "inherit",
+             "tools": d.tools, "disallowedTools": d.disallowed_tools, "permissionMode": d.permission_mode,
+             "maxTurns": d.max_turns, "memory": d.memory, "background": d.background, "isolation": d.isolation,
+             "path": str(d.path) if d.path else None} for d in defs], "skipped": problems}, indent=2))
+        return 0
+    width = max((len(d.name) for d in defs), default=4)
+    for d in defs:
+        src = "built-in" if d.source == "builtin" else str(d.source) if d.source in ("user", "project", "cli") or \
+            str(d.source).startswith("plugin:") else "file"
+        print(f"{d.name.ljust(width)}  {src.ljust(9)}  {(d.model or 'inherit').ljust(9)}  {d.description[:70]}")
+    for line in problems:
+        sys.stderr.write(f"axon agents: {line}\n")
     return 0
 
 
@@ -1560,6 +1749,8 @@ def main(argv: list[str] | None = None) -> int:
                 return run_mcp_subcommand(argv[1:])
             if argv[0] == "purge":
                 return run_purge_subcommand(argv[1:])
+            if argv[0] == "agents":
+                return run_agents_subcommand(argv[1:])
             return run_doctor_subcommand(argv[1:])
         except KeyboardInterrupt:
             return 130
@@ -1600,8 +1791,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = _apply_prompt_flags(settings, args)
         agent_def = None
         if args.agent_name:
-            settings, agent_def = _apply_agent_flag(settings, args.agent_name)
+            settings, agent_def = _apply_agent_flag(settings, args.agent_name, explicit_mode=args.mode is not None)
         mcp_specs = _mcp_specs_from_args(args.mcp_config, settings.workspace) if args.mcp_config else None
+        if args.mcp_config or args.strict_mcp_config:
+            from axon.mcp.policy import cli_conflict
+            conflict = cli_conflict(settings.workspace, cli_servers=bool(args.mcp_config),
+                                    strict=bool(args.strict_mcp_config))
+            if conflict:
+                raise ConfigError(conflict)
     except ConfigError as e:
         return _startup_error(args, str(e), 2, "config_error")
     except KeyboardInterrupt:
@@ -1637,6 +1834,11 @@ def main(argv: list[str] | None = None) -> int:
         on_event = renderer.on_event
 
     interactive = sys.stdin.isatty() if sys.stdin else False
+    try:  # approval prompts and elicitation dialogs only in the REPL; -p and SDK runs never block on one
+        from axon.mcp import state as _mcp_state
+        _mcp_state.set_interactive(bool(interactive and not headless))
+    except Exception:
+        pass
     on_approval = None
     if interactive:
         from axon.ui.approve import ask_approval
@@ -1717,6 +1919,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
     if debug_path is not None:
+        debug_path = rehome_debug_log(agent) or debug_path
         import logging as _logging
         _logging.getLogger("axon").debug("session %s", getattr(agent.session, "active_session_id", ""))
     if debug_path is not None and fmt == "text":
@@ -1729,6 +1932,12 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     agent.start_session(source)
+    initial = str(getattr(agent_def, "initial_prompt", "") or "").strip() if agent_def is not None else ""
+    if initial and source == "startup":
+        if headless:
+            prompt = f"{initial}\n\n{prompt}".strip()
+        else:
+            agent.message_queue.push(initial)
     prev_term = _install_sigterm()
     if settings.additional_dirs:
         for d in settings.additional_dirs:

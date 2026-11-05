@@ -62,8 +62,8 @@ class FailoverProvider:
     def _fallback_provider(self, model: str) -> Any:
         prov = self._fallbacks.get(model)
         if prov is None:
-            from axon.providers.registry import provider_for
-            prov = provider_for(model, self.settings, failover=False)
+            from axon.providers.registry import provider_for, settings_for_model
+            prov = provider_for(model, settings_for_model(model, self.settings), failover=False)
             self._fallbacks[model] = prov
         return prov
 

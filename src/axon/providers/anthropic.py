@@ -200,7 +200,91 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
         ids = _tool_use_ids(m)
         if ids and (i >= len(out) or out[i]["role"] != "user"):
             fixed.append({"role": "user", "content": _interrupted_stubs(ids)})
+    _clean_tool_ids(fixed)
     return fixed
+
+
+_VALID_TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _valid_tool_id(tool_id: str, taken: set[str]) -> str:
+    """*tool_id* made acceptable to the Messages API (letters, digits, '_' and '-'), unique among *taken*."""
+    if _VALID_TOOL_ID.match(tool_id):
+        return tool_id
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)[:60] or "tool"
+    candidate = cleaned
+    counter = 1
+    while candidate in taken:
+        counter += 1
+        candidate = f"{cleaned}_{counter}"
+    return candidate
+
+
+def _clean_tool_ids(messages: list[dict[str, Any]]) -> None:
+    """Rewrite tool ids from other providers (dots, colons, empty) the same way in tool_use and tool_result."""
+    renamed: dict[str, str] = {}
+    taken: set[str] = set()
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            field = "id" if block.get("type") == "tool_use" else "tool_use_id" if block.get("type") == "tool_result" else ""
+            if not field:
+                continue
+            original = str(block.get(field) or "")
+            if original not in renamed:
+                renamed[original] = _valid_tool_id(original, taken)
+                taken.add(renamed[original])
+            block[field] = renamed[original]
+
+
+THINKING_TYPES = ("thinking", "redacted_thinking")
+
+
+def _is_tool_result_message(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        message.get("role") == "user"
+        and isinstance(content, list)
+        and len(content) > 0
+        and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+    )
+
+
+def _current_turn_start(messages: list[dict[str, Any]]) -> int:
+    """Index of the last message the user actually typed (not a tool result)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user" and not _is_tool_result_message(messages[i]):
+            return i
+    return 0
+
+
+def strip_thinking(messages: list[dict[str, Any]], *, keep_current_turn: bool) -> list[dict[str, Any]]:
+    """Return a copy of the messages without thinking blocks.
+
+    Anthropic signs every thinking block against the system prompt, the model and the messages
+    before it. If any of those changed (provider switch, compaction, new system prompt), sending
+    the old block back is a 400. The only blocks the API requires are the ones in the tool loop
+    that is still open, so with keep_current_turn=True those are left alone.
+    """
+    keep_from = _current_turn_start(messages) if keep_current_turn else len(messages)
+    result = []
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        is_old_assistant_message = (
+            index < keep_from and message.get("role") == "assistant" and isinstance(content, list)
+        )
+        if not is_old_assistant_message:
+            result.append(message)
+            continue
+        kept = [b for b in content if not (isinstance(b, dict) and b.get("type") in THINKING_TYPES)]
+        if not kept and content:
+            kept = [{"type": "text", "text": "[thinking omitted]"}]
+        result.append({**message, "content": kept})
+    return result
 
 
 def _tool_use_ids(msg: dict[str, Any]) -> list[str]:
@@ -346,6 +430,10 @@ class AnthropicProvider:
         key = key_obj.get_secret_value() if hasattr(key_obj, "get_secret_value") else str(key_obj or "")
         key = "" if key.strip().lower() in ("local", "none", "null") else key.strip()
         base = str(settings.base_url)
+        for tail in ("/v1/messages", "/v1"):  # the SDK adds /v1/messages itself (the key check accepts both spellings)
+            if base.rstrip("/").endswith(tail):
+                base = base.rstrip("/")[: -len(tail)]
+                break
         kwargs: dict[str, Any] = {
             "base_url": base,
             "max_retries": 0,  # retries are done here so each one is visible in the trace
@@ -355,8 +443,10 @@ class AnthropicProvider:
             kwargs["api_key"] = key or None
         else:
             # Anthropic-compatible gateways (AgentRouter & co.) authenticate with a Bearer token.
-            kwargs["auth_token"] = key or None
-            kwargs["api_key"] = key or None
+            # Never None here: the SDK would then read ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the
+            # shell and send the user's official Anthropic credentials to this third-party host.
+            kwargs["auth_token"] = key or "none"
+            kwargs["api_key"] = key or "none"
         if is_agentrouter(base):
             kwargs["default_headers"] = {k: v for k, v in default_headers(base).items() if k.startswith(("user-agent", "x-stainless"))}
         if http_client is not None:
@@ -399,7 +489,8 @@ class AnthropicProvider:
             cap = None
         limit = max(1, min(int(max_tokens), cap) if cap else int(max_tokens))
 
-        sys_blocks, tool_defs, msgs = limit_cache_breakpoints(system, normalize_tools_for_anthropic(tools), to_anthropic_messages(messages))
+        sys_blocks, tool_defs, msgs = limit_cache_breakpoints(
+            system, normalize_tools_for_anthropic(tools), strip_thinking(to_anthropic_messages(messages), keep_current_turn=True))
         if self._cache_last_only:
             sys_blocks, tool_defs, msgs = cache_on_last_message_only(sys_blocks, tool_defs, msgs)
         kwargs: dict[str, Any] = {"model": wire_model, "max_tokens": limit, "messages": msgs}
@@ -415,6 +506,7 @@ class AnthropicProvider:
                 kwargs["extra_headers"] = {"anthropic-beta": "context-1m-2025-08-07"}
 
         stripped_thinking = False
+        dropped_signatures = False
         retry_no = 0
         self._canceller.begin()
         while True:
@@ -441,6 +533,11 @@ class AnthropicProvider:
                         and any(k in text for k in ("thinking", "effort", "output_config", "budget_tokens", "adaptive"))):
                     kwargs.pop("extra_body", None)  # endpoint/model rejects thinking params: retry plain
                     stripped_thinking = True
+                    continue
+                if (not emitted[0] and not dropped_signatures and status == 400
+                        and ("signature" in text or "thinking" in text) and "messages" in text):
+                    kwargs["messages"] = strip_thinking(kwargs["messages"], keep_current_turn=False)
+                    dropped_signatures = True  # signed against a different system/model/endpoint: replay without
                     continue
                 if not emitted[0] and status == 400 and "cache_control" in text and not self._cache_last_only:
                     # Gateway rejects our breakpoints: keep a single marker on the last message for this session.
@@ -478,10 +575,16 @@ class AnthropicProvider:
     def _run(self, kwargs: dict[str, Any], state: StreamState, emitted: list[bool], thinking: bool, wire_model: str = "") -> Iterator[StreamEvent]:
         buffers: dict[int, dict[str, Any]] = {}
         blocks: list[Block] = []
-        with self._client.messages.stream(**kwargs) as stream, self._canceller.track(stream):
+        with self._canceller.open_stream(lambda: self._client.messages.stream(**kwargs)) as stream:
             for event in stream:
                 etype = getattr(event, "type", "")
-                if etype == "content_block_start":
+                if etype == "message_start":
+                    # The prompt is billed from here on: keep its tokens so a stream cut short (Esc, a dropped
+                    # connection) still reports them; message_delta only arrives at the very end.
+                    started = getattr(getattr(event, "message", None), "usage", None)
+                    if started is not None:
+                        state.usage = self._usage(started, state.usage)
+                elif etype == "content_block_start":
                     cb = event.content_block
                     idx = event.index
                     ctype = getattr(cb, "type", "")
@@ -573,7 +676,7 @@ class AnthropicProvider:
             v = getattr(raw, name, None)
             return int(v) if isinstance(v, int) else fallback
 
-        uncached = g("input_tokens", 0)
+        uncached = g("input_tokens", max(0, prev.input - prev.cache_read - prev.cache_write))
         cache_read = g("cache_read_input_tokens", prev.cache_read)
         cache_write = g("cache_creation_input_tokens", prev.cache_write)
         split = getattr(raw, "cache_creation", None)

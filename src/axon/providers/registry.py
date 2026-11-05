@@ -16,7 +16,9 @@ from axon.providers.catalog import (
     ProviderPreset,
     effective_base_url,
     find_api_key,
+    find_custom_model_preset,
     find_preset_by_url,
+    find_preset_for_model,
     get_preset_by_id,
     is_model_alias,
     resolve_model_alias,
@@ -40,6 +42,7 @@ __all__ = [
     "known_models",
     "get_context_window",
     "get_max_output",
+    "apply_user_pricing",
     "sync_agentrouter_pricing",
 ]
 
@@ -197,11 +200,75 @@ def get_context_window(model: str, default: int | None = None) -> int:
 
 CONTEXT_LIMIT_CHOICES = (128_000, 256_000, 1_000_000)
 
+_user_priced: list[tuple[str, str]] = []
+_user_context_before: dict[str, int | None] = {}
+
+
+def _forget_user_pricing() -> None:
+    """Undo the previous apply_user_pricing so re-loading the config never leaves stale entries."""
+    for provider_id, model in _user_priced:
+        _pricing.PROVIDER_PRICING.get(provider_id, {}).pop(model, None)
+    _user_priced.clear()
+    for model, before in _user_context_before.items():
+        if before is None:
+            MODEL_CONTEXT_LIMITS.pop(model, None)
+        else:
+            MODEL_CONTEXT_LIMITS[model] = before
+    _user_context_before.clear()
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return float(value)
+
+
+def apply_user_pricing(table: dict[str, Any] | None) -> int:
+    """Install prices and context sizes from the user's config.toml. Returns how many models were set.
+
+    Format (prices are USD per 1M tokens)::
+
+        [pricing.my-gateway."some-model"]
+        input = 0.15
+        output = 0.59
+        context = 131072        # optional
+        cache_read = 0.03       # optional
+    """
+    _forget_user_pricing()
+    count = 0
+    for provider_id, models in (table or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, spec in models.items():
+            if isinstance(spec, dict) and _add_user_model(str(provider_id).lower(), str(model), spec):
+                count += 1
+    return count
+
+
+def _add_user_model(provider_id: str, model: str, spec: dict[str, Any]) -> bool:
+    price_in = _positive_number(spec.get("input"))
+    price_out = _positive_number(spec.get("output"))
+    if price_in is None or price_out is None:
+        return False
+    rates = {"input": price_in, "output": price_out, "cache_write": 0.0}
+    cache_read = _positive_number(spec.get("cache_read"))
+    if cache_read is not None:
+        rates["cache_read"] = cache_read
+    _pricing.PROVIDER_PRICING.setdefault(provider_id, {})[model] = rates
+    _user_priced.append((provider_id, model))
+    context = spec.get("context")
+    if isinstance(context, int) and not isinstance(context, bool) and context > 0:
+        key = model.rsplit("/", 1)[-1].lower()
+        _user_context_before.setdefault(key, MODEL_CONTEXT_LIMITS.get(key))
+        MODEL_CONTEXT_LIMITS[key] = context
+    return True
+
 
 def effective_context_window(model: str, settings: Any = None, default: int | None = None) -> int:
     """The window Axon actually uses: the model's window, capped by the user's ``context_limit``
-    setting (default 128k; 0 = the model's full window). Auto-compact, the gauge, /context and the
-    status line all measure against this."""
+    setting. The default, 0 ("auto"), uses the model's full window, so switching to a model with a bigger or
+    smaller window changes it by itself. Auto-compact, the gauge, /context and the status line all measure
+    against this."""
     window = get_context_window(model, default=default)
     try:
         limit = int(getattr(settings, "context_limit", 0) or 0)
@@ -213,7 +280,7 @@ def effective_context_window(model: str, settings: Any = None, default: int | No
 def parse_token_count(text: str) -> int:
     """'128k' / '256K' / '1m' / '1M' / '200000' / 'max' -> tokens (0 for max/full)."""
     t = str(text).strip().lower().replace(",", "").replace("_", "").removesuffix("tokens").strip()
-    if t in ("max", "full", "model", "0", "unlimited"):
+    if t in ("auto", "max", "full", "model", "0", "unlimited"):
         return 0
     mult = 1
     if t.endswith("k"):
@@ -295,6 +362,64 @@ def resolve_api_key(preset_or_base_url: ProviderPreset | str | None, settings: A
     return ""
 
 
+def _strips_own_prefix(preset: ProviderPreset) -> bool:
+    """True when "<preset.id>/model" is a routing hint to remove before sending. Custom endpoints are
+    namespaced (their ids may contain "/") but still drop their own name."""
+    if preset.id in ("ollama", "lmstudio") or preset.category == "Custom":
+        return True
+    return not preset.namespaced_models
+
+
+def active_preset(settings: Any) -> ProviderPreset | None:
+    """The provider the session is on: settings.provider, else the preset owning settings.base_url."""
+    explicit = getattr(settings, "provider", None)
+    if isinstance(explicit, str) and explicit.strip():
+        preset = get_preset_by_id(explicit)
+        if preset is not None:
+            return preset
+    return find_preset_by_url(str(getattr(settings, "base_url", "") or ""))
+
+
+def preset_for_model_switch(model: str, settings: Any) -> ProviderPreset | None:
+    """Which provider should serve *model* when the user switches to it.
+
+    A model the active provider lists, or any model while a custom endpoint is active (a gateway may
+    serve claude-* or gpt-* ids), stays where it is. An explicit "<provider>/model" or a saved custom
+    model moves to that provider; otherwise the model family decides.
+    """
+    active = active_preset(settings)
+    prefixed, _rest = split_provider_prefix(model)
+    if prefixed is not None and (active is None or prefixed.id != active.id):
+        return find_preset_for_model(model)
+    if active is not None and model in active.models:
+        return active
+    saved = find_custom_model_preset(model)
+    if saved is not None:
+        return saved
+    if active is not None and active.category == "Custom":
+        return active
+    return find_preset_for_model(model)
+
+
+def settings_for_model(model: str, settings: Any) -> Any:
+    """Settings that route *model* to the provider serving it.
+
+    settings.provider outranks everything in resolve_route, so a side model (hook, compaction,
+    title, subagent, fallback) built from the main settings would go to the main provider's
+    endpoint even when it belongs to another provider. The main model is never re-routed.
+    """
+    from pydantic import SecretStr
+
+    if model == getattr(settings, "model", None):
+        return settings
+    target = preset_for_model_switch(model, settings)
+    current = active_preset(settings)
+    if target is None or current is None or target.id == current.id:
+        return settings
+    changes = {"provider": target.id, "base_url": effective_base_url(target), "api_key": SecretStr("")}
+    return settings.model_copy(update=changes)
+
+
 def resolve_route(model: str, settings: Any) -> Route:
     """Decide preset / endpoint / key for `model`.
 
@@ -324,11 +449,11 @@ def resolve_route(model: str, settings: Any) -> Route:
 
     if explicit_preset is not None:
         target = explicit_preset
-        if prefixed is not None and prefixed.id == explicit_preset.id and not explicit_preset.namespaced_models:
+        if prefixed is not None and prefixed.id == explicit_preset.id and _strips_own_prefix(explicit_preset):
             prefix = f"{model.split('/', 1)[0]}/"
     elif prefixed is not None and not (url_preset is not None and url_preset.namespaced_models) and prefixed.id != (url_preset.id if url_preset else None):
         target = prefixed
-        if not prefixed.namespaced_models or prefixed.id in ("ollama", "lmstudio"):
+        if _strips_own_prefix(prefixed):
             prefix = f"{model.split('/', 1)[0]}/"
     elif prefixed is not None and url_preset is not None and prefixed.id == url_preset.id and not url_preset.namespaced_models:
         target = url_preset

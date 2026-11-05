@@ -113,6 +113,7 @@ class ToolExecutionStart:
     user_prompt: str = ""
     rationale: str = ""          # the model's own words just before this call (never invented)
     rationale_source: str = ""   # where the rationale came from: "text" | "thinking" | ""
+    parse_error: str = ""        # set when the arguments were not valid JSON (input is then {"raw": text})
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
@@ -331,6 +332,25 @@ class StreamCanceller:
     def track(self, resp: Any) -> "_Tracked":
         return _Tracked(self, resp)
 
+    def is_cancelled(self) -> bool:
+        """True when this thread's stream was cancelled (does not consume the cancel)."""
+        with self._lock:
+            return self._me() in self._cancelled
+
+    def mark_waiting(self) -> None:
+        """Register this thread before the response exists, so an Esc pressed now is not lost."""
+        with self._lock:
+            self._active.setdefault(self._me(), None)
+
+    def forget_waiting(self) -> None:
+        with self._lock:
+            if self._active.get(self._me(), 0) is None:
+                self._active.pop(self._me(), None)
+
+    def open_stream(self, factory: Any) -> "_CancellableStream":
+        """Open an HTTP stream so that cancel() also works while waiting for the first response bytes."""
+        return _CancellableStream(self, factory)
+
     def cancel(self, thread_ident: int | None = None) -> bool:
         """Abort the stream of *thread_ident* (default: every active stream). True if one was hit."""
         with self._lock:
@@ -345,6 +365,71 @@ class StreamCanceller:
                 abort_http_response(resp)
                 aborted = True
         return aborted
+
+
+class _CancellableStream:
+    """Context manager for ``httpx.stream(...)`` that stays cancellable while the server is silent.
+
+    Some gateways send nothing until the whole answer is ready. The request is opened in a helper
+    thread and this thread polls for a cancel every 0.1 s instead of blocking in the read."""
+
+    POLL_SECONDS = 0.1
+
+    def __init__(self, owner: StreamCanceller, factory: Any) -> None:
+        self.owner = owner
+        self.factory = factory
+        self._context: Any = None
+        self._tracked: _Tracked | None = None
+
+    def __enter__(self) -> Any:
+        import threading as _threading
+        self.owner.mark_waiting()
+        self._context = self.factory()
+        result: dict[str, Any] = {}
+        opened = _threading.Event()
+
+        def open_in_background() -> None:
+            try:
+                result["response"] = self._context.__enter__()
+            except BaseException as error:
+                result["error"] = error
+            finally:
+                opened.set()
+
+        _threading.Thread(target=open_in_background, daemon=True).start()
+        while not opened.wait(self.POLL_SECONDS):
+            if self.owner.is_cancelled():
+                self._close_later(opened, result)
+                self.owner.forget_waiting()
+                self.owner.check()
+        if "error" in result:
+            self.owner.forget_waiting()
+            self.owner.check()
+            raise result["error"]
+        self._tracked = self.owner.track(result["response"])
+        self._tracked.__enter__()
+        return result["response"]
+
+    def _close_later(self, opened: Any, result: dict[str, Any]) -> None:
+        import threading as _threading
+
+        def close_when_open() -> None:
+            opened.wait()
+            if "response" in result:
+                try:
+                    self._context.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+        _threading.Thread(target=close_when_open, daemon=True).start()
+
+    def __exit__(self, exc_type: Any, *exc: Any) -> None:
+        try:
+            if self._tracked is not None:
+                self._tracked.__exit__(exc_type, *exc)
+        finally:
+            if self._context is not None:
+                self._context.__exit__(exc_type, *exc)
 
 
 class _Tracked:

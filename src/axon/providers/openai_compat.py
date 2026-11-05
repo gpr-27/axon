@@ -59,6 +59,7 @@ from axon.providers.transport import (
     retry_budget,
     should_retry_status,
 )
+from axon.providers import prompt_tools
 from axon.providers import transport as _transport
 
 # Message fields that strict OpenAI-compatible servers reject (Groq, Mistral, OpenAI, ...).
@@ -330,6 +331,29 @@ class _Outcome:
         self.transport_exc: BaseException | None = None
 
 
+CHARS_PER_TOKEN = 3.7
+
+
+def _usage_is_empty(usage: Usage) -> bool:
+    return not (usage.input or usage.output or usage.cache_read or usage.cache_write)
+
+
+def _estimate_usage(sent_messages: list[dict[str, Any]], turn: AssistantTurn) -> Usage:
+    """Token counts for gateways that stream no usage: about one token per 3.7 characters.
+
+    Only used when the endpoint reported nothing, so real numbers always win."""
+    sent_text = json.dumps(sent_messages, ensure_ascii=False, default=str)
+    received_text = turn.text + turn.thinking
+    if turn.tool_uses:
+        received_text += json.dumps([tu.input for tu in turn.tool_uses], default=str)
+    if not received_text.strip():
+        return turn.usage
+    return Usage(
+        input=max(1, int(len(sent_text) / CHARS_PER_TOKEN)),
+        output=max(1, int(len(received_text) / CHARS_PER_TOKEN)),
+    )
+
+
 class OpenAICompatProvider:
     name: str = "openai_compat"
 
@@ -407,6 +431,10 @@ class OpenAICompatProvider:
             headers.setdefault("http-referer", "https://github.com/axon-terminal")
             headers.setdefault("x-title", "Axon")
         return headers
+
+    def _prompt_tools_mode(self) -> bool:
+        """True for an endpoint that drops the ``tools`` field: tools are described in the prompt instead."""
+        return not bool(getattr(self._preset, "native_tools", True))
 
     def _strict(self) -> bool:
         return bool(getattr(self._preset, "strict_messages", False)) or self._azure
@@ -523,7 +551,12 @@ class OpenAICompatProvider:
         passback = not strict and ("reasoning_passback" in self._rejected(model) or needs_reasoning_passback(model, messages))
         chat_messages = sanitize_openai_messages(raw_messages, strict=strict, reasoning_passback=passback)
 
-        use_responses = self._wants_responses(model)
+        prompt_mode = self._prompt_tools_mode() and bool(tools)
+        if prompt_mode:
+            chat_messages = prompt_tools.messages_for_wire(chat_messages, normalize_tools_for_chat(tools))
+            tools = []  # nothing is sent in the `tools` field
+
+        use_responses = self._wants_responses(model) and not prompt_mode
         tried: set[str] = set()
         images_stripped = False
 
@@ -545,7 +578,11 @@ class OpenAICompatProvider:
                 acc: dict[int, _ToolAcc] = {}
                 stop: list[StopReason] = ["end_turn"]
                 outcome = _Outcome()
-                yield from self._attempt_with_retries(url, body, outcome, state, acc, stop, thinking, responses=use_responses)
+                events = self._attempt_with_retries(url, body, outcome, state, acc, stop, thinking, responses=use_responses)
+                for event in events:
+                    if prompt_mode and isinstance(event, TextDelta):
+                        continue  # buffered: raw <tool_call> tags must never show
+                    yield event
 
                 if outcome.status is not None and 200 <= outcome.status < 300 and outcome.stream_error is None and outcome.transport_exc is None:
                     break
@@ -571,7 +608,8 @@ class OpenAICompatProvider:
                     or "does not support thinking" in err or "does not support reasoning" in err
                     or ("thinking" in err and status == 400)
                 ):
-                    if not use_responses and "reasoning_effort" in err and "tool" in err and self._responses_url != url and not self._azure:
+                    if (not use_responses and "reasoning_effort" in err and "tool" in err and self._responses_url != url
+                            and not self._azure and "use_chat" not in tried):
                         use_responses = True
                         continue
                     tried.add("no_reasoning")
@@ -604,7 +642,13 @@ class OpenAICompatProvider:
                     continue
                 raise classify_error(status=outcome.status, body=outcome.text, base_url=str(self.settings.base_url), model=model, url=url)
 
-            turn = self._assemble(state, acc, stop[0])
+            if prompt_mode:
+                turn = self._assemble_prompt_tools(state, stop[0])
+                yield from self._prompt_tool_events(turn)
+            else:
+                turn = self._assemble(state, acc, stop[0])
+            if _usage_is_empty(turn.usage):
+                turn.usage = _estimate_usage(chat_messages, turn)
             for tu in turn.tool_uses:
                 yield ToolUseComplete(id=tu.id)
             turn.model = wire_model
@@ -630,7 +674,7 @@ class OpenAICompatProvider:
             reason = ""
             try:
                 self._canceller.check()
-                with self._open(url, body) as resp, self._canceller.track(resp):
+                with self._canceller.open_stream(lambda: self._open(url, body)) as resp:
                     status = int(getattr(resp, "status_code", 0) or 0)
                     outcome.status = status
                     outcome.headers = getattr(resp, "headers", None)
@@ -909,6 +953,28 @@ class OpenAICompatProvider:
                 for tc, _ in kept
             ]
         return AssistantTurn(blocks=blocks, stop_reason=stop_reason, usage=state.usage, native=native)
+
+    def _assemble_prompt_tools(self, state: StreamState, stop_reason: StopReason) -> AssistantTurn:
+        """Turn for a prompt-tools reply: ``<tool_call>`` blocks leave the text and become tool calls."""
+        text, calls = prompt_tools.parse_reply(state.text)
+        if stop_reason == "max_tokens":
+            calls = [c for c in calls if not c.parse_error]  # cut off mid-call: drop rather than leave it dangling
+        state.text_parts[:] = [text] if text else []
+        turn = self._assemble(state, {}, stop_reason)
+        if not calls:
+            return turn
+        turn.blocks.extend(calls)
+        turn.stop_reason = "tool_use"
+        turn.native["tool_calls"] = prompt_tools.native_tool_calls(calls)
+        return turn
+
+    @staticmethod
+    def _prompt_tool_events(turn: AssistantTurn) -> Iterator[StreamEvent]:
+        """The buffered reply, emitted once: its text, then the start of each call."""
+        if turn.text:
+            yield TextDelta(text=turn.text)
+        for call in turn.tool_uses:
+            yield ToolUseStart(id=call.id, name=call.name)
 
     def finalize(self) -> AssistantTurn:
         state: StreamState | None = getattr(self._local, "state", None)

@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     max_tokens: int = 128_000
     max_iterations: int = 50
     max_retries: int = 3                 # provider retries on 429/5xx/connection errors
-    turn_token_budget: int = 2_000_000
+    turn_token_budget: int = 0   # per-turn token cap; 0 = unlimited
     max_history_turns: int = 0  # Sliding context window in turns (0 = unlimited)
     session_cost_ceiling: Decimal = Decimal("50.00")
     compact_at: float = 0.75            # auto-compact at this share of the context limit
@@ -126,8 +126,9 @@ class Settings(BaseSettings):
     # Usage tips (spinner line / after turns). AXON_NO_TIPS=1 turns them off regardless.
     tips: bool = True
     tips_llm: bool = True                # model-written contextual tips (False: derived from the command registry)
+    live_status: bool = True             # "what is happening now" line + state-based tip under the spinner; explainers above choices
     tips_refresh_turns: int = 5          # min turns between LLM tip refreshes
-    context_limit: int = 128_000         # tokens of the model's window Axon uses (128k, 256k, 1M; 0 = model max)
+    context_limit: int = 0               # tokens of the model's window Axon uses; 0 = auto: the model's full window (up to 1M)
     max_width: int = 0                   # cap output width in columns (0 = use the whole terminal)
     screen_log: bool = True              # keep a plain-text copy of everything shown (projects/<p>/screen/)
     mouse_click_expand: bool = False     # capture clicks at the prompt to expand blocks (wheel/drag then go to Axon)
@@ -135,6 +136,8 @@ class Settings(BaseSettings):
     notify_after_seconds: float = 30.0   # "important": notify a finished turn only if it ran this long
     tips_refresh_minutes: float = 15.0   # min minutes between LLM tip refreshes
     auto_title: bool = True
+    title_llm: bool = True              # the model writes the session title (small model); False: heuristic title only
+    prompt_suggestions: bool = True     # ghost text in the empty prompt: the next message you will probably type
     # `!cmd` output is added to the conversation; when true the model also replies to it.
     respond_to_bash_commands: bool = True     # `!cmd`: the model responds to the output
     disable_all_hooks: bool = False
@@ -212,6 +215,13 @@ class Settings(BaseSettings):
             from axon.providers.endpoints import apply_endpoint_overrides
             endpoints_table = user_data.get("endpoints")
             apply_endpoint_overrides(endpoints_table if isinstance(endpoints_table, dict) else {})
+        except Exception:
+            pass
+        # 1b. [pricing.<provider>."<model>"] (user config only): prices and context sizes for custom endpoints.
+        try:
+            from axon.providers.registry import apply_user_pricing
+            pricing_table = user_data.get("pricing")
+            apply_user_pricing(pricing_table if isinstance(pricing_table, dict) else {})
         except Exception:
             pass
 
@@ -302,6 +312,16 @@ class Settings(BaseSettings):
             if f"AXON_{name.upper()}" in os.environ and name not in cli_overrides:
                 merged.pop(name, None)
 
+        # A base URL from the environment that belongs to a known provider switches to that provider (a
+        # provider saved next to the old URL would otherwise win in routing). An unknown URL keeps the saved
+        # provider, so its key is used through that proxy.
+        base_url_from_env = "AXON_BASE_URL" in os.environ and cli_overrides.get("base_url") is None
+        provider_is_explicit = "AXON_PROVIDER" in os.environ or cli_overrides.get("provider") is not None
+        if base_url_from_env and not provider_is_explicit:
+            env_preset = _preset_owning_url(os.environ["AXON_BASE_URL"])
+            if env_preset:
+                merged["provider"] = env_preset
+
         # 5. Security: a project file must not redirect a user-level API key.
         base_from_project = ("base_url" in proj_data and "base_url" in merged) or (
             "AXON_BASE_URL" in project_env_keys and "base_url" not in merged
@@ -309,7 +329,7 @@ class Settings(BaseSettings):
         key_from_project = ("api_key" in proj_data and "api_key" in merged) or "AXON_API_KEY" in project_env_keys
         if base_from_project and not key_from_project and cli_overrides.get("base_url") is None:
             proj_url = str(proj_data.get("base_url") or os.environ.get("AXON_BASE_URL", ""))
-            if not any(h in proj_url.lower() for h in _LOCAL_HOST_MARKERS):
+            if not _is_loopback_url(proj_url):
                 warnings.append(
                     f"Ignoring project-level base_url '{proj_url}': it would send your user-level API key to "
                     "another host. Set base_url in ~/.axon/config.toml or pass --base-url to use it."
@@ -342,6 +362,27 @@ class Settings(BaseSettings):
         return _resolve_api_key(settings, interactive=require_api_key)
 
 
+def _is_loopback_url(url: str) -> bool:
+    """True when the URL's host is this machine. The host is compared, never searched for in the whole
+    string, so 'https://evil.example/localhost' or 'https://localhost.evil.example' do not count."""
+    from urllib.parse import urlsplit
+    raw = (url or "").strip()
+    try:
+        host = (urlsplit(raw if "://" in raw else f"http://{raw}").hostname or "").lower()
+    except ValueError:
+        return False
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
+def _preset_owning_url(url: str) -> str | None:
+    try:
+        from axon.providers.catalog import find_preset_by_url
+        preset = find_preset_by_url(url)
+    except Exception:
+        return None
+    return preset.id if preset else None
+
+
 _JSON_KEY_MAP = {
     "model": "model", "smallModel": "small_model", "small_model": "small_model",
     "effortLevel": "effort", "effort": "effort", "baseUrl": "base_url", "base_url": "base_url",
@@ -363,9 +404,12 @@ _JSON_KEY_MAP = {
     "notifications": "notifications", "preferredNotifChannel": "notifications",
     "notifyAfterSeconds": "notify_after_seconds", "notify_after_seconds": "notify_after_seconds",
     "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
+    "liveStatus": "live_status", "live_status": "live_status",
     "tipsRefreshTurns": "tips_refresh_turns", "tips_refresh_turns": "tips_refresh_turns",
     "tipsRefreshMinutes": "tips_refresh_minutes", "tips_refresh_minutes": "tips_refresh_minutes",
     "autoTitle": "auto_title", "auto_title": "auto_title",
+    "titleLlm": "title_llm", "title_llm": "title_llm",
+    "promptSuggestions": "prompt_suggestions", "prompt_suggestions": "prompt_suggestions",
     "respondToBashCommands": "respond_to_bash_commands", "disableAllHooks": "disable_all_hooks",
     "vimMode": "vim_mode", "vim_mode": "vim_mode", "additionalDirectories": "additional_dirs",
     "systemPrompt": "system_prompt_override",
@@ -563,12 +607,21 @@ def preset_key_env_vars() -> list[str]:
     return out
 
 
+def _configured_preset(settings: Settings) -> Any:
+    """The provider preset the settings point at (settings.provider, else the preset owning base_url)."""
+    try:
+        from axon.providers.catalog import find_preset_by_url, get_preset_by_id
+        return (get_preset_by_id(str(settings.provider)) if settings.provider else None) or find_preset_by_url(settings.base_url)
+    except Exception:
+        return None
+
+
 def _preset_api_key(settings: Settings) -> str | None:
     """Key for the configured provider preset (settings.provider, else the preset owning base_url):
     process environment first, then ~/.axon/.env."""
     try:
-        from axon.providers.catalog import find_api_key, find_preset_by_url, get_preset_by_id
-        preset = (get_preset_by_id(str(settings.provider)) if settings.provider else None) or find_preset_by_url(settings.base_url)
+        from axon.providers.catalog import find_api_key
+        preset = _configured_preset(settings)
         if preset is None or not getattr(preset, "env_vars", None):
             return None
         val = find_api_key(list(preset.env_vars))
@@ -605,10 +658,16 @@ def _resolve_api_key(settings: Settings, interactive: bool = True) -> Settings:
     if preset_key:
         return settings.model_copy(update={"api_key": SecretStr(preset_key)})
 
-    for ck in PROVIDER_KEY_ENV_VARS:
-        candidate_val = os.environ.get(ck)
-        if candidate_val and candidate_val not in INVALID_KEY_PLACEHOLDERS:
-            return settings.model_copy(update={"api_key": SecretStr(candidate_val)})
+    # Only an endpoint that belongs to no known provider borrows a key from another provider's variable;
+    # a known provider without its own key must never be sent, say, the Anthropic key.
+    preset = _configured_preset(settings)
+    if preset is not None and not getattr(preset, "requires_key", True):
+        return settings.model_copy(update={"api_key": SecretStr("local")})  # keyless endpoint: no key is sent
+    if preset is None:
+        for ck in PROVIDER_KEY_ENV_VARS:
+            candidate_val = os.environ.get(ck)
+            if candidate_val and candidate_val not in INVALID_KEY_PLACEHOLDERS:
+                return settings.model_copy(update={"api_key": SecretStr(candidate_val)})
 
     if not interactive:
         return settings
@@ -665,7 +724,9 @@ def _prompt_for_key(settings: Settings) -> str:
     try:
         global_axon.mkdir(parents=True, exist_ok=True)
         env_file = global_axon / ".env"
-        with open(env_file, "a", encoding="utf-8") as f_env:
+        # create owner-only up front so the key is never briefly readable by others
+        fd = os.open(str(env_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f_env:
             f_env.write(f'\nAXON_API_KEY="{entered_key}"\n')
         if sys.platform != "win32":
             try:

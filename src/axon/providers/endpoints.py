@@ -12,6 +12,7 @@ Stored in the user's ``~/.axon/config.toml`` only (a project file may never redi
     model    = "qwen3-coder"           # optional default model
     name     = "My gateway"            # optional display name
     api_format = "openai"              # or "anthropic"
+    native_tools = false               # optional: the gateway drops `tools`, so describe them in the prompt
 
 ``apply_endpoint_overrides`` patches ``PROVIDER_PRESETS`` in place (presets get the new base URL,
 custom endpoints become presets in the "Custom" category), so routing, pickers, ``/keys`` and
@@ -31,7 +32,7 @@ from urllib.parse import urlparse
 from axon.providers.catalog import PROVIDER_PRESETS, ProviderPreset, axon_config_file, get_preset_by_id
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,39}$")
-_DEFAULTS: dict[str, tuple[str, tuple[str, ...], str | None, str]] = {}
+_DEFAULTS: dict[str, tuple[str, tuple[str, ...], str | None, str, bool]] = {}
 _CUSTOM_IDS: set[str] = set()
 
 
@@ -117,7 +118,7 @@ def load_endpoints(path: Path | None = None) -> dict[str, dict[str, Any]]:
 def _snapshot() -> None:
     for p in PROVIDER_PRESETS:
         if p.id not in _CUSTOM_IDS and p.id not in _DEFAULTS:
-            _DEFAULTS[p.id] = (p.base_url, tuple(p.env_vars), p.env_var, p.default_model)
+            _DEFAULTS[p.id] = (p.base_url, tuple(p.env_vars), p.env_var, p.default_model, p.native_tools)
 
 
 def default_url(preset_id: str) -> str | None:
@@ -147,7 +148,7 @@ def apply_endpoint_overrides(table: dict[str, Any] | None = None) -> list[str]:
     for p in PROVIDER_PRESETS:
         d = _DEFAULTS.get(p.id)
         if d:
-            p.base_url, p.env_vars, p.env_var, p.default_model = d[0], tuple(d[1]), d[2], d[3]
+            p.base_url, p.env_vars, p.env_var, p.default_model, p.native_tools = d[0], tuple(d[1]), d[2], d[3], d[4]
     changed: list[str] = []
     for eid, spec in (table or {}).items():
         if not isinstance(spec, dict):
@@ -159,6 +160,7 @@ def apply_endpoint_overrides(table: dict[str, Any] | None = None) -> list[str]:
         if env_var and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", env_var):
             env_var = ""
         model = str(spec.get("model") or "").strip()
+        native_tools = spec.get("native_tools")
         preset = get_preset_by_id(str(eid))
         if preset is not None:
             preset.base_url = url
@@ -167,6 +169,8 @@ def apply_endpoint_overrides(table: dict[str, Any] | None = None) -> list[str]:
                 preset.env_var = env_var
             if model:
                 preset.default_model = model
+            if isinstance(native_tools, bool):
+                preset.native_tools = native_tools
             changed.append(preset.id)
             continue
         pid = str(eid).lower()
@@ -178,6 +182,7 @@ def apply_endpoint_overrides(table: dict[str, Any] | None = None) -> list[str]:
             category="Custom", base_url=url, default_model=model, models=[model] if model else [],
             env_var=env_var or None, requires_key=bool(env_var),
             api_format="anthropic" if fmt == "anthropic" else "openai", namespaced_models=True,
+            native_tools=native_tools if isinstance(native_tools, bool) else True,
         ))
         _CUSTOM_IDS.add(pid)
         changed.append(pid)
@@ -201,8 +206,12 @@ def _current_url(eid: str) -> str:
 
 
 def save_endpoint(eid: str, base_url: str, *, env_var: str | None = None, model: str | None = None,
-                  name: str | None = None, api_format: str | None = None, path: Path | None = None) -> EndpointChange:
-    """Set a preset's base URL, or create/update a custom endpoint, in ~/.axon/config.toml."""
+                  name: str | None = None, api_format: str | None = None, native_tools: bool | None = None,
+                  path: Path | None = None) -> EndpointChange:
+    """Set a preset's base URL, or create/update a custom endpoint, in ~/.axon/config.toml.
+
+    ``native_tools=False`` marks an endpoint that drops the ``tools`` field (tools go in the prompt);
+    ``None`` leaves the saved value alone."""
     url = (base_url or "").strip().rstrip("/")
     if not valid_url(url):
         raise ValueError(f"not a valid http(s) URL: {base_url!r}")
@@ -226,6 +235,8 @@ def save_endpoint(eid: str, base_url: str, *, env_var: str | None = None, model:
                 spec.pop(k, None)
             else:
                 spec[k] = v
+    if native_tools is not None:
+        spec["native_tools"] = bool(native_tools)
     table[key] = spec
     data["endpoints"] = table
     active = bool(old) and norm(str(data.get("base_url", ""))) == norm(old)
@@ -234,6 +245,14 @@ def save_endpoint(eid: str, base_url: str, *, env_var: str | None = None, model:
     _write_config(cfg_path, data)
     apply_endpoint_overrides(table)
     return EndpointChange(key, old, url, cfg_path, active)
+
+
+def set_native_tools(eid: str, native_tools: bool, path: Path | None = None) -> EndpointChange:
+    """Turn native tool calling on or off for an existing endpoint or preset, keeping its URL."""
+    preset = get_preset_by_id(eid)
+    if preset is None:
+        raise ValueError(f"unknown endpoint {eid!r}")
+    return save_endpoint(preset.id, preset.base_url, native_tools=native_tools, path=path)
 
 
 def reset_endpoint(eid: str, path: Path | None = None) -> EndpointChange | None:
@@ -258,9 +277,11 @@ def reset_endpoint(eid: str, path: Path | None = None) -> EndpointChange | None:
             data["base_url"] = new
         else:
             data.pop("base_url", None)
-            if str(data.get("provider", "")).lower() == key:
-                data.pop("provider", None)
+    if not new and str(data.get("provider", "")).lower() == key:
+        data.pop("provider", None)  # a removed custom endpoint must not stay the configured provider
     _write_config(cfg_path, data)
+    if not default_url(key):
+        remove_models(key, cfg_path)
     apply_endpoint_overrides(table)
     return EndpointChange(key, old, new, cfg_path, active)
 
@@ -290,18 +311,25 @@ def models_url(base_url: str, api_format: str = "openai") -> str:
     return f"{_api_root(base_url)}/models"
 
 
+def request_headers(base_url: str, key: str, api_format: str) -> dict[str, str]:
+    """Headers for a /models request: the endpoint's defaults plus the key in the style its API expects."""
+    from axon.providers.transport import default_headers, is_official_anthropic
+    headers = default_headers(base_url)
+    if not key or key == "local":
+        return headers
+    if api_format != "anthropic":
+        headers["authorization"] = f"Bearer {key}"
+        return headers
+    headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+    if not is_official_anthropic(base_url):
+        headers["authorization"] = f"Bearer {key}"
+    return headers
+
+
 def test_endpoint(base_url: str, key: str = "", api_format: str = "openai", timeout: float = 6.0) -> EndpointTest:
     """GET <api root>/models: reachable? key accepted? how many models?"""
-    from axon.providers.transport import default_headers, is_official_anthropic
     url = models_url(base_url, api_format)
-    headers = default_headers(base_url)
-    if key and key != "local":
-        if api_format == "anthropic":
-            headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
-            if not is_official_anthropic(base_url):
-                headers["authorization"] = f"Bearer {key}"
-        else:
-            headers["authorization"] = f"Bearer {key}"
+    headers = request_headers(base_url, key, api_format)
     t0 = time.perf_counter()
     try:
         resp = http_get(url, headers, timeout)
@@ -331,8 +359,154 @@ def test_endpoint(base_url: str, key: str = "", api_format: str = "openai", time
 test_endpoint.__test__ = False  # type: ignore[attr-defined]
 
 
+# ─── Tool-support probe ────────────────────────────────────────────────────
+
+@dataclass
+class ToolProbe:
+    ran: bool            # False when the probe could not be made (no model, error, ...)
+    native_tools: bool   # the endpoint returned a tool call
+    message: str = ""
+
+
+def http_post(url: str, headers: dict[str, str], body: dict[str, Any], timeout: float) -> Any:
+    """Indirection so tests can replace the network call."""
+    import httpx
+    return httpx.post(url, headers=headers, json=body, timeout=timeout)
+
+
+def probe_tool_support(base_url: str, key: str = "", model: str = "", timeout: float = 30.0) -> ToolProbe:
+    """One tiny request with a trivial ``echo`` tool: does the endpoint hand back a tool call?
+
+    Only run on request (``/endpoint test``), never during normal chat."""
+    if not model:
+        return ToolProbe(False, True, "no model to probe with: pass --model <id>")
+    from axon.providers.transport import chat_completions_url, default_headers
+    headers = default_headers(base_url)
+    if key and key != "local":
+        headers["authorization"] = f"Bearer {key}"
+    echo = {"type": "function", "function": {
+        "name": "echo", "description": "Return the given text.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}
+    body = {"model": model, "max_tokens": 200, "tools": [echo], "tool_choice": "auto",
+            "messages": [{"role": "user", "content": "Call the echo tool with the text 'hi'. Do not answer in prose."}]}
+    try:
+        resp = http_post(chat_completions_url(base_url), headers, body, timeout)
+        data = resp.json()
+    except Exception as e:
+        return ToolProbe(False, True, f"{type(e).__name__}: {e}")
+    if int(resp.status_code) != 200:
+        return ToolProbe(False, True, f"HTTP {resp.status_code}")
+    return ToolProbe(True, _has_tool_call(data))
+
+
+def _has_tool_call(data: Any) -> bool:
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    message = choices[0].get("message")
+    return isinstance(message, dict) and bool(message.get("tool_calls") or message.get("function_call"))
+
+
+probe_tool_support.__test__ = False  # type: ignore[attr-defined]
+
+
+# ─── Importing models from an endpoint ─────────────────────────────────────
+
+@dataclass
+class RemoteModels:
+    models: list[str]
+    error: str = ""
+
+
+def parse_model_ids(payload: Any) -> list[str]:
+    """Model ids from an OpenAI/Anthropic ``{"data": [...]}``, an Ollama-style ``{"models": [...]}`` or a bare list."""
+    items = payload.get("data", payload.get("models")) if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+    ids: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            item = item.get("id") or item.get("name") or item.get("model")
+        text = str(item or "").strip()
+        if text and text not in ids:
+            ids.append(text)
+    return ids
+
+
+def fetch_models(base_url: str, key: str = "", api_format: str = "openai", timeout: float = 8.0) -> RemoteModels:
+    """The chat models an endpoint lists at /models, or an error saying why the list is unavailable."""
+    from axon.providers.catalog import is_chat_model_id
+    url = models_url(base_url, api_format)
+    try:
+        resp = http_get(url, request_headers(base_url, key, api_format), timeout)
+    except Exception as e:
+        return RemoteModels([], f"cannot reach {url}: {type(e).__name__}: {e}")
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if status in (401, 403):
+        return RemoteModels([], f"{url} rejected the API key (HTTP {status}); set it with /keys set")
+    if status != 200:
+        return RemoteModels([], f"{url} answered HTTP {status}; it may not offer a model list. Add models by name instead")
+    try:
+        ids = parse_model_ids(resp.json())
+    except ValueError:
+        return RemoteModels([], f"{url} did not return JSON")
+    chat_ids = [m for m in ids if is_chat_model_id(m)]
+    if not chat_ids:
+        return RemoteModels([], f"{url} listed no models")
+    return RemoteModels(chat_ids)
+
+
+def _custom_model_entries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = data.get("custom_models")
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def saved_models(eid: str, path: Path | None = None) -> list[str]:
+    """Models saved for provider *eid* in config.toml ``custom_models``."""
+    data = _read_config(path or axon_config_file())
+    return [str(e["model"]) for e in _custom_model_entries(data) if e.get("provider") == eid and e.get("model")]
+
+
+def add_models(eid: str, models: list[str], path: Path | None = None) -> list[str]:
+    """Save *models* under provider *eid*; returns the ones that were not saved before."""
+    cfg_path = path or axon_config_file()
+    data = _read_config(cfg_path)
+    entries = _custom_model_entries(data)
+    known = {str(e.get("model")) for e in entries if e.get("provider") == eid}
+    added: list[str] = []
+    for model in models:
+        model = model.strip()
+        if model and model not in known:
+            entries.append({"model": model, "provider": eid})
+            known.add(model)
+            added.append(model)
+    if added:
+        data["custom_models"] = entries
+        _write_config(cfg_path, data)
+    return added
+
+
+def remove_models(eid: str, path: Path | None = None) -> int:
+    """Forget every model saved for provider *eid*; returns how many were removed."""
+    cfg_path = path or axon_config_file()
+    data = _read_config(cfg_path)
+    entries = _custom_model_entries(data)
+    kept = [e for e in entries if e.get("provider") != eid]
+    removed = len(entries) - len(kept)
+    if removed:
+        if kept:
+            data["custom_models"] = kept
+        else:
+            data.pop("custom_models", None)
+        _write_config(cfg_path, data)
+    return removed
+
+
 __all__ = [
-    "EndpointChange", "EndpointTest", "apply_endpoint_overrides", "default_url", "http_get", "is_custom",
-    "is_overridden", "load_endpoints", "models_url", "norm", "reset_endpoint", "save_endpoint", "slug",
-    "suggest_env_var", "suggest_id", "test_endpoint", "url_warning", "valid_url",
+    "EndpointChange", "EndpointTest", "RemoteModels", "ToolProbe", "add_models", "apply_endpoint_overrides", "default_url",
+    "fetch_models", "http_get", "http_post", "is_custom", "is_overridden", "load_endpoints", "models_url", "norm",
+    "parse_model_ids", "probe_tool_support", "remove_models", "request_headers", "reset_endpoint", "save_endpoint", "saved_models", "set_native_tools",
+    "slug", "suggest_env_var", "suggest_id", "test_endpoint", "url_warning", "valid_url",
 ]

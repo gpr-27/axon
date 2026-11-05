@@ -14,6 +14,7 @@ import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from axon import interruptible
 from axon.errors import ProviderError
 
 # ─── Hosts ──────────────────────────────────────────────────────────────────
@@ -178,8 +179,9 @@ def azure_chat_url(endpoint: str, deployment: str, api_version: str | None = Non
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529})
 MAX_RETRY_AFTER_S = 60.0
 
-# Indirection so tests can neutralise real sleeping.
-_sleep = time.sleep
+# Indirection so tests can neutralise real sleeping. The back-off sleeps in short slices: a plain
+# time.sleep(30) after an HTTP 429 would hold Esc until it ends.
+_sleep = interruptible.sleep
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -427,6 +429,34 @@ def status_from_text(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_BAD_MODEL_MARKERS = ("model_not_found", "does not exist", "unknown model", "invalid model", "no such model",
+                      "model not found", "not a valid model", "unsupported model")
+
+
+def _bad_request_message(text: str, label: str, model: str, base_url: str, suffix: str) -> str:
+    """Explain a 400 by its most likely cause, with the next step, instead of a bare 'Bad Request'."""
+    head = f"HTTP 400 Bad Request from {label} (model '{model}')"
+    if "signature" in text or ("thinking" in text and "messages" in text):
+        return (f"{head}: the endpoint rejected earlier thinking blocks (they are signed for the model, system "
+                f"prompt and endpoint that produced them).\n  How to fix: /retry (Axon resends without them), or "
+                f"run `/compact` or `/clear` after switching provider or model.{suffix}")
+    if "thinking" in text or "budget_tokens" in text or "reasoning" in text:
+        return (f"{head}: this model or endpoint does not accept the thinking/reasoning settings.\n"
+                f"  How to fix: turn thinking off with `/thinking off` or lower `/effort`.{suffix}")
+    if any(k in text for k in _BAD_MODEL_MARKERS):
+        return (f"{head}: the endpoint does not know this model name.\n  How to fix: check the spelling, pick one "
+                f"the endpoint serves with `/model`, or list them with `/endpoint models <name> import`. "
+                f"Endpoint: {base_url}{suffix}")
+    if "tool" in text and any(k in text for k in ("not support", "unsupported", "invalid")):
+        return (f"{head}: the endpoint rejected the tool definitions or tool calls.\n  How to fix: this model may not "
+                f"support tools; pick another with `/model`, or run `/compact` if an old tool call is malformed.{suffix}")
+    if "api key" in text or "api_key" in text or "x-api-key" in text:
+        return (f"{head}: the endpoint complained about the API key.\n  How to fix: set {_key_hint(base_url)} "
+                f"with `/keys set` and check the endpoint with `/endpoint test`.{suffix}")
+    return (f"{head}: the endpoint rejected the request.\n  How to fix: /retry, `/compact` to rebuild the "
+            f"conversation, or switch model with `/model`. Endpoint: {base_url}{suffix}")
+
+
 def classify_error(
     *,
     status: int | None,
@@ -484,7 +514,7 @@ def classify_error(
     if status == 400:
         if any(k in text for k in ("context_length", "context length", "prompt is too long", "maximum context", "too many tokens", "reduce the length")):
             return err(f"HTTP 400 from {label}: the conversation exceeds the model's context window.\n  How to fix: run `/compact` or `/clear`, or pick a model with a larger window via `/model`.{suffix}")
-        return err(f"HTTP 400 Bad Request from {label} (model '{model}').{suffix}")
+        return err(_bad_request_message(text, label, model, base_url, suffix))
     if status == 401:
         hint = ""
         if is_agentrouter(base_url):
