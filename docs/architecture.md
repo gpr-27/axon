@@ -11,7 +11,8 @@ and the SDK all consume that same event stream.
 |---|---|
 | `axon/cli.py` | Argument parsing, print mode (`-p`, `--output-format`), the interactive REPL, `!cmd`, `# note`, and the `mcp` / `doctor` / `purge` subcommands |
 | `axon/config.py` | Typed `Settings` (pydantic) and the precedence chain across TOML, JSON, `.env`, environment and flags. Also API key resolution and the project base-URL guard |
-| `axon/storage.py` | The on-disk layout under `~/.axon` (or `AXON_HOME`): project keys, sessions, traces, checkpoints, usage log, pruning |
+| `axon/storage.py` | The on-disk layout under `~/.axon` (or `AXON_HOME`): project keys, the per-session folder helpers (`session_dir`, `session_subdir`, `trace_path`, ...), usage log, pruning |
+| `axon/session/relayout.py` | One-time, idempotent move of the older flat layout (`sessions/<id>.jsonl`, `traces/`, `outputs/<id>/`, ...) into per-session folders |
 | `axon/platform.py` | All OS-specific code: console VT/UTF-8 setup, raw key reading, shell detection (bash, zsh, pwsh, powershell, cmd, Git Bash) and process-tree kill |
 | `axon/agent/loop.py` | `Agent`: the turn loop, retries, compaction, budget guard, steering, background turns, hook dispatch and tool batching |
 | `axon/agent/prompt.py` · `context.py` | System prompt assembly (identity, environment, memory, skills, output style, goal), context accounting and compaction |
@@ -23,7 +24,7 @@ and the SDK all consume that same event stream.
 | `axon/tools/` | Built-in tools (`Read`, `Edit`, `Bash`, `Grep`, `Task`, …), the `ToolRegistry`, and the path helpers shared by file tools |
 | `axon/permissions/` | `engine.py` (allow, ask and deny evaluation), `rules.py` (rule syntax and persistence) and `paths.py` (the workspace path jail) |
 | `axon/hooks/` | Claude-Code-compatible lifecycle hooks: config merging, matchers, subprocess runner and JSON decisions |
-| `axon/mcp/` | MCP client (stdio, HTTP, SSE transports), config discovery, tool and prompt bridge, and the `/mcp` command |
+| `axon/mcp/` | MCP client (stdio, HTTP, SSE, WebSocket transports, OAuth, headersHelper), config discovery and merging, allow/deny and managed policy, project-server approvals, output limits, tool and prompt bridge, `axon mcp serve`, and the `/mcp` command |
 | `axon/skills/` | SKILL.md discovery, import and execution |
 | `axon/commands/` | The slash-command registry (`registry.py`) and built-ins grouped by area (`session_cmds.py`, `context_cmds.py`, …), plus custom commands, plugins and output styles |
 | `axon/session/` | JSONL transcripts (`store.py`), file checkpoints for `/rewind`, the cost `ledger.py` and optional encryption |
@@ -44,7 +45,7 @@ Feature modules plug in without touching the core. Each module listed in
                Agent.run_turn
                  1. session cost ceiling check
                  2. hook: UserPromptSubmit           (may block or add context)
-                 3. session.append_user  ──────────► sessions/<id>.jsonl
+                 3. session.append_user  ──────────► sessions/<id>/session.jsonl
                  ┌─ loop (≤ max_iterations) ───────────────────────────────────────┐
                  │ 4. auto-compact when context ≥ compact_at  (PreCompact hook)     │
                  │ 5. budget guard: projected cost of the next request             │
@@ -59,7 +60,7 @@ Feature modules plug in without touching the core. Each module listed in
                  │      hook: PostToolUse ─► ToolTiming, ToolExecutionResult        │
                  │10. all results in ONE message; steering messages appended       │
                  └──────────────────────────────────────────────────────────────────┘
-                 11. TurnTrace ─► traces/<id>.jsonl   (replayed by /inspect)
+                 11. TurnTrace ─► sessions/<id>/trace.jsonl   (replayed by /inspect)
                  12. auto title (StopFailure hook on error); the CLI then prints the
                      footer, next-step suggestions and an optional desktop notification
 ```
@@ -108,3 +109,19 @@ Everything is append-only JSONL under `~/.axon/projects/<project-key>/`. Transcr
 input, assistant text and thinking, tool calls and results, usage, cost, timings and permission
 decisions. That is enough for `/resume`, `/rewind`, `/export`, `/stats` and the HTML report to
 work from real data. See the storage tree in the [README](../README.md#storage-layout).
+
+Every chat session owns exactly one folder, `projects/<project-key>/sessions/<session-id>/`, and
+everything that belongs to the session lives only there: `session.jsonl` (transcript),
+`subagents/<n>.jsonl` (subagent transcripts, with `<n>.trace.jsonl` traces), `screen.log`,
+`trace.jsonl`, `outputs/` (full tool outputs and background shell logs), `checkpoints/` (`/rewind`
+data), `images/`, `pastes/`, `todos.json`, `exports/` and `debug.log`. All code reaches these through
+the helpers in `axon/storage.py` (`session_dir`, `session_subdir`, `session_file`, `transcript_path`);
+artifacts created without an explicit session id (pasted images and large pastes) go to the session
+the `SessionStore` opened last, and to `sessions/_unattached/` when none is active. Deleting a session
+moves its folder to `trash/`; pruning removes whole folders.
+
+Older flat layouts stay readable. `SessionStore.open()` and the startup step in `session/layout.py`
+call `session/relayout.py`, which moves (never copies) a session's scattered files into its folder.
+It is idempotent, never overwrites (a colliding file with different content is parked in
+`<session>/legacy/`, an identical one is dropped) and leaves images and pastes of the old layout in
+place because they carry no session id.

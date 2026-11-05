@@ -84,12 +84,34 @@ base_url = "https://proxy.example.com/v1"
 base_url = "https://llm.example.com/v1"
 env_var  = "MY_GATEWAY_API_KEY"    # its key; leave it out for no key
 model    = "qwen3-coder"           # optional default model
+native_tools = false               # optional: see "Gateways that drop tools" below
 ```
 
 ```
 /endpoint set <provider> <url>     /endpoint add <name> <url> [--key-env VAR] [--model M] [--use]
 /endpoint reset <provider|name>    /endpoint test [provider|url]     /endpoint use <name>
+/endpoint native-tools <name> true|false
 ```
+
+#### Gateways that drop tools
+
+Some OpenAI-compatible gateways accept the `tools` field and then ignore it, so every model answers
+"I do not have access to any tools" and an agent cannot read a file. `/endpoint test <name>` sends one
+tiny probe request (a trivial `echo` tool) and, if no tool call comes back, prints the command to fix it:
+
+```
+/endpoint native-tools my-gateway false
+```
+
+This saves `native_tools = false` for that endpoint (default `true`; `--native-tools false` also works on
+`/endpoint add` and `/endpoint set`). Axon then sends no `tools` field. Instead it adds a short protocol to
+the system message that lists each tool with its JSON schema and asks the model to write calls as
+`<tool_call>{"name": "Read", "arguments": {"path": "/x"}}</tool_call>`. Past calls and results are sent back as
+`<tool_call>` and `<tool_result>` text, and Axon turns the model's blocks into normal tool calls (invalid JSON
+becomes an error result the model can correct). In this mode the reply is shown once it is complete, not
+token by token. It depends on the model following the format, so it is less reliable than native tool
+calling; leave `native_tools` on for any endpoint that supports tools. The probe runs only when you ask for
+it, never during normal chat.
 
 `/settings` lists every option grouped by purpose: model and provider, permissions, display,
 context and cost, data, and shell. On a terminal you can change any of them in place. Without a
@@ -171,7 +193,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `max_tokens` | `AXON_MAX_TOKENS` | – | `128000` |
 | `max_iterations` | `AXON_MAX_ITERATIONS` | `maxTurns` | `50` |
 | `max_retries` | `AXON_MAX_RETRIES` | `maxRetries` | `3` |
-| `turn_token_budget` | `AXON_TURN_TOKEN_BUDGET` | – | `2000000` |
+| `turn_token_budget` | `AXON_TURN_TOKEN_BUDGET` | – | `0` |
 | `max_history_turns` | `AXON_MAX_HISTORY_TURNS` | – | `0` |
 | `session_cost_ceiling` | `AXON_SESSION_COST_CEILING` | – | `50.00` |
 | `compact_at` | `AXON_COMPACT_AT` | `compactAt` | `0.75` |
@@ -207,8 +229,9 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `suggestions` | `AXON_SUGGESTIONS` | `promptSuggestionEnabled` | `true` |
 | `tips` | `AXON_TIPS` | `spinnerTipsEnabled` | `true` |
 | `tips_llm` | `AXON_TIPS_LLM` | `tipsLlm` | `true` |
+| `live_status` | `AXON_LIVE_STATUS` | `liveStatus` | `true` |
 | `tips_refresh_turns` | `AXON_TIPS_REFRESH_TURNS` | `tipsRefreshTurns` | `5` |
-| `context_limit` | `AXON_CONTEXT_LIMIT` | `contextLimit` | `128000` |
+| `context_limit` | `AXON_CONTEXT_LIMIT` | `contextLimit` | `0` |
 | `max_width` | `AXON_MAX_WIDTH` | – | `0` |
 | `screen_log` | `AXON_SCREEN_LOG` | – | `true` |
 | `mouse_click_expand` | `AXON_MOUSE_CLICK_EXPAND` | `mouseClickExpand` | `false` |
@@ -216,6 +239,8 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `notify_after_seconds` | `AXON_NOTIFY_AFTER_SECONDS` | `notifyAfterSeconds` | `30.0` |
 | `tips_refresh_minutes` | `AXON_TIPS_REFRESH_MINUTES` | `tipsRefreshMinutes` | `15.0` |
 | `auto_title` | `AXON_AUTO_TITLE` | `autoTitle` | `true` |
+| `title_llm` | `AXON_TITLE_LLM` | `titleLlm` | `true` |
+| `prompt_suggestions` | `AXON_PROMPT_SUGGESTIONS` | `promptSuggestions` | `true` |
 | `respond_to_bash_commands` | `AXON_RESPOND_TO_BASH_COMMANDS` | `respondToBashCommands` | `true` |
 | `disable_all_hooks` | `AXON_DISABLE_ALL_HOOKS` | `disableAllHooks` | `false` |
 | `prompt_color` | `AXON_PROMPT_COLOR` | `promptColor` | `none` |
@@ -224,6 +249,36 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 
 `permissions` takes `allow`, `deny` and `ask` lists. `hooks` maps event names to hook groups.
 `budget` in `settings.json` maps to `budget_turn_usd`, `budget_session_usd` and `budget_action`.
+
+### Next-prompt suggestion (`prompt_suggestions`)
+
+After Axon finishes an answer in an interactive terminal, it asks the small model (`small_model`, else
+the main model) to guess what you will type next. The guess shows as dim ghost text in the empty
+prompt, followed by `tab to accept`. Tab (or Right / End on the empty prompt) moves it into the
+prompt, where you can edit it; typing, Esc, Up or Ctrl+C dismisses it. Enter on the empty prompt does
+not send it, and a suggestion you do not send is never saved to the prompt history. Turn it off with
+`/suggestions off`, `"promptSuggestions": false` in `settings.json` or `/config`.
+
+Cost: a few hundred input tokens (at most about 700: your last message, the answer and two earlier
+messages are trimmed) and ~15 output tokens per turn on the small model, recorded in the
+usage ledger with the source `suggest`. Nothing is generated for interrupted or failed turns, slash
+commands, subagents, `-p` print mode or when the output is not a terminal.
+
+### Automation
+
+The `automation` block turns on the automatic parts of the marketplace: background connecting and
+reconnecting of MCP servers, switching off a server that keeps failing, adding matching skills to your prompt,
+connector suggestions for the project and update checks. Everything is off until `"enabled": true`.
+
+```json
+{ "automation": { "enabled": true, "startup_wait": 2, "auto_disable_after": 3, "auto_skills": true } }
+```
+
+It is read from `[automation]` in `~/.axon/config.toml` and `<project>/.axon/config.toml`, then from
+`~/.axon/settings.json` and `<project>/.axon/settings.json` / `settings.local.json` (the Axon files only, not
+`.claude/`). `auto_install` and `auto_update` are honoured from your own user files only. Change the
+block with `/marketplace auto on|off|status|set <name> <value>`; every key is described in
+[Marketplace](marketplace.md#automation).
 
 ### Other environment variables
 
@@ -237,6 +292,11 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `FORCE_COLOR`, `AXON_FORCE_COLOR` | Force colour on (`truecolor` forces 24-bit) |
 | `AXON_NO_HYPERLINKS`, `AXON_HYPERLINKS` | Turn clickable OSC 8 file links off or on |
 | `AXON_SERVE_TOKEN` | Default bearer token for `axon serve` |
+| `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` | MCP startup limit, per-call limit and idle limit, in milliseconds (see [Extending](extending.md#time-limits-output-limits-reconnecting)) |
+| `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` | Size of an MCP result kept in the conversation (default 25,000 tokens) and of MCP tool descriptions |
+| `ENABLE_TOOL_SEARCH` | `true`, `false`, `auto` or `auto:N`: defer MCP tool schemas behind `ToolSearch` |
+| `MCP_CLIENT_SECRET` | OAuth client secret for `axon mcp add --client-secret` without a terminal |
+| `AXON_MANAGED_DIR` | Folder holding `managed-mcp.json` / `managed-settings.json` (default: the system managed folder) |
 | Provider keys | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `CEREBRAS_API_KEY`, `AZURE_OPENAI_API_KEY`, `AGENTROUTER_API_KEY` |
 
 ## Keyboard shortcuts

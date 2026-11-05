@@ -9,12 +9,12 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.27.6-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.29.0-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-113 slash commands · 21 built-in tools · 15 provider presets
+123 slash commands · 22 built-in tools · 15 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -37,61 +37,65 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 > fix the failing test in tests/test_cart.py
 
 ┌ Turn 1 · "fix the failing test in tests/test_cart.py"
-│ ◆ Step 1  LLM call · claude-sonnet-4-5 · reads 1 message (~11.8k tokens)
+│ ◆ Step 1 · claude-sonnet-4-5 · 1 message · ~11.8k tokens
+│ ▍ ANSWER
 │ ▎ I'll look at the test and the code it exercises.
-│   ↪ replied in 2.1s · 11.8k in (92% cached) · 164 out · $0.0061 · ctx 6%/200k
-│   → runs 2 tools in parallel, read-only
-│   ● Read  tests/test_cart.py
-│       reads a file
-│     ⎿  48 lines · 375 B · 0.01s
-│         1 │ line 1
-│         2 │ line 2
-│         3 │ line 3
-│         4 │ line 4
-│         5 │ line 5
-│        … +43 more lines · /output 1 to view all
-│   ● Grep  "def total" in src/
-│       searches inside files
-│       output_mode  content
-│     ⎿  1 match in 1 file · 0.04s
-│        src/shop/cart.py · 1 match
-│           31:     def total(self) -> Decimal:
 │ 
-│ ◆ Step 2  LLM call · claude-sonnet-4-5 · reads 4 messages (~12.5k tokens)
-│   ↪ replied in 1.4s · 12.5k in (94% cached) · 96 out · $0.0052 · ctx 6%/200k
-│   ● Bash  $ pytest -q tests/test_cart.py
-│       Run the cart tests
-│       ✓ allowed by rule: Bash(pytest *)
-│     ⎿  ██████████▒▒ 4 passed · 1 failed · 3 lines of output · 1.80s
-│        F....
-│        FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') ==
-│          Decimal('10.00')
-│        1 failed, 4 passed in 0.21s
+│ ▣ TOOLS · 2 calls · in parallel · allowed: read-only
+│    1 Read  input   tests/test_cart.py
+│            run     ✓ 0.01s · 48 lines · 375 B
+│            output   1  line 1
+│                     2  line 2
+│                    … +46 more lines · /output 1
+│    2 Grep  input   "def total" in src/
+│            run     ✓ 0.04s · 1 match in 1 file
+│            output  src/shop/cart.py:31  def total(self) -> Decimal:
+│   → 2 results (857 B, ~204 tokens) go to step 2
 │ 
-│ ◆ Step 3  LLM call · claude-sonnet-4-5 · reads 6 messages (~12.7k tokens)
+│ ◆ Step 2 · claude-sonnet-4-5 · 4 messages · ~12.5k tokens
+│ ▣ TOOLS · 1 call · allowed: rule
+│   Bash  input   pytest -q tests/test_cart.py
+│         run     ✓ 1.80s · allowed (rule)
+│         output  F....
+│                 FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') =…
+│                 1 failed, 4 passed in 0.21s
+│   → 1 result (128 B, ~34 tokens) goes to step 3
+│ 
+│ ◆ Step 3 · claude-sonnet-4-5 · 6 messages · ~12.7k tokens
+│ ▍ ANSWER
 │ ▎ The discount is truncated instead of rounded. Fixing `total()`.
-│   ↪ replied in 2.6s · 12.7k in (98% cached) · 212 out · $0.0068 · ctx 6%/200k
-│   ● Edit  src/shop/cart.py
-│       edits a file
-│       › hook PostToolUse ran (1 command)
-│     ⎿  ✎ Edited src/shop/cart.py · +1 −1 · 0.03s
-│            -         return (subtotal * rate).quantize(CENTS, ROUND_DOWN)
-│            +         return (subtotal * rate).quantize(CENTS, ROUND_HALF_UP)
 │ 
-│ ◆ Step 4  LLM call · claude-sonnet-4-5 · reads 8 messages (~12.9k tokens)
-│   ↪ replied in 1.2s · 12.9k in (97% cached) · 88 out · $0.0049 · ctx 7%/200k
-│   ● Bash  $ pytest -q tests/test_cart.py
-│       Re-run the cart tests
-│       ✓ allowed by rule: Bash(pytest *)
-│     ⎿  ████████████ 5 passed · 2 lines of output · 1.70s
-│        .....
-│        5 passed in 0.19s
+│ ▣ TOOLS · 1 call · allowed
+│   Edit  input   src/shop/cart.py
+│         run     ✓ 0.03s
+│         output  ✎ Edited src/shop/cart.py · +1 −1
+│                     -         return (subtotal * rate).quantize(CENTS, ROUND_DOWN)
+│                     +         return (subtotal * rate).quantize(CENTS, ROUND_HALF_UP)
+│         note    › hook PostToolUse ran (1 command)
+│   → 1 result (39 B, ~10 tokens) goes to step 4
 │ 
-│ ◆ Step 5  LLM call · claude-sonnet-4-5 · reads 10 messages (~13.0k tokens)
+│ ◆ Step 4 · claude-sonnet-4-5 · 8 messages · ~12.9k tokens
+│ ▣ TOOLS · 1 call · allowed: rule
+│   Bash  input   pytest -q tests/test_cart.py
+│         run     ✓ 1.70s · allowed (rule)
+│         output  .....
+│                 5 passed in 0.19s
+│   → 1 result (23 B, ~6 tokens) goes to step 5
+│ 
+│ ◆ Step 5 · claude-sonnet-4-5 · 10 messages · ~13.0k tokens
+│ ▍ ANSWER
 │ ▎ Fixed. `Cart.total()` now rounds the discount with `ROUND_HALF_UP`, so 9.995
 │ ▎ becomes 10.00. All 5 cart tests pass.
-│   ↪ replied in 1.1s · 13.0k in (99% cached) · 58 out · $0.0045 · ctx 7%/200k
+│   → final answer written in step 5 by claude-sonnet-4-5
+│   usage by step
+│   step  model              time     in  cached  cache write  out     cost
+│      1  claude-sonnet-4-5  2.1s  11.8k     92%            -  164  $0.0061
+│      2  claude-sonnet-4-5  1.4s  12.5k     94%            -   96  $0.0052
+│      3  claude-sonnet-4-5  2.6s  12.7k     98%            -  212  $0.0068
+│      4  claude-sonnet-4-5  1.2s  12.9k     97%            -   88  $0.0049
+│      5  claude-sonnet-4-5  1.1s  13.0k     99%            -   58  $0.0045
 └ ✓ Done in 10.6s · 5 LLM calls · 5 tool calls · 62.9k in · 618 out · $0.0275
+    context █░░░░░░░ 7% of 200k
 ```
 <!-- END GENERATED: demo -->
 
@@ -168,9 +172,9 @@ axon --version
 **Install a specific version:**
 
 ```bash
-uv tool install axon-terminal==0.27.6
-pipx install axon-terminal==0.27.6
-pip install axon-terminal==0.27.6
+uv tool install axon-terminal==0.29.0
+pipx install axon-terminal==0.29.0
+pip install axon-terminal==0.29.0
 ```
 
 ## Set up a model
@@ -327,11 +331,11 @@ project. Nothing is deleted automatically.
 
 | What | Where | See it with |
 |---|---|---|
-| Every conversation, with full tool outputs | `~/.axon/projects/<project>/sessions/` | `/resume`, `/history`, **Ctrl+F** |
+| Every conversation, with full tool outputs; each session has its own folder holding all of its files | `~/.axon/projects/<project>/sessions/<session>/` | `/resume`, `/history`, **Ctrl+F** |
 | Everything you did (prompts, commands, settings changes, approvals) | `…/<project>/activity.jsonl` | `/activity` |
 | Subagent runs, skill runs, hook runs, plans, and every skill / agent / memory you created | `…/<project>/library/` + the transcripts | `/library`, `axon library` |
-| A plain-text copy of everything shown on screen | `…/<project>/screen/` | any text editor |
-| File snapshots for undo | `…/<project>/checkpoints/` | `/rewind` |
+| A plain-text copy of everything shown on screen | `…/<session>/screen.log` | any text editor |
+| File snapshots for undo | `…/<session>/checkpoints/` | `/rewind` |
 | What it costs | `~/.axon/usage.jsonl` | `/cost`, `/stats`, `/report` |
 | Your keys | `~/.axon/.env` | `/keys` |
 
@@ -429,24 +433,24 @@ Related commands:
 - `/context [--why]` draws a coloured grid of context usage by category.
 - `/cost` shows spend by source and model, the cache hit rate and savings, and the last cache-miss cause.
 - `/focus` hides everything except prompts, one-line tool summaries and answers.
-- `--debug [api,hooks,...]` writes a debug log to `~/.axon/debug/<session>.log`.
+- `--debug [api,hooks,...]` writes a debug log to `~/.axon/projects/<project>/sessions/<session>/debug.log`.
 
 ## Commands
 
 <!-- BEGIN GENERATED: commands-overview -->
-113 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
+123 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
 
 | Group | Commands |
 |---|---|
-| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retry` `/rewind` `/sessions` `/star` `/tag` |
+| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retitle` `/retry` `/rewind` `/sessions` `/star` `/tag` |
 | **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/faq` `/payload` `/pricing` `/recap` `/window` |
 | **Model & Modes** | `/effort` `/endpoint` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
 | **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` |
-| **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/main` `/mcp` `/plugin` `/reload-plugins` `/skill-doctor` `/skills` `/subagents` `/tasks` `/tools` |
+| **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/list-agents` `/main` `/marketplace` `/mcp` `/plugin` `/reload-plugins` `/reload-skills` `/skill-doctor` `/skills` `/stop` `/subagents` `/subtask` `/tasks` `/tell` `/tools` |
 | **Memory & Project** | `/add-dir` `/cd` `/import` `/init` `/learn` `/memory` `/optimize` `/prompt` |
-| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/settings` `/status` `/statusbar` `/statusline` `/terminal-setup` `/theme` `/vim` |
+| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/settings` `/status` `/statusbar` `/statusline` `/storage` `/suggestions` `/terminal-setup` `/theme` `/vim` |
 | **Code** | `/index` `/map` |
-| **Getting started** | `/new` `/next` `/setup` `/tips` |
+| **Getting started** | `/menu` `/new` `/next` `/setup` `/tips` |
 | **Git** | `/changes` `/commit` `/git` `/pr` |
 | **Insight** | `/budget` `/insights` `/report` `/stats` |
 | **Integrations** | `/serve` |
@@ -479,7 +483,8 @@ Subcommands run outside the REPL: `axon setup`, `axon doctor`, `axon mcp …`, `
 | `TodoWrite` | allow | Create/update the visible task list for multi-step work (3+ steps, or when the user gives several tasks). |
 | `WebFetch` | ask | Fetch a URL (http/https) and return its content as readable text: HTML is converted to markdown-like text (headings, lists, code blocks, links), JSON is pretty-printed. |
 | `WebSearch` | ask | Search the web for current information: documentation, error messages, release notes, library versions. |
-| `Task` | allow | Delegate a task to a subagent with its own isolated context and returns only its final report. |
+| `Task` | allow | Delegate a task to a subagent with its own isolated context and returns only its final report (also known as the Agent tool). |
+| `SendMessage` | allow | Send a message to another agent in this session. |
 | `ExitPlanMode` | ask | Propose a concrete plan and exit 'plan' mode. |
 | `Skill` | allow | Load the full instructions of a skill listed under 'Available Skills' in the system prompt. |
 | `AskUserQuestion` | allow | Ask the user 1-4 multiple-choice questions in the terminal when a decision genuinely needs their input (ambiguous requirements, choosing between approaches). |
@@ -517,12 +522,17 @@ axon mcp list
 
 `${VAR}` and `${VAR:-default}` are expanded when the server starts, so the file keeps the reference
 and not the secret. Inside a session, `/mcp` manages servers, tools, resources, prompts and logs.
-MCP prompts become slash commands.
+MCP prompts become slash commands (`/server:prompt`). Remote servers support OAuth sign-in
+(`axon mcp login <name>`), `headersHelper`, WebSocket (`"type": "ws"`) and allow/deny lists; a project's
+`.mcp.json` servers wait for your approval; `axon mcp serve` exposes Axon's own tools as an MCP server.
+Details: [docs/extending.md](docs/extending.md#mcp-servers).
 
 **Hooks** run at `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
-`SubagentStop`, `PreCompact`, `Notification` and `SessionEnd`. Each hook receives the event as JSON
-on stdin. Exit code `2` blocks the action, and JSON on stdout can allow, ask, deny or add context.
-`/hooks` lists the hooks that are loaded.
+`SubagentStop`, `PreCompact`, `Notification`, `SessionEnd` and the other Claude Code events. A handler
+is a command, an HTTP endpoint, an MCP tool, or a model prompt/check; `if` narrows tool events.
+Each hook receives the event as JSON. Exit code `2` blocks the action, and JSON output can allow, ask,
+deny, rewrite tool input or output, or add context. `/hooks` browses the hooks that are loaded.
+See [docs/extending.md](docs/extending.md#hooks).
 
 **Subagents.** The model delegates work through the `Task` tool. The built-in agents are
 `general-purpose`, `explore`, `plan`, `code-reviewer`, `test-runner` and `analytics`. Use `/agents`
@@ -538,6 +548,21 @@ a failed subagent shows its reason there and in its own card. `/subagents <n>` o
 
 **Output styles.** Built-in styles are `default`, `explanatory`, `learning` and `concise`, plus any
 custom Markdown style you add. Switch with `/output-style`.
+
+**Marketplace.** `/marketplace` (aliases `/connectors`, `/store`) is a browser for connectors (MCP
+servers), skills and plugins, with Yours and Discover views, search, and filters for category, free and
+installed. It installs a connector into your MCP config, asks for any API key it needs (stored
+owner-only in `~/.axon/.env`), connects once to check it and rolls the change back if the server is
+unreachable. It also scaffolds new skills and plugins. The same commands work in scripts:
+
+```bash
+axon marketplace list --free
+axon marketplace search postgres
+axon marketplace install context7
+axon marketplace create-skill
+```
+
+Details and the verification rules for catalog entries: [docs/marketplace.md](docs/marketplace.md).
 
 ## Memory
 
@@ -612,20 +637,24 @@ every file, and `/project` (alias `/where`) shows which project you opened and w
   projects/<project-key>/
     project.json  README.md                           name, workspace path, git, counts
     activity.jsonl                                    append-only journal of everything
-    sessions/<session-id>.jsonl                       full transcript (+ _sub_<n> subagents)
-    outputs/<session-id>/                             full tool/shell outputs cut for the model
-    screen/<stamp>-<session-id>.log                   plain-text copy of the terminal
-    traces/<session-id>.jsonl                         per-turn traces
-    checkpoints/<session-id>/                         file snapshots for /rewind (+ rewound/)
     memory/MEMORY.md                                  auto memory for this project
-    todos/<session-id>.json                           todo list state
+    plans/  tips.json                                 plan-mode files, cached tips
     trash/                                            deleted sessions (/restore)
-    images/  pastes/  exports/  plans/  debug/        attachments, exports, debug logs
+    sessions/<session-id>/                            ONE folder per chat session, holding all of it:
+      session.jsonl                                   full transcript
+      subagents/<n>.jsonl                             subagent transcripts (<n>.trace.jsonl: traces)
+      screen.log                                      plain-text copy of the terminal
+      trace.jsonl                                     per-turn traces
+      outputs/                                        full tool/shell outputs cut for the model,
+                                                      background shell logs
+      checkpoints/                                    file snapshots for /rewind (+ rewound/)
+      images/  pastes/                                pasted images and large pastes
+      todos.json  exports/  debug.log                 todo list, /export files, --debug log
 ```
 
 Nothing is deleted automatically: `cleanup_period_days` defaults to `0` (keep forever). Set it to
-N > 0 to prune sessions, traces and todos older than N days at startup (the journal, memory,
-screen logs and trash are never pruned). `/delete` moves a session to the project's `trash/` and
+N > 0 to prune whole session folders older than N days at startup (the journal, memory and trash
+are never pruned). `/delete` moves a session's folder to the project's `trash/` and
 `/restore <id>` brings it back. Run `axon purge [project|caches|all]` to delete stored data on
 purpose.
 
@@ -636,7 +665,11 @@ cost), tool call, error, retry, rewind, resume and delete, with secrets redacted
 or `axon activity` with the same flags; `axon projects` lists every project, and
 `/history all` shows a transcript including messages a rewind removed. Transcripts that older
 versions kept in `~/.axon/sessions/` are moved into their project once (copied, verified, the
-originals kept in `~/.axon/backup/`).
+originals kept in `~/.axon/backup/`). Sessions stored in the older flat layout (`sessions/<id>.jsonl`
+next to `traces/`, `outputs/<id>/`, `checkpoints/<id>/`, `todos/`, `screen/`, `exports/`, `debug/`)
+are still readable and are moved, never copied, into their session folder when the session is opened
+and at startup; a file that would collide with a different one is parked in `<session>/legacy/`.
+Images and pastes of that old layout carry no session id and stay in `images/` and `pastes/`.
 
 ## Analytics
 
@@ -756,6 +789,7 @@ axon/
 | [docs/configuration.md](docs/configuration.md) | Every setting, file location and precedence rule |
 | [docs/commands.md](docs/commands.md) | Every slash command and CLI flag |
 | [docs/extending.md](docs/extending.md) | Formats for hooks, skills, commands, agents, plugins, MCP and output styles |
+| [docs/marketplace.md](docs/marketplace.md) | Browsing and installing connectors, skills and plugins; the catalog format |
 | [docs/windows.md](docs/windows.md) | PowerShell and cmd specifics, shells, troubleshooting |
 | [docs/testing.md](docs/testing.md) | Running and writing tests |
 | [CHANGELOG](src/axon/CHANGELOG.md) | Release notes (also shown by `/release-notes`) |

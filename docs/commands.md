@@ -8,12 +8,23 @@ Slash commands are typed inside a session. `/help` lists them, `/help <command>`
 - **Plugin commands**: `/<plugin>:<name>`
 - **MCP prompts**
 
-A custom command whose name collides with a built-in stays reachable as `/cmd:<name>`.
+A custom command whose name collides with a built-in stays reachable as `/cmd:<name>`; a skill with the same name as a custom command wins (the file stays reachable as `/cmd:<name>`).
+
+## Menus: nothing to type
+
+In a terminal, every command run with no arguments is driven with the keys (`↑↓` move, `Enter` select, `Esc` back, `/` filter a long list):
+
+- `/menu` (also `/help`, or `Alt+H` at the prompt) lists every command by category; `Enter` opens the command and its own menu, `Esc` comes back to the list.
+- Commands that show something (`/status`, `/cost`, `/context`, `/doctor`, ...) print their report, then ask **What next?** with the related views and actions.
+- Commands that do something (`/clear`, `/compact`, `/commit`, ...) say in one line what they do, then offer **Run it**, the choices their arguments offer (a question appears for any text they need) and **Cancel**.
+- `/tools` lists every tool with its permission; `Enter` shows the full description and all parameters, with *Always allow / Ask each time / Deny / Remove my rule*. `/permissions` lists the rules; pick one to change or remove it, or *Add a rule* (tool, allow/ask/deny, where to save).
+
+Every menu entry runs the same handler as the typed command (`/cost calls` and the menu's *Every API call* are the same call). Typed arguments, scripts and `axon -p` keep the plain text output, including its "type this next" hint lines.
 
 The tables below are generated from the command registry by `scripts/gen_docs.py`.
 
 <!-- BEGIN GENERATED: commands-reference -->
-113 built-in commands in 13 groups.
+123 built-in commands in 13 groups.
 
 Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Modes](#model--modes) · [Code & Review](#code--review) · [Agents, Skills & Tools](#agents-skills--tools) · [Memory & Project](#memory--project) · [System](#system) · [Code](#code) · [Getting started](#getting-started) · [Git](#git) · [Insight](#insight) · [Integrations](#integrations) · [Solve](#solve)
 
@@ -34,6 +45,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/rename` | `/title` | Rename the current session (no name: generate one) |
 | `/restore` | `/trash` | List deleted sessions (the trash) and restore them |
 | `/resume` | `/continue` | Resume a previous session of this workspace |
+| `/retitle` |  | Give past chats short AI-written titles |
 | `/retry` |  | Retry the last turn that failed with a provider error |
 | `/rewind` | `/undo` `/checkpoint` | Restore code and/or conversation to an earlier prompt |
 | `/sessions` | `/session` | List saved sessions with tokens and cost |
@@ -149,6 +161,14 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 </details>
 
+<details><summary><code>/retitle</code> usage</summary>
+
+```text
+/retitle [all]   (no argument: this chat; all: every past chat still named after its first words)
+```
+
+</details>
+
 <details><summary><code>/rewind</code> usage</summary>
 
 ```text
@@ -217,7 +237,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 /context          coloured usage grid + breakdown by category
 /context --why    every injected block, its trigger and tokens
 /context all      include per-tool token sizes
-/context limit    how much of the model's window to use: 128k (default), 256k, 1m or max
+/context limit    how much of the model's window to use: auto (default: the model's full window), 128k, 256k or 1m
 ```
 
 </details>
@@ -244,8 +264,9 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 <details><summary><code>/payload</code> usage</summary>
 
 ```text
-/payload          section summary with token counts
+/payload          section summary with token counts (a menu to expand one in a terminal)
 /payload full     full system prompt, tool list and messages
+/payload system|tools|history|last   one section in full
 ```
 
 </details>
@@ -298,10 +319,12 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 ```text
 /endpoint                                        menu (a list without a terminal)
 /endpoint set <provider> <url>                   redirect a provider to another base URL (proxy/gateway)
-/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--use]
+/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--import] [--use]
 /endpoint reset <provider|name>                  preset default URL again / delete a custom endpoint
-/endpoint test [provider|url]                    connectivity, latency and model count
+/endpoint test [provider|url] [--model M]        connectivity, latency, model count and tool-call support
+/endpoint native-tools <name> true|false         false: the gateway drops `tools` (tools go in the prompt)
 /endpoint use <provider|name> [--model M]        switch to it now (also saved as the default)
+/endpoint models <name> [import|add <model>...|clear]   list, import from its /models, add or forget models
 saved in ~/.axon/config.toml (user scope only)
 ```
 
@@ -522,16 +545,22 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/agents` |  | List, show, create or edit subagent definitions |
 | `/debug` |  | Turn on debug tracing and have the model diagnose the last turn |
 | `/explain` |  | Plain-language summary of a turn (no LLM call) |
-| `/hooks` |  | Configured lifecycle hooks (PreToolUse, Stop, …) |
+| `/hooks` |  | Browse configured lifecycle hooks (PreToolUse, Stop, ...) |
 | `/inspect` |  | Re-print the detailed timeline of a turn (default: last) |
+| `/list-agents` | `/peers` | List the subagents of this session, with their status and tokens |
 | `/main` | `/root` `/parent` | Return from a subagent transcript to the main session |
+| `/marketplace` | `/connectors` `/store` | Browse, install and control connectors (MCP), skills and plugins |
 | `/mcp` |  | MCP servers: list, add, remove, connect, tools, prompts |
 | `/plugin` | `/plugins` | Plugins bundling commands, skills, agents, hooks and MCP |
 | `/reload-plugins` | `/reload` | Re-scan plugins, custom commands and skills |
+| `/reload-skills` |  | Re-scan skill and command directories without restarting |
 | `/skill-doctor` | `/skills-doctor` | Token cost, usage and problems of every skill |
 | `/skills` | `/skill` | Browse, create, install and manage skills |
+| `/stop` |  | Stop running subagents (their transcripts are kept) |
 | `/subagents` | `/sub` `/subagent` | Open a subagent's transcript from this session as a chat |
+| `/subtask` |  | Fork the conversation into a background subagent; the result comes back here |
 | `/tasks` | `/bashes` `/jobs` | Background shells, background turns and subagent tasks |
+| `/tell` | `/msg` | Send a message to a running subagent; it reads it before its next step |
 | `/tools` | `/tool` | Tools the model can use and their permission |
 
 <details><summary><code>/agents</code> usage</summary>
@@ -539,6 +568,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 ```text
 /agents                         list built-in and custom agents
 /agents show <name>
+/agents check                   files that were skipped or have unrecognized fields
 /agents create [name] [--global] [description]   (wizard on a terminal)
 /agents edit <name>
 /agents delete <name>
@@ -562,6 +592,18 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/hooks</code> usage</summary>
+
+```text
+/hooks                  list every configured hook, grouped by event
+/hooks <n>              full text and origin of hook number n
+/hooks <Event>          hooks of one event with what it can do
+/hooks events           all events (also those with no hook) and their matcher
+/hooks reload           re-read the settings files
+```
+
+</details>
+
 <details><summary><code>/inspect</code> usage</summary>
 
 ```text
@@ -570,10 +612,29 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/marketplace</code> usage</summary>
+
+```text
+/marketplace                          browse (terminal) or list the connectors
+/marketplace list|search|info|categories      find connectors, skills and plugins
+/marketplace install|remove <id> · add <url|command> · create-skill · create-plugin
+/marketplace enable|disable <id>     switch a connector, skill or plugin on or off
+/marketplace status [--check] [--all]  everything installed: enabled, connected, tools, last error, scope
+/marketplace test <id> · reconnect <id|all> · logs <id> [lines]
+/marketplace scope <id> user|project|local
+/marketplace env <id> NAME=VALUE ... [--unset NAME] · timeout <id> <seconds>
+/marketplace tool <id> [<tool>|*] allow|ask|deny|reset [--global]
+/marketplace export [file] [--include-secrets] · import <file> [--dry-run] [--overwrite]
+/marketplace auto on|off|status|set <name> <value>     automatic behaviour (off by default)
+/marketplace suggest [--reset] · updates · update <id>
+```
+
+</details>
+
 <details><summary><code>/mcp</code> usage</summary>
 
 ```text
-/mcp [list|add|remove|enable|disable|connect|disconnect|tools|resources|prompts|logs|help]
+/mcp [list|get|add|remove|enable|disable|reconnect|login|logout|approve|tools|resources|prompts|logs|test|scope|env|timeout|tool|dashboard|export|import|auto|suggest|updates|help]
 ```
 
 </details>
@@ -581,11 +642,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/plugin</code> usage</summary>
 
 ```text
-/plugin                         list
-/plugin info <name>
-/plugin create <name> [--global]
+/plugin                         installed plugins and marketplaces
+/plugin discover [marketplace]
+/plugin install <name>@<marketplace> [--scope user|project|local]
+/plugin install <name> --marketplace <source>
 /plugin install <folder | https git URL> [--project]
-/plugin enable|disable|remove <name>
+/plugin marketplace add|list|update|remove [<source|name>]
+/plugin enable|disable <name> [--scope …] · uninstall|update|info <name>
+/plugin configure <name> [KEY=VALUE …]
+/plugin validate <path> · create <name> [--global] · reload
+/plugin status · test <name> · scope <name> user|project · export [file] · import <file>
 ```
 
 </details>
@@ -598,6 +664,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 /skills create <name> [template] [--global]
 /skills install <github-url> [--global] [--force]
 /skills edit <name> · /skills delete <name> · /skills reload
+/skills enable|disable <name> · /skills test <name> · /skills scope <name> user|project · /skills status
+```
+
+</details>
+
+<details><summary><code>/stop</code> usage</summary>
+
+```text
+/stop            stop every running subagent
+/stop <id>       stop one task
 ```
 
 </details>
@@ -606,6 +682,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /subagents [n | main | queue]
+/subagents edit <n>   edit a finished subagent's report (the main conversation sees the edit)
+/tell <n> <message>   talk to a running subagent
+```
+
+</details>
+
+<details><summary><code>/subtask</code> usage</summary>
+
+```text
+/subtask <task>
 ```
 
 </details>
@@ -616,6 +702,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 /tasks                   background shells, background turns (Ctrl+B) and subagent tasks
 /tasks log <id>          last output lines of a shell (bash_1) or background turn
 /tasks kill <id>         stop a background shell
+```
+
+</details>
+
+<details><summary><code>/tell</code> usage</summary>
+
+```text
+/tell <id|n> <message>
 ```
 
 </details>
@@ -730,7 +824,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/doctor` |  | Diagnose installation, keys, tools and environment |
 | `/env` | `/environment` | OS, Python, shell, paths and toolchains |
 | `/focus` |  | Focus view: only prompts, one-line tool summaries and answers |
-| `/help` |  | List commands, or details for one command |
+| `/help` |  | Browse every command with the arrow keys (or list them as text) |
 | `/keybindings` | `/shortcuts` `/kb` | Keyboard shortcuts in effect (remap in ~/.axon/keybindings.json) |
 | `/notify` |  | Desktop notifications: when they fire (important/all/off), or send a test |
 | `/output-style` | `/output-styles` `/style` | Choose how answers are written (default, explanatory, learning, concise, custom) |
@@ -739,6 +833,8 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/status` |  | Version, model, mode, trace, session, cost, storage |
 | `/statusbar` |  | Show the live status bar, or toggle it |
 | `/statusline` |  | Custom status line command under the prompt |
+| `/storage` |  | Show everything Axon stores in ~/.axon, with sizes and leftovers |
+| `/suggestions` |  | Show a guess of your next message as ghost text in the empty prompt (Tab accepts it) |
 | `/terminal-setup` |  | Set up Shift+Enter for newlines in your terminal |
 | `/theme` |  | Colour theme: auto \| dark \| light \| high-contrast \| mono |
 | `/vim` |  | Toggle vim key bindings in the prompt editor |
@@ -849,6 +945,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/suggestions</code> usage</summary>
+
+```text
+/suggestions [on|off]
+```
+
+</details>
+
 <details><summary><code>/terminal-setup</code> usage</summary>
 
 ```text
@@ -900,6 +1004,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 | Command | Aliases | Description |
 |---|---|---|
+| `/menu` | `/commands` | Walk through every command with the arrow keys |
 | `/new` | `/scaffold` | Create a runnable starter project from a template (list with /new) |
 | `/next` | `/suggest` | Suggested next steps for the last turn (verify, fix, commit, compact...) |
 | `/setup` | `/onboard` | Guided setup: provider, API key (verified), model, permission mode, trace level |
@@ -1103,13 +1208,14 @@ axon [options] [prompt]                 interactive session (prompt optional)
 axon -p "<prompt>" [--output-format text|json|stream-json]
 axon setup [--provider P --model M --mode X --trace L]
 axon doctor
-axon mcp <list|add|add-json|remove|enable|disable|tools|prompts|logs|...>
+axon mcp <list|get|add|add-json|remove|login|logout|reset-project-choices|serve|...>
 axon stats [today|7d|30d|all]
 axon report [--days N] [--out PATH] [--all-projects] [--open]
 axon serve [--port 8765] [--host 127.0.0.1] [--token T] [--workspace DIR] [--mode M]
 axon map [path]
 axon new <template> <dir>
 axon purge [project|caches|all] [--yes]
+axon agents [--json] [--workspace DIR]   # list subagent definitions and skipped files
 ```
 
 In print mode (`-p`), a prompt can be a slash command. The process exits with status 1 when the
@@ -1145,8 +1251,8 @@ options:
   --output-format {text,json,stream-json}
                         Print-mode output format
   --model MODEL         Model to use
-  --context-limit SIZE  How much of the model's context window to use: 128k (default), 256k, 1m or
-                        max
+  --context-limit SIZE  How much of the model's context window to use: auto (default: the model's
+                        full window), 128k, 256k or 1m
   --provider PROVIDER   Provider preset id (e.g. anthropic, openai, openrouter, ollama)
   --base-url BASE_URL   Provider API base URL
   --mode, --permission-mode MODE
@@ -1204,10 +1310,10 @@ options:
                         Run the session in a git worktree (created or reused)
 
 Subcommands: `axon mcp <list|add|remove|...>` MCP servers, `axon doctor` checks your setup, `axon
-setup` guided provider setup, `axon purge` deletes stored sessions/traces, `axon new <template>`
-starter project, `axon map` repository map, `axon stats` / `axon report` usage analytics, `axon
-serve` local HTTP/SSE API, `axon activity` the journal of everything you did, `axon projects`
-every project and its data folder, `axon keys` API keys (add, replace, test, remove), `axon
-endpoint` base URLs and custom endpoints.
+setup` guided provider setup, `axon purge` deletes stored sessions, `axon new <template>` starter
+project, `axon map` repository map, `axon stats` / `axon report` usage analytics, `axon serve`
+local HTTP/SSE API, `axon activity` the journal of everything you did, `axon projects` every
+project and its data folder, `axon keys` API keys (add, replace, test, remove), `axon endpoint`
+base URLs and custom endpoints.
 ```
 <!-- END GENERATED: cli-help -->

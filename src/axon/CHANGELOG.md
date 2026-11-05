@@ -1,5 +1,216 @@
 # Changelog
 
+## 0.29.0
+
+Smaller prompts, live status, next-prompt suggestions and calmer input
+- Prompt size: MCP tools are deferred behind ToolSearch as servers connect (also late ones), with a 15k-token
+  cap on what stays loaded; the system prompt no longer lists every tool a second time; deferred names are grouped
+  by server. A request with many MCP servers drops from about 217k to about 13k input tokens. `/tools` still lists
+  and describes deferred tools.
+- Context limit: the default is now "auto", the model's full window (up to 1M), and follows model switches.
+- Live status while a turn runs: a "Now" line (waiting for the gateway, running a tool, retrying after 429,
+  compacting, waiting for you) with state-based tips, and short explainers above AskUserQuestion and approval
+  prompts. `liveStatus: false` turns it off.
+- Prompt suggestions: after an answer a small model proposes your next message as ghost text (Tab accepts);
+  `/suggestions on|off`.
+- Chat titles: written by the model by default (small model if set, else the current one); `/retitle all` renames
+  past chats still named after their first words.
+- History: one prompt history per project root (a git repo in your home folder is not a project), a
+  `History 90/100` counter while browsing with the arrow keys, and pasted text recalled as its chip.
+- Pasting: a long paste is read to its end marker across 64 KB chunks, so it can no longer split into queued
+  messages; an echoed paste shows its first and last 3 lines.
+- Esc: waits are sliced (retry back-off, hooks, web tools, MCP calls, subagents, compaction), so Esc stops a turn
+  within about a second; an interrupted turn still prints its usage summary.
+- Skills: `disableClaudeSkills` stops Axon reading `~/.claude/skills`; `~/.axon/skills` is Axon's own folder.
+- Marketplace: AWS MCP Server (OAuth and AWS CLI sign-in), AWS Documentation, Gmail, Google Calendar, Drive,
+  Docs, Sheets, Slides, Slack, TextToQuant and Wispr Flow (47 connectors).
+- MCP sign-in page in the browser is branded and escapes provider text.
+- Tests can no longer open a browser (`BROWSER=true`, `webbrowser.open*` stubbed).
+
+## 0.28.1
+
+Every tool call explains its decision (no extra model calls)
+- Each call shows who chose it (model, provider, step, call N of M, tools offered, "via prompt tools" when the
+  endpoint has no native tool calling), why (the model's own sentence about that call, labelled "model said",
+  "model thought" or "Axon's note"), what it will do in plain words, why it was allowed, and which step receives
+  its result. The step that wrote the final answer is named.
+- The reason picker no longer splits at ":" or reuses one intro sentence for every call.
+- The same explanation appears in restored sessions, the transcript viewer and `/inspect`.
+
+## 0.28.0
+
+Marketplace, automatic control, custom gateways and fixes
+- Marketplace: `/marketplace` (`/connectors`, `/store`, `axon marketplace`) with Connectors, Skills and Plugins,
+  Yours and Discover views, a verified catalog of free connectors, install with health check and rollback,
+  per-tool allow/ask/deny, scope, keys, logs, export/import, a skill creator and a plugin creator.
+- Automatic control (off by default, `/marketplace auto on`): background MCP connect with retry and reconnect,
+  auto-disable after repeated failures, skills added by prompt triggers, connector suggestions per project and
+  update checks that only report. `/marketplace status` shows everything in one table.
+- Custom gateways: `native_tools = false` puts tools in the prompt for endpoints that drop the `tools` field;
+  `/endpoint test` detects it. `[pricing.<provider>."<model>"]` sets prices and context sizes;
+  `/endpoint models <name> import` imports an endpoint's model list. Token usage is estimated when a gateway
+  streams none.
+- Switching provider moves provider, URL and key together; every model (hooks, titles, compaction, subagents,
+  fallbacks) is sent to its own provider; `--base-url` keeps your key for a proxy URL.
+- Fixes: replayed thinking blocks no longer cause HTTP 400; Esc works while a gateway is silent; long pastes stay
+  one paste; ten agent-loop fixes (retry, tool results, cancel, subagent hooks, worktree merge, memory writes).
+- Storage: `/storage` shows the `~/.axon` tree with sizes and leftovers; new `logs/`, `cache/`, `state/`; secret
+  files are owner-only.
+
+## 0.27.7
+
+MCP matches Claude Code's terminal CLI
+- Transports and config: WebSocket servers (`"type": "ws"`, header-only auth, 16 MiB message cap), `streamable-http`
+  type alias, `alwaysLoad`, `headersHelper` and `oauth` fields; `"type": "sdk"` entries are skipped with a
+  message. Stdio servers get `AXON_PROJECT_DIR` / `CLAUDE_PROJECT_DIR`. Credential variables (provider keys,
+  `AWS_*`, proxies, `NPM_TOKEN`, ...) read as empty in a remote server's `url` / `headers`. Warnings for hidden
+  whitespace and for one name defined with different endpoints in several scopes; a plugin server that
+  duplicates one of yours counts once.
+- OAuth 2.0 for HTTP and SSE servers: `axon mcp login <name> [--no-browser]`, `axon mcp logout <name>`,
+  `/mcp login|logout`, discovery (RFC 9728 / 8414, `authServerMetadataUrl`), PKCE, Dynamic Client Registration or
+  `--client-id` / `--client-secret` (`MCP_CLIENT_SECRET`) / `--callback-port`, `oauth.scopes` (+ `offline_access`),
+  automatic refresh and a refresh-and-retry on 401, manual paste of the redirect URL without a browser. Tokens
+  live in `~/.axon/mcp-auth.json` (0600) and are deleted by `remove`. A server that needs sign-in shows
+  `Needs authentication`; a rejected configured `Authorization` header is a failure, not a sign-in request.
+- `headersHelper` runs on connect and after a 401/403 (10 s, scrubbed environment for project and plugin helpers).
+- New commands: `axon mcp get <name>`, `axon mcp serve` (Axon's tools as an MCP server over stdio),
+  `axon mcp reset-project-choices`, `axon mcp add-from-claude-desktop`, `/mcp reconnect all`,
+  `/mcp approve|reject`. `axon mcp list` now health-checks every server (Connected / Needs authentication /
+  Failed) and leaves no processes behind. `add` refuses invalid or duplicate names, takes several `--env` pairs,
+  and `remove` of a name defined in several scopes needs `--scope`. `/server:prompt` runs an MCP prompt too.
+- Project `.mcp.json` servers need your approval in an interactive session (`axon -p` and SDK runs still load
+  them); answers are remembered per project, `enabledMcpjsonServers` / `disabledMcpjsonServers` /
+  `enableAllProjectMcpServers` in your own settings decide without a prompt, and `/mcp disable` on a project
+  server no longer edits the shared file.
+- Managed control: `managed-mcp.json` (exclusive), `managedMcpServers`, `allowedMcpServers` /
+  `deniedMcpServers` (`serverUrl` wildcards, `serverCommand`, `serverName`), `allowManagedMcpServersOnly`; the
+  lists are re-checked whenever a server starts.
+- Limits: `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, per-server `timeout` as a hard wall-clock limit, an idle timeout
+  that progress notifications keep alive (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`), `MAX_MCP_OUTPUT_TOKENS` with
+  results saved to a file in the session's `outputs` folder, `anthropic/maxResultSizeChars`, error-text
+  truncation, images saved as files, description caps (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`).
+- Resilience: dropped remote servers reconnect (5 attempts, exponential backoff), first HTTP/SSE connections and
+  discovery requests retry transient errors, idempotent calls are repeated once after a closed connection,
+  a failed `list_changed` refresh keeps the previous tools.
+- Tool search: `ENABLE_TOOL_SEARCH=auto|auto:N`, `alwaysLoad` per server and per tool, `ToolSearch` waits for
+  connecting servers and names the ones that failed; root-level `anyOf`/`oneOf`/`allOf` schemas are flattened,
+  tools the API would reject are left out (listed by `/mcp tools`), `anthropic/requiresUserInteraction` forces a
+  prompt in every permission mode, server `instructions` reach the system prompt, MCP Apps UI resources are hidden.
+- Elicitation dialogs (form and URL mode) in the REPL; `roots/list` includes the `--add-dir` directories.
+- Not implemented: claude.ai connectors, MCP tasks / protocol revision 2026-07-28, the discovery cache,
+  automatic backgrounding of long MCP calls, `--channels`.
+
+One folder per chat session
+- `~/.axon/projects/<key>/sessions/<session-id>/` now holds everything of a session and nothing of it is
+  written anywhere else: `session.jsonl`, `subagents/<n>.jsonl` (was `<id>_sub_<n>.jsonl`, with
+  `<n>.trace.jsonl`), `screen.log`, `trace.jsonl`, `outputs/` (full tool outputs and background shell logs),
+  `checkpoints/` (`/rewind`), `images/`, `pastes/`, `todos.json`, `exports/` and `debug.log`. The project
+  keeps `project.json`, `README.md`, `activity.jsonl`, `memory/`, `plans/`, `trash/` and `tips.json`.
+  The old project-level `traces/`, `outputs/`, `checkpoints/`, `todos/`, `screen/`, `exports/`, `pastes/`,
+  `images/` and `debug/` folders are no longer written. Pasted images and large pastes attach to the active
+  session (`sessions/_unattached/` when there is none); the `--debug` log moves into the session folder
+  once the session is known.
+- Older sessions are still listed, resumed, exported and deleted. A session's files are moved (never
+  copied) into its folder when it is opened, and for the whole project at startup. The move is idempotent,
+  never overwrites (a clashing file is parked in `<session>/legacy/`), and old transcripts that point at a
+  moved full-output file still resolve it. Images and pastes of the old layout carry no session id and stay.
+- `/delete` and `/restore` move the whole session folder, `cleanup_period_days` prunes whole folders,
+  `/stats`, `axon report` and the session counts read the new layout.
+
+Skills, commands, plugins and output styles match Claude Code's terminal CLI
+- Skill frontmatter: `background`, `hooks` (nested YAML; registered when the skill runs and kept for the
+  session), `shell`, `metadata`, `license`, `compatibility`; booleans accept yes/no/on/off/1/0;
+  `allowed-tools` may be space separated (`Bash(git add *) Read`); the description falls back to the first line;
+  `context: fork` + `agent` now actually run the skill as a subagent (background unless `background: false`);
+  `effort` and `disallowed-tools` apply for the skill's turn; names with control / zero-width / `<>` characters
+  and folders named `synced` / `anthropic-skills*` are refused; frontmatter must start on line 1.
+- Arguments: `$ARGUMENTS[N]` and `$N` are **0-based** (`$0` is the first argument; this changes the old
+  1-based `$1`), `\$1` escapes, an unfilled indexed placeholder stays as written, and argument text is never
+  re-scanned. New variables `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`,
+  `${CLAUDE_EFFORT}`, `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` and `${user_config.KEY}` (AXON_ spellings
+  too), also inside `allowed-tools` rules.
+- Shell injection: `!` must start a line or follow whitespace, fenced ```` ```! ```` blocks, stderr merged, 2 minute
+  timeout, a failing / refused command aborts the whole invocation (exit 1 from grep/rg/diff/find/test is a
+  result), typed arguments can never run as a command, `disableSkillShellExecution` setting.
+- Discovery: parent directories up to the repository root, nested `.claude/skills` loaded when a file below
+  is touched, personal skills beat project skills, skills beat same-named command files, plugin skills are
+  namespaced `/<plugin>:<skill>`, `/add-dir` skills (prefixed on a clash), symlinked folders, live reload of
+  `SKILL.md` changes without a restart, `skillOverrides`, `disableBundledSkills`, `skillListingMaxDescChars`
+  (description + when_to_use capped at 1,536 characters).
+- Typing several skills at the start of a message runs them in one turn. New bundled skills: `/batch`,
+  `/update-config`, `/fewer-permission-prompts`, `/run`, `/run-skill-generator`.
+- Custom commands accept the skill fields (`arguments`, `effort`, `context: fork`, `disallowed-tools`, ...).
+- Plugins: manifest optional, `.claude-plugin/plugin.json` preferred, `displayName`, `defaultEnabled`,
+  `dependencies`, `userConfig` (`/plugin configure`, `${user_config.KEY}`, sensitive values kept out of
+  prompts), `skills` / `commands` (paths or object map) / `agents` / `outputStyles` / `hooks` / `mcpServers`
+  manifest keys in every Claude Code form, a single `SKILL.md` at the plugin root, `${CLAUDE_PLUGIN_DATA}`.
+- Marketplaces: `/plugin marketplace add|list|update|remove` (GitHub, git URL, local path, hosted JSON),
+  `/plugin discover`, `/plugin install name@marketplace --scope user|project|local` (or `--marketplace
+  <source>`), `/plugin update|uninstall|info|configure`, enable/disable honouring dependencies,
+  `enabledPlugins` written per scope, and `/plugin validate <plugin|marketplace|skills dir>`.
+- Output styles: new `proactive` style, a Claude-Code-accurate `concise`, `keep-coding-instructions` defaults to
+  false for custom styles, plugin `force-for-plugin` and `outputStyles` paths, `~/.claude/output-styles`, and
+  project styles from every directory up to the repository root (nearest wins).
+- Memory: `~/.claude/CLAUDE.md` and `~/.claude/rules/**` are loaded as user instructions.
+
+Hooks match Claude Code's terminal CLI
+- Matchers follow Claude Code: `*`/empty match all, letters, digits, `_`, `-`, spaces, `,` and `|` are an exact
+  list (`Edit|Write`, `Edit, Write`), anything else is an unanchored regular expression (`mcp__memory__.*`).
+  New matcher fields for `Setup`, `UserPromptExpansion`, `PreModelSwitch`/`PostModelSwitch`, `ConfigChange`,
+  `DirectoryAdded`, `FileChanged` and the elicitation events; `TaskCreated`/`TaskCompleted` take no matcher.
+- Handler `if` conditions in permission-rule syntax (`Bash(git *)`, `Edit(*.ts)`) on tool events.
+- New handler types: `prompt` and `agent` (a model call answering `{"ok": ...}`, with `continueOnBlock`,
+  `impossible` and `$ARGUMENTS`) and `mcp_tool` (`${tool_input.file_path}` substitution). `command` hooks take
+  `args` (exec form, no shell, `${CLAUDE_PROJECT_DIR}` / `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`),
+  `shell`, `asyncRewake`, `statusMessage`, `once` and `onFailure: "block"`.
+- Matching hooks of an event now run in parallel; defaults are 600 s (30 s for `UserPromptSubmit` and the
+  model-switch events, 30 s prompt, 60 s agent, 10 s `MessageDisplay`, 1.5 s `SessionEnd`).
+- Exit codes and output follow the Claude Code tables: exit 2 blocks only on events that can block (and is
+  ignored by `PermissionRequest`); invalid or ill-typed JSON is a non-blocking error; valid JSON with another
+  exit code still applies; HTTP hooks need a 2xx JSON object or empty body; `allowedHttpHookUrls` and
+  `httpHookAllowedEnvVars` are honored; identical handlers across settings files run once;
+  `disableAllHooks` follows file precedence.
+- New output fields: `updatedToolOutput`, `permissionDecision: "defer"` (precedence deny > defer > ask > allow),
+  `updatedInput` now replaces the whole input, `PermissionRequest` `updatedPermissions` / `interrupt`,
+  `terminalSequence` (OSC/BEL allowlist), `sessionTitle`, `reloadSkills`, `suppressOriginalPrompt`,
+  `additionalContext` on `PreToolUse`/`PostToolBatch`/`Stop`, `continue: false` on `PostToolUse`/`PostToolBatch`,
+  `systemMessage` as a hook warning, and a 10,000 character cap with file + preview.
+- Input fields: `prompt_id`, `tool_use_id`, `duration_ms`, `is_interrupt`, `compact_summary`, `model`
+  (`SessionStart`), `agent_type`, StopFailure error types (`rate_limit`, `overloaded`, ...).
+- `Stop` hooks can keep the turn going with `additionalContext`, up to 8 times in a row
+  (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`).
+- Background (`async`) hooks deliver their output on the next turn or tool result.
+- `CLAUDE_ENV_FILE` for `SessionStart`/`CwdChanged` hooks: exported variables reach later Bash commands.
+- New events accepted and fired: `UserPromptExpansion` (custom commands), `PreModelSwitch`/`PostModelSwitch`
+  (`/model`), `WorktreeCreate` (replaces git for `--worktree`; `WorktreeRemove` helper). `Setup`,
+  `MessageDisplay`, `TeammateIdle`, `ConfigChange`, `FileChanged`, `Elicitation`, `ElicitationResult` load from
+  Claude Code settings; Axon has nothing that fires them yet.
+- `/hooks` shows each hook's origin, `/hooks <n>` its full definition, `/hooks <Event>`, `/hooks events`,
+  `/hooks reload`. `HookManager.add_scoped` / `remove_scoped` register hooks for a skill or subagent run.
+
+Subagents match Claude Code's terminal CLI
+- Agent files read every frontmatter field: `permissionMode`, `skills` (preloaded), `mcpServers` (inline servers
+  live for one run), `hooks` (scoped to the agent), `memory` (`user`/`project`/`local` notes directory with
+  `MEMORY.md` in the prompt), `background`, `effort`, `isolation: worktree`, `color`, `initialPrompt`,
+  `omitClaudeMd`, plus nested YAML (hooks, mcpServers, block scalars). Files Claude Code skips (no name, bad name,
+  no description, broken YAML) are skipped and listed by `/agents check`; unknown fields are reported.
+- Agent folders are scanned recursively and from the repository root down to the workspace (closest wins), also
+  for `--add-dir` directories; names compare case-insensitively so a user `Explore` replaces the built-in.
+  `--agents` accepts every field and a JSON file path.
+- `Agent` is the Task tool's Claude Code name: `tools: Agent(worker, researcher)` limits what an `--agent` main
+  session may start; `Agent(Explore)` in deny rules or `--disallowedTools` blocks one type; `mcp__server` /
+  `mcp__*` work in `tools` and `disallowedTools`; an agent whose tools all fail to resolve does not launch.
+- Task call options: `run_in_background` (report arrives later as a message), `name`, `model`, `isolation`,
+  `effort`, and `subagent_type: "fork"` (inherits the conversation, runs in the background).
+- New `SendMessage` tool: steer a running subagent, resume a finished one with its full history, or message
+  `main` / a sibling from inside a subagent. Subagents you stopped are not resumed.
+- Worktree-isolated subagents keep their worktree and branch when their edits cannot be applied back, instead
+  of deleting them.
+- Explore and Plan start without CLAUDE.md and the git snapshot; at most 20 subagents run at once; reports are
+  scanned for text imitating harness output; `AXON_SUBAGENT_MODEL` sets the default subagent model.
+- `@agent-<name>` mentions make the model delegate to that subagent; `axon agents [--json]` lists definitions;
+  `--agent` also applies `permissionMode`, `effort`, `initialPrompt`, skills, memory and hooks.
+
 ## 0.27.6
 
 Parallel subagents are clear and correct
