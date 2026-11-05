@@ -45,6 +45,12 @@ _FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_bu
 
 
 # ─── Model ────────────────────────────────────────────────────────────────
+def _typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the command's menu offers it instead)."""
+    from axon.commands.common import typed_only
+    return typed_only(text)
+
+
 @dataclass
 class PlanStep:
     title: str
@@ -510,6 +516,19 @@ def verify_command(verify: str) -> str | None:
     return v if solver.looks_like_command(v) else None
 
 
+def _verify_permitted(agent: Any, cmd: str) -> bool:
+    """A verify command comes from the model's plan, so it passes the permission engine like a Bash call:
+    deny rules and invariants block it, allow rules / modes run it, anything else asks (no terminal: no)."""
+    perms = getattr(agent, "permissions", None)
+    if perms is None:
+        return True
+    from axon.commands.custom import make_shell_gate
+    try:
+        return bool(make_shell_gate(agent, [])(cmd))
+    except Exception:
+        return False
+
+
 def step_prompt(plan: Plan, index: int, retry_note: str = "") -> str:
     step = plan.steps[index]
     done = [f"{i}. {s.title} - {s.status}" + (f": {s.summary[:200]}" if s.summary else "")
@@ -589,6 +608,9 @@ def run_step(agent: Any, plan: Plan, index: int, ws: Path, retry_note: str = "")
         step.error = str(getattr(result, "error", None) or f"turn stopped: {stop}")
         return
     cmd = verify_command(step.verify)
+    if cmd and not _verify_permitted(agent, cmd):
+        _out(f"  {_c('WARNING')}verify command not run (not permitted): {cmd}{_c('RST')}")
+        cmd = None
     if cmd:
         _out(f"  {_c('INFO')}{_g('◐', '*')}{_c('RST')} verifying step {index + 1}: {_c('MUTED')}{cmd}{_c('RST')}")
         res = solver.run_check(solver.Check(cmd, cmd, "custom", "plan"), ws, solver._timeout(agent))
@@ -703,7 +725,7 @@ def cmd_plans(agent: Any, arg: str) -> None:
     ws = _workspace(agent)
     plans = list_plans(ws)
     if not plans:
-        _out(f"  {_c('MUTED')}No saved plans for this workspace. Start one with /plan-run <task>.{_c('RST')}")
+        _out(f"  {_c('MUTED')}No saved plans for this workspace.{_typed_only(' Start one with /plan-run <task>.')}{_c('RST')}")
         return
     rows = []
     for p in plans[: int(arg) if arg.strip().isdigit() else 20]:
@@ -727,7 +749,7 @@ def cmd_plan_resume(agent: Any, arg: str) -> None:
     else:
         plan = next((p for p in list_plans(ws) if p.unfinished), None)
         if plan is None:
-            _out(f"  {_c('MUTED')}No unfinished plans. See /plans.{_c('RST')}")
+            _out(f"  {_c('MUTED')}No unfinished plans.{_typed_only(' See /plans.')}{_c('RST')}")
             return
     if not plan.unfinished:
         _out(f"  {_c('SUCCESS')}Plan {plan.id} is already complete.{_c('RST')}")

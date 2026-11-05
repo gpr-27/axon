@@ -208,10 +208,34 @@ def create_project(template: str, dest: Path, name: str | None = None, *, force:
     return 0
 
 
+def _in_terminal() -> bool:
+    from axon.commands.common import is_tty
+    return is_tty()
+
+
+def _pick_template() -> list[str]:
+    """Arrow-key template list, then the project folder name (default my-<template>).
+    Returns [template, name], or [] when cancelled."""
+    from axon.ui.menus import ask_text, choose_value
+    options = [(t.name, t.name, f"{t.language} · {t.description}"[:70]) for t in list_templates()]
+    if not options:
+        _say(templates_table())
+        return []
+    template = choose_value("New project: which template?", options)
+    if template is None:
+        return []
+    name = ask_text("Folder name", default=f"my-{template}")
+    return [template, name] if name else []
+
+
 def handle_new(agent: Any, arg: str) -> None:
     parts = (arg or "").split()
     force = "--force" in parts
     parts = [p for p in parts if p != "--force"]
+    if not parts and _in_terminal():
+        parts = _pick_template()
+        if not parts:
+            return
     if not parts or parts[0] in ("list", "--list", "-l"):
         _say(templates_table())
         return

@@ -5,6 +5,7 @@ Evaluation order (first match wins):
   1. Hard invariants (catastrophic shell commands, credential / system paths)  -> deny
   2. Deny rules                                                               -> deny
   3. Plan mode: anything that mutates (except ExitPlanMode/TodoWrite)          -> deny
+  3a. MCP tools flagged ``anthropic/requiresUserInteraction``                  -> ask (every mode)
   3b. Ask rules (``permissions.ask``; beat allow rules and bypass mode)        -> ask
   4. Allow rules (persistent + session)                                       -> allow
   5. Tool ``default_permission == "deny"``                                    -> deny
@@ -150,15 +151,6 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _perm_lists(data: dict[str, Any]) -> tuple[list[str], list[str]]:
-    perms = data.get("permissions") if isinstance(data, dict) else None
-    if not isinstance(perms, dict):
-        return [], []
-    allow = [s for s in perms.get("allow", []) or [] if isinstance(s, str)]
-    deny = [s for s in perms.get("deny", []) or [] if isinstance(s, str)]
-    return allow, deny
-
-
 def _perm_list(data: dict[str, Any], key: str) -> list[str]:
     perms = data.get("permissions") if isinstance(data, dict) else None
     if not isinstance(perms, dict) or not isinstance(perms.get(key), list):
@@ -185,7 +177,6 @@ class PermissionEngine:
     def rule_sources(self) -> list[tuple[str, Path, str]]:
         """(label, path, format) for every file rules are read from."""
         ws = self.workspace
-        Path.home()
         return [
             ("user", _axon_home() / "settings.json", "json"),
             ("project", ws / ".axon" / "settings.json", "json"),
@@ -282,6 +273,12 @@ class PermissionEngine:
         # 3. Plan mode is strictly read-only
         if mode == "plan" and not readonly and name not in PLAN_MODE_ALLOWED and name not in PLAN_MODE_ASK and not self._readonly_git(name, args):
             return Decision("deny", f"Plan mode prevents mutating action '{name}'.")
+
+        # 3a. Tools whose permission prompt is the point (an MCP server marked the tool
+        #     _meta["anthropic/requiresUserInteraction"]): a person answers every call, in every mode,
+        #     and no allow rule skips it.
+        if getattr(tool, "requires_user_interaction", False) is True:
+            return Decision("ask", f"'{name}' requires your approval on every call (set by its MCP server).")
 
         # 3b. Ask rules beat allow rules (and bypass): the user asked to be consulted
         for r in self.ask_rules:

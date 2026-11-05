@@ -3,8 +3,10 @@ Spec-compliant MCP client session (protocol 2025-06-18, negotiates 2025-03-26 / 
 
 JSON-RPC 2.0 over any :mod:`axon.mcp.transports` transport: monotonically increasing
 request ids, pending-request futures resolved by the transport's reader, per-request
-timeouts with ``notifications/cancelled``, server-initiated requests (ping, roots/list;
-sampling/elicitation rejected) and notifications (list_changed, progress, logging).
+timeouts with ``notifications/cancelled`` (a hard wall-clock limit plus an idle limit that
+progress notifications keep alive), server-initiated requests (ping, roots/list, elicitation in
+form and URL mode when a handler is installed; sampling is rejected) and notifications
+(list_changed, progress, logging). Discovery requests retry transient failures.
 """
 from __future__ import annotations
 
@@ -18,11 +20,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from axon import interruptible
 from axon.mcp.transports import SessionExpired, Transport, TransportError, log_path_for
 
 LATEST_PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_PAGES = 100
+DISCOVERY_RETRY_DELAYS = (0.25, 0.5, 1.0)   # up to three retries after a transient network/server error
 
 # JSON-RPC error codes
 PARSE_ERROR = -32700
@@ -61,20 +65,28 @@ class MCPClient:
     def __init__(self, name: str, transport: Transport, *, timeout: float = 60.0,
                  workspace: Path | None = None,
                  on_tools_changed: Callable[["MCPClient"], None] | None = None,
-                 on_closed: Callable[["MCPClient", str], None] | None = None) -> None:
+                 on_closed: Callable[["MCPClient", str], None] | None = None,
+                 elicitation_handler: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+                 extra_roots: Callable[[], list[Path]] | None = None) -> None:
         self.name = name
         self.transport = transport
         self.timeout = timeout
         self.workspace = Path(workspace) if workspace else None
         self.on_tools_changed = on_tools_changed
         self.on_closed = on_closed
+        self.elicitation_handler = elicitation_handler   # (server, params) -> {"action": ..., "content": ...}
+        self.extra_roots = extra_roots                    # additional working directories
+        self.idle_timeout: float | None = None            # default idle window for tools/call (None = off)
+        self.on_prompts_changed: Callable[["MCPClient"], None] | None = None
+        self.on_resources_changed: Callable[["MCPClient"], None] | None = None
         self.protocol_version: str | None = None
         self.server_info: dict[str, Any] = {}
         self.capabilities: dict[str, Any] = {}
         self.instructions: str = ""
         self.closed = False
         self.close_reason = ""
-        self.progress: dict[Any, dict[str, Any]] = {}
+        self.progress: dict[Any, dict[str, Any]] = {}      # progressToken -> latest progress (in-flight calls)
+        self._tracked: set[Any] = set()
         self.log_path = log_path_for(name)
         self._ids = itertools.count(1)
         self._pending: dict[int | str, Future] = {}
@@ -101,7 +113,7 @@ class MCPClient:
     def initialize(self, timeout: float | None = None) -> dict[str, Any]:
         result = self.request("initialize", {
             "protocolVersion": LATEST_PROTOCOL_VERSION,
-            "capabilities": {"roots": {"listChanged": False}},
+            "capabilities": self._client_capabilities(),
             "clientInfo": {"name": "axon", "title": "Axon", "version": _client_version()},
         }, timeout=timeout)
         version = str(result.get("protocolVersion") or "")
@@ -120,6 +132,34 @@ class MCPClient:
         except Exception:
             pass
         return result
+
+    def _client_capabilities(self) -> dict[str, Any]:
+        caps: dict[str, Any] = {"roots": {"listChanged": True}}
+        if self.elicitation_handler is not None:
+            caps["elicitation"] = {"form": {}, "url": {}}
+        return caps
+
+    def roots(self) -> list[dict[str, str]]:
+        """The launch directory plus every additional working directory."""
+        dirs: list[Path] = [self.workspace] if self.workspace is not None else []
+        if self.extra_roots is not None:
+            try:
+                dirs += [Path(d) for d in self.extra_roots()]
+            except Exception:
+                pass
+        out, seen = [], set()
+        for d in dirs:
+            try:
+                uri = d.resolve().as_uri()
+            except (OSError, ValueError):
+                continue
+            if uri not in seen:
+                seen.add(uri)
+                out.append({"uri": uri, "name": d.name or str(d)})
+        return out
+
+    def notify_roots_changed(self) -> None:
+        self.notify("notifications/roots/list_changed")
 
     def close(self) -> None:
         if self.closed:
@@ -153,19 +193,41 @@ class MCPClient:
 
     # ── JSON-RPC core ───────────────────────────────────────────────────
     def request(self, method: str, params: dict[str, Any] | None = None,
-                timeout: float | None = None, _retry: bool = True) -> dict[str, Any]:
+                timeout: float | None = None, _retry: bool = True,
+                idle_timeout: float | None = None, track_progress: bool = False) -> dict[str, Any]:
+        """Send a request and wait for its result. ``timeout`` is a hard wall-clock limit (progress
+        does not extend it). ``idle_timeout`` aborts a call that has produced neither a response nor a
+        progress notification for that long (needs ``track_progress`` to see the progress)."""
         if self.closed:
             raise MCPError(f"MCP server '{self.name}' is not connected"
                            + (f" ({self.close_reason})" if self.close_reason else ""))
         req_id = next(self._ids)
+        if track_progress:
+            params = dict(params or {})
+            meta = dict(params.get("_meta") or {})
+            meta["progressToken"] = req_id
+            params["_meta"] = meta
         msg: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
         if params is not None:
             msg["params"] = params
         fut: Future = Future()
         with self._lock:
             self._pending[req_id] = fut
+            if track_progress:
+                self._tracked.add(req_id)
         try:
-            self.transport.send(msg)
+            return self._send_and_wait(msg, fut, req_id, method, params, timeout, _retry, idle_timeout, track_progress)
+        finally:
+            if track_progress:
+                with self._lock:
+                    self._tracked.discard(req_id)
+                    self.progress.pop(req_id, None)
+
+    def _send_and_wait(self, msg: dict[str, Any], fut: Future, req_id: int, method: str,
+                       params: dict[str, Any] | None, timeout: float | None, _retry: bool,
+                       idle_timeout: float | None, track_progress: bool) -> dict[str, Any]:
+        try:
+            interruptible.call(self.transport.send, msg)   # an HTTP server may hold the reply headers
         except SessionExpired:
             with self._lock:
                 self._pending.pop(req_id, None)
@@ -174,22 +236,76 @@ class MCPClient:
             # Spec: start a new session by re-initializing without the old session id.
             setattr(self.transport, "session_id", None)
             self.initialize(timeout)
-            return self.request(method, params, timeout, _retry=False)
+            return self.request(method, params, timeout, _retry=False, idle_timeout=idle_timeout,
+                                track_progress=track_progress)
         except TransportError as e:
             with self._lock:
                 self._pending.pop(req_id, None)
             raise MCPError(f"{self.name}: {e}") from e
         wait = self.timeout if timeout is None else timeout
-        try:
-            result = fut.result(timeout=wait)
-        except FutureTimeout:
-            with self._lock:
-                self._pending.pop(req_id, None)
-            if method != "initialize":
-                self.notify("notifications/cancelled",
-                            {"requestId": req_id, "reason": f"timed out after {wait:g}s"})
-            raise MCPTimeout(f"MCP server '{self.name}' did not answer '{method}' within {wait:g}s")
+        start = time.monotonic()
+        deadline = start + wait
+        token = req_id if track_progress else None
+        result: Any = None
+        while True:
+            now = time.monotonic()
+            idle_left = float("inf")
+            if idle_timeout:
+                last = start
+                seen = self.progress.get(token) if token is not None else None
+                if seen:
+                    last = max(last, seen.get("mono", start))
+                idle_left = last + idle_timeout - now
+            remaining = min(deadline - now, idle_left)
+            if remaining <= 0 and not fut.done():
+                with self._lock:
+                    self._pending.pop(req_id, None)
+                if idle_left <= deadline - now and idle_timeout:
+                    why = (f"MCP server '{self.name}' sent no response or progress for "
+                           f"{idle_timeout:g}s during '{method}'")
+                else:
+                    why = f"MCP server '{self.name}' did not answer '{method}' within {wait:g}s"
+                if method != "initialize":
+                    self.notify("notifications/cancelled", {"requestId": req_id, "reason": why})
+                raise MCPTimeout(why)
+            try:
+                # Short waits: one long fut.result() would hold Esc until the server answers.
+                result = fut.result(timeout=min(max(remaining, 0.0), interruptible.POLL_SECONDS))
+                break
+            except FutureTimeout:
+                continue
+            except KeyboardInterrupt:
+                self._give_up(req_id, method, "interrupted by the user")
+                raise
         return result if isinstance(result, dict) else {}
+
+    def _give_up(self, req_id: int, method: str, why: str) -> None:
+        """Stop waiting for a request and tell the server, on a helper thread, to stop working on it."""
+        with self._lock:
+            self._pending.pop(req_id, None)
+        if method != "initialize":
+            params = {"requestId": req_id, "reason": why}
+            threading.Thread(target=self.notify, args=("notifications/cancelled", params), daemon=True,
+                             name=f"mcp-{self.name}-cancel").start()
+
+    def _request_with_retry(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Discovery requests retry transient network/server errors (not auth, 4xx or timeouts)."""
+        attempt = 0
+        while True:
+            try:
+                return self.request(method, params)
+            except MCPTimeout:
+                raise
+            except MCPError as e:
+                cause = e.__cause__
+                status = getattr(cause, "status", None)
+                transient = isinstance(cause, TransportError) and not isinstance(cause, SessionExpired) \
+                    and getattr(self.transport, "kind", "") in ("http", "sse", "ws") \
+                    and (status is None or status >= 500) and not self.closed
+                if not transient or attempt >= len(DISCOVERY_RETRY_DELAYS):
+                    raise
+                time.sleep(DISCOVERY_RETRY_DELAYS[attempt])
+                attempt += 1
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
@@ -241,10 +357,17 @@ class MCPClient:
         if method == "ping":
             self._respond(req_id, {})
         elif method == "roots/list":
-            roots = []
-            if self.workspace is not None:
-                roots.append({"uri": self.workspace.resolve().as_uri(), "name": self.workspace.name})
-            self._respond(req_id, {"roots": roots})
+            self._respond(req_id, {"roots": self.roots()})
+        elif method == "elicitation/create" and self.elicitation_handler is not None:
+            try:
+                answer = self.elicitation_handler(self.name, params)
+            except Exception as e:  # a broken dialog must not wedge the server's request
+                self._log(f"elicitation failed: {e}")
+                answer = {"action": "cancel"}
+            action = answer.get("action") if isinstance(answer, dict) else None
+            if action not in ("accept", "decline", "cancel"):
+                answer = {"action": "cancel"}
+            self._respond(req_id, answer)
         elif method in ("sampling/createMessage", "elicitation/create"):
             self._respond(req_id, error=(METHOD_NOT_FOUND,
                                          f"Axon does not support '{method}'; the request was declined."))
@@ -258,12 +381,19 @@ class MCPClient:
                 threading.Thread(target=self._safe_tools_changed, daemon=True).start()
         elif method == "notifications/resources/list_changed":
             self._resource_cache = None
+            if self.on_resources_changed:
+                threading.Thread(target=self.on_resources_changed, args=(self,), daemon=True).start()
         elif method == "notifications/prompts/list_changed":
             self._prompt_cache = None
+            if self.on_prompts_changed:
+                threading.Thread(target=self.on_prompts_changed, args=(self,), daemon=True).start()
         elif method == "notifications/progress":
             token = params.get("progressToken")
+            if token not in self._tracked:
+                return
             self.progress[token] = {"progress": params.get("progress"), "total": params.get("total"),
-                                    "message": params.get("message"), "time": time.time()}
+                                    "message": params.get("message"), "time": time.time(),
+                                    "mono": time.monotonic()}
         elif method == "notifications/message":
             level = params.get("level", "info")
             data = params.get("data")
@@ -285,7 +415,7 @@ class MCPClient:
         cursor: str | None = None
         seen: set[str] = set()
         for _ in range(MAX_PAGES):
-            result = self.request(method, {"cursor": cursor} if cursor else {})
+            result = self._request_with_retry(method, {"cursor": cursor} if cursor else {})
             items.extend(i for i in (result.get(key) or []) if isinstance(i, dict))
             cursor = result.get("nextCursor")
             if not cursor or cursor in seen:
@@ -302,8 +432,10 @@ class MCPClient:
         return list(self._tool_cache)
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None,
-                  timeout: float | None = None) -> dict[str, Any]:
-        return self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
+                  timeout: float | None = None, idle_timeout: float | None = None) -> dict[str, Any]:
+        return self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout,
+                            idle_timeout=self.idle_timeout if idle_timeout is None else idle_timeout,
+                            track_progress=True)
 
     def list_resources(self, refresh: bool = False) -> list[dict[str, Any]]:
         if self._resource_cache is None or refresh:

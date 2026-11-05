@@ -114,9 +114,8 @@ def sanitize_skill_name(name: str) -> str:
     return clean[:64]
 
 
-def import_skill_from_url(url_or_repo: str, workspace: Path, *, target_root: Path | None = None,
-                          overwrite: bool = False) -> ImportedSkill:
-    """Fetch a SKILL.md and install it into ``target_root`` (default <ws>/.axon/skills)."""
+def skill_raw_location(url_or_repo: str) -> tuple[str, str, str, str]:
+    """(raw SKILL.md URL, folder name, owner, repo) for a GitHub skill source."""
     owner, repo, ref, subpath = parse_github_skill_url(url_or_repo)
     if subpath.lower().endswith(".md"):
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{subpath}"
@@ -130,7 +129,28 @@ def import_skill_from_url(url_or_repo: str, workspace: Path, *, target_root: Pat
         skill_name = repo
     if skill_name.lower() in ("skills", "src", "main", "master"):
         skill_name = f"{repo}-skill"
+    return raw_url, skill_name, owner, repo
 
+
+def fetch_skill_text(url_or_repo: str) -> str:
+    """Download the current SKILL.md of a GitHub source (used to look for updates). Like the install,
+    a shorthand source that has no ``main`` branch falls back to ``master``."""
+    raw_url = skill_raw_location(url_or_repo)[0]
+    try:
+        return _download(raw_url)
+    except ValueError:
+        raise
+    except Exception:
+        if parse_github_skill_url(url_or_repo)[2] == "main" and "tree" not in url_or_repo and "blob" not in url_or_repo:
+            return _download(raw_url.replace("/main/", "/master/", 1))
+        raise
+
+
+def import_skill_from_url(url_or_repo: str, workspace: Path, *, target_root: Path | None = None,
+                          overwrite: bool = False) -> ImportedSkill:
+    """Fetch a SKILL.md and install it into ``target_root`` (default <ws>/.axon/skills)."""
+    raw_url, skill_name, owner, repo = skill_raw_location(url_or_repo)
+    ref = parse_github_skill_url(url_or_repo)[2]
     try:
         content = _download(raw_url)
     except ValueError:

@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "id": "create-skill",
+      "name": "Skill creator (built in)",
+      "publisher": "Axon",
+      "description": "Interactive wizard that writes and validates a new SKILL.md.",
+      "category": "Authoring",
+      "kind": "builtin",
+      "source": "",
+      "docs_url": "",
+      "license": "",
+      "verified": true,
+      "note": "Run: /marketplace create-skill"
+    },
+    {
+      "id": "frontend-design",
+      "name": "frontend-design",
+      "publisher": "Anthropic",
+      "description": "Distinctive, production-grade frontend interfaces.",
+      "category": "Design",
+      "kind": "github",
+      "source": "anthropics/skills/skills/frontend-design",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/frontend-design",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    },
+    {
+      "id": "skill-creator",
+      "name": "skill-creator",
+      "publisher": "Anthropic",
+      "description": "Anthropic's guide for creating and improving skills.",
+      "category": "Authoring",
+      "kind": "github",
+      "source": "anthropics/skills/skills/skill-creator",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    },
+    {
+      "id": "mcp-builder",
+      "name": "mcp-builder",
+      "publisher": "Anthropic",
+      "description": "Guide for building high-quality MCP servers.",
+      "category": "Developer Tools",
+      "kind": "github",
+      "source": "anthropics/skills/skills/mcp-builder",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/mcp-builder",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    },
+    {
+      "id": "webapp-testing",
+      "name": "webapp-testing",
+      "publisher": "Anthropic",
+      "description": "Test local web apps with Playwright.",
+      "category": "Developer Tools",
+      "kind": "github",
+      "source": "anthropics/skills/skills/webapp-testing",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/webapp-testing",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    },
+    {
+      "id": "algorithmic-art",
+      "name": "algorithmic-art",
+      "publisher": "Anthropic",
+      "description": "Generative art with p5.js.",
+      "category": "Design",
+      "kind": "github",
+      "source": "anthropics/skills/skills/algorithmic-art",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/algorithmic-art",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    },
+    {
+      "id": "theme-factory",
+      "name": "theme-factory",
+      "publisher": "Anthropic",
+      "description": "Apply themes to slides, docs and pages.",
+      "category": "Design",
+      "kind": "github",
+      "source": "anthropics/skills/skills/theme-factory",
+      "docs_url": "https://github.com/anthropics/skills/tree/main/skills/theme-factory",
+      "license": "Apache-2.0",
+      "verified": true,
+      "note": "Only SKILL.md is downloaded; bundled scripts and assets are not."
+    }
+  ]
+}

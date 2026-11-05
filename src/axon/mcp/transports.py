@@ -16,21 +16,24 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 OnMessage = Callable[[dict[str, Any]], None]
 OnClose = Callable[[str], None]
+HeaderProvider = Callable[[], dict[str, str]]       # extra request headers, asked for on every request
+OnUnauthorized = Callable[[], bool]                  # refresh credentials after a 401/403; True = retry once
 IS_WINDOWS = os.name == "nt"
 
 
 class TransportError(Exception):
     """Raised when a message cannot be delivered."""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None, headers: dict[str, str] | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.headers = headers or {}        # response headers (e.g. WWW-Authenticate) when there were any
 
 
 class SessionExpired(TransportError):
@@ -139,8 +142,10 @@ class StdioTransport(Transport):
     kind = "stdio"
 
     def __init__(self, name: str, command: str, args: list[str] | None = None,
-                 env: dict[str, str] | None = None, cwd: str | Path | None = None) -> None:
+                 env: dict[str, str] | None = None, cwd: str | Path | None = None,
+                 project_dir: str | Path | None = None) -> None:
         self.name = name
+        self.project_dir = str(project_dir) if project_dir else None
         self.command = command
         self.args = list(args or [])
         self.env = dict(env or {})
@@ -160,8 +165,19 @@ class StdioTransport(Transport):
         except (OSError, ValueError):
             pass
 
+    def _close_log(self) -> None:
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except OSError:
+                pass
+            self._log_file = None
+
     def start(self, on_message: OnMessage, on_close: OnClose) -> None:
         full_env = dict(os.environ)
+        if self.project_dir:  # the stable project root, whatever directory the server runs in
+            full_env["AXON_PROJECT_DIR"] = self.project_dir
+            full_env["CLAUDE_PROJECT_DIR"] = self.project_dir
         full_env.update(self.env)
         full_env.setdefault("PYTHONIOENCODING", "utf-8")
         argv = build_argv(self.command, self.args, full_env)
@@ -181,10 +197,12 @@ class StdioTransport(Transport):
             )
         except FileNotFoundError as e:
             self._log(f"command not found: {e}\n")
+            self._close_log()
             raise TransportError(f"Command not found: {self.command} "
                                  f"(is it installed and on PATH?)") from e
         except OSError as e:
             self._log(f"failed to start: {e}\n")
+            self._close_log()
             raise TransportError(f"Failed to start '{self.command}': {e}") from e
 
         def _read() -> None:
@@ -250,12 +268,7 @@ class StdioTransport(Transport):
                     proc.stdout.close()
             except OSError:
                 pass
-        if self._log_file:
-            try:
-                self._log_file.close()
-            except OSError:
-                pass
-            self._log_file = None
+        self._close_log()
 
 
 # ─── SSE parsing ─────────────────────────────────────────────────────────
@@ -304,10 +317,14 @@ class StreamableHTTPTransport(Transport):
     kind = "http"
 
     def __init__(self, url: str, headers: dict[str, str] | None = None, timeout: float = 60.0,
-                 client: httpx.Client | None = None, name: str = "server") -> None:
+                 client: httpx.Client | None = None, name: str = "server",
+                 header_provider: HeaderProvider | None = None,
+                 on_unauthorized: OnUnauthorized | None = None) -> None:
         self.url = url
         self.name = name
         self.headers = dict(headers or {})
+        self.header_provider = header_provider
+        self.on_unauthorized = on_unauthorized
         self.timeout = timeout
         self._client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0),
                                               follow_redirects=True)
@@ -322,6 +339,11 @@ class StreamableHTTPTransport(Transport):
 
     def _headers(self, accept: str) -> dict[str, str]:
         h = {"Accept": accept, **self.headers}
+        if self.header_provider is not None:
+            try:
+                h.update(self.header_provider())
+            except Exception as e:  # a failing helper must not kill the request path
+                raise TransportError(f"could not compute request headers: {e}") from e
         if self.session_id:
             h["Mcp-Session-Id"] = self.session_id
         if self.protocol_version:
@@ -335,18 +357,30 @@ class StreamableHTTPTransport(Transport):
     def set_protocol_version(self, version: str) -> None:
         self.protocol_version = version
 
-    def send(self, message: dict[str, Any]) -> None:
-        if self._closed:
-            raise TransportError("transport closed")
-        assert self._on_message is not None
+    def _post(self, message: dict[str, Any]) -> httpx.Response:
         headers = self._headers("application/json, text/event-stream")
         headers["Content-Type"] = "application/json"
         body = json.dumps(message, ensure_ascii=False).encode("utf-8")
         try:
             req = self._client.build_request("POST", self.url, content=body, headers=headers)
-            resp = self._client.send(req, stream=True)
+            return self._client.send(req, stream=True)
         except httpx.HTTPError as e:
             raise TransportError(f"HTTP request failed: {e}") from e
+
+    def send(self, message: dict[str, Any]) -> None:
+        if self._closed:
+            raise TransportError("transport closed")
+        assert self._on_message is not None
+        resp = self._post(message)
+        if resp.status_code in (401, 403) and self.on_unauthorized is not None:
+            resp.close()
+            refreshed = False
+            try:
+                refreshed = bool(self.on_unauthorized())
+            except Exception:
+                refreshed = False
+            if refreshed:
+                resp = self._post(message)
         sid = resp.headers.get("mcp-session-id")
         if sid:
             self.session_id = sid
@@ -360,7 +394,7 @@ class StreamableHTTPTransport(Transport):
                 detail = ""
             resp.close()
             raise TransportError(f"HTTP {resp.status_code} from {self.url}: {detail}".strip(),
-                                 status=resp.status_code)
+                                 status=resp.status_code, headers=dict(resp.headers))
         ctype = resp.headers.get("content-type", "").lower()
         if resp.status_code == 202 or not ctype:
             resp.close()
@@ -452,10 +486,13 @@ class LegacySSETransport(Transport):
 
     def __init__(self, url: str, headers: dict[str, str] | None = None, timeout: float = 60.0,
                  client: httpx.Client | None = None, name: str = "server",
-                 connect_timeout: float = 15.0) -> None:
+                 connect_timeout: float = 15.0, header_provider: HeaderProvider | None = None,
+                 on_unauthorized: OnUnauthorized | None = None) -> None:
         self.url = url
         self.name = name
         self.headers = dict(headers or {})
+        self.header_provider = header_provider
+        self.on_unauthorized = on_unauthorized
         self.timeout = timeout
         self.connect_timeout = connect_timeout
         self._client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0, read=None),
@@ -465,19 +502,45 @@ class LegacySSETransport(Transport):
         self._error: str | None = None
         self._stream: httpx.Response | None = None
         self._closed = False
+        self._error_status: int | None = None
+        self._error_headers: dict[str, str] = {}
+
+    def _all_headers(self) -> dict[str, str]:
+        h = dict(self.headers)
+        if self.header_provider is not None:
+            h.update(self.header_provider())
+        return h
 
     def start(self, on_message: OnMessage, on_close: OnClose) -> None:
         def _listen() -> None:
             try:
-                req = self._client.build_request("GET", self.url,
-                                                 headers={"Accept": "text/event-stream", **self.headers})
-                resp = self._client.send(req, stream=True)
+                resp = None
+                for attempt in range(2):
+                    req = self._client.build_request("GET", self.url,
+                                                     headers={"Accept": "text/event-stream", **self._all_headers()})
+                    resp = self._client.send(req, stream=True)
+                    if attempt == 0 and resp.status_code in (401, 403) and self.on_unauthorized is not None:
+                        try:
+                            refreshed = bool(self.on_unauthorized())
+                        except Exception:
+                            refreshed = False
+                        if refreshed:
+                            resp.close()
+                            continue
+                    break
+                assert resp is not None
             except httpx.HTTPError as e:
+                self._error = f"SSE connect failed: {e}"
+                self._endpoint_ready.set()
+                return
+            except Exception as e:  # header provider failures
                 self._error = f"SSE connect failed: {e}"
                 self._endpoint_ready.set()
                 return
             if resp.status_code >= 400:
                 self._error = f"HTTP {resp.status_code} from {self.url}"
+                self._error_status = resp.status_code
+                self._error_headers = dict(resp.headers)
                 resp.close()
                 self._endpoint_ready.set()
                 return
@@ -485,7 +548,14 @@ class LegacySSETransport(Transport):
             try:
                 for event, data, _ in iter_sse(resp.iter_lines()):
                     if event == "endpoint":
-                        self.endpoint = urljoin(self.url, data.strip())
+                        endpoint = urljoin(self.url, data.strip())
+                        a, b = urlsplit(endpoint), urlsplit(self.url)
+                        if (a.scheme, a.netloc) != (b.scheme, b.netloc):
+                            # POSTing there would send our credentials to a host the user never configured
+                            self._error = f"SSE endpoint {endpoint[:80]} is not on the server's own origin"
+                            self._endpoint_ready.set()
+                            return
+                        self.endpoint = endpoint
                         self._endpoint_ready.set()
                     elif event == "message":
                         try:
@@ -504,19 +574,21 @@ class LegacySSETransport(Transport):
         if not self._endpoint_ready.wait(self.connect_timeout):
             raise TransportError("timed out waiting for SSE 'endpoint' event")
         if self.endpoint is None:
-            raise TransportError(self._error or "SSE stream ended before 'endpoint' event")
+            raise TransportError(self._error or "SSE stream ended before 'endpoint' event",
+                                 status=self._error_status, headers=self._error_headers)
 
     def send(self, message: dict[str, Any]) -> None:
         if self._closed or not self.endpoint:
             raise TransportError("SSE transport not connected")
         try:
             resp = self._client.post(self.endpoint, content=json.dumps(message).encode("utf-8"),
-                                     headers={"Content-Type": "application/json", **self.headers},
+                                     headers={"Content-Type": "application/json", **self._all_headers()},
                                      timeout=self.timeout)
         except httpx.HTTPError as e:
             raise TransportError(f"HTTP request failed: {e}") from e
         if resp.status_code >= 400:
-            raise TransportError(f"HTTP {resp.status_code} from {self.endpoint}", status=resp.status_code)
+            raise TransportError(f"HTTP {resp.status_code} from {self.endpoint}", status=resp.status_code,
+                                 headers=dict(resp.headers))
 
     def close(self) -> None:
         self._closed = True

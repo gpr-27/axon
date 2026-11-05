@@ -1137,6 +1137,41 @@ def _list(agent: Any, eng: TipEngine) -> None:
     _print(f"  {DIM}/tips refresh {dot} /tips off|on {dot} /tips llm off|on{RST}\n")
 
 
+def _in_terminal() -> bool:
+    from axon.commands.common import is_tty
+    return is_tty()
+
+
+def _tips_menu(agent: Any, eng: TipEngine) -> None:
+    """The tips as a list: Enter on a tip that starts with a command opens that command."""
+    from axon.commands.registry import dispatch_command
+    from axon.ui.menus import Action, browse
+    from axon.ui.picker import SelectItem
+
+    def rows() -> list[SelectItem]:
+        return [SelectItem(label=display_text(t.text), value=display_text(t.text),
+                           hint=display_text(t.reason)[:50] if t.reason and eng.source != "registry" else "")
+                for t in eng.tips()]
+
+    def actions_for(text: str) -> list[Action]:
+        first = text.split(" ", 1)[0]
+        if first.startswith("/"):
+            return [Action(f"Open {first}", lambda: dispatch_command(first, agent))]
+        return []
+
+    def extra() -> list[Action]:
+        turned = "on" if eng.enabled(agent) else "off"
+        llm = "on" if bool(getattr(agent.settings, "tips_llm", True)) else "off"
+        return [Action("Write fresh tips now", lambda: handle_tips(agent, "refresh")),
+                Action("Hide tips" if turned == "on" else "Show tips",
+                       lambda: handle_tips(agent, "off" if turned == "on" else "on")),
+                Action("Registry-only tips" if llm == "on" else "Model-written tips",
+                       lambda: handle_tips(agent, f"llm {'off' if llm == 'on' else 'on'}"))]
+
+    how = "from the command list" if eng.source == "registry" else "written for what you are doing"
+    browse("Tips", rows, actions_for, extra, subtitle=how)
+
+
 def handle_tips(agent: Any, arg: str) -> None:
     from axon.ui.theme import GOLD, MINT, RST, SLATE
     eng = tip_engine(agent)
@@ -1165,12 +1200,16 @@ def handle_tips(agent: Any, arg: str) -> None:
         _print(f"  {SLATE}Writing tips for what you are doing...{RST}")
         if not eng.refresh(agent, background=False, force=True):
             _print(f"  {GOLD}Could not refresh tips{RST}{SLATE}: {eng.last_error or 'a refresh is already running'}{RST}")
-        _list(agent, eng)
+        if not _in_terminal():
+            _list(agent, eng)
         return
     if sub and sub not in ("list", "ls", "show"):
         _print(f"  {SLATE}Usage: /tips [refresh | on | off | llm on | llm off]{RST}")
         return
-    _list(agent, eng)
+    if _in_terminal():
+        _tips_menu(agent, eng)
+    else:
+        _list(agent, eng)
 
 
 COMMANDS = [

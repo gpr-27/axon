@@ -163,7 +163,8 @@ def run_activity(q: ActivityQuery, workspace: Path, out: Any = None) -> int:
         kind = str(e.get("kind", ""))
         color = ROSE if kind in ("error",) or (isinstance(e.get("data"), dict) and e["data"].get("success") is False) else CYAN
         p(f"    {SLATE}{when}{RST} {proj}{color}{kind:<13}{RST} {WHITE}{activity.summary_line(e, 100)}{RST}")
-    p(f"\n  {DARK_SLATE}/activity help · filters: <N> --kind k --session id --since 2h --all-projects --export file.md{RST}\n")
+    from axon.commands.common import typed_only
+    p(f"\n  {DARK_SLATE}{typed_only('/activity help · filters: <N> --kind k --session id --since 2h --all-projects --export file.md')}{RST}\n")
     return 0
 
 
@@ -199,7 +200,7 @@ def handle_restore(agent: Any, arg: str) -> bool:
     if not a or a in ("list", "ls"):
         print(f"\n  {GOLD}Trash{RST} {SLATE}· {len(items)} deleted session(s) · {store.trash_root()}{RST}")
         if not items:
-            print(f"    {SLATE}Empty. /delete moves sessions here; nothing is destroyed.{RST}\n")
+            print(f"    {SLATE}Empty. Deleted sessions are moved here; nothing is destroyed.{RST}\n")
             return True
         for m in items:
             print(f"    {CYAN}{m['id']}{RST}  {SLATE}deleted {_fmt_ts(m['deleted_at'])} · {m['files']} file(s){RST}  "

@@ -4,8 +4,9 @@ Usage analytics: ``/stats``, ``/budget``, ``/report`` and ``axon report`` / ``ax
 Everything is computed from real persisted data (see :mod:`axon.storage`):
 
 * ``~/.axon/usage.jsonl``          one record per LLM call (tokens, cost, source, latency)
-* ``projects/<key>/traces/*.jsonl`` per-turn traces (tool calls, timings, errors)
-* ``projects/<key>/sessions/*.jsonl`` transcripts (session titles / turn counts as fallback)
+* ``projects/<key>/sessions/<id>/trace.jsonl`` per-turn traces (tool calls, timings, errors;
+  subagents: ``subagents/<n>.trace.jsonl``; older flat ``traces/<id>.jsonl`` is read too)
+* ``projects/<key>/sessions/<id>/session.jsonl`` transcripts (session titles / turn counts as fallback)
 
 The HTML report is a single self-contained file (inline CSS + SVG, no scripts or external
 assets) written under ``~/.axon/cache/reports/`` unless ``--out`` says otherwise.
@@ -35,6 +36,17 @@ MAX_ALL_DAYS = 366
 
 
 # ─── Formatting ────────────────────────────────────────────────────────────
+
+def typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the command's menu offers it instead)."""
+    from axon.commands.common import typed_only as _typed_only
+    return _typed_only(text)
+
+
+def is_tty() -> bool:
+    from axon.commands.common import is_tty as _is_tty
+    return _is_tty()
+
 
 def fmt_usd(v: float) -> str:
     v = float(v or 0)
@@ -336,42 +348,49 @@ def load_usage(since: float | None = None, project: str | None = None) -> list[U
     return out
 
 
-def _trace_files(project: str | None, since: float | None) -> list[tuple[str, Path]]:
+def _trace_files(project: str | None, since: float | None) -> list[tuple[str, Path, str]]:
+    """(project key, trace file, session id) of every saved trace file, new and flat layouts."""
     root = _projects_root()
     if not root.is_dir():
         return []
     dirs = [root / project] if project else [p for p in root.iterdir() if p.is_dir()]
-    out: list[tuple[str, Path]] = []
+    found: list[tuple[str, Path, str]] = []
     for d in dirs:
-        tdir = d / "traces"
-        if not tdir.is_dir():
-            continue
-        for f in tdir.glob("*.jsonl"):
-            try:
-                if since is not None and f.stat().st_mtime < since:
-                    continue
-            except OSError:
+        for f in d.glob("sessions/*/trace.jsonl"):
+            found.append((d.name, f, f.parent.name))
+        for f in d.glob("sessions/*/subagents/*.trace.jsonl"):
+            found.append((d.name, f, f"{f.parent.parent.name}_sub_{f.name.split('.')[0]}"))
+        for f in d.glob("traces/*.jsonl"):  # flat layout, not migrated yet
+            found.append((d.name, f, f.stem))
+    out: list[tuple[str, Path, str]] = []
+    for proj, f, sid in found:
+        try:
+            if since is not None and f.stat().st_mtime < since:
                 continue
-            out.append((d.name, f))
+        except OSError:
+            continue
+        out.append((proj, f, sid))
     return out
 
 
 def load_traces(since: float | None = None, project: str | None = None) -> list[dict[str, Any]]:
     """Saved TurnTrace dicts (each tagged with ``_project`` and ``_session``)."""
     out: list[dict[str, Any]] = []
-    for proj, path in _trace_files(project, since):
+    for proj, path, sid in _trace_files(project, since):
         for rec in storage.read_jsonl(path):
             started = _float(rec.get("started_at"))
             if since is not None and started and started < since:
                 continue
-            rec["_project"], rec["_session"] = proj, path.stem
+            rec["_project"], rec["_session"] = proj, sid
             out.append(rec)
     return out
 
 
 def _transcript_info(project: str, session: str) -> tuple[str, int]:
     """(first user prompt, number of user messages) from a session transcript."""
-    path = _projects_root() / project / "sessions" / f"{session}.jsonl"
+    path = _projects_root() / project / "sessions" / session / storage.SESSION_FILE
+    if not path.is_file():
+        path = _projects_root() / project / "sessions" / f"{session}.jsonl"  # flat layout
     if not path.is_file():
         return "", 0
     try:
@@ -651,7 +670,9 @@ def render_stats(stats: Stats, width: int | None = None) -> list[str]:
                  str(s.calls), fmt_dur(s.duration_s), fmt_usd(s.cost)] for s in top]
         lines += ch.table(["session", "last", "turns", "calls", "span", "cost"], rows, aligns="lrrrrr", max_width=W)
 
-    lines += ["", "  " + ch.paint("/stats today|7d|30d|all [--all-projects] · /report for an HTML dashboard", "SUBTLE"), ""]
+    lines += [""]
+    if not is_tty():
+        lines += ["  " + ch.paint("/stats today|7d|30d|all [--all-projects] · /report for an HTML dashboard", "SUBTLE"), ""]
     return lines
 
 
@@ -759,7 +780,7 @@ def budget_lines(agent: Any) -> list[str]:
     if ceiling <= 0:
         return [head, f"  Spent {ch.paint(fmt_usd(float(spent)), 'BOLD')} this session · "
                 + ch.paint("no limit set", "MUTED"),
-                "  " + ch.paint("Set one with /budget <amount>, e.g. /budget 5", "SUBTLE")]
+                "  " + ch.paint(typed_only("Set one with /budget <amount>, e.g. /budget 5"), "SUBTLE")]
     remaining = ceiling - spent
     frac = float(spent / ceiling) if ceiling else 0.0
     color = "SUCCESS" if frac < 0.75 else ("WARNING" if frac < 1 else "ERROR")
@@ -768,7 +789,7 @@ def budget_lines(agent: Any) -> list[str]:
              f"  Spent {ch.paint(fmt_usd(float(spent)), 'BOLD')} of {fmt_usd(float(ceiling))} · "
              + (ch.paint(f"{fmt_usd(float(remaining))} remaining", "SUCCESS" if frac < 0.75 else "WARNING")
                 if remaining > 0 else ch.paint("limit reached - new turns will not start", "ERROR"))]
-    lines.append("  " + ch.paint("New turns stop once spending reaches the limit. /budget off removes it.", "SUBTLE"))
+    lines.append("  " + ch.paint("New turns stop once spending reaches the limit." + typed_only(" /budget off removes it."), "SUBTLE"))
     return lines
 
 

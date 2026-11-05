@@ -709,19 +709,12 @@ def _wizard(args: argparse.Namespace, io: SetupIO, verify_fn: Callable[..., tupl
 
 # ─── Key / endpoint helpers ────────────────────────────────────────────────
 
-def _masked(key: str) -> str:
-    try:
-        from axon.providers.keystore import mask_key
-        return mask_key(key)
-    except Exception:
-        return "set"
-
-
 def _existing_key_choice(io: SetupIO, verify_fn: Callable[..., tuple[bool, str]], preset: Any, existing: str,
                          env_keys: dict[str, tuple[str, str]], base_url: str, model: str) -> str:
     """Use / test / replace an existing key. Returns the key to use, or '' to enter a new one."""
+    from axon.providers.keystore import mask_key
     var, where = env_keys.get(preset.id, (preset.env_var, ".env"))
-    label = f"{var} {_masked(existing)} ({'environment' if where == 'env' else '~/.axon/.env'})"
+    label = f"{var} {mask_key(existing)} ({'environment' if where == 'env' else '~/.axon/.env'})"
     while True:
         action = io.choose(f"An API key is already set: {label}", [
             Choice("Use it", "use", "keep the current key"),

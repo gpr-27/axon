@@ -9,9 +9,13 @@ Config files (later entries override earlier ones, per server name):
   3. <workspace>/.axon/mcp.json   scope "local"
 
 Every file uses the Claude Code layout: {"mcpServers": {"<name>": {...spec...}}}.
-A spec is {"type": "stdio"|"http"|"sse", "command", "args", "env", "cwd", "url",
-"headers", "timeout", "disabled"}. ${VAR} and ${VAR:-default} are expanded in
-command/args/env/cwd/url/headers at connect time (the file keeps the reference).
+A spec is {"type": "stdio"|"http"|"sse"|"ws", "command", "args", "env", "cwd", "url",
+"headers", "headersHelper", "oauth", "alwaysLoad", "timeout", "disabled"}. ${VAR} and ${VAR:-default}
+are expanded in command/args/env/cwd/url/headers at connect time (the file keeps the reference).
+
+Above all of these sit servers the organization provides (``managed-mcp.json`` /
+``managedMcpServers``, see :mod:`axon.mcp.policy`). Allow/deny lists remove servers from the result, and
+project (.mcp.json) servers wait for your approval in an interactive session (:mod:`axon.mcp.state`).
 """
 from __future__ import annotations
 
@@ -21,14 +25,32 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from axon.mcp.catalog import get_mcp_preset
+
+if TYPE_CHECKING:
+    from axon.mcp.policy import McpPolicy
 
 SCOPES = ("user", "project", "local")
 _SCOPE_ALIASES = {"global": "user", "user": "user", "project": "project", "local": "local",
                   "workspace": "local"}
 DEFAULT_TIMEOUT = 60.0
+SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Credentials that never expand into a remote server's url/headers (a repository's .mcp.json must not be
+# able to send your provider keys to a host it names). Copy the value into a variable of your own to use it.
+CREDENTIAL_VARS = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "AXON_API_KEY", "AXON_TOKEN",
+    "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY", "TOGETHER_API_KEY", "FIREWORKS_API_KEY",
+    "CEREBRAS_API_KEY", "AGENTROUTER_API_KEY", "AZURE_OPENAI_API_KEY",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
+    "GOOGLE_APPLICATION_CREDENTIALS", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NPM_TOKEN",
+})
+RESERVED_NAMES = frozenset({"workspace", "claude-in-chrome", "computer-use", "claude preview",
+                            "claude browser"})
 
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _PLACEHOLDER_RE = re.compile(r"^(your_.*|xoxb-\.\.\.|T\.\.\.|<.*>|\.\.\.)$", re.IGNORECASE)
@@ -41,11 +63,14 @@ def normalize_scope(scope: str | None) -> str:
     return s
 
 
-def expand_vars(value: str, env: dict[str, str] | None = None) -> str:
-    """Expand ${VAR} and ${VAR:-default}. Unknown variables without a default become ''."""
+def expand_vars(value: str, env: dict[str, str] | None = None, mask: frozenset[str] | None = None) -> str:
+    """Expand ${VAR} and ${VAR:-default}. Unknown variables without a default become ''.
+    Names in ``mask`` always read as empty (even with a default)."""
     source = os.environ if env is None else env
 
     def _sub(m: re.Match[str]) -> str:
+        if mask and m.group(1) in mask:
+            return ""
         val = source.get(m.group(1))
         if val is None or (val == "" and m.group(2) is not None):
             return m.group(2) if m.group(2) is not None else ""
@@ -54,11 +79,15 @@ def expand_vars(value: str, env: dict[str, str] | None = None) -> str:
     return _VAR_RE.sub(_sub, value)
 
 
-def missing_vars(value: str, env: dict[str, str] | None = None) -> list[str]:
+def missing_vars(value: str, env: dict[str, str] | None = None, mask: frozenset[str] | None = None) -> list[str]:
     """Names of ${VAR} references (without a default) that are not set."""
     source = os.environ if env is None else env
     return [m.group(1) for m in _VAR_RE.finditer(value)
-            if m.group(2) is None and not source.get(m.group(1))]
+            if m.group(2) is None and not source.get(m.group(1)) and not (mask and m.group(1) in mask)]
+
+
+def valid_server_name(name: str) -> bool:
+    return bool(SERVER_NAME_RE.match(name or ""))
 
 
 def is_placeholder(value: str) -> bool:
@@ -71,9 +100,14 @@ def infer_type(raw: dict[str, Any]) -> str:
         return "http"
     if t == "sse":
         return "sse"
+    if t in ("ws", "websocket", "wss"):
+        return "ws"
     if t == "stdio":
         return "stdio"
-    if raw.get("url") or raw.get("serverUrl"):
+    url = str(raw.get("url") or raw.get("serverUrl") or "")
+    if url.lower().startswith(("ws://", "wss://")):
+        return "ws"
+    if url:
         return "http"
     return "stdio"
 
@@ -92,17 +126,28 @@ class ServerSpec:
     disabled: bool = False
     scope: str = "user"
     source: Path | None = None
+    headers_helper: str = ""                 # shell command printing a JSON object of extra headers
+    oauth: dict[str, Any] = field(default_factory=dict)   # clientId, callbackPort, scopes, authServerMetadataUrl
+    always_load: bool | None = None          # True: never defer behind ToolSearch; False: always defer
+    timeout_explicit: bool = False           # "timeout" was written in the config (a hard per-call limit)
+    approval: str = "approved"               # approved | pending | rejected (project .mcp.json servers)
+    managed: bool = False                    # provided by the organization (managed settings / managed-mcp.json)
+    disabled_by: str = ""                    # "" | "file" | "project" (where the off switch lives)
 
     @classmethod
     def from_dict(cls, name: str, raw: dict[str, Any], scope: str = "user",
                   source: Path | None = None) -> "ServerSpec":
         if not isinstance(raw, dict):
             raise ValueError(f"MCP server '{name}' spec must be a JSON object")
+        if str(raw.get("type") or "").strip().lower() == "sdk":
+            raise ValueError(f'Skipped - MCP server "{name}" declares type "sdk", which only an SDK host '
+                             "application can register")
+        explicit = "timeout" in raw
         timeout = raw.get("timeout", DEFAULT_TIMEOUT)
         try:
             timeout = float(timeout)
         except (TypeError, ValueError):
-            timeout = DEFAULT_TIMEOUT
+            timeout, explicit = DEFAULT_TIMEOUT, False
         if timeout > 1000:  # Claude-Code style milliseconds
             timeout = timeout / 1000.0
         args = raw.get("args") or []
@@ -110,9 +155,13 @@ class ServerSpec:
             args = [args]
         elif not isinstance(args, list):
             raise ValueError(f"MCP server '{name}': 'args' must be a list")
-        for key in ("env", "headers"):
+        for key in ("env", "headers", "oauth"):
             if raw.get(key) is not None and not isinstance(raw.get(key), dict):
                 raise ValueError(f"MCP server '{name}': '{key}' must be an object")
+        helper = raw.get("headersHelper") or raw.get("headers_helper") or ""
+        if helper and not isinstance(helper, str):
+            raise ValueError(f"MCP server '{name}': 'headersHelper' must be a command string")
+        always = raw.get("alwaysLoad", raw.get("always_load"))
         return cls(
             name=name,
             type=infer_type(raw),
@@ -126,6 +175,11 @@ class ServerSpec:
             disabled=bool(raw.get("disabled", False)),
             scope=scope,
             source=source,
+            headers_helper=str(helper),
+            oauth=dict(raw.get("oauth") or {}),
+            always_load=always if isinstance(always, bool) else None,
+            timeout_explicit=explicit and timeout > 0,
+            disabled_by="file" if raw.get("disabled") else "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,9 +196,15 @@ class ServerSpec:
             out["url"] = self.url
             if self.headers:
                 out["headers"] = dict(self.headers)
-        if self.timeout != DEFAULT_TIMEOUT:
+            if self.headers_helper:
+                out["headersHelper"] = self.headers_helper
+            if self.oauth:
+                out["oauth"] = dict(self.oauth)
+        if self.always_load is not None:
+            out["alwaysLoad"] = self.always_load
+        if self.timeout != DEFAULT_TIMEOUT or self.timeout_explicit:
             out["timeout"] = self.timeout
-        if self.disabled:
+        if self.disabled and self.disabled_by != "project":
             out["disabled"] = True
         return out
 
@@ -152,25 +212,47 @@ class ServerSpec:
         """Return a human-readable problem, or None when the spec is usable."""
         if self.type == "stdio" and not self.command:
             return "stdio server has no 'command'"
-        if self.type in ("http", "sse") and not self.url:
+        if self.type in ("http", "sse", "ws") and not self.url:
             return f"{self.type} server has no 'url'"
+        if self.type == "ws" and not self.url.lower().startswith(("ws://", "wss://", "${")):
+            return "ws server 'url' must start with ws:// or wss://"
         return None
 
-    def resolved(self) -> "ServerSpec":
-        """Copy with ${VAR} references expanded."""
+    @property
+    def remote(self) -> bool:
+        return self.type != "stdio"
+
+    @property
+    def has_authorization_header(self) -> bool:
+        return any(k.lower() == "authorization" for k in self.headers)
+
+    def _mask(self) -> frozenset[str] | None:
+        return CREDENTIAL_VARS if self.remote else None
+
+    def resolved(self, project_dir: Path | str | None = None) -> "ServerSpec":
+        """Copy with ${VAR} references expanded. ``project_dir`` makes ${AXON_PROJECT_DIR} /
+        ${CLAUDE_PROJECT_DIR} resolve to the project root."""
         env = {k: expand_vars(v) for k, v in self.env.items()}
         lookup = dict(os.environ)
+        if project_dir:
+            lookup.setdefault("AXON_PROJECT_DIR", str(project_dir))
+            lookup.setdefault("CLAUDE_PROJECT_DIR", str(project_dir))
         lookup.update(env)
-        return ServerSpec(
+        mask = self._mask()
+        out = ServerSpec(
             name=self.name, type=self.type,
             command=expand_vars(self.command, lookup),
             args=[expand_vars(a, lookup) for a in self.args],
             env=env,
             cwd=expand_vars(self.cwd, lookup) if self.cwd else None,
-            url=expand_vars(self.url, lookup),
-            headers={k: expand_vars(v, lookup) for k, v in self.headers.items()},
+            url=expand_vars(self.url, lookup, mask),
+            headers={k: expand_vars(v, lookup, mask) for k, v in self.headers.items()},
             timeout=self.timeout, disabled=self.disabled, scope=self.scope, source=self.source,
+            headers_helper=self.headers_helper, oauth=dict(self.oauth), always_load=self.always_load,
+            timeout_explicit=self.timeout_explicit, approval=self.approval, managed=self.managed,
+            disabled_by=self.disabled_by,
         )
+        return out
 
     def unresolved_problems(self) -> list[str]:
         """Missing ${VAR}s and leftover catalog placeholders that would make the server fail."""
@@ -185,14 +267,63 @@ class ServerSpec:
         lookup = dict(os.environ)
         lookup.update({k: expand_vars(v) for k, v in self.env.items()})
         for text in [self.command, self.url, *self.args, *(self.headers.values())]:
-            for var in missing_vars(text, lookup):
+            for var in missing_vars(text, lookup, self._mask()):
+                if var in ("AXON_PROJECT_DIR", "CLAUDE_PROJECT_DIR"):
+                    continue
                 problems.append(f"${{{var}}} is not set")
         return sorted(set(problems))
+
+    def config_warnings(self) -> list[str]:
+        """Things worth a warning that do not stop the server loading."""
+        warnings: list[str] = []
+        fields: list[str] = []
+        for label, value in (("command", self.command), ("url", self.url)):
+            if value and value != value.strip():
+                fields.append(label)
+        fields += [f"args[{i}]" for i, a in enumerate(self.args) if a != a.strip()]
+        for group, mapping in (("env", self.env), ("headers", self.headers)):
+            for k, v in mapping.items():
+                if k != k.strip() or v != v.strip():
+                    fields.append(f"{group}.{k.strip()}")
+        if fields:
+            warnings.append("Leading or trailing whitespace in: " + ", ".join(fields))
+        if self.remote:
+            texts = [self.url, *self.headers.values()]
+            covered = sorted({m.group(1) for t in texts for m in _VAR_RE.finditer(t)
+                              if m.group(1) in CREDENTIAL_VARS})
+            if covered:
+                warnings.append("Credential variable(s) read as empty in a remote server's url/headers: "
+                                + ", ".join(covered) + " (copy the value into a variable of your own)")
+        if self.name.lower() in RESERVED_NAMES:
+            warnings.append(f"'{self.name}' is a reserved name; rename the server")
+        return warnings
+
+    def endpoint_key(self) -> str:
+        """Identity used to spot the same server defined twice (URL spelling differences ignored)."""
+        if self.remote:
+            return "url:" + normalize_url(self.url)
+        return "cmd:" + json.dumps([self.command, *self.args])
 
     def describe_target(self) -> str:
         if self.type == "stdio":
             return " ".join([self.command, *self.args]).strip()
         return self.url
+
+
+def normalize_url(url: str) -> str:
+    """Lower-case scheme/host, drop the scheme's default port and a trailing slash."""
+    try:
+        u = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    scheme = (u.scheme or "").lower()
+    host = (u.hostname or "").lower()
+    port = u.port
+    if port is not None and port == {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme):
+        port = None
+    netloc = (f"{u.username}:{u.password}@" if u.username else "") + host + (f":{port}" if port else "")
+    path = u.path.rstrip("/")
+    return f"{scheme}://{netloc}{path}" + (f"?{u.query}" if u.query else "")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -219,6 +350,11 @@ class MCPConfig:
         self.global_config_file = user_file("mcp.json")
         self.project_config_file = self.workspace / ".mcp.json"
         self.local_config_file = self.workspace / ".axon" / "mcp.json"
+        self.problems: list[tuple[str, str, str]] = []     # (name, source, message) entries not loaded
+        self.blocked: list[tuple[str, str]] = []           # (name, 'denied'|'not-allowed')
+        self.conflicts: dict[str, list[tuple[str, str]]] = {}
+        self.notices: list[str] = []
+        self.exclusive = False
 
     # ── Paths ────────────────────────────────────────────────────────────
     def path_for(self, scope: str) -> Path:
@@ -244,21 +380,77 @@ class MCPConfig:
                 out.append((plug.path / ".mcp.json", name, raw))
         return out
 
+    def policy(self) -> "McpPolicy":
+        from axon.mcp.policy import load_policy
+        return load_policy(self.workspace)
+
     def load_specs(self, include_disabled: bool = True) -> dict[str, ServerSpec]:
+        """Every usable server, merged by precedence (managed > local > project > user > plugin).
+
+        Side tables for the commands: ``problems`` (entries that could not be loaded), ``blocked``
+        (removed by policy), ``conflicts`` (same name, different endpoint in several scopes) and
+        ``notices`` (policy diagnostics)."""
+        from axon.mcp import state as mcp_state
+        from axon.mcp.policy import settings_approval
+        self.problems, self.blocked, self.conflicts = [], [], {}
+        pol = self.policy()
+        self.notices = list(pol.notices)
+        self.exclusive = pol.exclusive is not None
+        defs: dict[str, list[ServerSpec]] = {}
         merged: dict[str, ServerSpec] = {}
-        for path, name, raw in self.plugin_servers():
+
+        def _take(name: str, raw: Any, scope: str, path: Path | None, managed: bool = False) -> None:
             try:
-                merged[name] = ServerSpec.from_dict(name, raw, "plugin", path)
-            except ValueError:
-                continue
-        for scope, path in self.config_files():
-            if not path.is_file():
-                continue
-            for name, raw in _servers_in(_read_json(path)).items():
-                try:
-                    merged[str(name)] = ServerSpec.from_dict(str(name), raw, scope, path)
-                except ValueError:
+                spec = ServerSpec.from_dict(name, raw, scope, path)
+            except ValueError as e:
+                self.problems.append((name, str(path or scope), str(e)))
+                return
+            spec.managed = managed
+            defs.setdefault(name, []).append(spec)
+            merged[name] = spec
+
+        if pol.exclusive is None:
+            for path, name, raw in self.plugin_servers():
+                _take(name, raw, "plugin", path)
+            for scope, path in self.config_files():
+                if not path.is_file():
                     continue
+                for name, raw in _servers_in(_read_json(path)).items():
+                    _take(str(name), raw, scope, path)
+            for name, raw in pol.managed_servers.items():
+                _take(name, raw, "managed", None, managed=True)
+        else:
+            for name, raw in pol.managed_servers.items():
+                _take(name, raw, "managed", None, managed=True)
+            for name, raw in pol.exclusive.items():
+                _take(name, raw, "managed", None, managed=True)
+
+        # The same endpoint defined by a plugin and by one of your own scopes counts once.
+        own = {s.endpoint_key() for s in merged.values() if s.scope != "plugin" and not s.disabled}
+        for name in [n for n, s in merged.items() if s.scope == "plugin" and s.endpoint_key() in own]:
+            del merged[name]
+
+        for name, versions in defs.items():
+            ends = {v.endpoint_key() for v in versions}
+            if len(versions) > 1 and len(ends) > 1:
+                self.conflicts[name] = [(v.scope, v.describe_target()) for v in versions]
+
+        for name in list(merged):
+            reason = pol.check(merged[name])
+            if reason:
+                self.blocked.append((name, reason))
+                del merged[name]
+
+        off = mcp_state.disabled_servers(self.workspace)
+        interactive = mcp_state.is_interactive()
+        for name, spec in merged.items():
+            if name in off and not spec.disabled:
+                spec.disabled, spec.disabled_by = True, "project"
+            if spec.scope == "project":
+                verdict = settings_approval(self.workspace, name) or mcp_state.project_choice(self.workspace, name)
+                if verdict is None:
+                    verdict = "pending" if interactive else "approved"
+                spec.approval = verdict
         if not include_disabled:
             merged = {k: v for k, v in merged.items() if not v.disabled}
         return merged
@@ -275,6 +467,48 @@ class MCPConfig:
                     if isinstance(raw, dict):
                         out[str(name)] = dict(raw)
         return out
+
+    def definitions(self, name: str) -> list[tuple[str, Path | None, dict[str, Any]]]:
+        """Every (scope, file, raw spec) that defines ``name``, plugins first."""
+        out: list[tuple[str, Path | None, dict[str, Any]]] = []
+        for path, n, raw in self.plugin_servers():
+            if n == name:
+                out.append(("plugin", path, dict(raw)))
+        for scope, path in self.config_files():
+            if path.is_file():
+                raw = _servers_in(_read_json(path)).get(name)
+                if isinstance(raw, dict):
+                    out.append((scope, path, dict(raw)))
+        return out
+
+    def add_block_reason(self, spec: ServerSpec) -> str | None:
+        """Why an administrator's policy forbids adding this server (None when it is fine)."""
+        pol = self.policy()
+        if pol.exclusive is not None:
+            return ("Cannot add MCP server: enterprise MCP configuration is active and has exclusive "
+                    "control over MCP servers")
+        if pol.plugin_only:
+            return ("Cannot add MCP server: your organization's managed settings allow only MCP servers "
+                    "that plugins provide")
+        if spec.name in pol.managed_servers:
+            return f'MCP server "{spec.name}" is provided by your organization (managed settings)'
+        return pol.reason(spec)
+
+    # ── Per-project off switch ──────────────────────────────────────────
+    def toggle(self, name: str, disabled: bool) -> str | None:
+        """Turn a server off/on for this project. Servers from a shared file (project .mcp.json), a
+        plugin or the organization are switched in ``~/.axon/mcp-state.json`` so no shared file is
+        edited; your own user/local servers carry ``disabled`` in their file. Returns where it was
+        recorded, or None when the server is unknown or organization-managed."""
+        from axon.mcp import state as mcp_state
+        spec = self.get_spec(name)
+        if spec is None or spec.managed:
+            return None
+        if spec.scope in ("project", "plugin"):
+            mcp_state.set_server_disabled(self.workspace, name, disabled)
+            return "project state"
+        path = self.set_disabled(name, disabled)
+        return str(path) if path else None
 
     # ── Writing ──────────────────────────────────────────────────────────
     def _write(self, path: Path, data: dict[str, Any]) -> None:

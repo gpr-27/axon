@@ -152,10 +152,16 @@ def split_shell_commands(cmd: str) -> list[str]:
 def has_substitution(cmd: str) -> bool:
     """True if the command contains command/process substitution outside single quotes."""
     quote: str | None = None
-    for i, ch in enumerate(cmd):
+    i, n = 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        i += 1
         if quote == "'":
             if ch == "'":
                 quote = None
+            continue
+        if ch == "\\":
+            i += 1  # an escaped quote (\' or \") neither opens nor closes a quote
             continue
         if ch == "'" and quote is None:
             quote = "'"
@@ -165,9 +171,9 @@ def has_substitution(cmd: str) -> bool:
             continue
         if ch == "`":
             return True
-        if ch == "$" and i + 1 < len(cmd) and cmd[i + 1] == "(":
+        if ch == "$" and i < n and cmd[i] == "(":
             return True
-        if ch in "<>" and i + 1 < len(cmd) and cmd[i + 1] == "(" and quote is None:
+        if ch in "<>" and i < n and cmd[i] == "(" and quote is None:
             return True
     return False
 
@@ -286,7 +292,12 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
             if j == -1:
                 out.append(re.escape(c))
             else:
-                out.append("[" + pat[i + 1:j].replace("\\", "\\\\") + "]")
+                body = pat[i + 1:j].replace("\\", "\\\\")
+                if body[:1] == "!":  # glob negation ([!abc]) is [^abc] in a regex
+                    body = "^" + body[1:]
+                elif body[:1] == "^":  # a literal caret, not a negation, in glob syntax
+                    body = "\\" + body
+                out.append("[" + body + "]")
                 i = j
         else:
             out.append(re.escape(c))
@@ -361,6 +372,8 @@ def _tool_selector_matches(selector: str, tool_name: str) -> bool:
     s, t = selector.lower(), tool_name.lower()
     if s == t:
         return True
+    if selector in ("Agent", "Task") and tool_name == "Task":
+        return True
     if selector == "Edit" and tool_name in EDIT_TOOLS:
         return True
     if selector == "Read" and tool_name in READ_TOOLS:
@@ -411,6 +424,10 @@ class Rule:
             if has_substitution(cmd):
                 return False
             return bool(subs) and all(_command_matches(pat, s) for s in subs)
+
+        if tool_name == "Task":      # Agent(Explore): match the subagent type
+            kind = str(args.get("subagent_type") or "general-purpose").strip().lower()
+            return fnmatch.fnmatchcase(kind, pat.lower())
 
         if pat.startswith("domain:"):
             url = str(args.get("url", "")).strip()

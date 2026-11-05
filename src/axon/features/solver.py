@@ -38,6 +38,12 @@ except Exception:  # pragma: no cover
     _theme = None  # type: ignore[assignment]
 
 
+def _typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the menu offers the same choice)."""
+    from axon.commands.common import typed_only
+    return typed_only(text)
+
+
 def _c(name: str) -> str:
     return str(getattr(_theme, name, "")) if _theme is not None else ""
 
@@ -674,6 +680,12 @@ def snippet(ws: Path | str, failure: Failure, radius: int = SNIPPET_RADIUS) -> s
     path = resolve_file(Path(ws), failure.file)
     if path is None:
         return ""
+    try:  # the file name comes from command output: never read credential stores or files outside the workspace
+        from axon.permissions.paths import in_additional_dir, is_protected_path, is_within
+        if is_protected_path(path, Path(ws)) or not (is_within(Path(ws), path) or in_additional_dir(path)):
+            return ""
+    except Exception:
+        return ""
     try:
         if path.stat().st_size > 5_000_000:
             return ""
@@ -943,7 +955,7 @@ def _no_checks_hint(ws: Path) -> None:
     _out(f"  {_c('WARNING')}No checks detected in {ws}.{_c('RST')}")
     _out(f"  {_c('MUTED')}Add them in .axon/settings.json, e.g. "
          '{"verify": ["pytest -q", {"name": "lint", "command": "ruff check .", "kind": "lint"}]}'
-         f", or pass a command: /fix <command>, /autofix <command>.{_c('RST')}")
+         f"{_typed_only(', or pass a command: /fix <command>, /autofix <command>')}.{_c('RST')}")
 
 
 # ─── /verify ──────────────────────────────────────────────────────────────
@@ -1155,7 +1167,7 @@ def cmd_autofix(agent: Any, arg: str) -> None:
         why = {"no progress": "failures stopped decreasing", "agent stopped": "the agent turn did not complete"}.get(
             final["status"], f"reached --max {max_n}")
         _out(f"\n  {_c('ERROR')}{_c('BOLD')}{_g('✗', 'X')} Still failing ({why}){_c('RST')} · {summary}"
-             f"\n  {_c('MUTED')}Run /verify to see the remaining failures.{_c('RST')}")
+             f"\n  {_c('MUTED')}{_typed_only('Run /verify to see the remaining failures.')}{_c('RST')}")
 
 
 COMMANDS = [

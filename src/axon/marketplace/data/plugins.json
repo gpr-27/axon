@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "agent-sdk-dev",
+      "name": "agent-sdk-dev",
+      "publisher": "Anthropic",
+      "description": "Development kit for working with the Claude Agent SDK",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/agent-sdk-dev",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "code-review",
+      "name": "code-review",
+      "publisher": "Anthropic",
+      "description": "Automated code review for pull requests using multiple specialized agents with confidence-based scoring to filter false positives",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/code-review",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "commit-commands",
+      "name": "commit-commands",
+      "publisher": "Anthropic",
+      "description": "Commands for git commit workflows including commit, push, and PR creation",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/commit-commands",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "explanatory-output-style",
+      "name": "explanatory-output-style",
+      "publisher": "Anthropic",
+      "description": "Adds educational insights about implementation choices and codebase patterns (mimics the deprecated Explanatory output style)",
+      "category": "Learning",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/explanatory-output-style",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "feature-dev",
+      "name": "feature-dev",
+      "publisher": "Anthropic",
+      "description": "Comprehensive feature development workflow with specialized agents for codebase exploration, architecture design, and quality review",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/feature-dev",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "frontend-design",
+      "name": "frontend-design",
+      "publisher": "Anthropic",
+      "description": "Create distinctive, production-grade frontend interfaces with high design quality. Generates creative, polished code that avoids generic AI ",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/frontend-design",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "hookify",
+      "name": "hookify",
+      "publisher": "Anthropic",
+      "description": "Easily create custom hooks to prevent unwanted behaviors by analyzing conversation patterns or from explicit instructions. Define rules via ",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/hookify",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "learning-output-style",
+      "name": "learning-output-style",
+      "publisher": "Anthropic",
+      "description": "Interactive learning mode that requests meaningful code contributions at decision points (mimics the unshipped Learning output style)",
+      "category": "Learning",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/learning-output-style",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "plugin-dev",
+      "name": "plugin-dev",
+      "publisher": "Anthropic",
+      "description": "Comprehensive toolkit for developing Claude Code plugins. Includes 7 expert skills covering hooks, MCP integration, commands, agents, and be",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/plugin-dev",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "pr-review-toolkit",
+      "name": "pr-review-toolkit",
+      "publisher": "Anthropic",
+      "description": "Comprehensive PR review agents specializing in comments, tests, error handling, type design, code quality, and code simplification",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/pr-review-toolkit",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "ralph-loop",
+      "name": "ralph-loop",
+      "publisher": "Anthropic",
+      "description": "Interactive self-referential AI loops for iterative development. Claude works on the same task repeatedly, seeing its previous work, until c",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/ralph-loop",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "security-guidance",
+      "name": "security-guidance",
+      "publisher": "Anthropic",
+      "description": "Security review for Claude-generated code. Pattern-based warnings on edits, LLM-powered diff review on Stop, and an agentic commit reviewer ",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/security-guidance",
+        "ref": "main"
+      },
+      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "verified": true
+    },
+    {
+      "id": "create-plugin",
+      "name": "Plugin creator (built in)",
+      "publisher": "Axon",
+      "description": "Scaffolds a new Axon plugin folder with a manifest and an example command.",
+      "category": "Authoring",
+      "kind": "builtin",
+      "source": {},
+      "docs_url": "",
+      "verified": true
+    }
+  ]
+}

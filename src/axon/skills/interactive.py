@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from axon.storage import axon_home as _axon_home
-from axon.skills.manager import SkillManager
+from axon.skills.manager import Skill, SkillManager
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, DIM, GOLD, MINT, RST, SLATE, TEAL, WHITE
 
 TEMPLATES = {
@@ -112,6 +112,10 @@ USAGE = """  /skills                              list skills
   /skills edit <name>                  open in $EDITOR (built-ins are copied to the project first)
   /skills delete <name>                remove a project/personal skill
   /skills reload                       rescan skill folders
+  /skills enable|disable <name> [--project]    switch a skill on or off (saved; the model stops seeing it)
+  /skills test <name>                  check that the skill file is valid
+  /skills scope <name> user|project    move a skill to another scope
+  /skills status                       every connector, skill and plugin: enabled, connected, errors
   Run a skill with /<name> [arguments] or /skill:<name> [arguments]."""
 
 
@@ -135,7 +139,67 @@ def _print_list(mgr: SkillManager) -> None:
             tools = f" {DARK_SLATE}[{', '.join(s.allowed_tools)}]{RST}" if s.allowed_tools else ""
             from axon.commands.common import clip
             print(f"    {WHITE}/{s.name:<20}{RST} {SLATE}{clip(s.description or '', 64)}{RST}{tools}{shadow}")
-    print(f"\n  {DIM}/skills show|create|install|edit|delete <name>{RST}\n")
+    off = sorted(mgr.disabled)
+    if off:
+        print(f"\n  {SLATE}{BOLD}Disabled{RST}  {SLATE}{', '.join(off)}  (turn on: /skills enable <name>){RST}")
+    print(f"\n  {DIM}/skills show|create|install|edit|delete|enable|disable <name>{RST}\n")
+
+
+def _run_control(skills_mgr: SkillManager, workspace: Path, sub: str, words: list[str], flags: set[str]) -> None:
+    """enable / disable / test / scope / status share their code with /marketplace."""
+    from axon.marketplace.cli import run_command
+    tokens = [sub, *(w.lstrip("/") for w in words), "--tab", "skills"]
+    if "--project" in flags:
+        tokens += ["--scope", "project"]
+    run_command(tokens, workspace)
+    skills_mgr.discover()
+
+
+def find_skill(skills_mgr: SkillManager, name: str) -> Skill | None:
+    """A skill by name from every source the manager reads (enabled or switched off)."""
+    skill = skills_mgr.get(name)
+    if skill is not None:
+        return skill
+    for key, off in getattr(skills_mgr, "disabled", {}).items():
+        if key.lower() == name.lower():
+            return off
+    return None
+
+
+def test_skill(skills_mgr: SkillManager, name: str) -> bool:
+    """Validate one skill wherever it lives (personal, ~/.claude, project, plugin, bundled):
+    print its file, size, description, triggers and any problems, then OK or the problems."""
+    from axon.commands.common import err, ok
+    skill = find_skill(skills_mgr, name)
+    if skill is None:
+        err(f"Skill '{name}' not found. /skills lists the ones Axon can see.")
+        return False
+    print(f"\n  {GOLD}{BOLD}Testing skill /{skill.name}{RST}  {SLATE}{skill.scope}{RST}")
+    problems: list[str] = []
+    path = Path(skill.path)
+    if skill.scope == "bundled" or not path.is_file():
+        print(f"    {SLATE}file{RST}         built into Axon" if skill.scope == "bundled" else f"    {SLATE}file{RST}         {path} (missing)")
+        if skill.scope != "bundled":
+            problems.append(f"{path} does not exist")
+    else:
+        from axon.marketplace.skill_tools import validate_skill_file
+        print(f"    {SLATE}file{RST}         {path}")
+        print(f"    {SLATE}size{RST}         {path.stat().st_size:,} bytes")
+        problems += validate_skill_file(path)
+    print(f"    {SLATE}description{RST}  {skill.description[:100] or '(none)'}")
+    triggers = ", ".join(skill.triggers) if skill.triggers else "(none: the description decides)"
+    print(f"    {SLATE}triggers{RST}     {triggers}")
+    if not skill.description.strip():
+        problems.append("no description, so the model cannot tell when to use it")
+    if problems:
+        err(f"Skill '{skill.name}' has {len(problems)} problem(s):")
+        for problem in problems:
+            print(f"      - {problem}")
+        print()
+        return False
+    ok(f"OK: skill '{skill.name}' is valid.")
+    print()
+    return True
 
 
 def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -> None:
@@ -153,6 +217,26 @@ def handle_skills_command(skills_mgr: SkillManager, workspace: Path, arg: str) -
     if sub == "reload":
         skills_mgr.discover()
         ok(f"Reloaded {len(skills_mgr.skills)} skills")
+        return
+
+    if sub == "test":
+        if not name:
+            usage("/skills test <name>")
+            return
+        test_skill(skills_mgr, name)
+        return
+
+    if sub in ("enable", "disable") and name:
+        # every skill Axon can see (also ~/.claude/skills), not only the marketplace folders
+        from axon.marketplace import control
+        result = control.set_skill_enabled(workspace, name, sub == "enable",
+                                           "project" if "--project" in flags else "user")
+        (ok if result.ok else err)(result.message)
+        skills_mgr.discover()
+        return
+
+    if sub in ("enable", "disable", "scope", "status"):
+        _run_control(skills_mgr, workspace, sub, parts[1:], flags)
         return
 
     if sub in ("show", "info", "inspect"):
