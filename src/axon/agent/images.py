@@ -158,9 +158,9 @@ end try'''
     return False
 
 def get_images_cache_dir() -> Path:
-    """Persistent pasted-image folder of the current project (~/.axon/projects/<key>/images)."""
-    from axon.storage import project_subdir
-    return project_subdir(None, "images")
+    """Pasted-image folder of the active session (~/.axon/projects/<key>/sessions/<id>/images)."""
+    from axon.storage import active_session_subdir
+    return active_session_subdir("images")
 
 def _get_image_dimensions(p: Path) -> tuple[int, int]:
     """Extract width and height from image headers or macOS sips."""
@@ -322,6 +322,9 @@ def ingest_image_file(raw_path: str, custom_index: int | None = None) -> ImageAt
     clean_path = unescape_path(raw_path)
     p = resolve_fuzzy_image_path(clean_path)
 
+    # Only raster images are attached: "[Image: <path>]" in pasted text must not send any other file (keys, .env) to the model.
+    if p is not None and p.suffix.lower() not in IMAGE_EXTENSIONS:
+        p = None
     if not p or not p.exists() or not p.is_file():
         # Check if already ingested by label or filename
         for att in _INGESTED_IMAGES.values():

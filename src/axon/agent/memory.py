@@ -5,7 +5,7 @@ Load order (broadest first; files are concatenated, never overridden):
 
 1. Managed policy  /Library/Application Support/Axon/AXON.md (macOS), /etc/axon/AXON.md (Linux),
                    C:\\Program Files\\Axon\\AXON.md (Windows)  (+ ClaudeCode/CLAUDE.md compat paths)
-2. User            ~/.axon/AXON.md, then ~/.axon/rules/**/*.md
+2. User            ~/.axon/AXON.md, ~/.axon/rules/**/*.md, then ~/.claude/CLAUDE.md, ~/.claude/rules/**/*.md
 3. Project         for every directory from the filesystem root down to the workspace:
                    AXON.md, .axon/AXON.md, CLAUDE.md, .claude/CLAUDE.md, unconditional
                    .axon/rules/**/*.md (+ .claude/rules), then AXON.local.md / CLAUDE.local.md.
@@ -293,6 +293,11 @@ def _resolve_imports(text: str, base_dir: Path, scope: str, depth: int, seen: se
         try:
             if _is_network_path(target) or not target.is_file():
                 continue
+            from axon.permissions.paths import is_protected_path
+            if is_protected_path(target):   # an AXON.md from a cloned repo must not pull ~/.ssh or /etc into the prompt
+                if warnings is not None:
+                    warnings.append(f"Skipped import {raw} (protected credential or system location)")
+                continue
         except (OSError, RuntimeError):
             continue
         key = _file_key(target)
@@ -411,6 +416,12 @@ class MemoryLoader:
             self._take(axon_home / "AXON.md", "user")
             for rule in _rule_files(axon_home / "rules"):
                 self._take(rule, "user")
+            # Claude Code's user-level files (~/.claude/CLAUDE.md, ~/.claude/rules/**) are honoured too
+            claude_home = home / ".claude"
+            if claude_home != axon_home:
+                self._take(claude_home / "CLAUDE.md", "user")
+                for rule in _rule_files(claude_home / "rules"):
+                    self._take(rule, "user")
         if self.mode != "managed-only":
             chain = _ancestor_chain(self.workspace)
             has_primary = any((d / name).is_file() for d in chain for name in PRIMARY_FILES + LOCAL_FILES)
@@ -543,15 +554,26 @@ class AutoMemory:
     def save(self, title: str, body: str, mem_type: str = "project") -> tuple[Path, str | None]:
         mem_type = mem_type if mem_type in self.TYPES else "project"
         self.dir.mkdir(parents=True, exist_ok=True)
+        from axon.session.store import atomic_write_text
         slug = _generate_clean_slug(title) or f"memory-{int(time.time())}"
-        topic = self.dir / f"{slug}.md"
+        topic = self._topic_path(slug, title)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        topic.write_text(f"---\ntype: {mem_type}\nmodified: {stamp}\n---\n\n# {title.strip()}\n\n{body.strip()}\n", encoding="utf-8")
+        atomic_write_text(topic, f"---\ntype: {mem_type}\nmodified: {stamp}\n---\n\n# {title.strip()}\n\n{body.strip()}\n")
         line = f"- [{title.strip()}]({topic.name}): {' '.join(body.split())[:120]}"
         existing = self.index.read_text(encoding="utf-8", errors="replace") if self.index.is_file() else "# Memory index\n"
         kept = [ln for ln in existing.splitlines() if f"]({topic.name})" not in ln]
-        self.index.write_text("\n".join(kept + [line]).rstrip() + "\n", encoding="utf-8")
+        atomic_write_text(self.index, "\n".join(kept + [line]).rstrip() + "\n")
         return topic, check_memory_index(self.index)
+
+    def _topic_path(self, slug: str, title: str) -> Path:
+        """The file this title already owns, else a free name: different titles can share a slug."""
+        path = self.dir / f"{slug}.md"
+        heading = f"\n# {title.strip()}\n"
+        n = 2
+        while path.exists() and heading not in path.read_text(encoding="utf-8", errors="replace"):
+            path = self.dir / f"{slug}-{n}.md"
+            n += 1
+        return path
 
     def list(self) -> list[Path]:
         return sorted(p for p in self.dir.glob("*.md") if p.name != "MEMORY.md") if self.dir.is_dir() else []
@@ -697,7 +719,8 @@ class MemoryStore:
             f"# {item.title}\n\n"
             f"{item.content}\n"
         )
-        target.write_text(file_content, encoding="utf-8")
+        from axon.session.store import atomic_write_text
+        atomic_write_text(target, file_content)
         from axon.session.library import record_saved
         record_saved(target, action="created", source="memory", workspace=self.workspace,
                      item={"type": "memory", "name": target.stem, "scope": scope})

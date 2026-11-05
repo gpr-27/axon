@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from axon import interruptible
 from axon.errors import ToolError
 
 USER_AGENT = (
@@ -62,11 +63,19 @@ def fetch(
     timeout: float = DEFAULT_TIMEOUT_S,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> FetchResult:
-    """Fetch a URL with redirects, a timeout and a hard byte cap. Raises ToolError."""
+    """Fetch a URL with redirects, a timeout and a hard byte cap. Raises ToolError.
+
+    The request runs on a helper thread: a socket read blocks Esc until it returns, and a slow
+    server can take the whole timeout per read."""
     ensure_online("Web access", url)
     hdrs = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.7"}
     hdrs.update(headers or {})
+    return interruptible.call(_fetch_now, url, method, data, params, hdrs, timeout, max_bytes)
+
+
+def _fetch_now(url: str, method: str, data: dict[str, Any] | None, params: dict[str, Any] | None,
+               hdrs: dict[str, str], timeout: float, max_bytes: int) -> FetchResult:
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout), follow_redirects=True, max_redirects=8,
                           transport=_TRANSPORT) as client:

@@ -19,6 +19,12 @@ if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
 
+def _typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the menu offers the same choice)."""
+    from axon.commands.common import typed_only
+    return typed_only(text)
+
+
 def _fmt_ts(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
@@ -95,7 +101,7 @@ def handle_session_delete(store: SessionStore, session_id: str = "") -> None:
     if clean_arg in ("--all", "-a", "all", "clear"):
         count = store.delete_all_sessions()
         print(f"\n  {MINT}✓ Moved {count} session(s) of this workspace to the trash.{RST} "
-              f"{SLATE}(/restore <id> brings one back){RST}\n")
+              f"{SLATE}{_typed_only('(/restore <id> brings one back)')}{RST}\n")
         return
 
     ids = [m.session_id for m in recent]
@@ -160,7 +166,7 @@ def render_restored_conversation(conversation: Any, session_id: str, ledger: Any
         except Exception:
             rows = [f"  {SLATE}(could not draw the restored conversation){RST}"]
     sys.stdout.write("\n".join(rows) + "\n")
-    print(f"  {SLATE}/transcript opens it with every tool output expandable{RST}\n")
+    print(f"  {SLATE}{_typed_only('/transcript opens it with every tool output expandable')}{RST}\n")
 
     if ledger is not None:
         reason_tok = int(getattr(ledger, "total_reasoning_tokens", 0) or 0)
@@ -254,7 +260,7 @@ def handle_branch(agent: Agent, name: str = "") -> None:
         new_id = f"{old_id}_branch_{int(datetime.datetime.now().timestamp())}"
     n = 2
     base = new_id
-    while (store.session_dir / f"{new_id}.jsonl").exists():
+    while store.exists(new_id):
         new_id = f"{base}-{n}"
         n += 1
     store.open(new_id)

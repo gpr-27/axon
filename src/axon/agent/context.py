@@ -14,6 +14,7 @@ import json
 from typing import Any
 from axon.agent.state import Conversation, estimate_content_tokens, is_turn_start
 from axon.config import Settings
+from axon.waitmarks import waiting
 
 DEFAULT_CONTEXT_WINDOW = 128_000
 TRIM_THRESHOLD_CHARS = 8_000
@@ -75,7 +76,7 @@ class ContextManager:
 
     # ── budgeting ───────────────────────────────────────────────────
     def context_window(self, model: str | None = None) -> int:
-        """The model's window capped by the context_limit setting (default 128k)."""
+        """The model's window, capped by the context_limit setting (default: auto, the model's full window)."""
         from axon.providers.registry import effective_context_window
         return effective_context_window(model or self.settings.model, self.settings, default=DEFAULT_CONTEXT_WINDOW)
 
@@ -104,14 +105,19 @@ class ContextManager:
     # ── main entry ──────────────────────────────────────────────────
     def prepare(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]], model: str | None = None) -> None:
         """Apply sliding window, cheap compaction rungs and prompt-cache breakpoints."""
+        before = len(conv.messages)
         self._apply_sliding_window(conv)
+        rewritten = len(conv.messages) != before
 
         if self.needs_compaction(conv, system, tools, model):
             self._trim_large_results(conv)
         if self.needs_compaction(conv, system, tools, model):
             self._evict_stale_results(conv)
         if self.needs_compaction(conv, system, tools, model) and len(conv.messages) >= 12:
-            self._summarize_older_turns(conv)
+            rewritten = self._summarize_older_turns(conv) or rewritten
+
+        if rewritten:
+            self._drop_thinking_blocks(conv)
 
         self._apply_cache_control(conv, system, tools, model=model)
 
@@ -131,6 +137,21 @@ class ContextManager:
                 return
             start_idx = starts[-1]
         conv.messages = conv.messages[start_idx:]
+
+    @staticmethod
+    def _drop_thinking_blocks(conv: Conversation) -> None:
+        """Remove thinking blocks from history once its prefix changed (window trim, summary).
+
+        Anthropic signs each thinking block against the conversation before it, so after older
+        messages are cut the replayed signatures are rejected with HTTP 400 ("Invalid `signature`
+        in `thinking` block"). Thinking is optional context, so dropping it is safe."""
+        for m in conv.messages:
+            content = m.get("content")
+            if m.get("role") != "assistant" or not isinstance(content, list):
+                continue
+            kept = [b for b in content if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))]
+            if kept and len(kept) != len(content):
+                m["content"] = kept
 
     # ── rung 0: cache breakpoints ───────────────────────────────────
     def _apply_cache_control(
@@ -264,18 +285,19 @@ class ContextManager:
         if instructions:
             ask += f"\nAdditional focus: {instructions}"
         try:
-            stream = provider.stream(
-                model=model,
-                system=[{"type": "text", "text": SUMMARY_SYSTEM}],
-                messages=[{"role": "user", "content": f"{ask}\n\n<transcript>\n{transcript}\n</transcript>"}],
-                tools=[],
-                max_tokens=4096,
-                effort="low",
-                thinking=thinking,
-            )
-            for _ in stream:
-                pass
-            turn = provider.finalize()
+            with waiting("compact", model=model):       # the status line under the spinner says what is happening
+                stream = provider.stream(
+                    model=model,
+                    system=[{"type": "text", "text": SUMMARY_SYSTEM}],
+                    messages=[{"role": "user", "content": f"{ask}\n\n<transcript>\n{transcript}\n</transcript>"}],
+                    tools=[],
+                    max_tokens=4096,
+                    effort="low",
+                    thinking=thinking,
+                )
+                for _ in stream:
+                    pass
+                turn = provider.finalize()
         except Exception:
             return None, None
         return ((turn.text or "").strip() or None), getattr(turn, "usage", None)

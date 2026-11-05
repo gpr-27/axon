@@ -9,8 +9,11 @@ This module keeps that tree self-describing:
 * ``projects/index.json``           every project: name, path, last opened, sessions, size;
 * ``~/.axon/README.md`` and ``projects/<key>/README.md``  generated guides, rewritten only when
   their content changes (the renderers are pure functions);
+* :func:`migrate_legacy_root_dirs`  the same for the old root-level ``images/ paste-cache/ exports/
+  debug/`` scratch folders (they had no session id: they go to ``projects/_unsorted/sessions/_unattached/``);
 * :func:`migrate_legacy_sessions`   one-time, idempotent move of ``~/.axon/sessions/*.jsonl``
-  (older layout) into the owning project's ``sessions/``: copy -> verify (sha256) -> move the
+  (oldest layout) into the owning project's ``sessions/`` (then :mod:`axon.session.relayout` turns the
+  flat files into per-session folders): copy -> verify (sha256) -> move the
   original to ``~/.axon/backup/<stamp>/`` (never deleted), with a report and journal entries.
 
 All entry points are best-effort: :func:`startup` never raises.
@@ -30,8 +33,8 @@ from axon import storage
 
 UNSORTED = "_unsorted"
 MIGRATION_MARKER = "legacy-sessions-v1.done"
-_PROJECT_DIRS = ("sessions", "outputs", "traces", "checkpoints", "memory", "todos", "trash", "screen",
-                 "images", "pastes", "exports", "plans", "debug")
+LEGACY_ROOT_MARKER = "legacy-root-dirs-v1.done"
+LEGACY_ROOT_DIRS = ("images", "paste-cache", "exports", "debug")
 
 
 def _now() -> str:
@@ -131,9 +134,13 @@ def _count(d: Path, pattern: str) -> int:
 
 
 def session_count(pdir: Path) -> int:
+    """Sessions of a project: session folders plus flat transcripts of the older layout."""
     d = pdir / "sessions"
     try:
-        return sum(1 for p in d.glob("*.jsonl") if "_sub_" not in p.name and not p.name.endswith(".traces.jsonl"))
+        return sum(1 for p in d.iterdir()
+                   if (p.is_dir() and not p.name.startswith("_") and (p / storage.SESSION_FILE).is_file())
+                   or (p.is_file() and p.name.endswith(".jsonl") and "_sub_" not in p.name
+                       and not p.name.endswith(".traces.jsonl")))
     except OSError:
         return 0
 
@@ -179,7 +186,7 @@ def project_info(workspace: Path, *, detailed: bool = False) -> dict[str, Any]:
         "data_dir_display": _home_display(pdir),
         "sessions": session_count(pdir),
         "memory_files": _count(pdir / "memory", "*.md"),
-        "screen_logs": _count(pdir / "screen", "*.log"),
+        "screen_logs": _count(pdir / "sessions", "*/screen.log") + _count(pdir / "screen", "*.log"),
         "trash": _count(pdir / "trash", "*"),
         "last_opened": str(meta.get("last_opened") or ""),
         "created": str(meta.get("created") or ""),
@@ -271,13 +278,19 @@ here (or under `AXON_HOME`). Nothing is deleted automatically.
 
 | Path | What it is |
 |---|---|
-| `settings.json`, `config.toml`, `.env`, `mcp.json`, `keybindings.json` | your settings, API keys and MCP servers |
+| `settings.json`, `settings.local.json`, `config.toml`, `keybindings.json`, `statusline.py` | your settings, provider/model/endpoint config, key bindings |
+| `.env`, `mcp-auth.json`, `settings.local.json` | **secrets** (API keys, MCP OAuth tokens): owner-only (0600), never shared or exported; this folder is 0700 |
+| `mcp.json`, `mcp-state.json` | MCP servers and their enable/disable state |
 | `AXON.md`, `memory/`, `rules/` | user-wide instructions and memory (intentionally global) |
 | `agents/`, `commands/`, `skills/`, `plugins/`, `output-styles/`, `prompts/` | your extensions |
+| `agent-memory/`, `plugin-data/`, `bin/` | subagent memory, per-plugin data, helper binaries (OCR) |
 | `history.jsonl` | every prompt you typed, tagged with its project |
 | `usage.jsonl` | every model call: model, tokens, cache, cost (`/stats`, `axon report`) |
-| `logs/`, `cache/`, `bug-reports/` | logs and scratch data |
-| `backup/<timestamp>/` | originals kept by migrations (never deleted) |
+| `logs/` | `axon.log`, `mcp-<server>.log` |
+| `cache/` | regenerable scratch data (reports, key checks); safe to delete |
+| `state/<name>.json` | small remembered choices |
+| `bug-reports/` | saved bug reports |
+| `backup/<timestamp>/` | originals kept by migrations (never deleted); `migrations/` holds the done-markers |
 | `projects/index.json` | all projects: name, path, last opened, sessions, size (`axon projects`) |
 
 ## Per project: `projects/<project-key>/`
@@ -289,25 +302,43 @@ character replaced by `-`. Each project folder has its own `README.md`.
 |---|---|
 | `project.json` | name, workspace path, created, last opened, sessions, git remote/branch |
 | `activity.jsonl` | append-only journal of everything: prompts, commands, `!` shell, `#` notes, /btw, queue, permissions, settings, turns, tools, errors, rewinds, deletes, skill runs, subagent results, hook runs, plans, saved files (`/activity`, `axon activity`) |
-| `sessions/<id>.jsonl` | full transcripts: messages, thinking, tool calls and results, usage, cost, skill runs, subagent results, hook runs, plans, saved files (`/resume`, `/history all`) |
-| `sessions/<id>_sub_<n>.jsonl` | subagent transcripts |
+| `sessions/<id>/` | **one folder per chat session; everything of that session lives only in here** (`/resume <id>`, `/history all`) |
+| `sessions/<id>/session.jsonl` | full transcript: messages, thinking, tool calls and results, usage, cost, skill runs, subagent results, hook runs, plans, saved files |
+| `sessions/<id>/subagents/<n>.jsonl` | subagent transcripts (`<n>.trace.jsonl`: their traces) |
+| `sessions/<id>/screen.log` | plain-text copy of everything shown in the terminal |
+| `sessions/<id>/trace.jsonl` | per-turn traces (`/trace`, `axon report`) |
+| `sessions/<id>/outputs/` | complete tool and shell outputs that were truncated for the model, background shell logs |
+| `sessions/<id>/checkpoints/` | file snapshots for `/rewind`; `rewound/` keeps what a rewind replaced |
+| `sessions/<id>/images/`, `pastes/` | pasted images and large pasted text (the text stays in the transcript too) |
+| `sessions/<id>/todos.json`, `exports/`, `debug.log` | todo list, `/export` files, `--debug` log |
+| `sessions/_unattached/` | images/pastes made while no session was active (rare) |
 | `library/<type>/<name>/` | a copy of every version of every skill, agent, command, memory, rule, prompt and AXON.md, kept even after the original is edited or deleted (`/library`, `axon library`) |
-| `outputs/<id>/` | complete tool and shell outputs that were truncated for the model |
-| `screen/<stamp>-<id>.log` | plain-text copy of everything shown in the terminal |
-| `traces/<id>.jsonl` | per-turn traces (`/trace`, `axon report`) |
-| `checkpoints/<id>/` | file snapshots for `/rewind`; `rewound/` keeps what a rewind replaced |
 | `memory/` | auto memory for this project |
-| `todos/<id>.json` | todo lists |
-| `trash/` | deleted sessions (`/restore` lists and restores them) |
-| `images/`, `pastes/`, `exports/`, `plans/`, `debug/` | pasted images, large pastes, `/export` files, plans, debug logs |
+| `plans/` | plan-mode files |
+| `trash/` | deleted sessions: the whole session folder (`/restore` lists and restores them) |
 | `tips.json` | cached usage tips |
+
+## Where each thing is stored
+
+| You did | Stored in |
+|---|---|
+| typed a prompt | `history.jsonl`, the project's `activity.jsonl`, the session transcript |
+| pasted text / an image | `sessions/<id>/pastes/`, `sessions/<id>/images/` |
+| a tool printed a lot | `sessions/<id>/outputs/` (the model saw a truncated copy) |
+| an edit you can rewind / undo | `sessions/<id>/checkpoints/` (`/rewind`) |
+| planned, todo list | `plans/`, `sessions/<id>/todos.json` |
+| subagent ran | `sessions/<id>/subagents/`, `agent-memory/` |
+| model call (tokens, cost) | `usage.jsonl`, `sessions/<id>/trace.jsonl` |
+| something failed | `logs/`, `sessions/<id>/debug.log`, the journal |
+| deleted a session | `trash/` (`/restore`) |
+
+`/storage` prints this tree with sizes and flags entries Axon did not create.
 
 ## Retention, backup and restore
 
 - Retention: `cleanup_period_days` defaults to `0` = keep forever. Set it to N > 0 to prune
-  sessions, traces and todos older than N days at startup (the journal, memory, screen logs and
-  trash are never pruned).
-- `/delete` moves a session to `projects/<key>/trash/`; `/restore <id>` moves it back.
+  whole session folders older than N days at startup (the journal, memory and trash are never pruned).
+- `/delete` moves a session folder to `projects/<key>/trash/`; `/restore <id>` moves it back.
 - `axon purge [project|caches|all]` deletes data on purpose (asks first).
 - Back up: copy this whole folder (Axon only appends to journals and transcripts, so a copy taken
   while Axon runs is consistent up to the last line). Restore: copy it back.
@@ -331,16 +362,12 @@ Axon data for `{info.get('workspace', '')}` (generated; updated when these facts
 |---|---|
 | `project.json` | metadata (name, path, last opened, git) |
 | `activity.jsonl` | append-only journal of every action and event (`/activity`) |
-| `sessions/` | transcripts (`/resume <id>`, `/history all`) |
+| `sessions/<id>/` | one folder per chat session holding all of it: `session.jsonl`, `subagents/`, `screen.log`, `trace.jsonl`, `outputs/` (full tool output), `checkpoints/` (rewind/undo file backups), `images/`, `pastes/`, `todos.json`, `exports/`, `debug.log` (`/resume <id>`, `/history all`) |
 | `library/` | every version of skills, agents, commands, memory, rules and prompts (`/library`) |
-| `outputs/` | full tool/shell outputs that were truncated for the model |
-| `screen/` | plain-text copies of the terminal |
-| `traces/` | per-turn traces |
-| `checkpoints/` | /rewind snapshots (`rewound/` keeps replaced versions) |
 | `memory/` | this project's auto memory |
-| `todos/` | todo lists |
-| `trash/` | deleted sessions (`/restore`) |
-| `images/` `pastes/` `exports/` `plans/` `debug/` | attachments, exports and logs |
+| `plans/` | plan-mode files |
+| `trash/` | deleted session folders (`/restore`) |
+| `tips.json` | cached usage tips |
 
 See `../../README.md` for the whole layout.
 """
@@ -474,6 +501,83 @@ def migrate_legacy_sessions(*, force: bool = False) -> dict[str, Any]:
     return report
 
 
+def _free_destination(dest: Path, digest: str) -> Path:
+    """``dest``, or a ``_legacy`` sibling when ``dest`` holds different content (never overwrite)."""
+    stem, suffix = dest.stem, dest.suffix
+    n = 0
+    while dest.exists() and _sha256(dest) != digest:
+        n += 1
+        label = "_legacy" if n == 1 else f"_legacy{n}"
+        dest = dest.with_name(f"{stem}{label}{suffix}")
+    return dest
+
+
+def _copy_verified(src: Path, dest: Path, digest: str) -> None:
+    """Copy ``src`` to ``dest`` through a temp file and check the sha256 before it appears."""
+    tmp = dest.with_name(f".{dest.name}.migrating")
+    shutil.copy2(src, tmp)
+    if _sha256(tmp) != digest:
+        tmp.unlink(missing_ok=True)
+        raise OSError("copy verification failed (sha256 mismatch)")
+    os.replace(tmp, dest)
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    """Remove ``root`` and its sub-folders, but only those that are empty."""
+    for sub in sorted((x for x in root.rglob("*") if x.is_dir()), reverse=True):
+        try:
+            sub.rmdir()
+        except OSError:
+            pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
+def _move_legacy_root_file(top: Path, src: Path, dest_root: Path, backup: Path) -> dict[str, str]:
+    rel = src.relative_to(top)
+    digest = _sha256(src)
+    dest = _free_destination(dest_root / top.name / rel, digest)
+    storage.ensure_dir(dest.parent)
+    if not dest.exists():
+        _copy_verified(src, dest, digest)
+    kept = backup / top.name / rel
+    storage.ensure_dir(kept.parent)
+    shutil.move(str(src), str(kept))
+    return {"from": str(src), "to": str(dest), "backup": str(kept), "sha256": digest}
+
+
+def migrate_legacy_root_dirs(*, force: bool = False) -> dict[str, Any]:
+    """Move the old root-level scratch folders (``images/ paste-cache/ exports/ debug/``) into
+    ``projects/_unsorted/sessions/_unattached/<name>/``: copy, verify the sha256, then move the
+    original to ``backup/<stamp>/legacy-root/``. Nothing is overwritten or deleted; re-running is safe."""
+    home = storage.axon_home()
+    marker = home / "migrations" / LEGACY_ROOT_MARKER
+    report: dict[str, Any] = {"ran": False, "moved": [], "errors": []}
+    if marker.exists() and not force:
+        return report
+    sources = [home / n for n in LEGACY_ROOT_DIRS if (home / n).is_dir()]
+    files = [(d, f) for d in sources for f in sorted(d.rglob("*")) if f.is_file() and not f.is_symlink()]
+    if not files:
+        _write_marker(marker, "")
+        return report
+    report["ran"] = True
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = home / "backup" / stamp / "legacy-root"
+    dest_root = home / "projects" / UNSORTED / "sessions" / storage.UNATTACHED
+    for top, src in files:
+        try:
+            report["moved"].append(_move_legacy_root_file(top, src, dest_root, backup))
+        except OSError as e:
+            report["errors"].append({"file": str(src), "error": str(e)})
+    for d in sources:
+        _remove_empty_dirs(d)
+    if not report["errors"]:
+        _write_marker(marker, str(backup))
+    return report
+
+
 def _write_marker(marker: Path, report_path: str) -> None:
     try:
         storage.ensure_dir(marker.parent)
@@ -528,10 +632,16 @@ def startup(workspace: Path) -> dict[str, Any]:
     generated READMEs. Never raises; returns {"migration": report, "readmes": [...]}."""
     out: dict[str, Any] = {"migration": {}, "readmes": []}
     t0 = time.time()
-    for step in ("migrate", "touch", "readme", "index"):
+    for step in ("migrate", "root", "relayout", "touch", "readme", "index"):
         try:
             if step == "migrate":
                 out["migration"] = migrate_legacy_sessions()
+            elif step == "root":
+                out["legacy_root"] = migrate_legacy_root_dirs()
+                storage.ensure_home_layout()
+            elif step == "relayout":  # flat files -> one folder per session (idempotent, moves only)
+                from axon.session.relayout import migrate_project
+                out["relayout"] = migrate_project(storage.project_dir(workspace))
             elif step == "touch":
                 out["project"] = touch_project(workspace)
             elif step == "readme":
@@ -547,5 +657,5 @@ def startup(workspace: Path) -> dict[str, Any]:
 __all__ = [
     "UNSORTED", "project_name", "project_root", "git_info", "project_info", "touch_project", "update_index",
     "index_path", "render_home_readme", "render_project_readme", "write_readmes", "write_if_changed",
-    "migrate_legacy_sessions", "startup", "session_count", "dir_size",
+    "migrate_legacy_sessions", "migrate_legacy_root_dirs", "startup", "session_count", "dir_size",
 ]

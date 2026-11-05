@@ -1,7 +1,7 @@
 """
 The library: everything Axon and you created or ran, saved under the project and shown by ``/library``.
 
-Every event below is written twice: to the session transcript (``sessions/<id>.jsonl``, shown by
+Every event below is written twice: to the session transcript (``sessions/<id>/session.jsonl``, shown by
 ``/history``) and to the project's activity journal (``activity.jsonl``, shown by ``/activity``):
 
     skill_run        a skill ran (typed ``/name`` or called by the model): name, args, scope, result
@@ -42,6 +42,17 @@ PREVIEW_CHARS = 4000
 
 
 # ─── Classifying files ──────────────────────────────────────────────────────
+
+def typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the command's menu offers it instead)."""
+    from axon.commands.common import typed_only as _typed_only
+    return _typed_only(text)
+
+
+def is_tty() -> bool:
+    from axon.commands.common import is_tty as _is_tty
+    return _is_tty()
+
 
 def _home() -> Path:
     from axon import storage
@@ -282,16 +293,18 @@ def collect(workspace: Path | str) -> dict[str, Any]:
     for e in journal:
         by_kind.setdefault(str(e.get("kind")), []).append(e)
 
-    sess = _files(pd / "sessions", "*.jsonl")
+    sess = _files(pd / "sessions", "*/session.jsonl") + _files(pd / "sessions", "*.jsonl")  # folders + flat layout
     main = [p for p in sess if "_sub_" not in p.stem]
-    subs = [p for p in sess if "_sub_" in p.stem]
+    subs = _files(pd / "sessions", "*/subagents/*.jsonl") + [p for p in sess if "_sub_" in p.stem]
+    subs = [p for p in subs if p.stem.isdigit() or "_sub_" in p.stem]
     out["sessions"] = {"count": len(main), "path": str(pd / "sessions"),
-                       "items": [{"id": p.stem, "path": str(p), "bytes": p.stat().st_size,
-                                  "modified": p.stat().st_mtime} for p in main]}
+                       "items": [{"id": p.parent.name if p.name == "session.jsonl" else p.stem, "path": str(p),
+                                  "bytes": p.stat().st_size, "modified": p.stat().st_mtime} for p in main]}
     out["subagents"] = {"transcripts": len(subs),
                         "runs": [e.get("data", {}) | {"t": e.get("t"), "session_id": e.get("session_id")}
                                  for e in by_kind.get("subagent", [])],
-                        "items": [{"id": p.stem, "path": str(p)} for p in subs]}
+                        "items": [{"id": p.stem if "_sub_" in p.stem else f"{p.parent.parent.name}_sub_{p.stem}",
+                                   "path": str(p)} for p in subs]}
 
     skills: list[dict[str, Any]] = []
     try:
@@ -395,7 +408,7 @@ def render(inv: dict[str, Any], section: str | None = None, limit: int = 10) -> 
         L.append(f"Saved in  {inv['data_dir']}")
     if want("sessions"):
         s = inv["sessions"]
-        head("Sessions", f"{s['count']} · /resume, /history")
+        head("Sessions", f"{s['count']}" + typed_only(" · /resume, /history"))
         for it in s["items"][:n]:
             L.append(f"  {_when(it['modified'])}  {it['id']}  {it['bytes'] // 1024} KB")
     if want("subagents"):
@@ -430,7 +443,7 @@ def render(inv: dict[str, Any], section: str | None = None, limit: int = 10) -> 
             L.append(f"  /{x['name']:<22} {x['scope']:<9} {_one(x['description'], 60)}")
     if want("memory"):
         s = inv["memory"]
-        head("Memory", f"{len(s['items'])} files · {len(s['events'])} changes · /memory")
+        head("Memory", f"{len(s['items'])} files · {len(s['events'])} changes" + typed_only(" · /memory"))
         for x in s["items"][:n]:
             L.append(f"  [{x['scope']}] {_one(x['title'], 70)}" + (f"\n      {x['path']}" if full else ""))
     if want("hooks"):
@@ -450,7 +463,7 @@ def render(inv: dict[str, Any], section: str | None = None, limit: int = 10) -> 
             L.append(f"  {x['name']}")
     if want("files"):
         f = inv["files"]
-        head("File history (/rewind)", f"{f['sessions_with_checkpoints']} sessions · {f['bytes'] // 1024} KB")
+        head("File history", f"{f['sessions_with_checkpoints']} sessions · {f['bytes'] // 1024} KB")
     if want("outputs"):
         o = inv["outputs"]
         head("Full tool outputs", f"{o['count']} files · {o['bytes'] // 1024} KB")
@@ -461,10 +474,11 @@ def render(inv: dict[str, Any], section: str | None = None, limit: int = 10) -> 
             L.append(f"  {_when(r.get('t'))}  {r.get('action'):<8} {r.get('type')}/{r.get('name')}  ({r.get('source')})")
     if want("usage"):
         u = inv["usage"]
-        head("Model calls", f"{u['calls']} · ${u['cost']:.4f} · /stats")
+        head("Model calls", f"{u['calls']} · ${u['cost']:.4f}" + typed_only(" · /stats"))
     if section is None:
         L.append("")
-        L.append("Details: /library <" + "|".join(SECTIONS) + ">   ·   JSON: axon library --json")
+        if not is_tty():
+            L.append("Details: /library <" + "|".join(SECTIONS) + ">   ·   JSON: axon library --json")
     return L
 
 

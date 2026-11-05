@@ -16,14 +16,18 @@ import os
 import re
 import threading
 import time
+import weakref
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Iterator
+from axon import interruptible
 from axon.config import Settings
 from axon.errors import ToolError
 from axon.agent import filechanges
 from axon.agent.state import Conversation, FileState, TodoState, record_usage
+from axon.agent import suggest
 from axon.agent.prompt import build_system
 from axon.agent.context import ContextManager
 from axon.agent.trace import (
@@ -160,41 +164,40 @@ def set_terminal_title(title: str) -> None:
 
 
 def tool_rationales(turn: AssistantTurn, registry: Any = None, previous_tools: list[ToolUseBlock] | None = None) -> dict[str, tuple[str, str]]:
-    """Map tool_use id -> (rationale, source). The text is the model's own words right before the
-    call (assistant text, else thinking); otherwise a deterministic tag. Never invented."""
-    import re
-    out: dict[str, tuple[str, str]] = {}
-    last_text, last_thinking = "", ""
+    """Map tool_use id -> (rationale, source). The text is the model's own sentence that best explains
+    the call (one naming its arguments or the tool wins; see ``decision.pick_rationale``), from its
+    text or else its thinking; otherwise a deterministic tag. Never invented."""
+    from axon.agent.decision import pick_rationales
     edited = set()
     for tu in previous_tools or []:
         if tu.name in WRITE_TOOLS and isinstance(tu.input, dict):
             edited.add(str(tu.input.get("path") or tu.input.get("file_path") or ""))
+    blocks: list[tuple[str, Any]] = []
     for b in turn.blocks:
-        if isinstance(b, TextBlock) and b.text.strip():
-            last_text = b.text.strip()
-        elif isinstance(b, ThinkingBlock) and b.text.strip():
-            last_thinking = b.text.strip()
+        if isinstance(b, TextBlock):
+            blocks.append(("text", b.text))
+        elif isinstance(b, ThinkingBlock):
+            blocks.append(("thinking", b.text))
         elif isinstance(b, ToolUseBlock):
-            src_text, source = (last_text, "model-text") if last_text else (last_thinking, "model-thinking")
-            if src_text:
-                sentences = [x.strip() for x in re.split(r"(?<=[.!?:])\s+|\n+", src_text) if x.strip()]
-                why = sentences[-1] if sentences else src_text
-                out[b.id] = (why[:200] + ("..." if len(why) > 200 else ""), source)
-            else:
+            blocks.append(("tool", (b.id, b.name, b.input)))
+    out = pick_rationales(blocks)
+    for b in turn.tool_uses:
+        if b.id in out:
+            continue
+        tag = ""
+        target = str(b.input.get("path") or b.input.get("file_path") or "") if isinstance(b.input, dict) else ""
+        if edited and (b.name == "Bash" or (target and target in edited)):
+            tag = "verifies previous edit"
+        else:
+            try:
+                if registry is not None and registry.get(b.name).readonly:
+                    tag = "read-only lookup"
+            except Exception:
                 tag = ""
-                target = str(b.input.get("path") or b.input.get("file_path") or "") if isinstance(b.input, dict) else ""
-                if edited and (b.name == "Bash" or (target and target in edited)):
-                    tag = "verifies previous edit"
-                else:
-                    try:
-                        if registry is not None and registry.get(b.name).readonly:
-                            tag = "read-only lookup"
-                    except Exception:
-                        tag = ""
-                if tag:
-                    out[b.id] = (tag, "heuristic")
-            last_text = ""  # the next call needs its own preceding text
+        if tag:
+            out[b.id] = (tag, "heuristic")
     return out
+
 
 _log = logging.getLogger("axon.agent")
 # Provider-call events go to a child logger so `--debug api` selects them (`--debug agent` still does too).
@@ -228,7 +231,16 @@ def _provider_lock(provider: Any) -> threading.RLock:
         if lock is None:
             lock = threading.RLock()
             _PROVIDER_LOCKS[id(provider)] = lock
+            _forget_lock_when_collected(provider)
         return lock
+
+
+def _forget_lock_when_collected(provider: Any) -> None:
+    """Drop the provider's lock once the provider is garbage collected, so the table does not grow."""
+    try:
+        weakref.finalize(provider, _PROVIDER_LOCKS.pop, id(provider), None)
+    except TypeError:  # not weak-referenceable: keep the lock
+        pass
 
 
 @contextlib.contextmanager
@@ -258,8 +270,11 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 def make_provider(model: str, settings: Any, role: str = "main") -> Any:
-    """provider_for(model, settings, role=...) with a fallback for the older signature."""
-    from axon.providers.registry import provider_for
+    """provider_for(model, settings, role=...) for a model that may belong to another provider than the main one."""
+    from axon.providers.registry import provider_for, settings_for_model
+    settings = settings_for_model(model, settings)
+    if getattr(settings, "model", model) != model:
+        settings = settings.model_copy(update={"model": model})
     try:
         return provider_for(model, settings, role=role)
     except TypeError:
@@ -269,6 +284,33 @@ def make_provider(model: str, settings: Any, role: str = "main") -> Any:
 def _fed_back_fact(t: dict[str, Any]) -> dict[str, Any]:
     """The facts the timeline shows for one tool result fed into the next call (no full output)."""
     return {k: t.get(k) for k in ("id", "name", "target", "lines", "bytes", "tokens", "is_error") if k in t}
+
+
+def classify_stop_failure(text: str) -> str:
+    """Map an API error message to the StopFailure ``error`` type Claude Code reports."""
+    t = (text or "").lower()
+    table = (
+        ("rate_limit", ("rate limit", "rate_limit", "429", "too many requests")),
+        ("overloaded", ("overloaded", "529")),
+        ("authentication_failed", ("authentication", "invalid api key", "unauthorized", "401", "invalid x-api-key")),
+        ("billing_error", ("billing", "credit balance", "insufficient", "payment required", "402", "quota")),
+        ("model_not_found", ("model not found", "model_not_found", "does not exist", "unknown model")),
+        ("max_output_tokens", ("max_tokens", "max output", "maximum output")),
+        ("invalid_request", ("invalid_request", "invalid request", "400", "bad request")),
+        ("server_error", ("500", "502", "503", "504", "server error", "internal error", "bad gateway", "unavailable")),
+    )
+    for name, needles in table:
+        if any(n in t for n in needles):
+            return name
+    return "unknown"
+
+
+def _stop_hook_cap() -> int:
+    """Consecutive continuations Stop hooks may force before the turn ends (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP)."""
+    try:
+        return max(1, int(os.environ.get("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP") or os.environ.get("AXON_STOP_HOOK_BLOCK_CAP") or 8))
+    except ValueError:
+        return 8
 
 
 def _as_float(v: Any) -> float:
@@ -374,6 +416,7 @@ class Agent:
             except Exception:
                 hooks = None
         self.hooks = hooks
+        self._install_hook_callbacks()
         self._git_snapshot: str | None = git_status
         self._session_context: str = ""
         self._session_started = False
@@ -400,6 +443,8 @@ class Agent:
         self._rationales: dict[str, tuple[str, str]] = {}
         self._tool_timings: dict[str, float] = {}
         self._pending_context: list[str] = []       # `!cmd` output etc., prepended to the next prompt
+        self._hook_stop: str = ""                    # set when a hook returned continue:false mid-turn
+        self._prompt_id: str = ""
         self._post_compact_context: str = ""        # files re-read after a compaction
         self._repo_map: str | None = None
         self._titled: bool | None = None            # None = unknown (check the transcript once)
@@ -407,9 +452,13 @@ class Agent:
         self.goal: str | None = getattr(settings, "goal", None)   # /goal (P-CMD sets it)
         self.pending_input: str | None = None       # prefilled into the next prompt (rewind, /diff "a")
         self.title_provider: Any = None             # optional provider for LLM titles (small_model)
+        self.suggestions = suggest.SuggestionBox()  # the guessed next prompt, shown as ghost text
+        self.suggest_provider: Any = None           # optional provider for it (small_model); built on demand
         # Background turns (Ctrl+B): id -> BackgroundTurn
         self.background_tasks: dict[str, BackgroundTurn] = {}
         self._turn_thread: threading.Thread | None = None
+        self._last_cancel_at = 0.0                  # when Esc last interrupted the turn (repeat presses are ignored)
+        self._side_provider: Any = None             # a second provider streaming for this turn (compaction)
         self._bg_request = threading.Event()
         self._bg_counter = 0
         self._active_bg: BackgroundTurn | None = None
@@ -438,6 +487,163 @@ class Agent:
     def last_trace(self) -> TurnTrace | None:
         return self.traces[-1] if self.traces else None
 
+    # ── hook plumbing ───────────────────────────────────────────────
+    def _install_hook_callbacks(self) -> None:
+        """Give the hook manager what prompt/agent/mcp_tool hooks need from the running agent."""
+        h = self.hooks
+        if self.is_subagent or h is None or not hasattr(h, "llm"):
+            return          # a subagent shares its parent's hooks: they keep calling the parent
+        h.llm = self._hook_llm
+        h.mcp_call = self._hook_mcp_call
+        h.on_async = self._on_async_hook
+
+    def _hook_llm(self, prompt: str, model: str | None, timeout: float, agent: bool = False) -> str:
+        """One model call for a ``prompt``/``agent`` hook (cheap model unless the hook names one).
+        Agent hooks run as a single evaluation without a tool loop."""
+        want = model or self.settings.small_model or self.settings.model
+        prov = self.provider
+        if want != self.settings.model and type(prov).__module__.startswith("axon.providers"):
+            try:
+                prov = make_provider(want, self.settings, role="hook")
+            except Exception:
+                prov, want = self.provider, self.settings.model
+        system = [{"type": "text", "text": "You evaluate a lifecycle hook for a coding agent. Follow the instructions "
+                                           "and reply with only the JSON object requested."}]
+
+        caller: dict[str, int] = {}
+
+        def call() -> Any:
+            caller["thread"] = threading.get_ident()
+            with _provider_lock(prov):
+                for _ in prov.stream(model=want, system=system, messages=[{"role": "user", "content": prompt}],
+                                     tools=[], max_tokens=800, effort="reflex", thinking=False):
+                    pass
+                return prov.finalize()
+
+        ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="axon-hook-llm")
+        try:
+            turn = interruptible.wait_future(ex.submit(call), timeout=max(1.0, float(timeout)))
+        except FuturesTimeout as e:
+            raise TimeoutError(str(e)) from e
+        except KeyboardInterrupt:
+            cancel = getattr(prov, "cancel", None)
+            if callable(cancel) and "thread" in caller:
+                cancel(caller["thread"])     # Esc: stop the hook's model call too
+            raise
+        finally:
+            ex.shutdown(wait=False)
+        try:
+            if getattr(turn, "usage", None) is not None:
+                cost = _as_float(record_usage(self.ledger, want, turn.usage, source="hook"))
+                self._log_usage(want, turn.usage, cost, "hook")
+        except Exception:
+            pass
+        return str(turn.text or "")
+
+    def _hook_mcp_call(self, server: str, tool_name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        """Run an MCP tool for an ``mcp_tool`` hook through the normal tool registry."""
+        try:
+            tool = self.registry.get(f"mcp__{server}__{tool_name}")
+        except ToolError as e:
+            return str(e), True
+        ctx = ToolContext(workspace=self.settings.workspace, file_state=self.file_state, todos=self.todos,
+                          settings=self.settings, ledger=self.ledger, agent=self, checkpoints=self.checkpoints)
+        try:
+            return str(tool.run(args, ctx)), False
+        except Exception as e:
+            return str(e), True
+
+    @staticmethod
+    def _hook_tool_output(value: Any) -> str:
+        """A hook's ``updatedToolOutput`` as the text the model sees."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict) and isinstance(value.get("stdout"), str):
+            err = value.get("stderr")
+            return value["stdout"] + (f"\n{err}" if isinstance(err, str) and err else "")
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+
+    def _apply_permission_updates(self, updates: list[dict[str, Any]]) -> None:
+        """``updatedPermissions`` from a PermissionRequest hook: session rules and mode changes
+        (other destinations are not written to settings files from a hook)."""
+        for upd in updates:
+            kind = str(upd.get("type") or "")
+            try:
+                if kind == "addRules":
+                    behavior = str(upd.get("behavior") or "allow")
+                    for r in upd.get("rules") or []:
+                        spec = str(r.get("toolName") or "")
+                        if r.get("ruleContent"):
+                            spec = f"{spec}({r['ruleContent']})"
+                        if spec and behavior in ("allow", "deny", "ask"):
+                            self.permissions.add_session_rule(behavior, spec)
+                elif kind == "setMode":
+                    mode = {"acceptEdits": "acceptEdits", "plan": "plan", "default": "default", "manual": "default",
+                            "bypassPermissions": "bypass"}.get(str(upd.get("mode") or ""))
+                    if mode:
+                        self.set_mode(mode)
+            except Exception:
+                continue
+
+    def expansion_hook(self, command_name: str, args: str, source: str, prompt: str,
+                       expansion_type: str = "slash_command") -> tuple[bool, str, str]:
+        """UserPromptExpansion hooks for a typed command that expands into a prompt.
+        Returns (allowed, extra_context, message)."""
+        res = self._hook("UserPromptExpansion", {
+            "expansion_type": expansion_type, "command_name": command_name, "command_args": args,
+            "command_source": source, "prompt": prompt})
+        if res is None:
+            return True, "", ""
+        if res.blocked or getattr(res, "stop", False):
+            return False, "", res.message or getattr(res, "stop_reason", "") or "blocked by a UserPromptExpansion hook"
+        return True, res.additional_context or "", ""
+
+    def model_switch_hook(self, phase: str, from_model: str, to_model: str, requested: str | None = None,
+                          source: str = "command") -> tuple[bool, str]:
+        """PreModelSwitch (phase "pre": returns (allowed, reason)) / PostModelSwitch (phase "post": the hook's
+        context is queued for the next prompt)."""
+        payload = {"from_model": from_model, "to_model": to_model, "requested_model": requested, "source": source,
+                   "context_tokens": int(self.conversation.token_estimate() or 0) if self.conversation.messages else 0}
+        if phase == "pre":
+            res = self._hook("PreModelSwitch", payload)
+            if res is None:
+                return True, ""
+            if res.blocked or res.permission_decision in ("deny", "ask") or getattr(res, "stop", False):
+                return False, res.message or res.permission_reason or "blocked by a PreModelSwitch hook"
+            return True, ""
+        res = self._hook("PostModelSwitch", payload)
+        if res is not None and res.additional_context:
+            self._pending_context.append(f"<system-reminder>\n{res.additional_context}\n</system-reminder>")
+        return True, ""
+
+    def _on_async_hook(self, rewake: bool) -> None:
+        """A background hook produced output; it is delivered with the next prompt or tool result."""
+
+    def _absorb_async_hooks(self) -> str:
+        """Text from finished background hooks (empty when there is none)."""
+        h = self.hooks
+        if h is None or not hasattr(h, "drain_async"):
+            return ""
+        try:
+            msgs = h.drain_async()
+        except Exception:
+            return ""
+        return "\n\n".join(f"<system-reminder>\n{m}\n</system-reminder>" for m in msgs) if msgs else ""
+
+    @staticmethod
+    def _emit_terminal_sequence(seq: str) -> None:
+        """Write an allowlisted OSC/BEL sequence a hook returned (``terminalSequence``) to the terminal."""
+        import sys
+        try:
+            if sys.stdout.isatty():
+                sys.stdout.write(seq)
+                sys.stdout.flush()
+        except Exception:
+            pass
+
     # ── session lifecycle ───────────────────────────────────────────
     def _hook(self, event: str, payload: dict[str, Any], tool_use_id: str = "") -> Any:
         if self.hooks is None:
@@ -449,12 +655,27 @@ class Agent:
             self.hooks.session_id = sid
             sdir = getattr(self.session, "session_dir", None)
             if sdir is not None and sid:
-                self.hooks.transcript_path = str(sdir / f"{sid}.jsonl")
+                self.hooks.transcript_path = str(self.session._file(sid)) if hasattr(self.session, "_file") else str(sdir / f"{sid}.jsonl")
             payload = {"agent_name": self.agent_name, **payload}
+            if self.is_subagent:
+                payload.setdefault("agent_type", self.agent_name)
+            if tool_use_id and event != "PermissionRequest":
+                payload.setdefault("tool_use_id", tool_use_id)
+            self.hooks.prompt_id = getattr(self, "_prompt_id", "") or ""
+            try:
+                self.hooks.cwd = str(self.settings.workspace)
+            except Exception:
+                pass
             res = self.hooks.run(event, payload)
         except Exception:
             return None
-        warnings = getattr(res, "warnings", None) or []
+        warnings = list(getattr(res, "warnings", None) or [])
+        sysmsg = str(getattr(res, "system_message", "") or "").strip()
+        if sysmsg:
+            warnings.append(f"hook message: {sysmsg}")
+        seq = str(getattr(res, "terminal_sequence", "") or "")
+        if seq and not self.is_subagent:
+            self._emit_terminal_sequence(seq)
         if getattr(res, "ran", 0):
             try:
                 self._emit(HookEvent(
@@ -523,9 +744,19 @@ class Agent:
                 from axon.session.library import sync_all
                 threading.Thread(target=sync_all, args=(self.settings.workspace,), daemon=True,
                                  name="axon-library-sync").start()
-        res = self._hook("SessionStart", {"source": source})
+        res = self._hook("SessionStart", {"source": source, "model": self.settings.model})
         if res is not None and getattr(res, "additional_context", ""):
             self._session_context = res.additional_context
+        if res is not None and getattr(res, "session_title", "") and not self.is_subagent:
+            try:
+                self.session.rename_session(res.session_title)
+            except Exception:
+                pass
+        if res is not None and getattr(res, "reload_skills", False):
+            try:
+                self.skills.reload()
+            except Exception:
+                pass
         if self.hooks is not None and getattr(self.hooks, "has", lambda _e: False)("InstructionsLoaded"):
             try:
                 for node in list(getattr(self.memory, "loaded", []) or []):
@@ -703,7 +934,8 @@ class Agent:
                 sp.stop()
         except Exception:
             pass
-        self._hook("TaskCreated", {"task_id": rec.id, "task_type": "background_turn", "prompt": rec.prompt[:2000]})
+        self._hook("TaskCreated", {"task_id": rec.id, "task_type": "background_turn", "task_subject": rec.prompt.strip().splitlines()[0][:200] if rec.prompt.strip() else "",
+                                    "task_description": rec.prompt[:2000], "prompt": rec.prompt[:2000]})
         self.journal("background", {"action": "start", "id": rec.id, "prompt": rec.prompt[:500]})
         self._bg_request.set()
         return rec
@@ -740,6 +972,7 @@ class Agent:
         self.on_approval = getattr(self, "_fg_on_approval", self.on_approval)
         self._active_bg = None
         self._hook("TaskCompleted", {"task_id": rec.id, "task_type": "background_turn", "status": rec.status,
+                                     "task_subject": rec.prompt.strip().splitlines()[0][:200] if rec.prompt.strip() else "",
                                      "last_assistant_message": str(getattr(result, "final_text", "") or "")[:4000]})
         self.journal("background", {"action": "finish", "id": rec.id, "status": rec.status, "error": rec.error or "",
                                     "elapsed_s": round(rec.ended_at - rec.started_at, 3)}, sync=True)
@@ -757,19 +990,26 @@ class Agent:
 
         def work() -> None:
             try:
-                box["result"] = self.run_turn(user_input)
-            except BaseException as e:  # noqa: BLE001 - re-raised in the waiting thread
-                box["error"] = e
+                try:
+                    box["result"] = self.run_turn(user_input)
+                except BaseException as e:  # noqa: BLE001 - re-raised in the waiting thread
+                    box["error"] = e
+                finally:
+                    if self._active_bg is not None and threading.current_thread() is self._active_bg.thread:
+                        self._finish_background(box.get("result"), box.get("error"))
+            except KeyboardInterrupt:
+                pass  # an Esc that landed after the turn had finished: nothing left to stop
             finally:
-                if self._active_bg is not None and threading.current_thread() is self._active_bg.thread:
-                    self._finish_background(box.get("result"), box.get("error"))
                 done.set()
 
         self._bg_request.clear()
+        self._last_cancel_at = 0.0
         t = threading.Thread(target=work, name="axon-turn", daemon=True)
         self._turn_thread = t
         t.start()
-        while not done.is_set():
+        # A cancel that lands after the turn finished can kill the worker before it sets `done`:
+        # a dead worker ends the wait too.
+        while not done.is_set() and t.is_alive():
             try:
                 done.wait(poll_s)
             except KeyboardInterrupt:
@@ -779,7 +1019,13 @@ class Agent:
                 return None
         if "error" in box:
             raise box["error"]
-        return box.get("result")
+        if "result" not in box:
+            raise KeyboardInterrupt()
+        return box["result"]
+
+    # A second Esc this soon after the first only aborts the model stream again: another
+    # KeyboardInterrupt would land in the clean-up the first one started.
+    REPEAT_CANCEL_S = 1.0
 
     def cancel_current_turn(self) -> bool:
         """Interrupt the running turn: a KeyboardInterrupt is raised inside the worker thread (or in
@@ -787,6 +1033,11 @@ class Agent:
         t = self._turn_thread
         if t is not None and t.is_alive() and t is not threading.current_thread():
             import ctypes
+            now = time.monotonic()
+            if now - getattr(self, "_last_cancel_at", 0.0) < self.REPEAT_CANCEL_S:
+                self._cancel_provider_stream(t.ident)
+                return True
+            self._last_cancel_at = now
             try:
                 n = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(t.ident or 0), ctypes.py_object(KeyboardInterrupt))
             except Exception:
@@ -801,12 +1052,13 @@ class Agent:
         return True
 
     def _cancel_provider_stream(self, thread_ident: int | None) -> None:
-        cancel = getattr(self.provider, "cancel", None)
-        if callable(cancel):
-            try:
-                cancel(thread_ident)
-            except Exception:
-                pass
+        for provider in (self.provider, getattr(self, "_side_provider", None)):
+            cancel = getattr(provider, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel(thread_ident)
+                except Exception:
+                    pass
 
     # ── session title ──────────────────────────────────────────────
     def _has_title(self) -> bool:
@@ -856,6 +1108,10 @@ class Agent:
         if self.title_provider is not None:
             title = self._llm_title(prompt)
         title = title or heuristic_title(prompt)
+        return self._apply_title(title)
+
+    def _apply_title(self, title: str) -> str | None:
+        """Save *title* as the session's name and show it in the terminal title."""
         if not title:
             return None
         try:
@@ -867,9 +1123,31 @@ class Agent:
         set_terminal_title(title)
         return title
 
+    def _title_in_two_steps(self, prompt: str) -> None:
+        """Name the session now from the first words of the prompt, then let the model write a better title in
+        the background. The first title is saved at once, so a process that ends early still leaves a title."""
+        first = self._apply_title(heuristic_title(prompt))
+        if first is None:
+            return
+        threading.Thread(target=self._upgrade_title, args=(prompt, first), daemon=True, name="axon-title").start()
+
+    def _upgrade_title(self, prompt: str, first: str) -> None:
+        better = self._llm_title(prompt)
+        if better and better != first and self._title == first:      # the user has not renamed it meanwhile
+            self._apply_title(better)
+
+    def _current_title_provider(self, model: str, cached: Any) -> Any:
+        """The cached title provider was built at startup; rebuild it so it follows a provider switch."""
+        try:
+            return make_provider(model, self.settings, role="title")
+        except Exception:
+            return cached
+
     def _llm_title(self, prompt: str) -> str:
         prov = self.title_provider
         model = self.settings.small_model or self.settings.model
+        if type(prov).__module__.startswith("axon.providers"):
+            prov = self._current_title_provider(model, prov)
         system = [{"type": "text", "text": "Write a 3-6 word title for a coding session that starts with the user "
                                            "message below. Reply with the title only, no quotes or punctuation."}]
         try:
@@ -885,6 +1163,68 @@ class Agent:
             return text[:60]
         except Exception:
             return ""
+
+    # ── next-prompt suggestion ─────────────────────────────────────
+    @property
+    def next_suggestion(self) -> str:
+        """The guessed next prompt ("" when there is none)."""
+        return self.suggestions.text
+
+    def _maybe_suggest(self, user_input: str, result: TurnResult) -> None:
+        """After a normal final answer, guess the user's next message in a background thread."""
+        box = self.suggestions
+        if self.is_subagent or not box.live or not getattr(self.settings, "prompt_suggestions", True):
+            return
+        if result.stop_reason != "end_turn" or not str(result.final_text or "").strip():
+            return
+        if user_input.lstrip().startswith("/"):
+            return
+        earlier = suggest.earlier_user_messages(self.conversation.messages)
+        ticket = box.start()
+        threading.Thread(target=self._suggestion_worker, args=(ticket, user_input, result.final_text, earlier),
+                         daemon=True, name="axon-suggest").start()
+
+    def _suggestion_worker(self, ticket: int, user_input: str, answer: str, earlier: list[str]) -> None:
+        text = ""
+        try:
+            if self.suggestions.is_current(ticket):
+                text = self._llm_suggestion(user_input, answer, earlier)
+        except Exception:
+            text = ""
+        self.suggestions.finish(ticket, text)
+
+    def _suggestion_provider(self, model: str) -> Any:
+        """The small model's provider, rebuilt each time so it follows a provider switch."""
+        cached = self.suggest_provider
+        if cached is not None and not type(cached).__module__.startswith("axon.providers"):
+            return cached
+        try:
+            return make_provider(model, self.settings, role="suggest")
+        except Exception:
+            return cached
+
+    def _llm_suggestion(self, user_input: str, answer: str, earlier: list[str]) -> str:
+        model = self.settings.small_model or self.settings.model
+        prov = self._suggestion_provider(model)
+        if prov is None:
+            return ""
+        system, messages = suggest.build_request(user_input, answer, earlier)
+        with _provider_lock(prov):
+            for _ in prov.stream(model=model, system=system, messages=messages, tools=[],
+                                 max_tokens=suggest.MAX_TOKENS, effort="reflex", thinking=False):
+                pass
+            turn = prov.finalize()
+        if getattr(turn, "usage", None) is not None:
+            cost = _as_float(record_usage(self.ledger, model, turn.usage, source="suggest"))
+            self._log_usage(model, turn.usage, cost, "suggest")
+        return suggest.clean_reply(str(turn.text or ""), self._command_names())
+
+    def _command_names(self) -> set[str]:
+        try:
+            from axon.commands.registry import list_command_names
+            return {name.lstrip("/").lower() for name, _ in list_command_names(agent=self)}
+        except Exception:
+            return set()
 
     def get_combined_cost(self) -> Decimal:
         """Combined session cost (main agent plus all subagents)."""
@@ -1011,7 +1351,7 @@ class Agent:
         provider = self.provider
         if model != self.settings.model and type(provider).__module__.startswith("axon.providers"):
             try:
-                provider = make_provider(model, self.settings.model_copy(update={"model": model}), role="compact")
+                provider = make_provider(model, self.settings, role="compact")
             except Exception:
                 provider, model = self.provider, self.settings.model
         return provider, model
@@ -1025,13 +1365,26 @@ class Agent:
         except Exception:
             return ""
 
+    def _generate_summary(self, instructions: str) -> tuple[str | None, Any, str]:
+        """(summary, usage, model). When the small model fails (e.g. it belongs to the provider the session
+        just switched away from), the main model writes the summary instead of a lossy heuristic one."""
+        provider, model = self._compaction_provider()
+        text = self._compact_instructions(instructions)
+        self._side_provider = provider      # so Esc aborts this stream too (it may not be self.provider)
+        try:
+            with _provider_lock(provider):
+                summary, usage = self.context.generate_summary(self.conversation, provider, model, instructions=text)
+        finally:
+            self._side_provider = None
+        if summary is None and provider is not self.provider:
+            provider, model = self.provider, self.settings.model
+            with _provider_lock(provider):
+                summary, usage = self.context.generate_summary(self.conversation, provider, model, instructions=text)
+        return summary, usage, model
+
     def compact_preview(self, instructions: str = "") -> str | None:
         """Generate the summary that compaction would use, without changing the conversation."""
-        provider, model = self._compaction_provider()
-        with _provider_lock(provider):
-            summary, usage = self.context.generate_summary(
-                self.conversation, provider, model, instructions=self._compact_instructions(instructions)
-            )
+        summary, usage, model = self._generate_summary(instructions)
         cost = _as_float(record_usage(self.ledger, model, usage, source="compact")) if usage is not None else 0.0
         if usage is not None:
             self._log_usage(model, usage, cost, "compact")
@@ -1045,7 +1398,7 @@ class Agent:
     def compact(self, trigger: str = "manual", instructions: str = "", summary: str | None = None) -> bool:
         """Summarize older turns (PreCompact hook first) on the cheap model. Pass ``summary`` (e.g. from
         :meth:`compact_preview`) to apply an already generated summary. Returns True if compacted."""
-        res = self._hook("PreCompact", {"trigger": trigger, "custom_instructions": instructions})
+        res = self._hook("PreCompact", {"trigger": trigger, "custom_instructions": instructions or None})
         if res is not None and getattr(res, "blocked", False):
             n = len(self.conversation.messages)
             t = self.conversation.token_estimate()
@@ -1055,11 +1408,7 @@ class Agent:
         tokens_before = self.conversation.token_estimate()
         usage, cost, model = None, 0.0, ""
         if summary is None:
-            provider, model = self._compaction_provider()
-            with _provider_lock(provider):
-                summary, usage = self.context.generate_summary(
-                    self.conversation, provider, model, instructions=self._compact_instructions(instructions)
-                )
+            summary, usage, model = self._generate_summary(instructions)
             if usage is not None:
                 cost = _as_float(record_usage(self.ledger, model, usage, source="compact"))
                 self._log_usage(model, usage, cost, "compact")
@@ -1098,7 +1447,7 @@ class Agent:
             if self._session_started and not self.is_subagent:
                 self.start_session("compact")
         self._hook("PostCompact", {"trigger": trigger, "compacted": changed,
-                                   "summary": (summary or "")[:4000]})
+                                   "compact_summary": (summary or "")[:20_000], "summary": (summary or "")[:4000]})
         return changed
 
     def _recent_edited_files(self, limit: int = POST_COMPACT_FILES) -> list[str]:
@@ -1148,6 +1497,8 @@ class Agent:
     def run_turn(self, user_input: str) -> TurnResult:
         """Run the ReAct loop until the model stops, a limit is hit, or the user interrupts."""
         self._turn_counter += 1
+        if not self.is_subagent:
+            self.suggestions.clear()               # last turn's guess is stale now
         trace = TurnTrace(
             turn=len(self.traces) + 1,
             prompt=user_input,
@@ -1234,15 +1585,19 @@ class Agent:
 
     def _after_turn(self, user_input: str, result: TurnResult) -> None:
         if result.stop_reason == "error":
-            self._hook("StopFailure", {"error": str(result.error or result.final_text)[:2000],
+            detail = str(result.error or result.final_text)[:2000]
+            self._hook("StopFailure", {"error": classify_stop_failure(detail), "error_details": detail,
                                        "last_assistant_message": result.final_text[:4000]})
             return
         if result.stop_reason in ("blocked", "budget_exceeded"):
             return
+        self._maybe_suggest(user_input, result)
         if self._has_title():
             return
+        if self.is_subagent or not getattr(self.settings, "auto_title", True):
+            return
         if self.title_provider is not None:
-            threading.Thread(target=self.maybe_auto_title, args=(user_input,), daemon=True, name="axon-title").start()
+            self._title_in_two_steps(user_input)
         else:
             self.maybe_auto_title(user_input)
 
@@ -1340,6 +1695,12 @@ class Agent:
             context_used=context_tokens,
             context_window=self.context.context_window(self.settings.model),
         ))
+        try:   # the session record keeps the context size too, so a restored turn shows the same gauge
+            if isinstance(self._call_meta, dict):
+                self._call_meta["context_used"] = int(context_tokens or 0)
+                self._call_meta["context_window"] = int(self.context.context_window(self.settings.model) or 0)
+        except Exception:
+            pass
         if cache_status is not None:
             self._emit(cache_status)
         return cost, call_model
@@ -1364,7 +1725,8 @@ class Agent:
             self._think_blocks = []
             self._call_meta = {"message_count": len(self.conversation.messages), "tokens_in": tokens_in,
                                "provider": self._provider_name(self.display_model()),
-                               "fed_back": [_fed_back_fact(t) for t in last_round], "wrap_up": True}
+                               "fed_back": [_fed_back_fact(t) for t in last_round], "wrap_up": True,
+                               "tool_count": len(tool_schemas), "prompt_tools": self._prompt_tools_active()}
             try:
                 fingerprint = self._cache.fingerprint(self.settings.model, str(self.settings.effort), system_blocks, tool_schemas, self.conversation.messages)
             except Exception:
@@ -1396,6 +1758,14 @@ class Agent:
         self.journal("step_limit", {"limit": limit, "report_chars": len(text), "dropped_tool_calls": len(turn.tool_uses)})
         return text, usage
 
+    def _drop_from(self, message: dict[str, Any]) -> None:
+        """Remove *message* and everything after it. Found by identity: compaction or the history window
+        may have shortened the list since the message was added."""
+        messages = self.conversation.messages
+        index = next((i for i, m in enumerate(messages) if m is message), None)
+        if index is not None:
+            del messages[index:]
+
     def _stop_result(self, text: str, reason: str, iterations: int, tool_calls: int, usage: Usage, error: str | None = None) -> TurnResult:
         return TurnResult(final_text=text, stop_reason=reason, iterations=iterations, tool_calls_count=tool_calls, usage=usage, error=error)
 
@@ -1411,22 +1781,35 @@ class Agent:
                 "budget_exceeded", 0, 0, total_usage,
             )
 
+        self._hook_stop = ""
         if not self.is_subagent:
+            import uuid
+            self._prompt_id = str(uuid.uuid4())
             res = self._hook("UserPromptSubmit", {"prompt": user_input})
             if res is not None:
+                title = str(getattr(res, "session_title", "") or "")
+                if title:
+                    try:
+                        self.session.rename_session(title)
+                    except Exception:
+                        pass
                 if res.blocked or getattr(res, "stop", False):
                     msg = res.message or getattr(res, "stop_reason", "") or "blocked"
-                    return self._stop_result(f"Prompt blocked by UserPromptSubmit hook: {msg}", "blocked", 0, 0, total_usage)
+                    tail = "" if getattr(res, "suppress_original_prompt", False) else f"\nOriginal prompt: {raw_prompt}"
+                    return self._stop_result(f"Prompt blocked by UserPromptSubmit hook: {msg}{tail}", "blocked", 0, 0, total_usage)
                 if res.additional_context:
                     user_input = f"{user_input}\n\n<user-prompt-submit-hook>\n{res.additional_context}\n</user-prompt-submit-hook>"
 
         pending = self.take_pending_context()
+        late = self._absorb_async_hooks()
+        if late:
+            pending = f"{pending}\n\n{late}" if pending else late
         if pending:
             user_input = f"{pending}\n\n{user_input}" if user_input.strip() else pending
         self.conversation.repair()
-        user_msg_index = len(self.conversation.messages)
         # A subagent's prompt is written by the model: paths in it are files to read, not images to attach.
         self.conversation.append_user(user_input, attach_images=not self.is_subagent)
+        prompt_message = self.conversation.messages[-1]
         self.session.append_user(user_input)
         self._current_turn_prompt = user_input
 
@@ -1434,6 +1817,7 @@ class Agent:
         final_text = ""
         iterations = 0
         stop_hook_forced = False
+        stop_continuations = 0
         goal_checked = False
         last_round: list[dict[str, Any]] = []
         system_blocks = self.system_blocks()
@@ -1470,8 +1854,8 @@ class Agent:
                 try:
                     if self.compact(trigger="auto"):
                         system_blocks = self.system_blocks()
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.journal("error", {"error": f"auto-compaction failed: {type(e).__name__}: {e}"[:2000], "iteration": iterations})
             else:
                 self._consecutive_compactions = 0
             stop = self._budget_guard(system_blocks, tool_schemas, iterations, total_tool_calls, total_usage, final_text)
@@ -1500,6 +1884,9 @@ class Agent:
                 "tokens_in": tokens_in,
                 "provider": self._provider_name(self.display_model()),
                 "fed_back": [_fed_back_fact(t) for t in last_round],
+                # what the model chose from: the tool definitions sent with this call
+                "tool_count": len(tool_schemas),
+                "prompt_tools": self._prompt_tools_active(),
             }
 
             try:
@@ -1517,7 +1904,7 @@ class Agent:
                 msg = f"Provider error: {err}"
                 if iterations == 1:
                     # Nothing happened this turn: roll the prompt back so the next request stays valid.
-                    del self.conversation.messages[user_msg_index:]
+                    self._drop_from(prompt_message)
                     hint = "Your message was not answered and is not in the history; /retry sends it again."
                 else:
                     # Tool calls and results of this turn stay in the history, so the model can pick up
@@ -1554,9 +1941,16 @@ class Agent:
             if not tool_uses:
                 event = "SubagentStop" if self.is_subagent else "Stop"
                 res = self._hook(event, {"stop_hook_active": stop_hook_forced, "last_assistant_message": final_text})
-                if res is not None and res.blocked and not stop_hook_forced and res.message:
+                feedback = ""
+                if res is not None and not getattr(res, "stop", False):
+                    if res.blocked and res.message:
+                        feedback = res.message
+                    elif res.additional_context:
+                        feedback = res.additional_context
+                if feedback and stop_continuations < _stop_hook_cap():
                     stop_hook_forced = True
-                    follow = f"[{event} hook feedback] {res.message}"
+                    stop_continuations += 1
+                    follow = f"[{event} hook feedback] {feedback}"
                     self.conversation.append_user(follow)
                     self.session.append_user(follow)
                     continue
@@ -1610,9 +2004,21 @@ class Agent:
                         for tu in tool_uses
                     ]
 
+            batch_stop = self._hook_stop
             if turn.stop_reason != "max_tokens":
-                self._hook("PostToolBatch", {"tool_calls": [{"tool_name": tu.name, "tool_use_id": tu.id} for tu in tool_uses],
-                                             "errors": sum(1 for r in results if r.is_error)})
+                calls = []
+                for tu, r in zip(tool_uses, results):
+                    calls.append({"tool_name": tu.name, "tool_input": tu.input if isinstance(tu.input, dict) else {},
+                                  "tool_use_id": tu.id, "tool_response": str(r.content)[:20_000]})
+                batch = self._hook("PostToolBatch", {"tool_calls": calls, "errors": sum(1 for r in results if r.is_error)})
+                if batch is not None:
+                    if batch.additional_context:
+                        results = self._with_note(results, f"<system-reminder>\n{batch.additional_context}\n</system-reminder>")
+                    if batch.blocked or getattr(batch, "stop", False):
+                        batch_stop = batch_stop or batch.message or getattr(batch, "stop_reason", "") or "Stopped by PostToolBatch hook"
+            late = self._absorb_async_hooks()
+            if late:
+                results = self._with_note(results, late)
             results = self._deliver_steer(results, iterations)
             left = limit - iterations
             if not step_warned and 0 < left <= STEP_WARNING_LEFT:
@@ -1623,6 +2029,11 @@ class Agent:
             self.conversation.append_tool_results(results, provider_encoder=self._encoder())
             self._append_results(results)
             last_round = self._observations(tool_uses, results, iterations)
+            stop_continuations = 0
+            if batch_stop:
+                self._hook_stop = ""
+                return self._stop_result((final_text + "\n\n" if final_text else "") + f"[Stopped by hook: {batch_stop}]",
+                                         "blocked", iterations, total_tool_calls, total_usage)
 
         budget = int(self.settings.turn_token_budget or 0)
         over_budget = (ceiling > 0 and self.ledger.total() >= ceiling) or (
@@ -1716,7 +2127,8 @@ class Agent:
             small = self.settings.small_model
             if action == "downgrade" and small and small != self.settings.model:
                 old = self.settings.model
-                self.settings = self.settings.model_copy(update={"model": small})
+                from axon.providers.registry import settings_for_model
+                self.settings = settings_for_model(small, self.settings).model_copy(update={"model": small})
                 if type(self.provider).__module__.startswith("axon.providers"):
                     try:
                         self.provider = make_provider(small, self.settings, role="main")
@@ -1762,7 +2174,16 @@ class Agent:
             tool_count=len(tool_schemas),
             cache_markers=markers,
             provider=str(getattr(self.provider, "name", "")),
+            prompt_tools=self._prompt_tools_active(),
         )
+
+    def _prompt_tools_active(self) -> bool:
+        """True when the endpoint has no native tool calling and the tools are described in the prompt."""
+        check = getattr(self.provider, "_prompt_tools_mode", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return False
 
     def _call_model(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]], iteration: int = 0) -> tuple[AssistantTurn | None, str, BaseException | None]:
         """Stream one model call. Returns (turn, outcome, error) with outcome ok|interrupted|error.
@@ -1833,7 +2254,7 @@ class Agent:
                     self.journal("retry", {"attempt": attempt, "max_attempts": self.max_retries, "delay_s": delay,
                                            "error": f"{type(e).__name__}: {e}"[:1000], "iteration": iteration})
                     try:
-                        time.sleep(delay)
+                        interruptible.sleep(delay)
                     except KeyboardInterrupt:
                         return AssistantTurn(blocks=[TextBlock(text=INTERRUPTED_NOTE)]), "interrupted", None
                     continue
@@ -1935,8 +2356,8 @@ class Agent:
                         from axon.ui.subagent_monitor import run_live_subagent_monitor
                         with _pause_input():
                             run_live_subagent_monitor(future_map, self.subagents, agent=self)
-                    except ImportError:
-                        pass
+                    except Exception as e:  # a monitor/UI bug must not cancel the batch
+                        self.journal("error", {"error": f"live subagent monitor failed: {type(e).__name__}: {e}"})
                     finally:
                         held, self._held_events = self._held_events or [], None
                         self._deliver_after_monitor(held, tool_uses, batch_nums)
@@ -1962,7 +2383,10 @@ class Agent:
             pool.shutdown(wait=True)
         else:
             for idx, tu in enumerate(tool_uses):
-                results[idx] = self._run_one(tu)
+                try:
+                    results[idx] = self._run_one(tu)
+                except Exception as e:
+                    results[idx] = self._error_result(tu, f"Tool error: {type(e).__name__}: {e}")
 
         final: list[ToolResultBlock] = []
         for r, tu in zip(results, tool_uses):
@@ -2014,7 +2438,7 @@ class Agent:
             self._hook("PermissionDenied", {"tool_name": block.name, "tool_input": block.input if isinstance(block.input, dict) else {},
                                             "reason": reason, "source": source}, tool_use_id=block.id)
 
-    _FULL_OUTPUT_RE = re.compile(r"\(full output, [\d,]+ chars, saved to (.+?)\)")
+    _FULL_OUTPUT_RE = re.compile(r"\(full output, [\d,]+ chars, saved to (.+?\.txt)\)")   # a folder name may hold ")"
 
     def _note_full_output(self, block: ToolUseBlock, text: str) -> None:
         """Remember a complete-output file a tool saved itself (Bash), so the transcript references it."""
@@ -2095,6 +2519,11 @@ class Agent:
         if not p.is_absolute():
             p = self.settings.workspace / p
         notes: list[str] = []
+        try:  # skills in a sub-directory's .claude/skills load the first time a file there is touched
+            if self.skills is not None and hasattr(self.skills, "load_nested_for"):
+                self.skills.load_nested_for(p)
+        except Exception:
+            pass
         try:
             with self._memory_lock:
                 loaded = self.memory.on_file_access(p)
@@ -2160,6 +2589,9 @@ class Agent:
         why = self._rationales.get(block.id)
         if why:
             kwargs.update(rationale=why[0], rationale_source=why[1])
+        parse_error = getattr(block, "parse_error", None)
+        if parse_error:
+            kwargs.update(parse_error=str(parse_error))
         return ToolExecutionStart(**kwargs)
 
     def _run_one_inner(self, block: ToolUseBlock) -> ToolResultBlock:
@@ -2176,15 +2608,20 @@ class Agent:
 
         tool_input: dict[str, Any] = dict(block.input) if isinstance(block.input, dict) else {}
         hook_perm: str | None = None
+        pre_context = ""
         pre = self._hook("PreToolUse", {"tool_name": tool.name, "tool_input": tool_input}, tool_use_id=block.id)
         if pre is not None:
-            if pre.updated_input:
-                tool_input = {**tool_input, **pre.updated_input}
+            if pre.updated_input is not None:
+                tool_input = dict(pre.updated_input)       # updatedInput replaces the whole input
             if pre.blocked or pre.permission_decision == "deny" or getattr(pre, "stop", False):
                 reason = pre.message or getattr(pre, "stop_reason", "") or "no reason given"
+                if getattr(pre, "stop", False):
+                    self._hook_stop = self._hook_stop or str(getattr(pre, "stop_reason", "") or reason)
                 self._perm_event(block, "deny", f"PreToolUse hook: {reason}", "hook")
                 return self._error_result(block, f"Blocked by PreToolUse hook: {reason}")
-            hook_perm = pre.permission_decision
+            # "defer" only means something to a calling process in -p mode; elsewhere it is ignored.
+            hook_perm = pre.permission_decision if pre.permission_decision in ("allow", "ask") else None
+            pre_context = pre.additional_context
 
         decision = self.permissions.check(tool, tool_input, self.settings.mode)
         outcome = decision.outcome
@@ -2212,12 +2649,15 @@ class Agent:
             req = self._hook("PermissionRequest", {"tool_name": tool.name, "tool_input": tool_input, "reason": reason},
                              tool_use_id=block.id)
             req_dec = getattr(req, "permission_decision", None) if req is not None else None
-            if req is not None and getattr(req, "updated_input", None):
-                tool_input = {**tool_input, **req.updated_input}
+            if req is not None and getattr(req, "updated_input", None) is not None:
+                tool_input = dict(req.updated_input)
             if req_dec == "allow":
                 outcome, source, reason = "allow", "hook", "Allowed by PermissionRequest hook."
-            elif req_dec == "deny" or (req is not None and getattr(req, "blocked", False)):
+                self._apply_permission_updates(getattr(req, "updated_permissions", None) or [])
+            elif req_dec == "deny":
                 why = str(getattr(req, "message", "") or "denied")
+                if getattr(req, "interrupt", False):
+                    self._hook_stop = self._hook_stop or f"PermissionRequest hook denied {tool.name} and stopped: {why}"
                 self._perm_event(block, "deny", f"PermissionRequest hook: {why}", "hook")
                 return self._error_result(block, f"Permission denied by PermissionRequest hook: {why}")
         if outcome == "allow":
@@ -2252,6 +2692,7 @@ class Agent:
             tool_use_id=block.id,
         )
         snapshot = self._snapshot_files(tool.name, tool_input)
+        t_tool = time.monotonic()
         try:
             out = tool.run(tool_input, ctx)
             self._note_full_output(block, str(out))
@@ -2267,12 +2708,18 @@ class Agent:
         if not is_error:
             content = self._after_file_access(tool.name, tool_input, content)
 
+        duration_ms = int((time.monotonic() - t_tool) * 1000)
         post = self._hook(
             "PostToolUse",
-            {"tool_name": tool.name, "tool_input": tool_input, "tool_response": {"content": content[:100_000], "is_error": is_error}},
+            {"tool_name": tool.name, "tool_input": tool_input, "duration_ms": duration_ms,
+             "tool_response": {"content": content[:100_000], "is_error": is_error}},
             tool_use_id=block.id,
         )
         if post is not None:
+            if getattr(post, "stop", False):
+                self._hook_stop = self._hook_stop or str(getattr(post, "stop_reason", "") or "Stopped by PostToolUse hook")
+            if getattr(post, "updated_tool_output", None) is not None:
+                content = self._hook_tool_output(post.updated_tool_output)
             extra = []
             if post.blocked and post.message:
                 extra.append(f"[PostToolUse hook feedback]\n{post.message}")
@@ -2280,10 +2727,17 @@ class Agent:
                 extra.append(f"[PostToolUse hook context]\n{post.additional_context}")
             if extra:
                 content = content + "\n\n" + "\n\n".join(extra)
+        if pre_context:
+            content = f"{content}\n\n[PreToolUse hook context]\n{pre_context}"
 
         if is_error:
             fail = self._hook("PostToolUseFailure", {"tool_name": tool.name, "tool_input": tool_input,
-                                                     "error": content[:20_000]}, tool_use_id=block.id)
+                                                     "error": content[:20_000], "is_interrupt": False,
+                                                     "duration_ms": duration_ms}, tool_use_id=block.id)
+            if fail is not None and getattr(fail, "stop", False):
+                self._hook_stop = self._hook_stop or str(getattr(fail, "stop_reason", "") or "Stopped by PostToolUseFailure hook")
+            if fail is not None and fail.blocked and fail.message:
+                content = f"{content}\n\n[PostToolUseFailure hook feedback]\n{fail.message}"
             if fail is not None and getattr(fail, "additional_context", ""):
                 content = f"{content}\n\n[PostToolUseFailure hook context]\n{fail.additional_context}"
         res = ToolResultBlock(tool_use_id=block.id, content=content, is_error=is_error)

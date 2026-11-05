@@ -4,7 +4,7 @@ timeline (:class:`TurnTrace`) built from them.
 
 Renderers consume these events through ``Agent.on_event`` (unknown event types must
 be ignored); ``Agent.traces`` keeps every turn's :class:`TurnTrace`, which is also
-appended to ``~/.axon/projects/<project>/traces/<session_id>.jsonl`` for ``/inspect``.
+appended to ``~/.axon/projects/<project>/sessions/<session_id>/trace.jsonl`` for ``/inspect``.
 """
 from __future__ import annotations
 import json
@@ -35,6 +35,7 @@ class LLMRequestInfo:
     tool_count: int
     cache_markers: int
     provider: str = ""
+    prompt_tools: bool = False     # tools described in the prompt (endpoint without native tool calling)
 
 
 @dataclass(frozen=True)
@@ -556,9 +557,9 @@ class TurnTrace:
 
 
 def trace_file(workspace: Path, session_id: str) -> Path:
-    """``~/.axon/projects/<project>/traces/<session_id>.jsonl``."""
+    """``~/.axon/projects/<project>/sessions/<session_id>/trace.jsonl``."""
     from axon import storage
-    return storage.traces_dir(Path(workspace)) / f"{session_id}.jsonl"
+    return storage.trace_path(Path(workspace), session_id)
 
 
 def save_trace(workspace: Path | None, session_id: str, trace: TurnTrace) -> None:

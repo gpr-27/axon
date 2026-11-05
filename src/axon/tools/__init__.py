@@ -24,7 +24,7 @@ from axon.tools.shell import BashTool
 from axon.tools.todo import TodoWriteTool
 from axon.tools.web import WebFetchTool
 from axon.tools.web_search import WebSearchTool
-from axon.tools.task import TaskTool, ExitPlanModeTool
+from axon.tools.task import TaskTool, SendMessageTool, ExitPlanModeTool
 from axon.tools.doctor import DoctorTool
 from axon.tools.interactive import AskUserQuestionTool, SkillTool, ToolSearchTool
 
@@ -117,6 +117,7 @@ def create_default_registry() -> ToolRegistry:
         WebFetchTool(),
         WebSearchTool(),
         TaskTool(),
+        SendMessageTool(),
         ExitPlanModeTool(),
         SkillTool(),
         AskUserQuestionTool(),
@@ -149,6 +150,7 @@ __all__ = [
     "WebFetchTool",
     "WebSearchTool",
     "TaskTool",
+    "SendMessageTool",
     "ExitPlanModeTool",
     "DoctorTool",
     "SkillTool",

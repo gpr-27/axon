@@ -4,7 +4,7 @@ File checkpoints for /rewind: snapshot files before tool edits and restore them.
 Contents are captured as raw bytes so binary files, CRLF line endings and
 non-UTF-8 encodings round-trip exactly. Each committed snapshot is one agent turn.
 When a session is bound (``set_session``), snapshots are also persisted under
-``storage.checkpoints_dir(workspace, session_id)/<n>/`` so /rewind survives a resume.
+``storage.checkpoints_dir(workspace, session_id)/<n>/`` (``sessions/<id>/checkpoints/<n>/``) so /rewind survives a resume.
 
 Rewinding never destroys data: before files are restored, their current contents are saved to
 ``<session checkpoints>/rewound/<stamp>-current/`` and the undone snapshots are moved to
@@ -54,7 +54,9 @@ class CheckpointManager:
             return
         try:
             from axon import storage
-            base = storage.project_dir(self.workspace, create=False) / "checkpoints" / session_id
+            from axon.session.relayout import migrate_for
+            migrate_for(self.workspace, session_id)
+            base = storage.session_dir(self.workspace, session_id, create=False) / "checkpoints"
         except Exception:
             return
         self._dir = base

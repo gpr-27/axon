@@ -15,6 +15,7 @@ from axon.tools.base import Tool, ToolContext
 # Resolved by get()/subset(); never advertised to the model.
 DEFAULT_ALIASES: dict[str, tuple[str, dict[str, Any]]] = {
     "LS": ("Ls", {}),
+    "Agent": ("Task", {}),   # Claude Code renamed Task to Agent
     "list_dir": ("Ls", {}),
     "FileTree": ("Ls", {"depth": 3}),
     "read_file": ("Read", {}),

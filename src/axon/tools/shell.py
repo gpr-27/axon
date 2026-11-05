@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, ClassVar
 
+from axon import interruptible
 from axon import platform as plat
 from axon.errors import ToolError
 from axon.tools.base import Tool, ToolContext
@@ -131,6 +132,11 @@ def _child_env(workspace: Path | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not _is_secret_env(k)}
     if workspace is not None:
         _apply_python_env(env, Path(workspace))
+    try:   # variables SessionStart/CwdChanged/... hooks persisted through CLAUDE_ENV_FILE
+        from axon.hooks.envfile import read_env
+        env.update(read_env(env))
+    except Exception:
+        pass
     env.update({"TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat", "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0"})
     return env
@@ -213,12 +219,10 @@ class _Capture:
     def text(self) -> str:
         with self.lock:
             head = "".join(self.head)
-            tail = "".join(self.tail)
-            kept = len(head) + len(tail)
-            if self.total <= kept:
-                return head + tail
-            tail = tail[-(self.cap // 2):]
+            tail = "".join(self.tail)[-(self.cap // 2):]   # a single chunk may be larger than the budget
             elided = self.total - len(head) - len(tail)
+            if elided <= 0:
+                return head + tail
             return f"{head}\n\n[... {elided} characters elided by Axon ...]\n\n{tail}"
 
 
@@ -246,6 +250,16 @@ def _persist_spill(spill: str, ctx: Any, cmd: str, post: Callable[[str], str] | 
     finally:
         try:
             os.unlink(spill)
+        except OSError:
+            pass
+
+
+def _discard_spill(capture: _Capture) -> None:
+    """Close and delete the spooled output of a command that was interrupted (nobody will read it)."""
+    path = capture.close_spill()
+    if path:
+        try:
+            os.unlink(path)
         except OSError:
             pass
 
@@ -349,7 +363,7 @@ class BashTool(Tool):
             try:
                 from axon import storage
                 ws, sid = _session_of(ctx)
-                log_path = storage.outputs_dir(ws, sid or "no-session") / f"background-{int(time.time() * 1000)}.log"
+                log_path = storage.outputs_dir(ws, sid) / f"background-{int(time.time() * 1000)}.log"
             except Exception:
                 log_path = None
             try:
@@ -387,18 +401,19 @@ class BashTool(Tool):
         started = time.monotonic()
         timed_out = False
         try:
-            proc.wait(timeout=timeout)
+            interruptible.wait_process(proc, timeout)   # in slices: on Windows one long wait would hold Esc
         except subprocess.TimeoutExpired:
             timed_out = True
             plat.kill_process_tree(proc)
         except KeyboardInterrupt:
             plat.kill_process_tree(proc)
+            _discard_spill(capture)
             raise
         reader.join(timeout=2.0 if timed_out else 1.0)
         detached = reader.is_alive()  # a background child still holds the pipe; the daemon reader drains it
         output = self._extract_cwd(_clean_output(capture.text())).strip("\n")
         full_note = ""
-        spill = capture.close_spill() if not detached else ""
+        spill = capture.close_spill()   # also when detached: what was captured so far is kept, not left in the temp dir
         if spill:
             full_note = _persist_spill(spill, ctx, cmd, self._extract_cwd)
             marker = "characters elided by Axon ...]"

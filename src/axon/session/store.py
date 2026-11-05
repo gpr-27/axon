@@ -13,8 +13,12 @@ Robustness:
   (temp file + ``os.replace`` with a retry loop for Windows sharing violations);
 - listing metadata is cached per file on (mtime_ns, size), so re-opening the
   session switcher only re-reads transcripts that changed;
-- deleting a session moves it (transcript, subagents, traces, checkpoints, todos, full
-  outputs) to ``projects/<key>/trash/`` - :meth:`SessionStore.restore_session` brings it back.
+- every session owns one folder, ``projects/<key>/sessions/<id>/`` (``session.jsonl``,
+  ``subagents/<n>.jsonl``, trace, screen log, outputs, checkpoints, todos ... see
+  :mod:`axon.storage`); transcripts of the older flat layout (``sessions/<id>.jsonl``) are still
+  read and are moved into their folder when the session is opened (:mod:`axon.session.relayout`);
+- deleting a session moves its whole folder to ``projects/<key>/trash/`` -
+  :meth:`SessionStore.restore_session` brings it back.
 """
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from axon import storage
 from axon.storage import axon_home as _axon_home
 from axon.agent.state import Conversation
 from axon.providers.base import AssistantTurn, ToolResultBlock, Usage
@@ -109,7 +114,7 @@ def is_temp_workspace(workspace: Path) -> bool:
 
 
 def default_session_dir(workspace: Path) -> Path:
-    """Per-project transcript directory: ~/.axon/projects/<project>/sessions."""
+    """Per-project directory holding the session folders: ~/.axon/projects/<project>/sessions."""
     try:
         from axon import storage
         return storage.sessions_dir(Path(workspace))
@@ -373,19 +378,38 @@ class SessionStore:
         ]
         self.model: str | None = None  # active model, recorded with each assistant turn
         self.active_session_id: str = self._generate_session_id()
-        self.active_file: Path = self.session_dir / f"{self.active_session_id}.jsonl"
+        self.active_file: Path = self.session_dir / "session.jsonl"
+        self._activate(self.active_session_id, register=not storage.active_session_id())
 
     def _dirs(self) -> list[Path]:
         return [self.session_dir] + self.legacy_dirs
 
     def _file(self, session_id: str) -> Path:
-        """Existing transcript for ``session_id`` (project dir first, then legacy), else the new path."""
+        """Existing transcript for ``session_id`` (session folder first, then the flat layouts of
+        the project and legacy dirs), else the path a new transcript will be written to."""
+        new = storage.transcript_path(self.session_dir, session_id)
+        if new.exists():
+            return new
         name = f"{session_id}.jsonl"
         for d in self._dirs():
             p = d / name
             if p.exists():
                 return p
-        return self.session_dir / name
+        return new
+
+    def _activate(self, session_id: str, register: bool = True) -> None:
+        """Make ``session_id`` the session that session-less artifacts (pasted images) attach to and
+        move its files out of the flat layout, if it still has any. A subagent's store (explicit
+        dir) never redirects the main session's artifacts."""
+        if register and not self._explicit_dir:
+            storage.set_active_session(self.workspace, session_id)
+        try:
+            from axon.session import relayout
+            pdir = None if self._explicit_dir else storage.project_dir(self.workspace, create=False)
+            relayout.migrate_session(self.session_dir, session_id, pdir)
+        except Exception:
+            pass
+        self.active_file = self._file(session_id)
 
     def exists(self, session_id: str) -> bool:
         return self._file(session_id).exists()
@@ -402,14 +426,14 @@ class SessionStore:
     def path_for(self, session_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9_.\-]+", session_id or "") or session_id in (".", ".."):
             raise ValueError(f"Invalid session id: {session_id!r}")
-        return self.session_dir / f"{session_id}.jsonl"
+        return storage.transcript_path(self.session_dir, session_id)
 
     def open(self, session_id: str | None = None) -> str:
         if session_id:
             self.active_session_id = session_id
         else:
             self.active_session_id = self._generate_session_id()
-        self.active_file = self._file(self.active_session_id)
+        self._activate(self.active_session_id)
         return self.active_session_id
 
     # ── writing ──
@@ -422,6 +446,7 @@ class SessionStore:
         return line
 
     def _write_record(self, target: Path, record_type: str, data: Any) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.stat().st_size == 0:
             meta = {"type": "session_meta", "timestamp": time.time(),
                     "data": {"workspace": str(self.workspace), "version": 1}}
@@ -452,7 +477,9 @@ class SessionStore:
             "stop_reason": turn.stop_reason,
             "text": turn.text,
             "thinking": turn.thinking,
-            "tool_uses": [{"id": tu.id, "name": tu.name, "input": tu.input} for tu in turn.tool_uses],
+            "tool_uses": [{"id": tu.id, "name": tu.name, "input": tu.input,
+                           **({"parse_error": tu.parse_error} if getattr(tu, "parse_error", None) else {})}
+                          for tu in turn.tool_uses],
             "native": turn.native,
             "model": model,
             "cost": round(float(cost), 8) if cost is not None else None,
@@ -609,6 +636,10 @@ class SessionStore:
                         messages.append({"role": "assistant", "content": blocks or data.get("text", "")})
                 elif t in ("compaction", "rewind") and isinstance(data, dict) and isinstance(data.get("messages"), list):
                     messages = [dict(m) for m in data["messages"] if isinstance(m, dict)]
+                    # A compaction at a turn's first model call keeps that turn's prompt as the last message: a
+                    # rolled-back failure that follows must cut there, not at the length before the compaction.
+                    prompt_start = next((i for i in range(len(messages) - 1, -1, -1) if is_user_prompt(messages[i])),
+                                        len(messages))
                 elif t == "tool_results" and isinstance(data, list):
                     if data and isinstance(data[0], dict) and data[0].get("role") == "tool":
                         messages.extend(dict(m) for m in data if isinstance(m, dict))
@@ -693,11 +724,16 @@ class SessionStore:
         return conv
 
     def _subagent_files(self, session_id: str) -> list[Path]:
-        found: dict[str, Path] = {}
+        """Subagent transcripts of a session, by index: ``<id>/subagents/<n>.jsonl`` (flat
+        ``<id>_sub_<n>.jsonl`` files of the older layout are found too)."""
+        found: dict[int, Path] = {}
         for d in reversed(self._dirs()):
             for p in d.glob(f"{glob_escape(session_id)}_sub_*.jsonl"):
                 if not p.name.endswith(".traces.jsonl"):  # legacy per-subagent trace files are not transcripts
-                    found[p.name] = p
+                    found[_sub_index_of(p)] = p
+        for p in (self.session_dir / storage._sid_dirname(session_id) / "subagents").glob("*.jsonl"):
+            if p.stem.isdigit():  # <n>.jsonl; <n>.trace.jsonl / <n>.todos.json are not transcripts
+                found[int(p.stem)] = p
         return [found[k] for k in sorted(found)]
 
     def load_ledger(self, session_id: str, model: str, include_subagents: bool = True) -> Ledger:
@@ -706,8 +742,7 @@ class SessionStore:
         self._fill_ledger(ledger, self._file(session_id), model, "main")
         if include_subagents and "_sub_" not in session_id:
             for sub_file in self._subagent_files(session_id):
-                idx = sub_file.stem.split("_sub_")[-1]
-                self._fill_ledger(ledger, sub_file, model, f"subagent_{idx}")
+                self._fill_ledger(ledger, sub_file, model, f"subagent_{_sub_index_of(sub_file)}")
         return ledger
 
     def _fill_ledger(self, ledger: Ledger, path: Path, model: str, source: str) -> None:
@@ -731,13 +766,14 @@ class SessionStore:
         for m in metas:
             self._fill_ledger(total, m.path, model, "main")
             for sub in self._subagent_files(m.session_id):
-                self._fill_ledger(total, sub, model, f"subagent_{sub.stem.split('_sub_')[-1]}")
+                self._fill_ledger(total, sub, model, f"subagent_{_sub_index_of(sub)}")
         return total
 
     # ── listing ──
     def _main_files(self, all_workspaces: bool = False, strict: bool = False) -> list[tuple[Path, os.stat_result]]:
-        """Main transcripts: everything in the project dir, plus legacy files that belong to
-        this workspace (or carry no workspace record, unless ``strict``)."""
+        """Main transcripts: every session folder of the project, plus flat transcripts of the
+        older layout, plus legacy files that belong to this workspace (or carry no workspace
+        record, unless ``strict``)."""
         out: list[tuple[Path, os.stat_result]] = []
         seen: set[str] = set()
         ws_key = _norm_ws(self.workspace)
@@ -747,15 +783,20 @@ class SessionStore:
             except OSError:
                 continue
             for e in entries:
-                if not e.name.endswith(".jsonl") or "_sub_" in e.name or e.name.startswith(".") or e.name in seen:
+                if e.name.startswith(".") or (e.name.startswith("_") and e.is_dir()):
                     continue
-                if e.name.endswith(".traces.jsonl"):
+                if e.is_dir():  # sessions/<id>/session.jsonl
+                    sid, p = e.name, Path(e.path) / storage.SESSION_FILE
+                elif e.name.endswith(".jsonl") and "_sub_" not in e.name and not e.name.endswith(".traces.jsonl"):
+                    sid, p = e.name[:-6], Path(e.path)  # flat layout: sessions/<id>.jsonl
+                else:
+                    continue
+                if sid in seen:
                     continue
                 try:
-                    st = e.stat()
+                    st = p.stat()
                 except OSError:
                     continue
-                p = Path(e.path)
                 # The per-project directory belongs to this project; shared/legacy
                 # directories are filtered by the workspace recorded in session_meta.
                 shared = idx > 0 or self._explicit_dir
@@ -765,7 +806,7 @@ class SessionStore:
                         continue
                     if not ws and strict and idx > 0:
                         continue
-                seen.add(e.name)
+                seen.add(sid)
                 out.append((p, st))
         out.sort(key=lambda x: x[1].st_mtime, reverse=True)
         return out
@@ -775,7 +816,11 @@ class SessionStore:
         try:
             for d in self._dirs():
                 for e in os.scandir(d):
-                    if e.name.endswith(".jsonl") and "_sub_" in e.name and not e.name.endswith(".traces.jsonl"):
+                    if e.is_dir():
+                        for p in (Path(e.path) / "subagents").glob("*.jsonl"):
+                            if p.stem.isdigit():
+                                idx.setdefault(e.name, []).append(p)
+                    elif e.name.endswith(".jsonl") and "_sub_" in e.name and not e.name.endswith(".traces.jsonl"):
                         parent = e.name[:-6].rsplit("_sub_", 1)[0]
                         idx.setdefault(parent, []).append(Path(e.path))
         except OSError:
@@ -792,7 +837,7 @@ class SessionStore:
         for f, st in files:
             s = _scan(f, self.model)
             tokens, cost = s.tokens, s.cost
-            for sub in subs.get(f.stem, []):
+            for sub in subs.get(session_id_of(f), []):
                 ss = _scan(sub, self.model)
                 tokens += ss.tokens
                 cost += ss.cost
@@ -801,7 +846,7 @@ class SessionStore:
                 from datetime import datetime
                 title = f"New Session ({datetime.fromtimestamp(st.st_mtime).strftime('%I:%M %p')})"
             items.append(SessionMeta(
-                session_id=f.stem, created_at=st.st_mtime, model=s.model, message_count=s.count,
+                session_id=session_id_of(f), created_at=st.st_mtime, model=s.model, message_count=s.count,
                 path=f, first_prompt=title, total_tokens=tokens, total_cost=round(cost, 5),
                 is_starred=s.starred, tags=list(s.tags),
             ))
@@ -816,7 +861,7 @@ class SessionStore:
         for f, st in files:
             s = _scan(f, self.model)
             tokens, cost = s.tokens, s.cost
-            for sub in subs.get(f.stem, []):
+            for sub in subs.get(session_id_of(f), []):
                 ss = _scan(sub, self.model)
                 tokens += ss.tokens
                 cost += ss.cost
@@ -836,7 +881,7 @@ class SessionStore:
             if not title:
                 from datetime import datetime
                 title = f"New Session ({datetime.fromtimestamp(st.st_mtime).strftime('%I:%M %p').lstrip('0')})"
-            is_curr = f.stem == active_id
+            is_curr = session_id_of(f) == active_id
             last_msg = s.last_msg or ("Active workspace session" if is_curr else "")
             if s.last_type == "assistant_turn" and s.last_stop in ("", "end_turn", "stop"):
                 status = "completed"
@@ -845,7 +890,7 @@ class SessionStore:
             else:
                 status = "needs_input"
             out.append(DashboardSession(
-                id=f.stem, title=title, last_message=last_msg or "Ready for prompt", status=status,
+                id=session_id_of(f), title=title, last_message=last_msg or "Ready for prompt", status=status,
                 updated_at=st.st_mtime, is_current=is_curr, path=f, total_tokens=tokens,
                 message_count=s.count, tags=list(s.tags), is_starred=s.starred, total_cost=round(cost, 5),
             ))
@@ -853,15 +898,21 @@ class SessionStore:
 
     # ── deletion (to the trash) ──
     def _session_artifacts(self, session_id: str) -> list[Path]:
-        """Every file/dir that belongs to a session: transcript, subagents, traces, checkpoints,
-        todos and full-output files (current and legacy locations)."""
+        """Everything that belongs to a session: its folder (transcript, subagents, trace, screen
+        log, outputs, checkpoints, todos, exports ...) plus any leftovers of the flat layouts."""
+        try:
+            from axon.session import relayout
+            pdir = None if self._explicit_dir else storage.project_dir(self.workspace, create=False)
+            relayout.migrate_session(self.session_dir, session_id, pdir)
+        except Exception:
+            pass
         main_file = self._file(session_id)
+        folder = self.session_dir / storage._sid_dirname(session_id)
         sub_traces = [p for d in self._dirs() for p in d.glob(f"{glob_escape(session_id)}_sub_*.traces.jsonl")]
-        items: list[Path] = [main_file, *self._subagent_files(session_id), *sub_traces,
+        items: list[Path] = [folder, main_file, *self._subagent_files(session_id), *sub_traces,
                              main_file.with_name(f"{session_id}.traces.jsonl"),
                              self.workspace / ".axon" / "checkpoints" / session_id]
         try:
-            from axon import storage
             pdir = storage.project_dir(self.workspace, create=False)
             items += [pdir / "traces" / f"{session_id}.jsonl", pdir / "checkpoints" / session_id,
                       pdir / "todos" / f"{session_id}.json", pdir / "outputs" / session_id]
@@ -869,7 +920,8 @@ class SessionStore:
             pass
         out: list[Path] = []
         for p in items:
-            if p.exists() and p not in out:
+            # a file inside the session folder travels with the folder
+            if p.exists() and p not in out and not (p != folder and folder in p.parents):
                 out.append(p)
         return out
 
@@ -919,7 +971,7 @@ class SessionStore:
             pass
         with _cache_lock:
             _summary_cache.pop(str(main_file), None)
-        deleted = any(m["from"] == str(main_file) for m in moved)
+        deleted = not main_file.exists() and bool(moved)
         _journal("delete", {"session": session_id, "title": title, "trash": str(dest), "files": len(moved)}, self)
         if session_id == self.active_session_id:
             self.open()
@@ -965,12 +1017,18 @@ class SessionStore:
             src, dst = d / str(it.get("to")), Path(str(it.get("from")))
             if not src.exists():
                 continue
-            if dst.exists():
-                left.append(it)
-                continue
             try:
+                if dst.exists() and not (dst.is_dir() and src.is_dir()):
+                    left.append(it)
+                    continue
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                _retry(lambda s=src, t=dst: shutil.move(str(s), str(t)))
+                if dst.is_dir():  # the session folder was re-created meanwhile (a log was still being written)
+                    from axon.session.relayout import _move
+                    _move(src, dst, dst)
+                    if src.exists():
+                        left.append(it)
+                else:
+                    _retry(lambda s=src, t=dst: shutil.move(str(s), str(t)))
             except OSError:
                 left.append(it)
         if not left:
@@ -999,7 +1057,7 @@ class SessionStore:
     def latest(self) -> str | None:
         """Most recent session of *this* workspace (unscoped legacy files are ignored)."""
         files = self._main_files(strict=True)
-        return files[0][0].stem if files else None
+        return session_id_of(files[0][0]) if files else None
 
 
 def restore_retry_state(agent: Any, session_id: str | None = None) -> None:
@@ -1090,6 +1148,18 @@ def iter_history(path: Path) -> Iterator[dict[str, Any]]:
             role = "event"
             text = f"unsent at exit: {len(data.get('queue') or [])} queued, draft {len(str(data.get('draft') or ''))} chars"
         yield {"index": i, "type": t, "timestamp": entry.get("timestamp"), "role": role, "text": text, "data": data}
+
+
+def session_id_of(path: Path) -> str:
+    """Session id of a transcript path: ``<id>/session.jsonl`` -> ``<id>``, flat ``<id>.jsonl`` -> ``<id>``."""
+    path = Path(path)
+    return path.parent.name if path.name == storage.SESSION_FILE else path.stem
+
+
+def _sub_index_of(path: Path) -> int:
+    """Subagent number of ``subagents/<n>.jsonl`` or the flat ``<id>_sub_<n>.jsonl``."""
+    m = re.search(r"(\d+)$", Path(path).stem)
+    return int(m.group(1)) if m else 0
 
 
 def glob_escape(s: str) -> str:

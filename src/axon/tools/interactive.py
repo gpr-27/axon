@@ -65,6 +65,12 @@ class SkillTool(Tool):
         text = skill_content(name, ctx.workspace, str(args.get("args") or ""))
         if text.startswith("Unknown skill"):
             raise ToolError(text)
+        hooks = getattr(agent, "hooks", None)
+        if skill is not None and getattr(skill, "hooks", None) and hasattr(hooks, "add_scoped"):
+            try:
+                hooks.add_scoped(skill.hooks, f"skill:{skill.name}")   # the skill's own hooks run while it is active
+            except Exception:
+                pass
         try:
             from axon.session.library import record_run
             scope = str(getattr(skill, "scope", "") or "")
@@ -121,6 +127,7 @@ def _parse_questions(args: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _ask_one(q: dict[str, Any], index: int, total: int) -> list[str] | None:
     """Show one question with the Selector. Returns the chosen labels, or None if cancelled."""
+    from axon.ui import decision_help, live_status
     from axon.ui.picker import SelectItem, Selector
 
     multi = q["multiSelect"]
@@ -158,7 +165,8 @@ def _ask_one(q: dict[str, Any], index: int, total: int) -> list[str] | None:
     sub = f"{index}/{total}" if total > 1 else ""
     footer = "↑↓ move · space toggle · enter confirm · esc cancel" if multi else None
     sel = Selector(items, title=f"{title}: {q['question']}", subtitle=sub, footer=footer, on_key=on_key)
-    res = sel.run()
+    with live_status.waiting("user", what="your answer"), decision_help.shown(decision_help.question_lines(q, index, total)):
+        res = sel.run()
     if res is None:
         return None
     if isinstance(res, tuple):
@@ -269,6 +277,26 @@ def schema_tokens(tools: list[Tool]) -> int:
     return total // 4
 
 
+def deferred_tool_summary(deferred: dict[str, Any]) -> str:
+    """Deferred tool names grouped by MCP server, without repeating the long ``mcp__<server>__`` prefix.
+
+    Example: "mcp__vercel__ (2): list_projects, get_deployment; OtherTool"."""
+    if not deferred:
+        return "(none)"
+    by_server: dict[str, list[str]] = {}
+    others: list[str] = []
+    for name in sorted(deferred):
+        parts = name.split("__", 2)
+        if len(parts) == 3 and parts[0] == "mcp":
+            by_server.setdefault(parts[1], []).append(parts[2])
+        else:
+            others.append(name)
+    groups = [f"mcp__{server}__ ({len(names)}): {', '.join(names)}" for server, names in by_server.items()]
+    if others:
+        groups.append(", ".join(others))
+    return "; ".join(groups) + ". A full name is the prefix plus the tool name."
+
+
 class ToolSearchTool(Tool):
     """Lists deferred tools by name only; the model fetches full schemas on demand. Fetched tools
     become callable through the registry (they are registered hidden, so the first request's tool
@@ -293,10 +321,9 @@ class ToolSearchTool(Tool):
 
     @property
     def description(self) -> str:  # type: ignore[override]
-        names = ", ".join(sorted(self.deferred)) or "(none)"
         return ("Fetch the full input schemas of deferred tools before calling them. Their names are known but "
                 "their parameters are not. Query 'select:A,B' for exact names or keywords to search. "
-                f"Deferred tools: {names}")
+                f"Deferred tools: {deferred_tool_summary(self.deferred)}")
 
     def add(self, tools: list[Tool]) -> None:
         for t in tools:
@@ -329,16 +356,27 @@ class ToolSearchTool(Tool):
             limit = int(args.get("max_results") or 5)
         except (TypeError, ValueError):
             limit = 5
+        pending, failed = _mcp_server_state()
+        if pending:  # a server that is still connecting may be the one that has the tool
+            _wait_for_mcp(pending)
+            pending, failed = _mcp_server_state()
         found = self.search(query, limit)
         if not found:
-            return f"No deferred tool matches '{query}'. Deferred tools: {', '.join(sorted(self.deferred)) or 'none'}"
+            msg = f"No deferred tool matches '{query}'. Deferred tools: {', '.join(sorted(self.deferred)) or 'none'}"
+            if pending:
+                msg += f"\nStill connecting: {', '.join(pending)}."
+            if failed:
+                msg += "\nMCP servers that failed to connect: " + "; ".join(
+                    f"{n} ({status}: {err[:160]})" if err else f"{n} ({status})" for n, status, err in failed)
+            return msg
         agent = getattr(ctx, "agent", None)
         registry = getattr(agent, "registry", None)
         lines = [f"{len(found)} tool(s); they can now be called directly:", "<functions>"]
         for t in found:
             if registry is not None and not registry.has(t.name):
                 registry.register(_Revealed(t))
-            lines.append(json.dumps({"name": t.name, "description": str(t.description or ""),
+            desc = getattr(t, "full_description", None) or t.description
+            lines.append(json.dumps({"name": t.name, "description": str(desc or ""),
                                      "parameters": t.schema}, default=str, ensure_ascii=False))
         lines.append("</functions>")
         return "\n".join(lines)
@@ -371,6 +409,10 @@ class _Revealed(Tool):
     def default_permission(self) -> str:  # type: ignore[override]
         return str(getattr(self.target, "default_permission", "ask"))
 
+    @property
+    def requires_user_interaction(self) -> bool:
+        return getattr(self.target, "requires_user_interaction", False) is True
+
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
         return self.target.run(args, ctx)
 
@@ -381,29 +423,111 @@ class _Revealed(Tool):
         return self.target.summarize(args, output, is_error)
 
 
-def defer_mcp_tools(registry: Any, context_window: int, *, fraction: float = DEFER_FRACTION,
+def _live_bridge() -> Any:
+    """The MCP bridge if MCP is in use (never creates one)."""
+    import sys
+    mod = sys.modules.get("axon.mcp.bridge")
+    return getattr(mod, "_bridge", None) if mod is not None else None
+
+
+def _mcp_server_state() -> tuple[list[str], list[tuple[str, str, str]]]:
+    bridge = _live_bridge()
+    if bridge is None:
+        return [], []
+    try:
+        return bridge.pending_servers(), bridge.failed_servers()
+    except Exception:
+        return [], []
+
+
+def _wait_for_mcp(pending: list[str], timeout: float = 10.0) -> None:
+    bridge = _live_bridge()
+    if bridge is not None:
+        try:
+            bridge.wait_for_servers(timeout)
+        except Exception:
+            pass
+
+
+def parse_tool_search_mode(value: str) -> tuple[str, float]:
+    """ENABLE_TOOL_SEARCH -> (mode, fraction): 'off' | 'always' | 'auto' with the threshold fraction.
+    Unset behaves like ``auto`` (Axon defers only when schemas would crowd the context window)."""
+    v = (value or "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return "off", DEFER_FRACTION
+    if v in ("1", "true", "yes", "on"):
+        return "always", DEFER_FRACTION
+    if v.startswith("auto:"):
+        try:
+            return "auto", max(0.0, min(100.0, float(v.split(":", 1)[1]))) / 100.0
+        except ValueError:
+            return "auto", DEFER_FRACTION
+    return "auto", DEFER_FRACTION
+
+
+# MCP schemas above this many tokens are deferred behind ToolSearch, however big the context window is: with a 1M
+# window, "10% of the window" would let 100k tokens of tool definitions ride along on every request. A single
+# server with a few tools (under ~2k tokens) stays loaded, since one extra ToolSearch step would cost more than it saves.
+DEFER_MAX_TOKENS = 2_000
+
+
+def defer_threshold(context_window: int, fraction: float) -> int:
+    """Token size of the MCP tool schemas above which they are moved behind ToolSearch."""
+    return max(1, min(int(context_window * fraction), DEFER_MAX_TOKENS))
+
+
+def forget_deferred(registry: Any, names: list[str]) -> None:
+    """Drop tools of a server that disconnected (or is reconnecting) from the ToolSearch list."""
+    search = registry.tools.get("ToolSearch") if hasattr(registry, "tools") else None
+    if isinstance(search, ToolSearchTool):
+        for name in names:
+            search.deferred.pop(name, None)
+
+
+def defer_mcp_tools(registry: Any, context_window: int, *, fraction: float | None = None,
                     force: bool | None = None) -> ToolSearchTool | None:
-    """When MCP tool schemas would use more than ``fraction`` of the context window, move them out
-    of the advertised tool list behind a ToolSearch tool. ``ENABLE_TOOL_SEARCH`` (env) = ``true`` forces
-    deferral, ``false`` disables it. Returns the ToolSearch tool when deferral happened."""
+    """Move MCP tool schemas out of the advertised tool list behind a ToolSearch tool.
+
+    ``ENABLE_TOOL_SEARCH`` (env): ``true`` defers every MCP tool, ``false`` none, ``auto`` (also the
+    default) defers when the schemas would take more than 10% of the context window and ``auto:N`` when
+    more than N%. A server with ``"alwaysLoad": true`` (or a tool marked ``anthropic/alwaysLoad``) is never
+    deferred; ``"alwaysLoad": false`` always defers that server's tools. Returns the ToolSearch tool
+    when deferral happened."""
     import os
-    env = os.environ.get("ENABLE_TOOL_SEARCH", "").strip().lower()
-    if force is None and env in ("0", "false", "no", "off"):
+    mode, env_fraction = parse_tool_search_mode(os.environ.get("ENABLE_TOOL_SEARCH", ""))
+    if fraction is None:
+        fraction = env_fraction
+    if force is None and mode == "off":
         return None
     mcp = [t for t in registry.all_tools() if str(t.name).startswith("mcp__") and not getattr(t, "hidden", False)]
     if not mcp:
         return None
-    want = force if force is not None else (env in ("1", "true", "yes", "on") or
-                                            schema_tokens(mcp) > max(1, int(context_window * fraction)))
-    if not want:
-        return None
+
+    def _server_always(t: Any) -> bool | None:
+        conn = getattr(t, "_connection", None)
+        return getattr(getattr(conn, "spec", None), "always_load", None)
+
+    exempt = [t for t in mcp if callable(getattr(t, "loads_upfront", None)) and t.loads_upfront()]
+    pinned = [t for t in mcp if _server_always(t) is False]
+    movable = [t for t in mcp if t not in exempt]
     existing = registry.tools.get("ToolSearch")
+    already_deferring = isinstance(existing, ToolSearchTool) and bool(existing.deferred)
+    if force is not None:
+        want = force
+    elif mode == "always" or already_deferring:
+        want = True   # once some MCP tools are deferred, servers that connect later are deferred too
+    else:
+        want = bool(movable) and schema_tokens(movable) > defer_threshold(context_window, fraction)
+    chosen = movable if want else [t for t in pinned if t in movable]
+    if not chosen:
+        return None
     search = existing if isinstance(existing, ToolSearchTool) else ToolSearchTool()
-    for t in mcp:
+    for t in chosen:
         registry.unregister(t.name)
-    search.add(mcp)
+    search.add(chosen)
     registry.register(search)
     return search
 
 
-__all__ = ["SkillTool", "AskUserQuestionTool", "ToolSearchTool", "defer_mcp_tools", "schema_tokens"]
+__all__ = ["SkillTool", "AskUserQuestionTool", "ToolSearchTool", "defer_mcp_tools", "defer_threshold",
+           "forget_deferred", "schema_tokens"]

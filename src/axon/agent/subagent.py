@@ -21,11 +21,13 @@ Definition files use a small YAML-style frontmatter::
     You are a security auditor ...
 """
 from __future__ import annotations
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+from axon import interruptible
 from axon.agent.state import Conversation, record_usage
 from axon.errors import ToolError
 from axon.providers.base import Usage
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     from axon.providers.base import StreamEvent
 
 DEFAULT_SUBAGENT_ITERATIONS = 25
+DEFAULT_MAX_CONCURRENT = 20
 STEP_LIMIT_PREFIX = "Stopped at the step limit"   # first body line of an exhausted result (the UI keys on it)
 # Model names in Claude agent files that mean "use the parent's model".
 _INHERIT_MODELS = {"", "inherit", "default", "sonnet", "opus", "haiku"}
@@ -59,6 +62,21 @@ class AgentDefinition:
     path: Path | None = None
     disallowed_tools: list[str] = field(default_factory=list)
     max_turns: int | None = None
+    permission_mode: str | None = None    # default | acceptEdits | auto | dontAsk | bypassPermissions | plan
+    skills: list[str] = field(default_factory=list)          # preloaded into the subagent's context
+    mcp_servers: list[Any] = field(default_factory=list)     # names (shared) or {name: spec} (private to this agent)
+    hooks: dict[str, Any] = field(default_factory=dict)      # lifecycle hooks scoped to this agent
+    memory: str | None = None             # user | project | local: a persistent notes directory
+    background: bool = False              # always run in the background
+    effort: str | None = None
+    isolation: str | None = None          # "worktree"
+    color: str | None = None
+    initial_prompt: str = ""              # first user turn when this agent is the main session (--agent)
+    omit_claude_md: bool = False          # start without the user/project memory files
+    omit_git_status: bool = False         # start without the git status snapshot
+    spawn_types: list[str] | None = None  # Agent(a, b): the only subagent types this agent may start (--agent)
+    fast_model: bool = False              # default to the session's small/fast model (explore, plan)
+    fork: bool = False                    # inherits the conversation so far (subagent_type "fork")
 
 
 BUILTIN_AGENTS: tuple[AgentDefinition, ...] = (
@@ -72,8 +90,9 @@ BUILTIN_AGENTS: tuple[AgentDefinition, ...] = (
     ),
     AgentDefinition(
         name="explore",
-        description="Fast read-only codebase exploration: find files, symbols and usages, and answer questions about the code.",
-        readonly=True,
+        description="Fast read-only codebase exploration: find files, symbols and usages, and answer questions about the code. "
+                    "Say how thorough to be: quick, medium or very thorough.",
+        readonly=True, omit_claude_md=True, omit_git_status=True, fast_model=True, max_turns=12,
         system_prompt=(
             "You are a read-only exploration subagent. Search broadly (Glob/Grep) and read only what you need. "
             "Never modify files. Report concrete findings with exact file paths and line numbers."
@@ -82,7 +101,7 @@ BUILTIN_AGENTS: tuple[AgentDefinition, ...] = (
     AgentDefinition(
         name="plan",
         description="Read-only software architect: studies the code and returns a step-by-step implementation plan.",
-        readonly=True,
+        readonly=True, omit_claude_md=True, omit_git_status=True, fast_model=True, max_turns=15,
         system_prompt=(
             "You are a read-only planning subagent. Investigate the relevant code, then return an implementation plan: "
             "files to change, the change in each, ordering, risks, and how to verify. Never modify files."
@@ -112,13 +131,81 @@ BUILTIN_AGENTS: tuple[AgentDefinition, ...] = (
 
 
 def _parse_list(raw: str) -> list[str]:
+    """Comma-separated names (``Read, Grep`` or ``[Read, Grep]``); commas inside parentheses stay, so
+    ``Agent(worker, researcher), Read`` is two entries."""
+    from axon.agent.frontmatter import _split_top
     raw = raw.strip()
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
-    return [t.strip().strip("'\"") for t in raw.split(",") if t.strip().strip("'\"")]
+    return [t.strip("'\"").strip() for t in _split_top(raw) if t.strip("'\"").strip()]
 
 
-def parse_agent_file(path: Path, source: str) -> AgentDefinition | None:
+_FIELD_ALIASES = {
+    "allowedtools": "tools", "disallowedtools": "disallowed", "maxturns": "maxturns", "permissionmode": "permissionmode",
+    "mcpservers": "mcpservers", "omitclaudemd": "omitclaudemd", "initialprompt": "initialprompt",
+    "autocompactwindow": "autocompactwindow",
+}
+_KNOWN_FIELDS = {"name", "description", "tools", "disallowed", "model", "permissionmode", "maxturns", "skills", "mcpservers",
+                 "hooks", "memory", "background", "omitclaudemd", "effort", "isolation", "color", "initialprompt",
+                 "autocompactwindow", "experimental", "readonly"}
+PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan", "manual")
+COLORS = ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _field_key(key: str) -> str:
+    k = str(key).strip().lower().replace("-", "").replace("_", "")
+    return _FIELD_ALIASES.get(k, k)
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return _parse_list(str(value))
+
+
+def _as_bool(value: Any) -> bool:
+    return value is True or str(value).strip().lower() in ("true", "yes", "1")
+
+
+def split_agent_tools(entries: list[str]) -> tuple[list[str], list[str] | None]:
+    """Normalize a ``tools`` list. ``Agent`` / ``Task`` (with or without a ``(type, ...)`` allowlist) become the
+    ``Task`` tool; the allowlist is returned separately (None = any type). ``Bash(git push *)`` style specifiers
+    keep only the tool name."""
+    tools: list[str] = []
+    spawn: list[str] | None = None
+    for e in entries:
+        m = re.match(r"^(Agent|Task)\s*(?:\((.*)\))?$", e.strip())
+        if m:
+            if "Task" not in tools:
+                tools.append("Task")
+            if m.group(2) is not None and m.group(2).strip():
+                spawn = (spawn or []) + [t for t in _parse_list(m.group(2)) if t not in (spawn or [])]
+            continue
+        name = e.split("(", 1)[0].strip() if "(" in e else e.strip()
+        if name and name not in tools:
+            tools.append(name)
+    return tools, spawn
+
+
+def parse_agent_text(text: str, fallback_name: str) -> tuple[dict[str, Any], str, str | None]:
+    """(normalized frontmatter fields, body, error). Field names are lower-cased without separators."""
+    from axon.agent.frontmatter import parse_yaml_subset, split_frontmatter
+    fm, body = split_frontmatter(text)
+    if fm is None:
+        return {}, text, None
+    try:
+        raw = parse_yaml_subset(fm)
+    except ValueError as e:
+        return {}, body, f"frontmatter does not parse: {e}"
+    return {_field_key(k): v for k, v in raw.items()}, body, None
+
+
+def parse_agent_file(path: Path, source: str, report: list[str] | None = None) -> AgentDefinition | None:
+    """Read one agent file. Returns None for a file Claude Code would skip (no name when it has frontmatter,
+    bad name, no description, unparseable YAML); the reason is appended to *report* when given."""
     try:
         raw = path.read_bytes()
         try:
@@ -128,76 +215,120 @@ def parse_agent_file(path: Path, source: str) -> AgentDefinition | None:
             text = raw.decode("utf-8", errors="replace")
     except OSError:
         return None
-    meta: dict[str, Any] = {}
-    body = text
-    lines = text.splitlines()
-    if lines and lines[0].strip() == "---":
-        end = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end = i
-                break
-        if end is not None:
-            current_list: str | None = None
-            for line in lines[1:end]:
-                if not line.strip() or line.lstrip().startswith("#"):
-                    continue
-                stripped = line.strip()
-                if current_list and stripped.startswith("- "):
-                    meta.setdefault(current_list, []).append(stripped[2:].strip().strip("'\""))
-                    continue
-                if ":" not in line:
-                    continue
-                key, val = line.split(":", 1)
-                key = key.strip().lower()
-                val = val.strip()
-                current_list = None
-                if not val and key in ("tools", "allowed-tools", "allowed_tools", "disallowedtools", "disallowed-tools", "disallowed_tools"):
-                    current_list = "disallowed" if key.startswith("disallow") else "tools"
-                    meta[current_list] = []
-                    continue
-                if key in ("allowed-tools", "allowed_tools"):
-                    key = "tools"
-                if key in ("disallowedtools", "disallowed-tools", "disallowed_tools"):
-                    key = "disallowed"
-                meta[key] = _parse_list(val) if key in ("tools", "disallowed") else val.strip("'\"")
-            body = "\n".join(lines[end + 1:])
-    name = str(meta.get("name") or path.stem).strip()
+
+    def skip(why: str) -> None:
+        if report is not None:
+            report.append(f"{path}: skipped, {why}")
+        return None
+
+    meta, body, error = parse_agent_text(text, path.stem)
+    if error:
+        return skip(error)
+    has_fm = bool(meta) or text.lstrip().startswith("---")
+    name = str(meta.get("name") or "").strip()
+    if not name:
+        if has_fm and source != "builtin" and not source.startswith("plugin:"):
+            return skip("no 'name' in the frontmatter (treated as documentation)") if meta else None
+        name = path.stem.strip()
     if not name:
         return None
-    tools_val = meta.get("tools")
-    tools: list[str] | None = None
-    if isinstance(tools_val, list) and tools_val and tools_val != ["*"]:
-        tools = tools_val
+    if name.startswith("-") or ":" in name or len(name) > 256:
+        if not source.startswith("plugin:"):
+            return skip(f"invalid name {name!r} (cannot start with '-', contain ':' or exceed 256 characters)")
+    if meta and not str(meta.get("description") or "").strip() and not source.startswith("plugin:") and source != "builtin":
+        return skip("has a name but no 'description'")
+    if report is not None:
+        unknown = [k for k in meta if k not in _KNOWN_FIELDS]
+        if unknown:
+            report.append(f"{path}: unrecognized field(s) ignored: {', '.join(unknown[:5])}")
+
+    return _definition_from_meta(meta, body, name, source, path, f"Custom agent from {path.name}")
+
+
+def _definition_from_meta(meta: dict[str, Any], body: str, name: str, source: str, path: Path | None,
+                          default_desc: str) -> AgentDefinition:
+    tools, spawn = split_agent_tools(_as_list(meta.get("tools")))
+    if tools == ["*"]:
+        tools = []
+    disallowed = [d.split("(", 1)[0].strip() if "(" in d else d for d in _as_list(meta.get("disallowed"))]
+    disallowed = ["Task" if d == "Agent" else d for d in disallowed]
     model = str(meta.get("model") or "").strip() or None
-    disallowed = meta.get("disallowed") if isinstance(meta.get("disallowed"), list) else []
     try:
-        max_turns = int(str(meta.get("maxturns") or meta.get("max_turns") or "0")) or None
+        max_turns = int(str(meta.get("maxturns") or "0")) or None
     except ValueError:
         max_turns = None
+    perm = str(meta.get("permissionmode") or "").strip() or None
+    if perm is not None and perm not in PERMISSION_MODES:
+        low = {m.lower(): m for m in PERMISSION_MODES}
+        perm = low.get(perm.lower())
+    plugin = source.startswith("plugin:")        # plugin agents may not carry hooks, mcpServers or permissionMode
+    memory = str(meta.get("memory") or "").strip().lower() or None
+    color = str(meta.get("color") or "").strip().lower() or None
+    effort = str(meta.get("effort") or "").strip().lower() or None
+    iso = str(meta.get("isolation") or "").strip().lower() or None
+    hooks = meta.get("hooks") if isinstance(meta.get("hooks"), dict) else {}
+    mcp = meta.get("mcpservers") if isinstance(meta.get("mcpservers"), list) else []
     return AgentDefinition(
         name=name,
-        description=str(meta.get("description") or f"Custom agent from {path.name}").strip(),
-        tools=tools,
+        description=str(meta.get("description") or default_desc).strip(),
+        tools=tools or None,
         model=model,
         system_prompt=body.strip(),
         source=source,
-        readonly=str(meta.get("readonly", "")).lower() in ("true", "yes", "1"),
+        readonly=_as_bool(meta.get("readonly")),
         path=path,
-        disallowed_tools=list(disallowed or []),
+        disallowed_tools=disallowed,
         max_turns=max_turns,
+        permission_mode=None if plugin else perm,
+        skills=_as_list(meta.get("skills")),
+        mcp_servers=[] if plugin else list(mcp),
+        hooks={} if plugin else dict(hooks),
+        memory=memory if memory in ("user", "project", "local") else None,
+        background=_as_bool(meta.get("background")),
+        effort=effort if effort in EFFORTS else None,
+        isolation=iso if iso == "worktree" else None,
+        color=color if color in COLORS else None,
+        initial_prompt="" if plugin else str(meta.get("initialprompt") or "").strip(),
+        omit_claude_md=_as_bool(meta.get("omitclaudemd")),
+        spawn_types=spawn,
     )
 
 
 def agent_definition_dirs(workspace: Path) -> list[tuple[str, Path]]:
+    """Agent directories, lowest priority first (later ones override earlier ones): user, then the project
+    directories walking from the repository root down to the workspace (the closest wins), then the
+    ``.claude/agents`` of every ``--add-dir`` directory."""
     ws = Path(workspace)
     from axon import storage
-    user_dir = storage.user_ext_dir("agents")
-    return [
-        ("user", user_dir),
-        ("project", ws / ".claude" / "agents"),
-        ("project", ws / ".axon" / "agents"),
-    ]
+    out: list[tuple[str, Path]] = [("user", storage.user_ext_dir("agents"))]
+    chain: list[Path] = []
+    cur = ws
+    for _ in range(40):
+        chain.append(cur)
+        if (cur / ".git").exists() or cur.parent == cur:
+            break
+        cur = cur.parent
+    for d in reversed(chain):
+        out.append(("project", d / ".claude" / "agents"))
+        out.append(("project", d / ".axon" / "agents"))
+    return out
+
+
+def extra_agent_dirs(settings: Any) -> list[tuple[str, Path]]:
+    """``.claude/agents`` / ``.axon/agents`` inside directories added with --add-dir."""
+    out: list[tuple[str, Path]] = []
+    for d in getattr(settings, "additional_dirs", None) or []:
+        out.append(("project", Path(d) / ".claude" / "agents"))
+        out.append(("project", Path(d) / ".axon" / "agents"))
+    return out
+
+
+def _agent_files(directory: Path) -> list[Path]:
+    """Every ``*.md`` under *directory*, subfolders included (a folder does not change an agent's identity)."""
+    try:
+        return sorted(directory.rglob("*.md")) if directory.is_dir() else []
+    except OSError:
+        return []
 
 
 def feature_agent_definitions() -> list[AgentDefinition]:
@@ -222,35 +353,41 @@ def feature_agent_definitions() -> list[AgentDefinition]:
 
 
 def parse_agents_json(raw: str | dict[str, Any]) -> list[AgentDefinition]:
-    """Parse ``--agents`` JSON: ``{"name": {"description": ..., "prompt": ..., "tools": [...], "model": ...}}``.
-    Raises ValueError on malformed input."""
+    """Parse ``--agents``: a JSON object (or the path of a JSON file) mapping agent names to
+    ``{"description", "prompt", "tools", "disallowedTools", "model", "permissionMode", "maxTurns", "skills",
+    "mcpServers", "hooks", "memory", "background", "effort", "isolation", "initialPrompt", ...}``.
+    ``color`` and ``experimental`` are ignored. Raises ValueError on malformed input."""
     import json
-    data = json.loads(raw) if isinstance(raw, str) else raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text.startswith("{") and Path(text).expanduser().is_file():
+            text = Path(text).expanduser().read_text(encoding="utf-8")
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise ValueError(f"not valid JSON: {e}") from e
+    else:
+        data = raw
     if not isinstance(data, dict):
         raise ValueError("--agents expects a JSON object mapping agent names to definitions")
     out: list[AgentDefinition] = []
     for name, spec in data.items():
         if not isinstance(spec, dict):
             raise ValueError(f"agent '{name}' must be an object")
+        name = str(name).strip()
+        if not name or name.startswith("-") or ":" in name:
+            raise ValueError(f"invalid agent name '{name}'")
         desc = str(spec.get("description") or "").strip()
         prompt = str(spec.get("prompt") or spec.get("system_prompt") or "").strip()
-        if not desc or not prompt:
-            raise ValueError(f"agent '{name}' needs 'description' and 'prompt'")
-        tools = spec.get("tools")
-        if isinstance(tools, str):
-            tools = _parse_list(tools)
-        disallowed = spec.get("disallowedTools") or spec.get("disallowed_tools") or []
-        if isinstance(disallowed, str):
-            disallowed = _parse_list(disallowed)
-        max_turns = spec.get("maxTurns") or spec.get("max_turns")
-        out.append(AgentDefinition(
-            name=str(name).strip(), description=desc, system_prompt=prompt,
-            tools=[str(t) for t in tools] if isinstance(tools, list) and tools and tools != ["*"] else None,
-            model=(str(spec.get("model")).strip() or None) if spec.get("model") else None,
-            source="cli", readonly=bool(spec.get("readonly", False)),
-            disallowed_tools=[str(t) for t in disallowed] if isinstance(disallowed, list) else [],
-            max_turns=int(max_turns) if isinstance(max_turns, (int, str)) and str(max_turns).isdigit() else None,
-        ))
+        if not desc:
+            raise ValueError(f"agent '{name}' needs a 'description'")
+        if not prompt and not spec.get("memory"):
+            raise ValueError(f"agent '{name}' needs a 'prompt'")
+        meta = {_field_key(k): v for k, v in spec.items() if k not in ("color", "experimental", "prompt", "system_prompt")}
+        meta["description"] = desc
+        d = _definition_from_meta(meta, prompt, name, "cli", None, desc)
+        d.readonly = bool(spec.get("readonly", False))
+        out.append(d)
     return out
 
 
@@ -272,11 +409,14 @@ def plugin_agent_definitions(workspace: Path) -> list[AgentDefinition]:
     except Exception:  # noqa: BLE001 - plugins are optional; never break agent loading
         return []
     out: list[AgentDefinition] = []
+    try:
+        from axon.commands.plugins import plugin_agent_files
+    except ImportError:  # pragma: no cover
+        return []
     for plug in plugins:
-        directory = plug.path / "agents"
         try:
-            files = sorted(directory.glob("*.md")) if directory.is_dir() else []
-        except OSError:
+            files = list(plugin_agent_files(plug))   # honours the manifest's ``agents`` key
+        except Exception:  # noqa: BLE001
             files = []
         for f in files:
             d = parse_agent_file(f, f"plugin:{plug.name}")
@@ -285,29 +425,37 @@ def plugin_agent_definitions(workspace: Path) -> list[AgentDefinition]:
     return out
 
 
-def load_agent_definitions(workspace: Path) -> list[AgentDefinition]:
-    """Built-in + feature agents, then user and project agent files, then --agents (later override)."""
-    by_name: dict[str, AgentDefinition] = {a.name: a for a in BUILTIN_AGENTS}
+def load_agent_definitions(workspace: Path, report: list[str] | None = None,
+                           extra_dirs: list[tuple[str, Path]] | None = None) -> list[AgentDefinition]:
+    """Built-in + feature agents, then plugin, user and project agent files, then --agents (later override).
+    Names compare case-insensitively (a user ``Explore`` replaces the built-in ``explore``). *report* collects
+    one line per file that was skipped or had fields that were ignored."""
+    by_name: dict[str, AgentDefinition] = {a.name.lower(): a for a in BUILTIN_AGENTS}
     for d in feature_agent_definitions():
-        by_name.setdefault(d.name, d)
+        by_name.setdefault(d.name.lower(), d)
     for d in plugin_agent_definitions(workspace):
-        by_name[d.name] = d
-    for source, directory in agent_definition_dirs(workspace):
-        try:
-            files = sorted(directory.glob("*.md")) if directory.is_dir() else []
-        except OSError:
-            files = []
-        for f in files:
-            d = parse_agent_file(f, source)
+        by_name[d.name.lower()] = d
+    for source, directory in agent_definition_dirs(workspace) + list(extra_dirs or []):
+        for f in _agent_files(directory):
+            d = parse_agent_file(f, source, report)
             if d is not None:
-                by_name[d.name] = d
-    by_name.update(_SESSION_AGENTS)
+                by_name[d.name.lower()] = d
+    for name, d in _SESSION_AGENTS.items():
+        by_name[name.lower()] = d
     return list(by_name.values())
 
 
-def get_agent_definition(workspace: Path, name: str | None) -> AgentDefinition | None:
-    wanted = (name or "general-purpose").strip().lower()
-    for d in load_agent_definitions(workspace):
+FORK_AGENT = AgentDefinition(
+    name="fork", description="Inherits the whole conversation so far; same system prompt, tools and model as the main agent.",
+    fork=True,
+)
+
+
+def get_agent_definition(workspace: Path, name: str | None, extra_dirs: list[tuple[str, Path]] | None = None) -> AgentDefinition | None:
+    wanted = (name or "general-purpose").strip().lower().removeprefix("agent-")
+    if wanted == "fork":
+        return FORK_AGENT
+    for d in load_agent_definitions(workspace, extra_dirs=extra_dirs):
         if d.name.lower() == wanted:
             return d
     return None
@@ -342,6 +490,14 @@ class SubagentTask:
     tool_calls: int = 0
     retries: int = 0          # provider retries (a request was rejected and sent again)
     resumes: int = 0          # turn-level resumes after a provider error (work kept, run continued)
+    live_agent: Any = field(default=None, repr=False, compare=False)   # the running sub-Agent (None once finished)
+    name: str = ""            # addressable name given by the delegating agent (SendMessage `to`)
+    background: bool = False  # started with run_in_background (its report arrives as a message)
+    stopped: bool = False     # stopped by the user: SendMessage will not resume it
+    runs: int = 1             # 1 + how many times it was resumed
+    color: str = ""
+    isolation: str = ""
+    worktree_note: str = ""   # where its edits went when they were not merged back
 
     def add_log(self, msg: str) -> None:
         self.live_logs.append(msg)
@@ -372,7 +528,7 @@ class SubagentManager:
             return self._counter
 
     def register(self, prompt: str, max_steps: int = 15, title: str | None = None, agent_type: str = "general-purpose",
-                 call_id: str = "") -> SubagentTask:
+                 call_id: str = "", name: str = "") -> SubagentTask:
         with self._lock:
             if call_id and call_id in self._reserved:
                 idx = self._reserved.pop(call_id)
@@ -394,10 +550,26 @@ class SubagentManager:
                 max_steps=max_steps,
                 start_time=time.time(),
                 agent_type=agent_type,
+                name=name.strip(),
             )
             self._tasks.append(task)
             self._notify()
             return task
+
+    def reopen(self, task: SubagentTask, max_steps: int) -> None:
+        """Start a finished subagent's next run under the same id (SendMessage to a finished subagent)."""
+        with self._lock:
+            task.status = "running"
+            task.steps = 0
+            task.resumes = 0
+            task.max_steps = max_steps
+            task.start_time = time.time()
+            task.result_text = ""
+            task.error_msg = None
+            task.activity = ""
+            task.runs += 1
+            task.stopped = False
+            self._notify()
 
     def update_progress(self, task_id: str, steps: int) -> None:
         with self._lock:
@@ -413,15 +585,28 @@ class SubagentManager:
             for t in self._tasks:
                 if t.id == task_id:
                     t.status = status
+                    t.live_agent = None
                     t.result_text = result_text
                     t.conversation = conversation
                     t.elapsed_s = max(0.1, time.time() - t.start_time)
                     if usage:
-                        t.input_tokens = getattr(usage, "input", 0) or 0
-                        t.output_tokens = getattr(usage, "output", 0) or 0
+                        t.input_tokens = (t.input_tokens if t.runs > 1 else 0) + (getattr(usage, "input", 0) or 0)
+                        t.output_tokens = (t.output_tokens if t.runs > 1 else 0) + (getattr(usage, "output", 0) or 0)
                         t.tokens_consumed = t.input_tokens + t.output_tokens
                     break
             self._notify()
+
+    def send(self, query: str, text: str) -> SubagentTask | None:
+        """Hand *text* to a running subagent: it reads it between its steps, like a steer message."""
+        with self._lock:
+            task = self.get_task(query)
+            live = getattr(task, "live_agent", None) if task is not None else None
+        queue = getattr(live, "message_queue", None)
+        if task is None or task.status != "running" or queue is None:
+            return None
+        queue.push(text, steer=True)
+        task.add_entry("note", f"you: {text}")
+        return task
 
     def total_tokens(self) -> int:
         with self._lock:
@@ -431,7 +616,9 @@ class SubagentManager:
         with self._lock:
             for t in self._tasks:
                 if t.id == task_id:
-                    t.status = "error"
+                    if t.status != "cancelled":
+                        t.status = "error"
+                    t.live_agent = None
                     t.error_msg = error
                     t.elapsed_s = max(0.1, time.time() - t.start_time)
                     break
@@ -452,9 +639,16 @@ class SubagentManager:
         with self._lock:
             q = str(query).strip().lower()
             for t in self._tasks:
-                if t.id == q or str(t.index) == q or t.title.lower().startswith(q):
+                if t.id == q or str(t.index) == q or (t.name and t.name.lower() == q):
+                    return t
+            for t in reversed(self._tasks):
+                if t.title.lower().startswith(q) and q:
                     return t
             return None
+
+    def running_count(self) -> int:
+        with self._lock:
+            return sum(1 for t in self._tasks if t.status == "running")
 
     def clear(self) -> None:
         with self._lock:
@@ -480,10 +674,21 @@ class SubagentManager:
             ident = self._threads.get(task_id)
             if not ident:
                 return False
+            live = None
+            for t in self._tasks:
+                if t.id == task_id:
+                    t.stopped = True
+                    live = t.live_agent
             try:
-                return ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(KeyboardInterrupt)) == 1
+                signalled = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), ctypes.py_object(KeyboardInterrupt)) == 1
             except Exception:
-                return False
+                signalled = False
+        # The interrupt only fires when the subagent's thread runs Python again: abort its model
+        # stream too, or a subagent waiting on the model keeps going until the reply arrives.
+        abort = getattr(live, "_cancel_provider_stream", None)
+        if signalled and callable(abort):
+            abort(ident)
+        return signalled
 
     def cancel_all(self) -> int:
         """Interrupt every running subagent; returns how many were signalled."""
@@ -493,6 +698,32 @@ class SubagentManager:
 
 
 _APPROVAL_LOCK = threading.Lock()
+
+
+class _ParentCheckpoints:
+    """A subagent's handle on its parent's file checkpoints: the files it edits are captured into the parent's
+    pending snapshot, so /rewind undoes them too. Only the parent seals a turn."""
+
+    def __init__(self, parent_checkpoints: Any) -> None:
+        self._cp = parent_checkpoints
+
+    def capture_before_edit(self, p: Path) -> None:
+        self._cp.capture_before_edit(p)
+
+    def commit_turn_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
+def _shared_checkpoints(parent: Any, sub_ws: Path) -> Any:
+    """The parent's checkpoints for a subagent working in the same workspace (None: a private manager, e.g.
+    in a git worktree, whose paths /rewind must not restore)."""
+    cp = getattr(parent, "checkpoints", None)
+    if cp is None or Path(sub_ws) != Path(parent.settings.workspace):
+        return None
+    return _ParentCheckpoints(cp)
 
 
 def _subagent_approver(parent: Agent) -> Callable[[str, dict[str, Any], Any], str] | None:
@@ -509,11 +740,234 @@ def _subagent_approver(parent: Agent) -> Callable[[str, dict[str, Any], Any], st
     return approve
 
 
-def _resolve_model(parent: Agent, agent_def: AgentDefinition) -> str:
-    m = (agent_def.model or "").strip()
-    if m.lower() in _INHERIT_MODELS:
-        return parent.settings.model
-    return m
+def _resolve_model(parent: Agent, agent_def: AgentDefinition, override: str | None = None) -> str:
+    """Model for one run: the Task call's ``model``, else the definition's, else AXON_SUBAGENT_MODEL, else the parent's."""
+    import os
+    for cand in (override, agent_def.model, os.environ.get("AXON_SUBAGENT_MODEL")):
+        m = (cand or "").strip()
+        if m and m.lower() not in _INHERIT_MODELS:
+            return m
+        if m and cand is not os.environ.get("AXON_SUBAGENT_MODEL"):
+            return parent.settings.model        # an explicit "inherit" / alias stops the search
+    if agent_def.fast_model and agent_def.source == "builtin":
+        small = str(getattr(parent.settings, "small_model", "") or "").strip()
+        if small:
+            return small
+    return parent.settings.model
+
+
+def _check_spawn_allowed(parent: Any, agent_def: AgentDefinition) -> None:
+    """``tools: Agent(worker, researcher)`` on a ``--agent`` main session: only those types may be started."""
+    allowed = getattr(parent, "allowed_subagent_types", None)
+    if allowed and agent_def.name.lower() not in {a.lower() for a in allowed}:
+        raise ToolError(f"This agent may only start these subagent types: {', '.join(allowed)} (not '{agent_def.name}').")
+
+
+def max_concurrent_subagents() -> int:
+    import os
+    try:
+        return max(1, int(os.environ.get("AXON_MAX_CONCURRENT_SUBAGENTS", "") or DEFAULT_MAX_CONCURRENT))
+    except ValueError:
+        return DEFAULT_MAX_CONCURRENT
+
+
+def _check_concurrency(parent: Any) -> None:
+    limit = max_concurrent_subagents()
+    if parent.subagents.running_count() >= limit:
+        raise ToolError(f"Concurrent subagent limit reached ({limit} running). Do not retry now: wait for a running "
+                        "subagent to finish (its report arrives as a message), or stop one with /stop.")
+
+
+def _effective_mode(parent_mode: str, wanted: str | None) -> tuple[str, bool]:
+    """(permission mode, never_prompt) for a subagent. The parent's bypass / acceptEdits / plan modes win over the
+    definition's ``permissionMode``; otherwise the definition's mode applies. ``dontAsk`` means no prompts
+    (calls that would ask are denied); ``bypassPermissions`` and ``auto`` are only honoured when the parent has them."""
+    if wanted is None or parent_mode in ("bypass", "acceptEdits", "plan"):
+        return parent_mode, False
+    if wanted == "dontAsk":
+        return parent_mode, True
+    if wanted in ("acceptEdits", "plan"):
+        return wanted, False
+    if wanted in ("default", "manual"):
+        return "default", False
+    return parent_mode, False
+
+
+def _match_tools(reg: Any, patterns: list[str]) -> set[str]:
+    """Tool names in *reg* named by *patterns*: exact names (aliases such as ``Agent`` resolved), ``mcp__server``
+    for a whole MCP server, and ``*`` globs for MCP tools. A ``Bash(git push *)`` specifier names the whole tool."""
+    import fnmatch
+    names = [t.name for t in reg.all_tools()]
+    out: set[str] = set()
+    for raw in patterns:
+        pat = raw.split("(", 1)[0].strip()
+        if not pat:
+            continue
+        if pat.startswith("mcp__"):
+            if any(c in pat for c in "*?["):
+                out |= {n for n in names if fnmatch.fnmatchcase(n, pat)}
+            else:
+                out |= {n for n in names if n == pat or n.startswith(pat + "__")}
+        else:
+            out |= {t.name for t in reg.subset(names=[pat]).all_tools()}
+    return out
+
+
+def _build_registry(parent: Agent, agent_def: AgentDefinition, plan: bool = False) -> Any:
+    """The subagent's tools: the parent's, minus recursion/plan-mode controls and ``disallowedTools``
+    (applied first), narrowed to ``tools`` when given; read-only for readonly agents and in plan mode."""
+    reg = parent.registry
+    blocked = set(_EXCLUDED_FOR_SUBAGENTS) | _match_tools(reg, agent_def.disallowed_tools)
+    pool = [t.name for t in reg.all_tools() if t.name not in blocked]
+    if agent_def.tools:
+        wanted = _match_tools(reg, agent_def.tools)
+        if agent_def.memory:
+            wanted |= {"Read", "Write", "Edit"}      # the agent keeps its notes with these
+        names = [n for n in pool if n in wanted]
+        if not names:
+            raise ToolError(f"Agent '{agent_def.name}' would be spawned with zero tools: none of its tools "
+                            f"({', '.join(agent_def.tools)}) is available to subagents.")
+    else:
+        names = pool
+    readonly = agent_def.readonly or plan or getattr(parent.settings, "mode", "default") == "plan"
+    return reg.subset(names=names, readonly_only=readonly)
+
+
+def _attach_inline_mcp(registry: Any, agent_def: AgentDefinition, workspace: Path) -> Any:
+    """Connect the MCP servers defined inline in the agent's ``mcpServers`` (private to this run) and add their
+    tools to *registry*. Returns the bridge to disconnect afterwards, or None. Names that only reference a server
+    configured for the session need nothing: their tools are already in the parent's registry."""
+    specs: dict[str, Any] = {}
+    for entry in agent_def.mcp_servers:
+        if isinstance(entry, dict):
+            for key, spec in entry.items():
+                if isinstance(spec, dict):
+                    specs[str(key)] = spec
+    if not specs:
+        return None
+    try:
+        from axon.mcp.bridge import MCPToolBridge
+        bridge = MCPToolBridge(workspace)
+        for tool in bridge.connect_all(specs):
+            registry.register(tool)
+        return bridge
+    except Exception:  # noqa: BLE001 - a broken server must not stop the subagent
+        return None
+
+
+def agent_memory_dir(workspace: Path, agent_def: AgentDefinition) -> Path | None:
+    """The persistent notes directory for ``memory: user|project|local`` (None when the agent has no memory)."""
+    if not agent_def.memory:
+        return None
+    from axon import storage
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_def.name).strip("-") or "agent"
+    if agent_def.memory == "user":
+        return storage.axon_home() / "agent-memory" / slug
+    sub = "agent-memory" if agent_def.memory == "project" else "agent-memory-local"
+    return Path(workspace) / ".axon" / sub / slug
+
+
+def _memory_prompt(parent: Any, agent_def: AgentDefinition) -> str:
+    if not agent_def.memory or not getattr(parent.settings, "auto_memory", True):
+        return ""
+    d = agent_memory_dir(parent.settings.workspace, agent_def)
+    if d is None:
+        return ""
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return ""
+    index = ""
+    try:
+        raw = (d / "MEMORY.md").read_text(encoding="utf-8", errors="replace") if (d / "MEMORY.md").is_file() else ""
+        lines = raw.splitlines()[:200]
+        index = "\n".join(lines)[:25_000]
+    except OSError:
+        pass
+    return (f"## Persistent memory ({agent_def.memory})\n\nYou have a persistent memory directory at `{d}`. It survives across "
+            "conversations: check it before you start, and save what you learn (codepaths, patterns, decisions) as short "
+            "notes there with Read/Write/Edit. Keep `MEMORY.md` as a concise index; only its first 200 lines or 25KB are "
+            "shown below, so curate it when it grows.\n\n"
+            + (f"### MEMORY.md\n{index}" if index.strip() else "MEMORY.md is empty so far."))
+
+
+def _skills_prompt(parent: Any, agent_def: AgentDefinition) -> str:
+    mgr = getattr(parent, "skills", None)
+    if not agent_def.skills or mgr is None:
+        return ""
+    out: list[str] = []
+    for name in agent_def.skills[:32]:
+        try:
+            skill = mgr.get(name)
+            if skill is None or getattr(skill, "disable_model_invocation", False):
+                continue
+            out.append(mgr.render(skill))
+        except Exception:  # noqa: BLE001 - a missing or broken skill is skipped
+            continue
+    return "## Preloaded skills\n\n" + "\n\n".join(out) if out else ""
+
+
+_SPEED_RULES = ("Work fast: issue all independent reads, greps and globs together in ONE step (parallel tool calls) "
+               "instead of one per step, stop as soon as you can answer, and write the report as soon as you have it.")
+
+
+def _role_prompt(parent: Any, agent_def: AgentDefinition, workspace: Path) -> str:
+    parts = [agent_def.system_prompt.strip() if agent_def.fork else (agent_def.system_prompt.strip() + "\n\n" + _SPEED_RULES).strip(),
+             _skills_prompt(parent, agent_def), _memory_prompt(parent, agent_def)]
+    return "\n\n".join(p for p in parts if p)
+
+
+def _scoped_hooks(parent: Any, agent_def: AgentDefinition) -> Any:
+    """The parent's hooks plus the agent's own frontmatter ``hooks`` (``Stop`` becomes ``SubagentStop``)."""
+    base = getattr(parent, "hooks", None)
+    if not agent_def.hooks or base is None or not hasattr(base, "add_scoped"):
+        return base
+    try:
+        import copy
+        section = {("SubagentStop" if str(k).lower() == "stop" else k): v for k, v in agent_def.hooks.items()}
+        scoped = copy.copy(base)                       # a private manager: the parent's hooks never see these
+        scoped._scoped = {k: list(v) for k, v in getattr(base, "_scoped", {}).items()}
+        return scoped if scoped.add_scoped(section, f"agent:{agent_def.name}") else base
+    except Exception:  # noqa: BLE001
+        return base
+
+
+_TAG_RE = re.compile(r"<(/?)(system-reminder|system|assistant|human)\b", re.I)
+_ROLE_RE = re.compile(r"(?m)^([ \t]*)(Human|Assistant):")
+_PERM_RE = re.compile(r"bypassPermissions|--dangerously-skip-permissions")
+
+
+def scan_report(text: str) -> str:
+    """A subagent's report on its way to the delegating agent: text that imitates the harness (a
+    ``<system-reminder>`` tag, a ``Human:`` line) gets a backslash so it reads as ordinary text; a marker line
+    says so. Nothing is removed or reworded."""
+    if not text:
+        return text
+    found: list[str] = []
+    if _TAG_RE.search(text):
+        found.append("tag imitating harness output")
+        text = _TAG_RE.sub(lambda m: f"<\\{m.group(1)}{m.group(2)}", text)
+    if _ROLE_RE.search(text):
+        found.append("role-prefixed line")
+        text = _ROLE_RE.sub(lambda m: f"{m.group(1)}\\{m.group(2)}:", text)
+    if _PERM_RE.search(text):
+        found.append("permission setting mentioned")
+    if found:
+        text = f"[harness: subagent output matched instruction-shaped pattern(s): {', '.join(found)}]\n{text}"
+    return text
+
+
+def fork_prompt(parent: Any, task: str) -> str:
+    """The task wrapped with the conversation so far (a fork starts from the same context as the main agent)."""
+    try:
+        from axon.commands.code_cmds import session_context
+        context_text, n = session_context(parent)
+    except Exception:  # noqa: BLE001
+        context_text, n = "", 0
+    if not n:
+        return task
+    return (f"<conversation_so_far>\n{context_text}\n</conversation_so_far>\n\nYou are a fork of the conversation above. "
+            f"Do only this task and report back concisely:\n{task}")
 
 
 def _make_provider(parent: Agent, model: str, settings: Any) -> Any:
@@ -527,24 +981,6 @@ def _make_provider(parent: Agent, model: str, settings: Any) -> Any:
         except Exception:
             return prov
     return prov
-
-
-def _build_registry(parent: Agent, agent_def: AgentDefinition) -> Any:
-    reg = parent.registry
-    base = reg.subset(names=agent_def.tools) if agent_def.tools else reg.subset()
-    blocked = set(_EXCLUDED_FOR_SUBAGENTS)
-    for name in agent_def.disallowed_tools:
-        try:
-            blocked.add(reg.get(name).name)
-        except Exception:
-            blocked.add(name)
-    names = [t.name for t in base.all_tools() if t.name not in blocked]
-    readonly = agent_def.readonly or getattr(parent.settings, "mode", "default") == "plan"
-    sub = base.subset(names=names, readonly_only=readonly)
-    if readonly:
-        sub = sub.subset(names=[t.name for t in sub.all_tools() if t.name not in blocked])
-    return sub
-
 
 
 def _persist_subagent_run(parent: Any, task: Any, agent_type: str, model: str, prompt: str, status: str,
@@ -565,7 +1001,7 @@ def _persist_subagent_run(parent: Any, task: Any, agent_type: str, model: str, p
 
 # Turn-level resumes after a provider error (on top of the provider's own retries), with a growing pause.
 SUBAGENT_RESUMES = 2
-SUBAGENT_RESUME_DELAY_S = 3.0
+SUBAGENT_RESUME_DELAY_S = 1.0
 _RESUME_PROMPT = ("continue (the previous request failed with a provider error; pick up where you left off "
                   "using the tool results above)")
 
@@ -618,25 +1054,53 @@ def run_subagent(
     subagent_type: str | None = None,
     description: str = "",
     call_id: str = "",
+    *,
+    model: str | None = None,
+    name: str = "",
+    isolation: str | None = None,
+    effort: str | None = None,
+    resume: SubagentTask | None = None,
+    task: SubagentTask | None = None,
 ) -> str:
     """Run an isolated subagent turn and return its final report.
 
     The subagent gets its own Conversation, a restricted tool registry (never the Task
     tool, enforcing depth 1), its own provider instance, and its own session file. Its
-    usage is recorded once into the parent ledger with ``source=<agent name>``."""
+    usage is recorded once into the parent ledger with ``source=<agent name>``.
+
+    *resume* continues a finished subagent (its history is kept, *prompt* is the new message); *task* is a
+    task the caller already registered (background runs); *model*, *effort* and *isolation* override the
+    definition for this run."""
     if not hasattr(parent, "subagents") or parent.subagents is None:
         parent.subagents = SubagentManager()
 
-    agent_def = get_agent_definition(parent.settings.workspace, subagent_type)
+    if resume is not None:
+        agent_def = get_agent_definition(parent.settings.workspace, resume.agent_type, extra_dirs=extra_agent_dirs(parent.settings))
+        if agent_def is None:
+            agent_def = get_agent_definition(parent.settings.workspace, "general-purpose")
+    else:
+        agent_def = get_agent_definition(parent.settings.workspace, subagent_type, extra_dirs=extra_agent_dirs(parent.settings))
     if agent_def is None:
         available = ", ".join(sorted(d.name for d in load_agent_definitions(parent.settings.workspace)))
         raise ToolError(f"Unknown subagent_type '{subagent_type}'. Available: {available}")
+    _check_spawn_allowed(parent, agent_def)
 
     max_iter = _step_limit(parent, agent_def, max_iterations)
-    model = _resolve_model(parent, agent_def)
-    task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name,
-                                     call_id=call_id)
+    run_model = _resolve_model(parent, agent_def, model)
+    model = run_model
+    iso = (isolation or agent_def.isolation or ("worktree" if getattr(parent.settings, "isolate_worktrees", False) else "")) or ""
+    iso = iso if iso == "worktree" else ""
+    if resume is not None:
+        task = resume
+        if task.status != "running":
+            parent.subagents.reopen(task, max_iter)
+    elif task is None:
+        _check_concurrency(parent)
+        task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name,
+                                         call_id=call_id, name=name)
     task.model = model
+    task.color = agent_def.color or ""
+    task.isolation = iso
     started = time.time()
 
     def emit_parent(phase: str, status: str, cost: float = 0.0, usage: Any = None, iterations: int = 0,
@@ -767,7 +1231,7 @@ def run_subagent(
 
     worktree_info: WorktreeInfo | None = None
     sub_ws = parent.settings.workspace
-    if getattr(parent.settings, "isolate_worktrees", False) and not agent_def.readonly:
+    if iso == "worktree" and not agent_def.readonly:
         try:
             worktree_info = WorktreeManager.create_worktree(parent.settings.workspace, task.id)
             if worktree_info:
@@ -775,39 +1239,71 @@ def run_subagent(
                 task.add_log(f"Isolated git worktree: {sub_ws.name}")
                 if callable(hook):
                     hook("WorktreeCreate", {"worktree_path": str(sub_ws), "agent_id": task.id})
+            else:
+                task.add_log("Worktree isolation unavailable (not a git repository with a commit): running in the workspace")
         except Exception:
             worktree_info = None
+    mcp_bridge: Any = None
 
     try:
-        sub_settings = parent.settings.model_copy(update={"max_iterations": max_iter, "workspace": sub_ws, "model": model})
+        mode, no_prompt = _effective_mode(parent.settings.mode, agent_def.permission_mode)
+        updates: dict[str, Any] = {"max_iterations": max_iter, "workspace": sub_ws, "model": model, "mode": mode,
+                                   "parallel_tools": max(4, int(getattr(parent.settings, "parallel_tools", 1) or 1))}
+        eff = effort or agent_def.effort
+        if eff:
+            try:
+                from axon.config import Settings
+                updates["effort"] = Settings.normalize_effort(eff)
+            except Exception:
+                pass
+        from axon.providers.registry import settings_for_model
+        sub_settings = settings_for_model(model, parent.settings).model_copy(update=updates)
         parent_sess_id = parent.session.active_session_id.rsplit("_sub_", 1)[0]
         sub_store = SessionStore(sub_ws, session_dir=parent.session.session_dir)
         sub_store.open(f"{parent_sess_id}_sub_{task.index}")
         sub_ledger = Ledger()
+        registry = _build_registry(parent, agent_def, plan=(mode == "plan"))
+        mcp_bridge = _attach_inline_mcp(registry, agent_def, sub_ws)
+        role = _role_prompt(parent, agent_def, sub_ws)
         sub_agent = Agent(
             provider=_make_provider(parent, model, sub_settings),
-            tools=_build_registry(parent, agent_def),
+            tools=registry,
             permissions=parent.permissions,
             context=parent.context,
+            checkpoints=_shared_checkpoints(parent, sub_ws),
             session=sub_store,
             ledger=sub_ledger,
             settings=sub_settings,
             skills=getattr(parent, "skills", None),
             on_event=sub_on_event,
-            on_approval=_subagent_approver(parent),
-            hooks=getattr(parent, "hooks", None),
+            on_approval=None if no_prompt else _subagent_approver(parent),
+            hooks=_scoped_hooks(parent, agent_def),
             agent_name=agent_def.name,
-            extra_system=agent_def.system_prompt,
-            git_status=getattr(parent, "_git_snapshot", None),
+            extra_system=role,
+            git_status="" if agent_def.omit_git_status else getattr(parent, "_git_snapshot", None),
         )
+        if agent_def.omit_claude_md:
+            sub_agent._memory_text = ""
+        sub_agent.parent_agent = parent
+        sub_agent.subagents = parent.subagents      # siblings can reach each other with SendMessage
+        sub_agent.subagent_task = task
+        if resume is not None and getattr(resume.conversation, "messages", None):
+            sub_agent.conversation = Conversation(list(resume.conversation.messages))
 
-        sub_prompt = (
-            f"{prompt}\n\n"
-            "When you are done, reply with a concise final report for the agent that delegated this task: what you did or "
-            "found, exact file paths (with line numbers where useful), and any open issues. Your final message is the only "
-            f"thing the delegating agent will see. You have at most {max_iter} steps (model calls); budget them so the "
-            "report gets written."
-        )
+        task.live_agent = sub_agent
+        if resume is not None:
+            sub_prompt = f"{prompt}\n\n(You have at most {max_iter} steps (model calls) for this message.)"
+        elif agent_def.fork:
+            sub_prompt = (f"{fork_prompt(parent, prompt)}\n\nWhen you are done, reply with a concise final report for the "
+                          f"agent that forked you. You have at most {max_iter} steps (model calls).")
+        else:
+            sub_prompt = (
+                f"{prompt}\n\n"
+                "When you are done, reply with a concise final report for the agent that delegated this task: what you did or "
+                "found, exact file paths (with line numbers where useful), and any open issues. Your final message is the only "
+                f"thing the delegating agent will see. You have at most {max_iter} steps (model calls); budget them so the "
+                "report gets written."
+            )
         parent.subagents.bind_thread(task.id, threading.get_ident())
         try:
             result = sub_agent.run_turn(sub_prompt)
@@ -823,9 +1319,12 @@ def run_subagent(
                 task.add_log(line)
                 task.add_entry("resume", line, is_error=True)
                 task.activity = f"Resuming ({task.resumes}/{SUBAGENT_RESUMES}) · {why}"
-                time.sleep(SUBAGENT_RESUME_DELAY_S * task.resumes)
+                interruptible.sleep(SUBAGENT_RESUME_DELAY_S * task.resumes)
                 result = sub_agent.run_turn(again)
                 spent.append(result.usage)
+            if result.stop_reason == "interrupted" and task.stopped:
+                # Stopped while it waited for the model (that interrupt ends the turn quietly): report a cancel.
+                raise KeyboardInterrupt
             # Unbound inside the try: a cancel signalled just before this still lands in the handler below.
             parent.subagents.bind_thread(task.id, None)
         except KeyboardInterrupt:
@@ -846,10 +1345,16 @@ def run_subagent(
 
         if worktree_info:
             merged_ok, merge_msg = WorktreeManager.merge_back(worktree_info)
-            final_text += f"\n\n[Worktree] {merge_msg}" if not merged_ok or "applied" in merge_msg.lower() else ""
-            WorktreeManager.cleanup(worktree_info)
-            if callable(hook):
-                hook("WorktreeRemove", {"worktree_path": str(worktree_info.worktree_path), "agent_id": task.id})
+            if merged_ok:
+                final_text += f"\n\n[Worktree] {merge_msg}" if "applied" in merge_msg.lower() else ""
+                WorktreeManager.cleanup(worktree_info)
+                if callable(hook):
+                    hook("WorktreeRemove", {"worktree_path": str(worktree_info.worktree_path), "agent_id": task.id})
+            else:
+                # Its edits could not be applied to the workspace: keep the worktree so nothing is lost.
+                task.worktree_note = (f"{merge_msg.strip()} The changes are kept in {worktree_info.worktree_path} "
+                                      f"(branch {worktree_info.branch_name}).")
+                final_text += f"\n\n[Worktree] {task.worktree_note}"
             worktree_info = None
 
         # One aggregated record in the parent ledger for the whole subagent run.
@@ -881,13 +1386,15 @@ def run_subagent(
         header = f"[Subagent #{task.index} Result ({task.title}) | {tokens_total:,} tokens (in: {sub_usage.input:,} · out: {sub_usage.output:,})]"
         if result.stop_reason == "max_iterations":
             parent.subagents.complete(task.id, final_text or "[Stopped at the step limit]", sub_agent.conversation, status="exhausted", usage=sub_usage)
-            return _exhausted_report(header, task, max_iter, final_text)
+            return _exhausted_report(header, task, max_iter, scan_report(final_text))
         if not final_text:
             parent.subagents.complete(task.id, "No text output", sub_agent.conversation, status="completed", usage=sub_usage)
             return f"{header}:\nCompleted ({result.iterations} steps) with no text output."
         parent.subagents.complete(task.id, final_text, sub_agent.conversation, status="completed", usage=sub_usage)
-        return f"{header}:\n{final_text}"
-    except ToolError:
+        return f"{header}:\n{scan_report(final_text)}"
+    except ToolError as e:
+        parent.subagents.fail(task.id, str(e))
+        emit_parent("end", "error", result_text=str(e))
         raise
     except Exception as e:
         parent.subagents.fail(task.id, str(e))
@@ -899,6 +1406,118 @@ def run_subagent(
                 WorktreeManager.cleanup(worktree_info)
             except Exception:
                 pass
+        if mcp_bridge is not None:
+            try:
+                mcp_bridge.disconnect_all()
+            except Exception:
+                pass
+
+
+def _push_to(agent: Any, text: str) -> bool:
+    """Queue *text* as a steer message for *agent* (read between its steps, or as its next turn when idle)."""
+    queue = getattr(agent, "message_queue", None)
+    if queue is None:
+        return False
+    try:
+        from axon.ui.in_flight import push_queued
+        push_queued(queue, text, steer=True)
+    except Exception:  # noqa: BLE001
+        queue.push(text, steer=True)
+    return True
+
+
+def _main_agent(agent: Any) -> Any:
+    return getattr(agent, "parent_agent", None) or agent
+
+
+def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None = None, subagent_type: str | None = None,
+                     max_iterations: int | None = None, description: str = "", call_id: str = "", model: str | None = None,
+                     name: str = "", isolation: str | None = None, effort: str | None = None) -> str:
+    """Run a subagent on its own thread and return at once; its report is queued for the delegating agent as a
+    message when it finishes. Errors in choosing the agent type are raised here, before anything starts."""
+    if not hasattr(parent, "subagents") or parent.subagents is None:
+        parent.subagents = SubagentManager()
+    ws = parent.settings.workspace
+    if resume is not None:
+        agent_def = get_agent_definition(ws, resume.agent_type, extra_dirs=extra_agent_dirs(parent.settings)) or FORK_AGENT
+        task = resume
+        parent.subagents.reopen(task, _step_limit(parent, agent_def, max_iterations))
+        verb = "Resumed"
+    else:
+        agent_def = get_agent_definition(ws, subagent_type, extra_dirs=extra_agent_dirs(parent.settings))
+        if agent_def is None:
+            available = ", ".join(sorted(d.name for d in load_agent_definitions(ws)))
+            raise ToolError(f"Unknown subagent_type '{subagent_type}'. Available: {available}")
+        _check_spawn_allowed(parent, agent_def)
+        _check_concurrency(parent)
+        task = parent.subagents.register(prompt, max_steps=_step_limit(parent, agent_def, max_iterations),
+                                         title=description or None, agent_type=agent_def.name, call_id=call_id, name=name)
+        verb = "Started"
+    task.background = True
+
+    def work() -> None:
+        try:
+            report = run_subagent(prompt, parent, max_iterations=max_iterations, subagent_type=subagent_type,
+                                  description=description, model=model, name=name, isolation=isolation, effort=effort,
+                                  resume=task if resume is not None else None, task=None if resume is not None else task)
+        except Exception as e:  # noqa: BLE001
+            report = f"[Subagent #{task.index} ({task.title}) failed: {type(e).__name__}: {e}]"
+            parent.subagents.fail(task.id, str(e))
+        _push_to(_main_agent(parent), f"[Background subagent {task.id} ({task.title}) finished]\n{report}")
+
+    threading.Thread(target=work, daemon=True, name=f"subagent-{task.id}").start()
+    who = f"{task.id}" + (f", name '{task.name}'" if task.name else "")
+    return (f"{verb} subagent #{task.index} ({task.title}) in the background ({who}). Its report will arrive as a "
+            "message when it finishes; carry on with other work and do not poll. Message it meanwhile (or resume it "
+            f"later) with SendMessage(to=\"{task.name or task.id}\").")
+
+
+def delegate(prompt: str, parent: Agent, *, background: bool | None = None, subagent_type: str | None = None, **kw: Any) -> str:
+    """Start a subagent for the Task tool: in the foreground (the report is the result), or in the background
+    (``run_in_background``, the definition's ``background: true``, or a fork unless told otherwise)."""
+    agent_def = get_agent_definition(parent.settings.workspace, subagent_type, extra_dirs=extra_agent_dirs(parent.settings))
+    if background is None:
+        background = bool(agent_def and (agent_def.background or agent_def.fork))
+    if background:
+        return spawn_background(prompt, parent, subagent_type=subagent_type, **kw)
+    return run_subagent(prompt, parent, subagent_type=subagent_type, **kw)
+
+
+def send_message(agent: Any, to: str, message: str) -> str:
+    """SendMessage: hand *message* to a running subagent (it reads it before its next step), resume a finished one
+    in the background with its full history, or, from a subagent, report to ``main``."""
+    main = _main_agent(agent)
+    key = str(to or "").strip().lstrip("#@")
+    text = str(message or "").strip()
+    if not key or not text:
+        raise ToolError("SendMessage needs 'to' and 'message'.")
+    me = getattr(agent, "subagent_task", None)
+    if key.lower() in ("main", "lead", "parent", "user"):
+        if main is agent:
+            raise ToolError("You are the main agent: there is nobody above you to message.")
+        who = f"{me.id} ({me.title})" if me is not None else "a subagent"
+        _push_to(main, f"[Message from subagent {who}]\n{text}")
+        return "Sent to the main agent."
+    mgr = getattr(main, "subagents", None)
+    task = mgr.get_task(key) if mgr is not None else None
+    if task is None and key.lower().startswith("sub-"):
+        task = mgr.get_task(key[4:]) if mgr is not None else None
+    if task is None:
+        known = ", ".join(f"{t.id}" + (f" ({t.name})" if t.name else "") for t in (mgr.all_tasks() if mgr is not None else []))
+        raise ToolError(f"No subagent '{to}'. Known subagents: {known or 'none yet'}.")
+    if me is not None and task.id == me.id:
+        raise ToolError("A subagent cannot message itself.")
+    prefix = f"[Message from subagent {me.id}] " if me is not None else ""
+    if task.status == "running":
+        if mgr.send(task.id, prefix + text) is None:
+            raise ToolError(f"{task.id} is still starting; try again in a moment.")
+        return f"Delivered to {task.id}: it reads the message before its next step."
+    if task.stopped:
+        raise ToolError(f"{task.id} was stopped by the user and is not resumed by messages.")
+    if not getattr(task.conversation, "messages", None):
+        raise ToolError(f"{task.id} has no saved history to resume.")
+    return spawn_background(prefix + text, main, resume=task)
+
 
 def _exhausted_report(header: str, task: Any, max_iter: int, report: str) -> str:
     """What the delegating agent sees when a subagent hit its step limit: the header, the limit, the report the
@@ -920,6 +1539,12 @@ def _short_args(inp: Any, limit: int = 80) -> str:
                 return v if len(v) <= limit else v[: limit - 3] + "..."
     v = " ".join(str(inp).split())
     return v if len(v) <= limit else v[: limit - 3] + "..."
+
+
+def _subagent_number(result: Any) -> int | None:
+    """The N in a Task result header ("[Subagent #N Result ...", "[Subagent #N (...) failed ...")."""
+    match = re.match(r"^\[Subagent #(\d+)\b", str(result or ""))
+    return int(match.group(1)) if match else None
 
 
 def sync_subagents_for_session(agent: Agent) -> None:
@@ -1010,6 +1635,10 @@ def sync_subagents_for_session(agent: Agent) -> None:
 
                                 if res_match:
                                     task.result_text = res_content
+                                    number = _subagent_number(res_content) or task_idx
+                                    task.index = number
+                                    task.id = f"sub-{number}"
+                                    seen_indices.add(number)
                                     fail_m = re.match(r"^\[Subagent #\d+ (?:\(.*?\) )?failed:\s*(.*)\]\s*$",
                                                       str(res_content or ""), re.DOTALL)
                                     if fail_m:
@@ -1019,10 +1648,10 @@ def sync_subagents_for_session(agent: Agent) -> None:
                                                   str(res_content or "")):
                                         task.status = "exhausted"
                                     from axon.agent.state import Conversation
-                                    sub_file = getattr(agent, "session", None) and (agent.session.session_dir / f"{parent_sess_id}_sub_{task_idx}.jsonl")
+                                    sub_file = getattr(agent, "session", None) and agent.session._file(f"{parent_sess_id}_sub_{number}")
                                     if sub_file and sub_file.exists():
                                         try:
-                                            task.conversation = agent.session.read_conversation(f"{parent_sess_id}_sub_{task_idx}")
+                                            task.conversation = agent.session.read_conversation(f"{parent_sess_id}_sub_{number}")
                                         except Exception:
                                             task.conversation = Conversation([
                                                 {"role": "user", "content": prompt_txt},
@@ -1035,16 +1664,15 @@ def sync_subagents_for_session(agent: Agent) -> None:
                                         ])
                                     break
 
-    # 2. Discover any additional subagent session files on disk (_sub_*.jsonl)
+    # 2. Discover any additional subagent transcripts on disk (sessions/<id>/subagents/<n>.jsonl)
     s_dir = getattr(agent, "session", None) and getattr(agent.session, "session_dir", None)
     if s_dir and s_dir.exists():
-        pattern = f"{parent_sess_id}_sub_*.jsonl"
-        for sub_path in sorted(s_dir.glob(pattern)):
-            stem = sub_path.stem
-            m_idx = re.search(r"_sub_(\d+)$", stem)
+        for sub_path in agent.session._subagent_files(parent_sess_id):
+            m_idx = re.search(r"(\d+)$", sub_path.stem)
             if not m_idx:
                 continue
             f_idx = int(m_idx.group(1))
+            stem = f"{parent_sess_id}_sub_{f_idx}"
             if f_idx in seen_indices:
                 continue
             seen_indices.add(f_idx)
@@ -1071,6 +1699,9 @@ def sync_subagents_for_session(agent: Agent) -> None:
                 task.conversation = sub_conv
             except Exception:
                 pass
+
+    if seen_indices:   # numbers parsed from results can be ahead of the count: new subagents must not reuse them
+        agent.subagents._counter = max(agent.subagents._counter, max(seen_indices))
 
     # 3. Synchronize token counts and costs for each task
     model_name = getattr(getattr(agent, "settings", None), "model", None)

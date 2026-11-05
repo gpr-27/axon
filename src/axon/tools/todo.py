@@ -1,7 +1,7 @@
 """
 TodoWrite tool for persistent externalized plan tracking across compaction.
 
-The list is persisted per session to ``axon.storage.todos_dir(ws)/<session_id>.json`` (see
+The list is persisted per session to ``axon.storage.todos_path(ws, session_id)`` (``sessions/<id>/todos.json``) (see
 ``TodoState.bind``) so ``--continue`` / ``--resume`` restore it.
 """
 from __future__ import annotations

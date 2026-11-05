@@ -243,6 +243,15 @@ class Conversation:
         return fixes
 
 
+def _sha256_of(p: Path) -> str:
+    """Hash a file in chunks: Read registers images, PDFs and binaries of any size, which must not be loaded whole."""
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 class FileState:
     """Tracks (mtime_ns, sha256) per file for read-before-edit invariants."""
     def __init__(self) -> None:
@@ -252,9 +261,7 @@ class FileState:
         p = p.resolve()
         if p.exists() and p.is_file():
             stat = p.stat()
-            content = p.read_bytes()
-            digest = hashlib.sha256(content).hexdigest()
-            self._seen[p] = (stat.st_mtime_ns, stat.st_size, digest)
+            self._seen[p] = (stat.st_mtime_ns, stat.st_size, _sha256_of(p))
 
     def check_writable(self, p: Path) -> None:
         """Enforces that file was read in this session and is not stale."""
@@ -271,7 +278,7 @@ class FileState:
         curr_stat = p.stat()
         # mtime alone misses a write within the same clock tick (coarse on Windows), so size counts too
         if curr_stat.st_mtime_ns != last_mtime or curr_stat.st_size != last_size:
-            curr_sha = hashlib.sha256(p.read_bytes()).hexdigest()
+            curr_sha = _sha256_of(p)
             if curr_sha != last_sha:
                 raise StaleFileError(
                     f"{p.name} has changed on disk since you read it. "
@@ -297,7 +304,7 @@ class TodoState:
     """Maintains task todo list with constraint of at most one in_progress.
 
     Once :meth:`bind` is called with the workspace and a session-id getter, every
-    :meth:`replace` is persisted to ``axon.storage.todos_dir(ws)/<session_id>.json`` and the
+    :meth:`replace` is persisted to ``axon.storage.todos_path(ws, session_id)`` (``sessions/<id>/todos.json``) and the
     list is (re)loaded lazily whenever the active session id changes (``--continue``,
     ``--resume``, ``/resume``), so a resumed session gets its checklist back."""
 
@@ -337,8 +344,8 @@ class TodoState:
         if not (self._workspace and sid):
             return None
         try:
-            from axon.storage import todos_dir
-            return todos_dir(self._workspace) / f"{sid}.json"
+            from axon.storage import todos_path
+            return todos_path(self._workspace, sid)
         except (ImportError, AttributeError, OSError):
             return None
 
@@ -375,6 +382,7 @@ class TodoState:
         payload = [{"id": t.id, "content": t.content, "status": t.status,
                     **({"activeForm": t.active_form} if t.active_form else {})} for t in self._items]
         try:
+            p.parent.mkdir(parents=True, exist_ok=True)  # the session folder is created on first write
             tmp = p.with_name(p.name + ".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             import os
@@ -498,35 +506,36 @@ class MessageQueue:
             return steer
 
     def pop(self) -> QueuedMessage | None:
-        if self.items:
-            return self.items.pop(0)
-        return None
+        with self._lock:
+            return self.items.pop(0) if self.items else None
 
     def peek(self) -> QueuedMessage | None:
-        if self.items:
-            return self.items[0]
-        return None
+        with self._lock:
+            return self.items[0] if self.items else None
 
     def remove(self, item_id: int) -> bool:
-        for i, it in enumerate(self.items):
-            if it.id == item_id:
-                self.items.pop(i)
-                _journal_queue("remove", id=it.id, text=it.text)
-                return True
-        return False
+        with self._lock:
+            found = next((i for i, it in enumerate(self.items) if it.id == item_id), None)
+            item = self.items.pop(found) if found is not None else None
+        if item is None:
+            return False
+        _journal_queue("remove", id=item.id, text=item.text)
+        return True
 
     def remove_by_index(self, idx: int) -> QueuedMessage | None:
         """Remove a queued message by its 1-based positional index. Returns the removed item or None."""
-        if 1 <= idx <= len(self.items):
-            it = self.items.pop(idx - 1)
-            _journal_queue("remove", id=it.id, text=it.text)
-            return it
-        return None
+        with self._lock:
+            item = self.items.pop(idx - 1) if 1 <= idx <= len(self.items) else None
+        if item is not None:
+            _journal_queue("remove", id=item.id, text=item.text)
+        return item
 
     def clear(self) -> None:
-        if self.items:
-            _journal_queue("clear", texts=[it.text for it in self.items], count=len(self.items))
-        self.items.clear()
+        with self._lock:
+            dropped = list(self.items)
+            self.items.clear()
+        if dropped:
+            _journal_queue("clear", texts=[it.text for it in dropped], count=len(dropped))
 
     def __len__(self) -> int:
         return len(self.items)
