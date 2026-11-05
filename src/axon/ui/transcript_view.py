@@ -75,6 +75,8 @@ def _spinner(now: float) -> str:
 
 def _one_line(text: Any, limit: int = 80) -> str:
     s = " ".join(sanitize(strip_ansi(str(text or ""))).split())
+    if " · " in s:          # titles and summaries are recorded with a literal dot: ASCII under AXON_ASCII
+        s = s.replace(" · ", f" {glyph('dot')} ")
     return s if len(s) <= limit else s[: max(1, limit - 1)] + glyph("ellipsis")
 
 
@@ -303,6 +305,7 @@ def entries_from_messages(messages: Iterable[Any], registry: Any = None) -> list
         elif role == "assistant":
             blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}]
                                                                    if isinstance(content, str) else [])
+            first_new = len(out)
             for b in blocks:
                 if not isinstance(b, dict):
                     continue
@@ -322,10 +325,33 @@ def entries_from_messages(messages: Iterable[Any], registry: Any = None) -> list
                 if isinstance(call, dict):
                     fn = call.get("function") or {}
                     add_tool(call.get("id", ""), str(fn.get("name", "tool")), fn.get("arguments") or {})
+            _add_rationales(out[first_new:])
         elif role == "tool":
             add_result(m.get("tool_call_id", ""), content, bool(m.get("is_error")))
     close_turn()
     return out
+
+
+def _add_rationales(entries: list[Any]) -> None:
+    """Fill in each restored tool call's 'why' from the reply it came from (same choice as live)."""
+    from axon.agent.decision import pick_rationales
+    blocks: list[tuple[str, Any]] = []
+    for e in entries:
+        if e.kind in ("text", "thinking"):
+            blocks.append((e.kind, e.body))
+        elif e.kind == "tool":
+            try:
+                inp = json.loads(e.detail) if e.detail else {}
+            except ValueError:
+                inp = {}
+            blocks.append(("tool", (e.id, _split_title(e.title)[0], inp)))
+    try:
+        picked = pick_rationales(blocks)
+    except Exception:
+        return
+    for e in entries:
+        if e.kind == "tool" and e.id in picked and not e.why:
+            e.why, e.why_source = picked[e.id]
 
 
 # ─── rows ──────────────────────────────────────────────────────────────────
@@ -435,6 +461,24 @@ class Layout:
             return bool(getattr(e, "body", ""))
         return bool(getattr(e, "body", "")) or bool(getattr(e, "detail", ""))
 
+    def _card(self, e: Any, name: str, width: int, now: float) -> list[str]:
+        """The phased card of a tool entry (``[]`` when it cannot be drawn)."""
+        from axon.ui import tool_cards
+        try:
+            inp = json.loads(e.detail) if getattr(e, "detail", "") else {}
+            running = getattr(e, "status", "") == "running"
+            started = getattr(e, "started_at", 0.0) or 0.0
+            call = tool_cards.CardCall(
+                number=0, name=name, inp=inp if isinstance(inp, dict) else {}, why=getattr(e, "why", "") or "", why_source=getattr(e, "why_source", "") or "",
+                allowed=getattr(e, "allowed", "") or "", content=e.body or "", is_error=getattr(e, "status", "") == "error",
+                duration=(max(0.0, now - started) if running and started else getattr(e, "duration", None)),
+                state="running" if running else "done",
+                hint=f"/output {e.output_no}" if getattr(e, "output_no", 0) else "/transcript",
+                registry=self.registry, name_w=tool_cards.name_column_width([name]))
+            return tool_cards.card_rows(call, width)
+        except Exception:
+            return []
+
     def _tool_rows(self, e: Any, avail: int, expanded: bool, fold: str, now: float) -> list[str]:
         R = T.RST
         name, target = _split_title(e.title)
@@ -446,6 +490,10 @@ class Layout:
             left += f"  {T.TEXT}{_one_line(target, 200)}{R}"
         if purpose and not expanded:
             left += f" {T.SUBTLE}{glyph('dot')} {purpose}{R}"
+        if not expanded:        # collapsed: the same phased card the live view draws (choose / input / run / output)
+            card = self._card(e, name, avail - 2, now)
+            if card:
+                return [f"{fold} {card[0]}"] + [f"  {r}" for r in card[1:]]
         rows = [_fit(left, _status_mark(e, now), avail)]
         body = e.body or ""
         n_lines = len(body.splitlines())
@@ -464,8 +512,16 @@ class Layout:
         if purpose:
             rows.append(truncate(f"      {T.MUTED}What{R}  {T.TEXT}{purpose}{R}", avail))
         if why:
+            from axon.agent.decision import SOURCE_LABELS
+            source = SOURCE_LABELS.get(getattr(e, "why_source", "") or "", "")
+            why_text = f"{T.SUBTLE}({source}){R} {T.ITALIC}{why}" if source else why
             rows += [f"      {T.MUTED}Why{R}   {T.ITALIC}{ln}{R}" if i == 0 else f"            {T.ITALIC}{ln}{R}"
-                     for i, ln in enumerate(wrap_ansi(why, max(10, inner - 6)))]
+                     for i, ln in enumerate(wrap_ansi(why_text, max(10, inner - 6)))]
+        for label, value in (("Chosen", getattr(e, "chosen", "")), ("Allowed", getattr(e, "allowed", "")),
+                             ("Then", getattr(e, "then", ""))):
+            if value:
+                rows += [f"      {T.MUTED}{label:<7}{R} {ln}" if i == 0 else f"              {ln}"
+                         for i, ln in enumerate(wrap_ansi(_one_line(value, 300), max(10, inner - 8)))]
         if e.detail:
             rows.append(f"      {T.MUTED}{T.BOLD}Input{R}")
             for ln in e.detail.splitlines():
@@ -823,7 +879,7 @@ class TranscriptViewer:
         if key == "backspace":
             self.query = self.query[:-1]
         elif key.startswith(plat.PASTE_PREFIX):
-            self.query += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+            self.query += sanitize(key[len(plat.PASTE_PREFIX):].replace("\n", " "))
         elif len(key) == 1 and key >= " ":
             self.query += key
         else:

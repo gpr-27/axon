@@ -530,7 +530,7 @@ def layout_width(margin: int = 2) -> int:
     cols = term_width() - margin
     cap = _MAX_LAYOUT_WIDTH
     env = os.environ.get("AXON_MAX_WIDTH", "")
-    if env.isdigit() and int(env) > 0:
+    if env.isdecimal() and int(env) > 0:
         cap = int(env)
     return max(20, min(cols, cap) if cap > 0 else cols)
 

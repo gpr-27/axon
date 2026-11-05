@@ -23,7 +23,6 @@ from axon.ui.theme import BOLD, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, WHITE
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
-_HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
 CUSTOM_MODEL_OPTION = "✏️  Enter custom model name..."
 RANDOM_MODEL_OPTION = "🎲  Random model (from this provider)"
@@ -87,15 +86,13 @@ def store_key(env_var: str, value: str) -> Path | None:
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
+    """Parsed config file. Raises when it exists but is malformed, so it is never overwritten."""
     try:
         import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
         import tomli as tomllib  # type: ignore[no-redef]
-    try:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    except Exception:
-        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
 def save_provider_choice(preset: ProviderPreset, model: str) -> Path | None:
@@ -107,6 +104,7 @@ def save_provider_choice(preset: ProviderPreset, model: str) -> Path | None:
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg = _load_toml(cfg_file) if cfg_file.exists() else {}
         cfg["base_url"] = preset.base_url
+        cfg["provider"] = preset.id
         cfg["model"] = model
         if model not in preset.models:
             customs = [c for c in cfg.get("custom_models", []) if isinstance(c, dict)]
@@ -125,19 +123,47 @@ def same_endpoint(a: str, b: str) -> bool:
     return bool(x and y) and (x == y or x in y or y in x)
 
 
+def is_active_preset(settings: Any, preset: ProviderPreset) -> bool:
+    """True when *preset* is the provider the session is using: settings.provider decides, else the base URL."""
+    chosen = str(getattr(settings, "provider", "") or "").strip().lower()
+    if chosen:
+        return chosen == preset.id
+    return same_endpoint(str(getattr(settings, "base_url", "") or ""), preset.base_url)
+
+
+def _hook_verdict(result: Any) -> tuple[bool, str]:
+    """A hook answers (allowed, reason); anything else means "no objection"."""
+    if isinstance(result, tuple) and len(result) == 2:
+        return bool(result[0]), str(result[1])
+    return True, ""
+
+
 def apply_provider(agent: Agent, preset: ProviderPreset, model: str, api_key: str | None) -> bool:
     """Switch the running agent to preset+model, persist the choice and print a summary."""
     from axon.providers.registry import provider_for
+    previous_model = str(getattr(agent.settings, "model", "") or "")
+    hook = getattr(agent, "model_switch_hook", None)
+    if callable(hook) and model != previous_model:
+        allowed, reason = _hook_verdict(hook("pre", previous_model, model, requested=model))
+        if not allowed:
+            print(f"\n  {ROSE}Model switch blocked by a PreModelSwitch hook: {reason}{RST}\n")
+            return False
     key = api_key or "local"
-    new_settings = agent.settings.model_copy(update={"model": model, "base_url": preset.base_url, "api_key": SecretStr(key)})
+    new_settings = agent.settings.model_copy(update={"model": model, "base_url": preset.base_url, "provider": preset.id, "api_key": SecretStr(key)})
     agent.settings = new_settings
     agent.provider = provider_for(model, new_settings)
+    try:
+        agent.session.model = model
+    except Exception:
+        pass
     if getattr(agent, "permissions", None) is not None and hasattr(agent.permissions, "settings"):
         try:
             agent.permissions.settings = new_settings
         except Exception:
             pass
     cfg = save_provider_choice(preset, model)
+    if callable(hook) and model != previous_model:
+        hook("post", previous_model, model, requested=model)
     print(f"\n  {MINT}{BOLD}✓ Configured active provider: {preset.name}!{RST}")
     print(f"  {SLATE}Active Model: {BOLD}{WHITE}{model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}")
     if cfg:
@@ -180,7 +206,7 @@ def _provider_items(agent: Agent) -> list[SelectItem]:
             linked = is_provider_linked(p, agent)
         except Exception:
             linked = False
-        active = same_endpoint(agent.settings.base_url, p.base_url)
+        active = is_active_preset(agent.settings, p)
         badge = f"{MINT}✓{RST}" if linked else f"{DARK_SLATE}○{RST}"
         hint = ("active · " if active else ("linked · " if linked else "")) + p.description
         items.append(SelectItem(label=p.name, value=p, hint=hint, group=p.category, badge=badge,
@@ -198,7 +224,7 @@ def run_provider_picker(agent: Agent) -> bool:
             return False
         return _fallback_provider_picker(agent)
     items = _provider_items(agent)
-    start = next((i for i, it in enumerate(items) if same_endpoint(agent.settings.base_url, it.value.base_url)), 0)
+    start = next((i for i, it in enumerate(items) if is_active_preset(agent.settings, it.value)), 0)
     chosen = Selector(items, title="Connect a provider", index=start, filterable=True,
                       placeholder="type to search providers and models", max_visible=14).run()
     if not isinstance(chosen, SelectItem):
@@ -344,7 +370,7 @@ def _fallback_provider_picker(agent: Agent) -> bool:
             linked = is_provider_linked(p, agent)
         except Exception:
             linked = False
-        tag = " [Active]" if same_endpoint(agent.settings.base_url, p.base_url) else (" [Linked]" if linked else "")
+        tag = " [Active]" if is_active_preset(agent.settings, p) else (" [Linked]" if linked else "")
         options.append(f"{'✓' if linked else '○'} {p.name}{tag} ({p.category}) - {p.default_model}")
     chosen = pick(options, title="Connect a Provider")
     if not chosen:

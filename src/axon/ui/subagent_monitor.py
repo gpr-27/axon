@@ -15,7 +15,7 @@ from typing import Any
 from axon import platform as plat
 from axon.ui.picker import LiveFrame
 from axon.ui.theme import (AMBER, BOLD, CYAN, DARK_SLATE, GOLD, ITALIC, LAVENDER, MINT, ROSE, RST, SLATE, TEAL,
-                           WHITE, wrap_ansi)
+                           WHITE, sanitize, strip_ansi, wrap_ansi)
 
 _HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
@@ -48,7 +48,8 @@ def _st(t: Any) -> tuple[str, str, str, str]:
 
 
 def _one_line(text: Any) -> str:
-    return " ".join(str(text or "").split())
+    """*text* on one row, without terminal escapes: titles, activity, results and errors are model / tool text."""
+    return " ".join(sanitize(strip_ansi(str(text or ""))).split())
 
 
 def _tok(n: int) -> str:
@@ -221,7 +222,7 @@ def _tab_bar(view: Any, tasks: list[Any], q_len: int, width: int) -> str:
 
 
 def _footer(width: int) -> list[str]:
-    items = [("0", "overview"), ("1-9", "open"), ("←/→", "switch"), ("Q", "queue"), ("esc", "back"),
+    items = [("0", "overview"), ("1-9", "open"), ("←/→", "switch"), ("Q", "queue"), ("esc", "back / stop"),
              ("⏎", "note to main agent"), ("/btw", "ask aside")]
     rows: list[str] = []
     cur = " "
@@ -423,7 +424,8 @@ def _tail(text: str, cells: int) -> str:
 
 def _paste_text(key: str) -> str:
     """A bracketed / coalesced paste as one input line (newlines, CRs and tabs become spaces)."""
-    return key[len(plat.PASTE_PREFIX):].replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    text = key[len(plat.PASTE_PREFIX):].replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return sanitize(text)
 
 
 def input_cursor_col(buf: str, width: int) -> int:
@@ -476,7 +478,10 @@ def run_live_subagent_monitor(future_map: dict[Any, int], subagents_mgr: Any, ag
                 while any(not fut.done() for fut in future_map):
                     tasks = list(subagents_mgr.all_tasks())
                     key = plat.read_key(timeout=0.1)
-                    if key and keys.handle(key, tasks) == "command":
+                    action = keys.handle(key, tasks) if key else None
+                    if action == "interrupt":
+                        raise KeyboardInterrupt
+                    if action == "command":
                         frame.clear()
                         last_lines = []
                         with plat.cooked_terminal():
@@ -500,7 +505,8 @@ class MonitorKeys:
     """Key handling of the live monitor (pure: no terminal I/O, so key sequences are testable).
 
     ``handle`` returns "command" when a slash command (other than /q) was entered: the caller runs
-    ``self.command`` with the terminal in cooked mode."""
+    ``self.command`` with the terminal in cooked mode, and "interrupt" for Esc on the overview with
+    an empty input line: the caller then stops the turn."""
 
     def __init__(self, agent: Any = None) -> None:
         self.agent = agent
@@ -525,8 +531,10 @@ class MonitorKeys:
         elif key == "esc":
             if self.buf:
                 self.buf = ""
-            else:
+            elif self.view != 0:
                 self.view = 0
+            else:
+                return "interrupt"           # Esc on the overview stops the turn, as it does outside the monitor
         elif key in ("tab", "right", "down") and not (self.buf and key == "right"):
             self.view = _cycle(self.view, 1, tasks)
         elif key in ("shift-tab", "left", "up") and not (self.buf and key == "left"):

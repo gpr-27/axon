@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from axon import platform as plat
 from axon.session.store import DashboardSession, clean_session_topic, load_dashboard_sessions
 from axon.ui.picker import SelectItem, Selector
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, WHITE
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, WHITE, sanitize
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
@@ -162,7 +162,7 @@ def run_session_dashboard(agent: Agent) -> str | None:
                 state["buffer"] = state["buffer"][:-1]
                 return True
             if key.startswith(plat.PASTE_PREFIX):
-                state["buffer"] += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+                state["buffer"] += sanitize(key[len(plat.PASTE_PREFIX):].replace("\n", " "))
                 return True
             if len(key) == 1 and key >= " ":
                 state["buffer"] += key

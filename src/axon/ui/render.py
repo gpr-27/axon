@@ -55,7 +55,10 @@ from axon.providers.base import (
     ToolUseStart,
     TurnComplete,
 )
+from axon.agent import decision as _decision
 from axon.ui import cards as _cards
+from axon.ui import live_status as _live
+from axon.ui import tool_cards as _tool_cards
 from axon.ui.markdown import (
     MarkdownStream,
     file_uri,
@@ -129,6 +132,12 @@ MUTATING_TOOLS = WRITE_TOOLS | EDIT_TOOLS | MULTI_EDIT_TOOLS | BASH_TOOLS | {"Pa
 
 
 # ─── Output ────────────────────────────────────────────────────────────────
+
+def _typed_only(text: str) -> str:
+    """``text`` without a terminal, "" in one (the command's menu offers it instead)."""
+    from axon.commands.common import typed_only
+    return typed_only(text)
+
 
 def _write(text: str) -> None:
     """Write to stdout under the shared output lock; never raises on unencodable characters."""
@@ -358,7 +367,7 @@ def render_read_box(p: str, content: str, max_show: int = 3, max_width: int = 88
     lang = _lang_for(p)
     rows = []
     for l in lines:
-        if "→" in l and l.split("→", 1)[0].strip().isdigit():
+        if "→" in l and l.split("→", 1)[0].strip().isdecimal():
             num, code = l.split("→", 1)
             rows.append(f"{SUBTLE}{int(num.strip()):>4} {glyph('v')}{RST} {highlight(code, lang)}")
         else:
@@ -464,7 +473,7 @@ def render_queue_box(queue: Any, max_width: int = 88) -> str:
     """Pending message queue with ids and removal hints."""
     items = getattr(queue, "items", [])
     if not items:
-        return f"  {MUTED}Message queue is empty. Use /q <prompt> to add prompts.{RST}"
+        return f"  {MUTED}Message queue is empty.{_typed_only(' Use /q <prompt> to add prompts.')}{RST}"
     rows = []
     for idx, it in enumerate(items, 1):
         if idx == 1:
@@ -724,6 +733,7 @@ def render_error_box(tool_name: str, content: str, max_width: int = 88) -> str:
 _LAST_TOOL_OUTPUT = ""
 _TOOL_OUTPUTS: "dict[int, tuple[str, str, str]]" = {}   # n -> (tool name, target, full output)
 _TOOL_OUTPUT_SEQ = 0
+_TOOL_CALLS: "dict[int, dict[str, Any]]" = {}   # n -> how call #n was made (see Renderer._remember_call)
 _TOOL_OUTPUT_KEEP = 200
 # Hint appended to elided previews ("… +12 more lines · /output 7"); set per tool result.
 _MORE_HINT = "/output"
@@ -789,6 +799,10 @@ class TranscriptEntry:
     id: str = ""             # tool call id
     output_no: int = 0       # '/output <n>' number of a tool result
     why: str = ""            # why the model called the tool (its own words before the call)
+    why_source: str = ""     # model-text | model-thinking | heuristic
+    chosen: str = ""         # 'chosen by <model> (<provider>) in step 2 · call 1 of 1 · from 22 tools'
+    allowed: str = ""        # the permission decision in plain words
+    then: str = ""           # where the result went ('result (54 B, ~14 tokens) goes to the model in step 3')
     uid: int = field(default_factory=lambda: next(_UIDS))   # stable id: screen rows are tagged with it
 
 
@@ -917,6 +931,83 @@ def context_gauge(used: int, window: int, cells: int = 8, compact: bool = False)
     filled = min(cells, max(1, round(ratio * cells)))
     bar = f"{color}{glyph('block') * filled}{SUBTLE}{glyph('shade') * (cells - filled)}{RST}"
     return f"{MUTED}context{RST} {bar} {color}{pct:.0f}%{RST}{MUTED} of {_fmt_tokens(window)}{RST}"
+
+
+# ─── End-of-turn summary: one row per LLM call ─────────────────────────────
+
+_SUMMARY_HEADER = ("step", "model", "time", "in", "cached", "cache write", "out", "cost")
+_SUMMARY_MODEL_CHARS = 28
+
+
+def step_usage(step: int, model: str, duration: Any, usage: Any, cost: Any) -> dict[str, Any]:
+    """The figures of one LLM call that the end-of-turn table shows (``usage`` None: never reported)."""
+    def number(*names: str) -> int:
+        return int(_get(usage, *names, default=0) or 0) if usage is not None else 0
+
+    def decimal(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    return {"step": int(step or 0), "model": str(model or ""), "duration": decimal(duration),
+            "input": number("input", "input_tokens"), "cache_read": number("cache_read", "cache_read_tokens"),
+            "cache_write": number("cache_write", "cache_write_tokens"), "output": number("output", "output_tokens"),
+            "cost": decimal(cost), "reported": usage is not None}
+
+
+def _summary_cells(s: dict[str, Any]) -> list[str]:
+    """One table row: step, model, time, in, cached %, cache write, out, cost ('-' when unknown)."""
+    model = truncate(_clean(s.get("model") or "?"), _SUMMARY_MODEL_CHARS)
+    if s.get("stopped"):
+        model += " (stopped)"
+    time_s = f"{s['duration']:.1f}s" if s.get("duration") is not None else "-"
+    if not s.get("reported"):
+        return [str(s.get("step") or "?"), model, time_s, "-", "-", "-", "-", "-"]
+    inp, read = int(s.get("input") or 0), int(s.get("cache_read") or 0)
+    cached = f"{int(read * 100 / inp)}%" if inp and read else "-"
+    write = _fmt_tokens(int(s["cache_write"])) if s.get("cache_write") else "-"
+    cost = f"${s['cost']:.4f}" if s.get("cost") is not None else "-"
+    return [str(s.get("step") or "?"), model, time_s, _fmt_tokens(inp), cached, write,
+            _fmt_tokens(int(s.get("output") or 0)), cost]
+
+
+def _summary_table_row(cells: list[str], widths: list[int], color: str) -> str:
+    """Cells joined by two spaces: the model column left-aligned, the figures right-aligned."""
+    out = []
+    for i, (cell, w) in enumerate(zip(cells, widths)):
+        gap = " " * max(0, w - display_width(cell))
+        out.append(cell + gap if i == 1 else gap + cell)
+    return f"{color}{'  '.join(out).rstrip()}{RST}"
+
+
+def _summary_line(s: dict[str, Any]) -> str:
+    """The narrow-terminal form of one row: 'step 1 · model · 3.7s · 32.5k in (95% cached) · 800 out · $0.0009'."""
+    cells = _summary_cells(s)
+    head = f"step {cells[0]} {glyph('dot')} {cells[1]} {glyph('dot')} {cells[2]}"
+    if not s.get("reported"):
+        return head + f" {glyph('dot')} no usage reported"
+    usage = {"input": s["input"], "output": s["output"], "cache_read": s["cache_read"], "cache_write": s["cache_write"]}
+    return head + f" {glyph('dot')} " + _usage_line(usage, cost=s.get("cost"))
+
+
+def turn_summary_rows(steps: list[dict[str, Any]], width: int, stopped: bool = False) -> list[str]:
+    """The end-of-turn usage table (rows without the rail): a title, a header and one row per LLM call.
+    A terminal too narrow for the table gets one wrapped line per call instead."""
+    if not steps:
+        return []
+    title = (f"{WARNING}used so far {glyph('dot')} the turn stopped{RST}" if stopped
+             else f"{MUTED}usage by step{RST}")
+    table = [list(_SUMMARY_HEADER)] + [_summary_cells(s) for s in steps]
+    widths = [max(display_width(row[i]) for row in table) for i in range(len(_SUMMARY_HEADER))]
+    rows = [title]
+    if sum(widths) + 2 * (len(widths) - 1) <= width:
+        rows.append(_summary_table_row(table[0], widths, SUBTLE))
+        rows += [_summary_table_row(cells, widths, MUTED) for cells in table[1:]]
+        return rows
+    for s in steps:
+        rows += wrap_ansi(f"{MUTED}{_summary_line(s)}{RST}", max(10, width))
+    return rows
 
 
 TRACE_LEVELS = ("compact", "normal", "detailed", "debug")
@@ -1188,14 +1279,47 @@ def tool_header_rows(name: str, inp: dict[str, Any], detail: int = 1) -> list[tu
     return [(0, f"{mark} {BOLD}{label}{RST}" + (f"  {TEXT}{target}{RST}" if target else ""))]
 
 
-def tool_purpose_row(name: str, inp: dict[str, Any], registry: Any = None, why: str = "") -> str:
-    """'runs a shell command · why: <the model's words>' (a Bash call's own description replaces the
-    generic purpose); '' when there is nothing to say."""
+def tool_what_row(name: str, inp: dict[str, Any], registry: Any = None) -> tuple[str, set[str]]:
+    """'finds files by name · find files matching *.toml in src, show at most 5' and the argument keys
+    that sentence already covers (so they are not repeated as 'key  value' rows). A Bash call's own
+    description replaces the generic purpose; its command is the header."""
     purpose = tool_purpose(name, registry)
-    desc = _one_line((inp or {}).get("description") or "", 200) if name in BASH_TOOLS else ""
-    bits = [desc or purpose] + ([f"why: {ITALIC}{_one_line(why, 400)}"] if why else [])
-    bits = [b for b in bits if b]
-    return f"{SUBTLE}" + f" {glyph('dot')} ".join(bits) + RST if bits else ""
+    summary, covered = _decision.describe_arguments(name, inp or {})
+    if name in BASH_TOOLS:
+        text = summary or purpose
+    else:
+        text = f" {glyph('dot')} ".join(b for b in (purpose, _clean(summary)) if b)
+    return (f"{SUBTLE}{text}{RST}" if text else ""), covered
+
+
+def tool_why_row(why: str, source: str = "") -> str:
+    """'model said: “…”' / 'model thought: “…”' / "Axon's note: read-only lookup" ('' without a why)."""
+    line = _decision.rationale_line(_clean(why), source)
+    if not line:
+        return ""
+    label, _, text = line.partition(": ")
+    return f"{SUBTLE}{label}:{RST} {DIM}{ITALIC}{text}{RST}"
+
+
+def tool_chosen_row(chosen: str) -> str:
+    # agent/decision.py joins the facts with a literal ' · ': use the encoding-aware dot (ASCII under AXON_ASCII)
+    dot = glyph("dot")
+    return f"{SUBTLE}{_clean(chosen).replace(' · ', f' {dot} ')}{RST}" if chosen else ""
+
+
+def tool_allowed_row(outcome: str, source: str = "", reason: str = "", approval: Any = None) -> str:
+    """'✓ allowed: bypass mode is on' / '✗ denied by rule: …' (one short line)."""
+    text = _one_line(_decision.allowed_because(outcome, source, reason, approval), 200)
+    outcome = str(outcome or "").lower()
+    if outcome == "allow":
+        return f"{SUCCESS}{glyph('ok')}{RST} {MUTED}{text}{RST}"
+    if outcome == "deny":
+        return f"{ERROR}{glyph('fail')}{RST} {MUTED}{text}{RST}"
+    return f"{WARNING}{glyph('warn')}{RST} {MUTED}{text}{RST}"
+
+
+def tool_then_row(text: str) -> str:
+    return f"{SUBTLE}{glyph('arrow')} {text}{RST}" if text else ""
 
 
 def _arg_value_rows(v: Any, width: int, max_rows: int) -> list[str]:
@@ -1246,7 +1370,8 @@ def _body_summary(v: Any) -> str:
     return f"{MUTED}{_one_line(v, 40)}{RST}"
 
 
-def tool_input_rows(name: str, inp: dict[str, Any], width: int | None = None, detail: int = 1) -> list[str]:
+def tool_input_rows(name: str, inp: dict[str, Any], width: int | None = None, detail: int = 1,
+                    skip: set[str] | None = None) -> list[str]:
     """The call's arguments as aligned 'key  value' rows, leaving out what the header already shows.
 
     compact: none · normal: every other argument (long text: its first line) · detailed: also the bodies
@@ -1255,6 +1380,7 @@ def tool_input_rows(name: str, inp: dict[str, Any], width: int | None = None, de
         return []
     width = max(24, width or _width(160) - 10)
     shown = set(_TARGET_KEYS[name]) if name in _TARGET_KEYS else {_generic_target_key(inp)}
+    shown |= set(skip or ())       # already said in plain words on the 'what' row
     items = [(str(k), v) for k, v in inp.items() if not str(k).startswith("_") and str(k) not in shown]
     if detail < 2:
         items = [(k, v) for k, v in items if k not in _BODY_KEYS and v not in (None, "", [], {})]
@@ -1274,15 +1400,22 @@ def tool_input_rows(name: str, inp: dict[str, Any], width: int | None = None, de
 
 
 def tool_call_rows(name: str, inp: dict[str, Any], detail: int = 1, width: int | None = None,
-                   registry: Any = None, why: str = "") -> list[tuple[int, str]]:
-    """Header, purpose and argument rows of one tool call as ``[(indent, row)]`` (indent in columns,
-    relative to the '●'): what the live timeline, /inspect and restored sessions all print."""
+                   registry: Any = None, why: str = "", why_source: str = "",
+                   chosen: str = "") -> list[tuple[int, str]]:
+    """Header and explanation rows of one tool call as ``[(indent, row)]`` (indent in columns, relative
+    to the '●'): what the live timeline, /inspect and restored sessions all print.
+
+    Below the header (normal level and up): who chose the call (*chosen*), why (the model's own words,
+    *why* from *why_source*), what it does with its arguments in plain words, then any argument the
+    plain words do not cover as 'key  value' rows. Detailed and debug list every argument."""
     rows = tool_header_rows(name, inp, detail)
     if detail >= 1:
-        purpose = tool_purpose_row(name, inp, registry, why)
-        if purpose:
-            rows.append((4, purpose))
-        rows += [(4, r) for r in tool_input_rows(name, inp, (width or _width(160) - 10), detail)]
+        what, covered = tool_what_row(name, inp, registry)
+        for row in (tool_chosen_row(chosen), tool_why_row(why, why_source), what):
+            if row:
+                rows.append((4, row))
+        skip = covered if detail < 2 else set()
+        rows += [(4, r) for r in tool_input_rows(name, inp, (width or _width(160) - 10), detail, skip)]
     return rows
 
 
@@ -1330,21 +1463,26 @@ def _tool_summary(registry: Any, name: str, inp: dict[str, Any], content: str, i
             pass
         fn = getattr(tool, "summarize", None)
         text = fn(inp or {}, content or "", is_error) if callable(fn) else ""
-        return sanitize(str(text or "")).strip().splitlines()[0] if text else ""
+        # tools join their facts with a literal ' · ': use the encoding-aware dot (ASCII under AXON_ASCII)
+        return sanitize(str(text or "")).strip().splitlines()[0].replace(" · ", f" {glyph('dot')} ") if text else ""
     except Exception:
         return ""
 
 
 def tool_result_rows(name: str, inp: dict[str, Any], content: str, is_error: bool = False,
-                     width: int | None = None, registry: Any = None, detail: int = 1, link: str = "") -> list[str]:
+                     width: int | None = None, registry: Any = None, detail: int = 1, link: str = "",
+                     preview: bool = True) -> list[str]:
     """Result rows: the tool's own one-line summary (when it provides one) + rendered body.
 
     *detail* follows the trace level (0 compact: the summary row only, 1 normal, 2+ detailed: longer
-    previews); *link* (a file:// URI of the full output) makes the summary row an OSC 8 hyperlink."""
+    previews); *link* (a file:// URI of the full output) makes the summary row an OSC 8 hyperlink.
+    ``preview=False`` leaves out the rendered body (the caller shows the exact text instead)."""
     changes = list(inp.get("_changes") or ())
     content, listed = _split_file_changes(content)
     changes = changes or listed
     rows = summarize_tool_result(name, inp, content, is_error, width, detail=detail)
+    if not preview:
+        rows = rows[:1]
     if changes:
         rows = rows + _cards.file_change_rows(changes, width or _width(140),
                                               _lim(_DIFF_ROWS, detail) if detail > 0 else 1 + len(changes), _MORE_HINT)
@@ -1395,7 +1533,7 @@ CARD_TOOLS = _CARD_HEADER_TOOLS | READ_TOOLS | BASH_TOOLS | LS_TOOLS | GREP_TOOL
 _FULL = 200_000
 _CODE_LINES = (0, 30, 120, _FULL)
 _DIFF_ROWS = (0, 60, 240, _FULL)
-_READ_LINES = (0, 5, 30, _FULL)
+_READ_LINES = (0, 15, 30, _FULL)      # normal: as many lines as the exact result shows (EXACT_RESULT_LINES)
 _LIST_ROWS = (0, 6, 24, _FULL)
 _GREP_ROWS = (0, 12, 40, _FULL)
 _JSON_LINES = (0, 12, 40, _FULL)
@@ -1734,6 +1872,154 @@ def _generic_rows(content: str, path: str, width: int, detail: int) -> list[str]
     return [f"{_plural(len(lines), 'line')} of output{dot}{size}"] + _text_rows(lines, width, h, t, lang)
 
 
+# ─── Exact call and result: what the model sent, and what it gets back ─────
+
+EXACT_CALL_LINES = 15      # rows of a call's exact arguments shown at the normal trace level
+EXACT_RESULT_LINES = 15    # rows of a result's exact text shown at the normal trace level
+_EXACT_CALL_ROWS = (0, EXACT_CALL_LINES, 40, _FULL)
+_EXACT_RESULT_ROWS = (0, EXACT_RESULT_LINES, 40, _FULL)
+# Results whose card is drawn from the result text itself, so the card replaces the exact text:
+# Read (the numbered lines, highlighted) and the formatted cards of plans and subagent reports.
+_CARD_IS_RESULT = {"TodoWrite", "Task", "Agent", "ExitPlanMode"}
+# Results whose card shows something the result text does not (the diff of the call's own arguments):
+# the card is kept and the exact text follows it.
+_CARD_PLUS_EXACT = _CARD_HEADER_TOOLS
+
+
+def _hard_wrap(line: str, width: int) -> list[str]:
+    """*line* cut into pieces of at most *width* columns, keeping every character (spaces included).
+    A piece ends after its last space when it has one, so words are not split."""
+    pieces: list[str] = []
+    current, used = "", 0
+    for ch in line:
+        w = display_width(ch)
+        if current and used + w > width:
+            cut = current.rfind(" ") + 1
+            if not current[:cut].strip() or cut >= len(current):
+                cut = len(current)          # no space after a word to break at: cut the word
+            pieces.append(current[:cut])
+            current = current[cut:]
+            used = display_width(current)
+        current += ch
+        used += w
+    pieces.append(current)
+    return pieces
+
+
+def exact_text_rows(text: str, width: int, max_rows: int, hint: str = "") -> list[str]:
+    """*text* verbatim behind a thin bar, cut to *width* columns: the first *max_rows* rows, then
+    '… +N more lines · <hint> to view all'."""
+    bar = f"{SUBTLE}{glyph('v')}{RST} "
+    lines = sanitize(text or "").expandtabs(4).split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return [bar + f"{MUTED}(empty){RST}"]
+    rows: list[str] = []
+    piece_width = max(10, width - 2)
+    for index, line in enumerate(lines):
+        room = (max_rows - len(rows) + 1) * piece_width
+        for piece in _hard_wrap(line[:room], piece_width):   # a huge line is only cut as far as it is shown
+            if len(rows) >= max_rows:
+                rows.append(bar + _cards.more_row(len(lines) - index, hint))
+                return rows
+            rows.append(bar + f"{TEXT}{piece}{RST}")
+    return rows
+
+
+def exact_call_rows(name: str, inp: dict[str, Any], width: int, detail: int = 1, raw: str = "",
+                    hint: str = "/transcript") -> list[str]:
+    """'exact call · Name' and the arguments exactly as the model sent them (JSON; the raw text when they
+    were not valid JSON). Nothing at the compact level."""
+    if detail <= 0:
+        return []
+    text = _decision.exact_call_text(inp, raw, max(10, width - 2))
+    label = f"exact call {glyph('dot')} {_clean(name)}"
+    if raw:
+        label += " (not valid JSON: the raw text the model wrote)"
+    return [f"{SUBTLE}{label}{RST}"] + exact_text_rows(text, width, _lim(_EXACT_CALL_ROWS, detail), hint)
+
+
+def _exact_label(text: str, note: str = "") -> str:
+    """'exact result sent to the model (12 lines)' (+ ' · <note>')."""
+    n = len(sanitize(text or "").rstrip().splitlines())
+    label = f"exact result sent to the model ({_plural(n, 'line')})"
+    if note:
+        label += f" {glyph('dot')} {note}"
+    return f"{SUBTLE}{label}{RST}"
+
+
+def _is_numbered_read(content: str) -> bool:
+    return bool(re.search(r"^\s*\d+→", content or "", re.M))
+
+
+def _summary_is_text(summary: str, text: str) -> bool:
+    """True when the one-row summary already shows the whole (one-line) result text."""
+    one = sanitize(text or "").strip()
+    return bool(one) and "\n" not in one and strip_ansi(summary).strip() == one
+
+
+def tool_result_rows_exact(name: str, inp: dict[str, Any], content: str, is_error: bool = False,
+                           width: int | None = None, registry: Any = None, detail: int = 1, link: str = "",
+                           hint: str = "/output", exact_text: str | None = None) -> list[str]:
+    """Result rows that make the exact text the model gets back explicit (normal level and up).
+
+    * a diff card (Edit, Write, ...) is kept and the exact text follows it;
+    * Read's numbered, highlighted card is the exact text: it is labelled as such;
+    * plan and subagent cards are kept, with a pointer to the exact text;
+    * every other result (shell output, search results, JSON, errors, ...): the summary row, then the
+      exact text (its first rows and a '… +N more lines · /output N' pointer).
+
+    *exact_text* is what the model received when *content* is something else (a restored session draws
+    its cards from the untruncated output). Compact (detail 0) is ``tool_result_rows`` unchanged."""
+    if detail <= 0:
+        return tool_result_rows(name, inp, content, is_error, width, registry, detail=detail, link=link)
+    width = width or _width(160) - 8
+    exact = content if exact_text is None else exact_text
+    read_card = name in READ_TOOLS and _is_numbered_read(content)
+    keep_card = not is_error and (name in _CARD_PLUS_EXACT or name in _CARD_IS_RESULT or read_card)
+    rows = tool_result_rows(name, inp, content, is_error, width, registry, detail=detail, link=link,
+                            preview=keep_card)
+    if not rows:
+        return rows
+    if read_card and len(rows) > 1:
+        return rows[:1] + [_exact_label(exact, "drawn with colours")] + rows[1:]
+    if name in _CARD_IS_RESULT and keep_card:
+        return rows + [f"{SUBTLE}the card shows the result sent to the model {glyph('dot')} {hint} for its exact text{RST}"]
+    if _summary_is_text(rows[0], exact) and len(rows) == 1:
+        return [rows[0] + f"{SUBTLE} {glyph('dot')} exact result sent to the model{RST}"]
+    body = exact_text_rows(exact, width - 2, _lim(_EXACT_RESULT_ROWS, detail), hint)
+    return rows + [_exact_label(exact)] + body
+
+
+def tool_output_details(n: int, width: int | None = None) -> list[str]:
+    """The full explainer block of tool call #n (the one '/output n' shows): who chose it and why, what it
+    does, the permission outcome, the exact call exactly as the model sent it, how long it took and where
+    its result went. The exact result is the output itself, which '/output' prints below this block.
+    ``[]`` when the call was not kept (an older session, or its record was dropped)."""
+    meta = _TOOL_CALLS.get(int(n))
+    if meta is None:
+        return []
+    width = width or max(40, _width(160) - 8)
+    name = str(meta.get("name", "tool"))
+    inp = {k: v for k, v in (meta.get("input") or {}).items() if not str(k).startswith("_")}
+    rows = [text for _, text in tool_call_rows(name, inp, 2, width, None, str(meta.get("why") or ""),
+                                              str(meta.get("why_source") or ""), str(meta.get("chosen") or ""))]
+    allowed = str(meta.get("allowed") or "")
+    if allowed:
+        blocked = allowed.startswith(("denied", "declined"))
+        rows.append(f"{ERROR if blocked else SUCCESS}{glyph('fail') if blocked else glyph('ok')}{RST} {MUTED}{allowed}{RST}")
+    rows += exact_call_rows(name, inp, width, 3)
+    content = str(meta.get("content") or "")
+    n_bytes = len(content.encode("utf-8", errors="replace"))
+    took = meta.get("duration")
+    step = int(meta.get("step") or 0)
+    rows.append(f"{SUBTLE}{glyph('arrow')} " + (f"took {float(took):.2f}s {glyph('dot')} " if took is not None else "")
+                + _decision.then_text(n_bytes, max(1, int(len(content) / 3.7)) if content else 0, step + 1 if step else 0)
+                + f"{RST}")
+    return rows
+
+
 # ─── Spinner ───────────────────────────────────────────────────────────────
 
 class _SpinnerAwareStdout:
@@ -1801,6 +2087,7 @@ class Spinner:
         self._phase_t0 = 0.0
         self.prefix = "  "
         self.started_at = 0.0
+        self.live: Any = None   # axon.ui.live_status.LiveStatus: the "now" and tip rows (set by the Renderer)
 
     @staticmethod
     def enabled() -> bool:
@@ -1865,6 +2152,27 @@ class Spinner:
             self._visible = False
             self._rows = 1
 
+    def status_rows(self) -> list[str]:
+        """Rows under the spinner line: what is happening now, then a tip. The plain tip row when live status is off."""
+        live = self.live
+        if live is None or term_height() < 12 or not live.enabled():
+            hint = self.hint_line()
+            return [hint] if hint else []
+        lead = self._row_lead()
+        label = f"{SUBTLE}{glyph('result')} {RST}"
+        room = max(10, term_width() - 1) - display_width(lead) - 2 - len("Now: ")
+        rows = live.rows(room, show_tip=term_height() >= 14)
+        if not rows.now:
+            hint = self.hint_line()
+            return [hint] if hint else []
+        out = [truncate(f"{lead}{label}{MUTED}Now: {RST}{TEXT}{rows.now}{RST}", max(10, term_width() - 1))]
+        if rows.tip:
+            out.append(truncate(f"{lead}{label}{MUTED}Tip: {sanitize(rows.tip)}{RST}", max(10, term_width() - 1)))
+        return out
+
+    def _row_lead(self) -> str:
+        return self.prefix.rstrip() + ("  " if self.prefix.strip() else "  ")
+
     def hint_line(self) -> str:
         """Second row under the spinner: a contextual tip, or how to talk to the agent while it works."""
         if os.environ.get("AXON_NO_TIPS") or term_height() < 12:
@@ -1872,7 +2180,7 @@ class Spinner:
         elapsed = time.time() - (self.started_at or time.time())
         tip = ""
         if Spinner.draft_provider is not None and elapsed < 6:
-            tip = "Type a message to queue it for the agent (sent between steps) · /btw asks a side question"
+            tip = f"Type a message to queue it for the agent (sent between steps) {glyph('dot')} /btw asks a side question"
         else:
             try:
                 from axon.features.tips import tip_engine
@@ -1882,7 +2190,7 @@ class Spinner:
                 tip = ""
         if not tip:
             return ""
-        lead = self.prefix.rstrip() + ("  " if self.prefix.strip() else "  ")
+        lead = self._row_lead()
         return truncate(f"{lead}{SUBTLE}{glyph('result')} {RST}{MUTED}Tip: {sanitize(tip)}{RST}", max(10, term_width() - 1))
 
     def _run(self) -> None:
@@ -1895,13 +2203,13 @@ class Spinner:
                     continue
                 self._frame = (self._frame + 1) % len(frames)
                 line = self.render_line(frames[self._frame])
-                hint = self.hint_line()
+                extra = self.status_rows()
                 try:
                     self._erase_locked()
-                    self._real.write("\r\033[2K" + line + (f"\n\033[2K{hint}" if hint else ""))
+                    self._real.write("\r\033[2K" + line + "".join(f"\n\033[2K{row}" for row in extra))
                     self._real.flush()
                     self._visible = True
-                    self._rows = 2 if hint else 1
+                    self._rows = 1 + len(extra)
                 except Exception:
                     break
 
@@ -2000,6 +2308,10 @@ class Renderer:
         self._lock = threading.RLock()
         self.registry: Any = getattr(settings, "registry", None)
         self.spinner = Spinner(status=self._spinner_status)
+        self.live = _live.LiveStatus(agent_of=lambda: getattr(self, "_agent", None), provider_of=self._provider_for)
+        self.live.fallback_tip = self._generic_tip
+        self.spinner.live = self.live
+        _live.set_current(self.live)
         self._tail = "\n\n"
         self._md: MarkdownStream | None = None
         self._md_railed = False
@@ -2023,7 +2335,12 @@ class Renderer:
         self._step_stats_done = True
         self._pending_stats: tuple[Any, str] | None = None
         self._pending_perm: dict[str, list[str]] = {}
-        self._pending_why: dict[str, str] = {}
+        self._pending_why: dict[str, tuple[str, str]] = {}   # tool id -> (why, source) before the call starts
+        self._step_tool_count = 0                  # tool definitions sent with the current LLM call
+        self._step_prompt_tools = False            # ... described in the prompt (no native tool calling)
+        self._step_tool_uses = 0                   # tool calls the current LLM call wrote
+        self._step_call_no = 0                     # calls of the current step started so far
+        self._answer_step: tuple[int, str] = (0, "")   # (step, model) that wrote the final answer
         self._batch_order: list[str] = []          # tool ids of the current batch, in call order
         self._batch_blocks: dict[str, dict[str, Any]] = {}
         self._batch_next = 0
@@ -2041,6 +2358,30 @@ class Renderer:
         self._turn_text = False                    # the model wrote response text this turn
         self.last_context: tuple[int, int] = (0, 0)   # (tokens in context, window) of the last LLM call
         self._step_context: tuple[int, int] = (0, 0)
+        self._pending_exact: dict[str, list[str]] = {}   # tool id -> its 'exact call' rows, not printed yet
+        self._turn_steps: list[dict[str, Any]] = []      # usage of each LLM call this turn (end-of-turn table)
+        self._turn_context: tuple[int, int] = (0, 0)     # context use after the turn's last LLM call
+        # Phased tool cards (normal trace level): a call is drawn once, when its result is in.
+        self._calls: dict[str, dict[str, Any]] = {}      # tool id -> what its card shows (see _on_tool_start)
+        self._ready_cards: dict[str, tuple[list[str], str]] = {}   # finished cards waiting for their turn to print
+        self._call_notes: dict[str, list[str]] = {}      # tool id -> hook messages for its card
+        self._allowed_info: dict[str, str] = {}          # tool id -> permission text (may arrive before the call starts)
+        self._step_results = [0, 0, 0]                   # results of this step: count, bytes, estimated tokens
+        self._step_calls_due = 0                         # calls of this step that have not finished yet
+        self._step_line_open = False                     # a '→ N results go to step N' line is waiting to be printed
+        self._batch_total = 1                            # calls in the current batch (numbers show when > 1)
+        self._batch_mode = ""                            # 'sequential' / 'parallel' / '' (one call)
+        self._batch_common: str | None = None            # permission outcome the batch shares (None: not known yet)
+        self._tools_header_done = False                  # the 'TOOLS' header of the current batch is printed
+        self._row_blank = False                          # the last row written was an empty rail row
+        self._after_header = False                       # nothing written since the step header
+        self._answer_label_step = 0                      # step whose 'ANSWER' label is already printed
+        self._batch_name_w = 4                           # width of the tool-name column of the current batch
+        # What the model is doing right now, for the live status line (ui/live_status.py reads it):
+        # {"phase": "idle" | "choosing" | "selected" | "input" | "running", "tool": name, "args": text so far,
+        #  "since": time.time() when the phase began}. Set by ToolUseStart, ToolArgsDelta, the tool start and
+        # the tool result; "args" is the argument text as the model streams it.
+        self.tool_phase: dict[str, Any] = {"phase": "idle", "tool": "", "args": "", "since": 0.0}
 
     def attach(self, agent: Any) -> None:
         """Bind to an agent: its tool registry supplies result summaries; trace level from settings."""
@@ -2107,6 +2448,9 @@ class Renderer:
     def _out(self, text: str) -> None:
         if text:
             self._tail = (self._tail + text)[-2:]
+            self._after_header = False
+            last_row = strip_ansi(text).rstrip("\n").rsplit("\n", 1)[-1]
+            self._row_blank = not last_row.strip(" │|")
             _write(text)
 
     def _gap_text(self) -> str:
@@ -2247,6 +2591,7 @@ class Renderer:
     # ── event dispatch ────────────────────────────────────────────────────
     def on_event(self, e: Any) -> None:
         handler = self._HANDLERS.get(type(e))
+        self.live.observe(e)
         with self._lock:
             try:
                 if handler is not None:
@@ -2283,6 +2628,8 @@ class Renderer:
         self._turn_text = False
         self._turn_cost = 0.0
         self._turn_cost_known = False
+        self._turn_steps = []
+        self._turn_context = (0, 0)
         if self.level < 1:
             return
         self._gap()
@@ -2298,8 +2645,11 @@ class Renderer:
         self._out(truncate(line, width) + "\n")
 
     def _on_llm_call(self, e: LLMCallStart) -> None:
+        self._flush_cards(force=True)
         self._flush_blocks(force=True)
         self._finish_stream()
+        self._flush_step_line()
+        self._set_phase("idle")
         self._close_step_stats()
         if e.user_prompt:
             self._current_user_prompt = e.user_prompt
@@ -2313,6 +2663,11 @@ class Renderer:
             self._open_turn(self._current_user_prompt, e.model, self._current_permission_mode)
         self._current_iteration = e.iteration
         self._round_obs_count = 0
+        self._step_tool_count, self._step_prompt_tools = 0, False
+        self._step_tool_uses, self._step_call_no = 0, 0
+        self._step_results, self._step_calls_due = [0, 0, 0], 0
+        if e.iteration == 1:
+            self._answer_step = (0, "")
         self._step = e.iteration
         self._step_t0 = time.time()
         self._step_model = e.model
@@ -2329,13 +2684,22 @@ class Renderer:
             prov = self._provider_for(e.model)
 
             def step_row(with_prov: bool) -> str:
+                if self.level == 1:       # normal: the turn header names the provider; no 'LLM call' / 'reads'
+                    tokens = f" {dot} ~{_fmt_tokens(e.tokens_in)} tokens" if e.tokens_in else ""
+                    return (f"{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {e.iteration}{RST} {MUTED}{dot}{RST} {TEXT}{e.model}{RST}"
+                            f" {MUTED}{dot} {_plural(e.message_count, 'message')}{tokens}{RST}")
                 return (f"{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {e.iteration}{RST}  {TEXT}LLM call{RST} {MUTED}{dot}{RST} "
                         f"{TEXT}{e.model}{RST}" + (f" {MUTED}({prov}){RST}" if with_prov and prov else "")
                         + f" {MUTED}{dot} reads {_plural(e.message_count, 'message')}{size}{RST}")
             row = step_row(True)
             if prov and display_width(self._rail() + row) > term_width() - 1:
                 row = step_row(False)          # narrow window: the turn header already names the provider
+            if self.level == 1 and display_width(self._rail() + row) > term_width() - 1:
+                short = f" {MUTED}{dot} {_plural(e.message_count, 'message')}{RST}"      # then the token count goes,
+                row = (f"{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {e.iteration}{RST} {MUTED}{dot}{RST} {TEXT}{e.model}{RST}"
+                       + (short if display_width(self._rail() + f'Step {e.iteration} {dot} {e.model} {dot} {_plural(e.message_count, "message")}') <= term_width() - 1 else ""))
             self._line(row)
+            self._after_header = True
             self._render_fed_back(e)
             if self.level >= 3:
                 self._render_debug_fields(e, skip={"iteration", "model", "message_count", "tokens_in", "tools_ingested", "user_prompt"})
@@ -2345,8 +2709,8 @@ class Renderer:
 
     def _render_fed_back(self, e: LLMCallStart) -> None:
         items = e.tools_ingested or []
-        if e.iteration <= 1 or not items:
-            return
+        if e.iteration <= 1 or not items or self.level < 2:
+            return          # normal level: the '→ N results go to step N' line under the tools says it
         total_bytes = sum(int(t.get("bytes", 0) or 0) for t in items)
         total_tok = sum(int(t.get("tokens", 0) or 0) for t in items)
         errors = sum(1 for t in items if t.get("is_error"))
@@ -2366,10 +2730,12 @@ class Renderer:
 
     def _close_step_stats(self, usage: Any = None, stop: str = "", cost: Any = None, duration: float | None = None,
                           miss_cause: str = "", context: tuple[int, int] | None = None) -> None:
-        """Print the usage/timing/cost line of the current LLM call (once).
+        """Record the usage/timing/cost of the current LLM call (once) for the end-of-turn summary.
 
-        Prefers the data of an ``LLMCallEnd`` trace event; falls back to the provider's
-        ``TurnComplete`` usage (kept pending until the next timeline boundary).
+        Only the detailed and debug levels also print it as a line in the middle of the turn; compact
+        and normal show it in the table under the final answer. Prefers the data of an ``LLMCallEnd``
+        trace event; falls back to the provider's ``TurnComplete`` usage (kept pending until the next
+        timeline boundary).
         """
         if self._step_stats_done:
             return
@@ -2391,9 +2757,12 @@ class Renderer:
                 self._turn_cost_known = True
             except (TypeError, ValueError):
                 pass
-        if self.level < 1:
-            return
         dur = duration if duration is not None else max(0.0, time.time() - self._step_t0)
+        self._turn_steps.append(step_usage(self._step, self._step_model, dur, usage, cost))
+        if context:
+            self._turn_context = context
+        if self.level < 2:
+            return       # compact / normal: no cost line mid-turn; the end-of-turn table has it
         show_stop = stop if (self.level >= 2 or stop not in ("end_turn", "tool_use", "")) else ""
         sep = f" {MUTED}{glyph('dot')}{RST} "
         stats = (f"{SUBTLE}{glyph('wrap')}{RST} {MUTED}replied in {dur:.1f}s {glyph('dot')} "
@@ -2441,7 +2810,8 @@ class Renderer:
 
     @property
     def _think_full(self) -> bool:
-        return self.show_thinking and self.level >= 1
+        """The whole thought, streamed: only at the detailed and debug levels (normal shows one line)."""
+        return self.show_thinking and self.level >= 2
 
     def _think_stream(self, text: str) -> None:
         avail = max(20, layout_width(10))
@@ -2481,6 +2851,8 @@ class Renderer:
                     out.append(" ")
                     self._think_col += 1
             else:
+                if display_width(self._think_word) + display_width(ch) > avail:
+                    flush_word()        # unspaced text (CJK, a long URL) is cut at the row end, not left to the terminal
                 self._think_word += ch
         if out:
             self._out("".join(out))
@@ -2505,6 +2877,10 @@ class Renderer:
             return
         if self.level < 1:
             return
+        if self.level == 1:       # normal: '✻ THINKING  0.1s · first words of the thought…' (the rest: detailed)
+            if full_text:
+                self._section(_tool_cards.thinking_line(elapsed, full_text, self._section_width()))
+            return
         full = " ".join("".join(self._thinking_lines).split())
         first = re.split(r"(?<=[.!?])\s", full, maxsplit=1)[0] if full else ""
         text = f"{SUBTLE}{glyph('star')} thought for {elapsed:.1f}s{RST}"
@@ -2527,6 +2903,9 @@ class Renderer:
             self._text_in_step = True
             if not self._railed:
                 self._gap()
+            if self.level == 1 and self._answer_label_step != self._step:
+                self._answer_label_step = self._step
+                self._section(_tool_cards.answer_label(), gap=True)
             # On the timeline the text is a child of its step (same column as tool calls); no header row.
             self.spinner.set_label(f"Step {self._step} {glyph('dot')} responding")
         self._resp_raw.append(e.text)
@@ -2567,15 +2946,21 @@ class Renderer:
     # Tool calls ----------------------------------------------------------
     def _on_tool_use_start(self, e: ToolUseStart) -> None:
         self._finish_stream()
+        self._set_phase("selected" if e.name else "choosing", _clean(e.name))
         self.spinner.set_label(f"Step {self._step} {glyph('dot')} writing {_clean(e.name)} call")
 
     def _on_tool_args(self, e: ToolArgsDelta) -> None:
         self._out_chars += len(e.fragment)
+        phase = self.tool_phase
+        if phase.get("phase") in ("choosing", "selected", "input"):
+            phase["phase"] = "input"
+            phase["args"] = (str(phase.get("args", "")) + sanitize(e.fragment))[-2000:]
 
     def _on_tool_use_complete(self, e: ToolUseComplete) -> None:
         pass
 
     def _on_batch(self, e: ToolBatchStart) -> None:
+        self._flush_cards(force=True)
         self._flush_blocks(force=True)
         tools = list(e.tools or ())
         self._batch_order = [i for i in (str(getattr(t, 'id', '') or '') for t in tools) if i]
@@ -2592,7 +2977,14 @@ class Renderer:
             self._current_user_prompt = e.user_prompt
         if e.mode:
             self._current_permission_mode = e.mode
-        if self.level >= 2 or (self.level >= 1 and e.total_count > 1):
+        if self.level == 1:
+            names = [str(getattr(t, "name", "") or "tool") for t in tools]
+            self._batch_name_w = _tool_cards.name_column_width(names, self._card_width())
+            self._batch_total = int(e.total_count or len(tools))
+            self._step_calls_due = max(self._step_calls_due, 0) + self._batch_total
+            self._batch_mode = ("parallel" if self._batch_parallel else "sequential") if self._batch_total > 1 else ""
+            self._batch_common, self._tools_header_done = None, False       # the TOOLS header waits for the first card
+        elif self.level >= 2:
             if e.total_count > 1:
                 how = "in parallel, read-only" if self._batch_parallel else "one after another"
             else:
@@ -2644,6 +3036,8 @@ class Renderer:
         for note in b["notes"]:
             for row in note.split("\n"):
                 self._line(row, "      ")
+        if b.get("exact"):
+            self._lines(b["exact"], "      ")
         if b["rows"]:
             first, rest = b["rows"]
             if strip_ansi(first).lstrip().startswith(glyph("tl")):
@@ -2675,7 +3069,11 @@ class Renderer:
         prev = self._snapshot_before(e.name, inp)
         if prev is not None:
             self._active_tools[e.id]["prev"] = prev
-        why = _get(e, "rationale", "why", default="") or self._pending_why.pop(e.id, "")
+        pending_why, pending_source = self._pending_why.pop(e.id, ("", ""))
+        why = _get(e, "rationale", "why", default="") or pending_why
+        why_source = _get(e, "rationale_source", default="") or pending_source
+        self._step_call_no += 1
+        chosen = self._chosen_text()
         try:
             import json as _json
             detail = _json.dumps(inp, indent=2, ensure_ascii=False, default=str)
@@ -2684,14 +3082,28 @@ class Renderer:
         self._t_tools[e.id] = _record(TranscriptEntry("tool", self._turn_no, self._step,
                                                       title=f"{_clean(e.name)}  {tool_target(e.name, inp)}".rstrip(),
                                                       detail=detail, status="running", started_at=time.time(), id=e.id,
-                                                      why=_plain(why)))
-        call = tool_call_rows(e.name, inp, self.level, _width(160) - 12, self.registry, why)
-        if self._batch_parallel and e.id in self._batch_order:
+                                                      why=_plain(why), why_source=str(why_source), chosen=chosen))
+        self._set_phase("running", _clean(e.name))
+        if self.level == 1:
+            # Normal level: the whole card is drawn when the result is in (see _card_result).
+            number = self._batch_order.index(e.id) + 1 if e.id in self._batch_order else self._step_call_no
+            self._calls[e.id] = {"name": e.name, "input": inp, "why": _clean(why), "why_source": str(why_source),
+                                 "t0": time.time(), "number": number}
+            call, exact = [], []
+        else:
+            call = tool_call_rows(e.name, inp, self.level, _width(160) - 12, self.registry, why, str(why_source), chosen)
+            exact = self._exact_call(e, inp)
+        if self.level == 1:
+            pass
+        elif self._batch_parallel and e.id in self._batch_order:
             b = self._block(e.id)
             b["uid"] = self._t_tools[e.id].uid
             b["header"] = self._tool_header(e.id, e.name, inp, mark_last=False)
             b["call"] = call
+            b["exact"] = exact
         else:
+            # printed after the permission decision ('allowed: …'), or with the result at the latest
+            self._pending_exact[e.id] = exact
             if not self._railed:
                 self._gap()
             self._last_header_id = e.id
@@ -2701,6 +3113,27 @@ class Renderer:
                  else f"Running {len(running)} tools")
         self.spinner.start(label)
         self.spinner.set_label(label)
+
+    def _exact_call(self, e: ToolExecutionStart, inp: dict[str, Any]) -> list[str]:
+        """The 'exact call' rows of a call: its arguments exactly as the model sent them."""
+        raw = ""
+        if _get(e, "parse_error", default=""):
+            raw = str(inp.get("raw") or "")
+        return exact_call_rows(e.name, inp, _width(160) - 12, self.level, raw)
+
+    def _print_exact_call(self, call_id: str) -> None:
+        """Print a call's pending 'exact call' rows (once)."""
+        rows = self._pending_exact.pop(call_id, None)
+        if rows:
+            self._lines(rows, "      ")
+
+    def _chosen_text(self) -> str:
+        """'chosen by <model> (<provider>) in step N · call i of n · from T tools' for the call starting now."""
+        if not self._step_model:
+            return ""
+        return _decision.chosen_by_text(self._step_model, self._provider_for(self._step_model), self._step,
+                                        self._step_call_no, self._step_tool_uses, self._step_tool_count,
+                                        self._step_prompt_tools)
 
     def _workspace(self) -> Path:
         ws = getattr(getattr(self._agent, "settings", None), "workspace", None)
@@ -2744,6 +3177,7 @@ class Renderer:
     def _on_tool_result(self, e: ToolExecutionResult) -> None:
         global _MORE_HINT
         self._finish_stream()
+        self._print_exact_call(e.id)
         info = self._active_tools.pop(e.id, None) or {"name": e.name, "input": {}, "idx": 0, "t0": None}
         inp = {**(info.get("input") or {}), **(e.input or {})}
         if "prev" in info:
@@ -2753,6 +3187,10 @@ class Renderer:
         if e.id in self._t_tools:
             _tag_rows(self._t_tools[e.id].uid)
         out_no = _save_tool_output(e.content, _clean(e.name), tool_target(e.name, inp))
+        self._remember_call(out_no, e, inp, info)
+        if self.level == 1:
+            self._card_result(e, info, inp, out_no)
+            return
         in_block = self._batch_parallel and e.id in self._batch_order
         if not in_block:
             if self._last_header_id != e.id:
@@ -2764,8 +3202,8 @@ class Renderer:
         if link:
             _MORE_HINT = hyperlink(link, _MORE_HINT)              # click (cmd/ctrl+click) opens the full output
         try:
-            rows = tool_result_rows(e.name, inp, e.content, e.is_error, width, self.registry,
-                                    detail=min(self.level, 2), link=link)
+            rows = tool_result_rows_exact(e.name, inp, e.content, e.is_error, width, self.registry,
+                                          detail=min(self.level, 2), link=link, hint=_MORE_HINT)
         finally:
             _MORE_HINT = "/output"
         entry = self._t_tools.pop(e.id, None) or _record(TranscriptEntry(
@@ -2780,16 +3218,9 @@ class Renderer:
             rows[0] = f"{ERROR}{glyph('fail')}{RST} " + rows[0]
         self._round_obs_count += 1
         if self.level >= 1 and rows:
-            content = e.content or ""
-            n_bytes = len(content.encode("utf-8", errors="replace"))
-            est = max(1, len(content) // 4) if content else 0
             t0 = info.get("t0")
             dur = f"{time.time() - t0:.2f}s" if t0 else ""
-            dest = f"step {self._current_iteration + 1}" if self._turn_open else "the model"
-            # normal: how long it took; detailed: also what was sent back to the model
             facts = [dur] if dur else []
-            if self.level >= 2:
-                facts.append(f"sent {_fmt_bytes(n_bytes)} (~{_fmt_tokens(est)} tokens) to {dest}")
             sep = f" {glyph('dot')} "
             if card:
                 # the subagent card is a box: fold the timing into its bottom border
@@ -2797,8 +3228,11 @@ class Renderer:
                     rows = _append_box_footer(rows, f"took {sep.join(facts)}")
             elif facts:
                 rows = [rows[0] + f"{SUBTLE}{sep}{sep.join(facts)}{RST}"] + rows[1:]
-        if self.level >= 2 and not e.is_error and e.name not in _CARD_HEADER_TOOLS | {"Task", "TodoWrite"}:
-            rows.append(f"{SUBTLE}result #{self._round_obs_count} [{(e.id or '')[:12]}] goes to the model in step {self._current_iteration + 1}{RST}")
+        then = self._then_text(e)
+        entry.then = then
+        then_row = tool_then_row(then) if self.level >= 1 else ""
+        if then_row:
+            rows = rows + [then_row]
         if in_block:
             b = self._block(e.id)
             if not b["header"]:
@@ -2816,8 +3250,162 @@ class Renderer:
         if not self._active_tools:
             self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
 
+    # ── phased tool cards (normal level) ───────────────────────────────────
+    # A call is drawn once, when its result is in: choose / input / run / output (ui/tool_cards.py).
+    # Parallel calls finish in any order but their cards are printed in the order the model asked.
+    def _section_width(self) -> int:
+        return max(20, term_width() - 1 - display_width(self._rail()))
+
+    def _section(self, text: str, gap: bool = False) -> None:
+        """One section label row on the rail ('▣ TOOLS · 2 calls', '✻ THINKING …', '▍ ANSWER'). *gap*: a blank
+        rail row first, unless the step header or a blank row is right above."""
+        if gap and not self._row_blank and not self._after_header:
+            self._line("")
+        self._out(self._rail() + truncate(text, self._section_width()) + "\n")
+
+    def _card_width(self) -> int:
+        """Columns a card row may use: never wide enough for the terminal to wrap it."""
+        return max(30, term_width() - 1 - display_width(self._rail("  ")))
+
+    def _card_out(self, rows: list[str]) -> None:
+        lead = self._rail("  ")
+        self._out("".join(lead + r + "\n" for r in rows))
+
+    def _set_phase(self, phase: str, tool: str = "", args: str = "") -> None:
+        self.tool_phase = {"phase": phase, "tool": tool, "args": args, "since": time.time()}
+
+    def _remember_call(self, out_no: int, e: ToolExecutionResult, inp: dict[str, Any], info: dict[str, Any]) -> None:
+        """Keep what '/output <n>' needs to explain call #n in full (see ``tool_output_details``)."""
+        entry = self._t_tools.get(e.id)
+        t0 = info.get("t0")
+        _TOOL_CALLS[out_no] = {
+            "name": e.name, "input": dict(inp), "is_error": bool(e.is_error), "content": e.content or "",
+            "why": (entry.why if entry else "") or "", "why_source": (entry.why_source if entry else "") or "",
+            "chosen": (entry.chosen if entry else "") or "", "allowed": self._allowed_info.get(e.id, ""),
+            "duration": (time.time() - t0) if t0 else None, "step": self._step,
+        }
+        for old in sorted(_TOOL_CALLS)[:-_TOOL_OUTPUT_KEEP]:
+            del _TOOL_CALLS[old]
+
+    def _card_call(self, call_id: str, name: str, inp: dict[str, Any], content: str, is_error: bool, state: str,
+                   out_no: int, why: str, duration: float | None) -> "_tool_cards.CardCall":
+        saved = self._calls.pop(call_id, {})
+        batched = call_id in self._batch_order
+        if batched and self._batch_common is None:
+            self._batch_common = _tool_cards.common_permission([self._allowed_info.get(i, "") for i in self._batch_order])
+        common = (self._batch_common or "") if batched else _decision.short_allowed(self._allowed_info.get(call_id, ""))
+        self._card_common = common
+        hint = f"/output {out_no}" if out_no else "/output"
+        link = _output_file(out_no, content) if out_no and content.strip() else ""
+        if link:
+            hint = hyperlink(link, hint)            # click (cmd/ctrl+click) opens the full output
+        return _tool_cards.CardCall(
+            number=int(saved.get("number") or self._step_call_no or 1), name=name, inp=inp,
+            why=str(saved.get("why") or why or ""), why_source=str(saved.get("why_source") or ""),
+            total=self._batch_total if batched else 1, common_allowed=common,
+            allowed=self._allowed_info.pop(call_id, ""),
+            content=content, is_error=is_error, duration=duration, state=state,
+            hint=hint, notes=self._call_notes.pop(call_id, []),
+            registry=self.registry, name_w=self._batch_name_w)
+
+    def _card_result(self, e: ToolExecutionResult, info: dict[str, Any], inp: dict[str, Any], out_no: int) -> None:
+        entry = self._t_tools.pop(e.id, None) or _record(TranscriptEntry(
+            "tool", self._turn_no, self._step, title=f"{_clean(e.name)}  {tool_target(e.name, inp)}".rstrip(), id=e.id))
+        content = e.content or ""
+        entry.body, entry.output_no = sanitize(content), out_no
+        entry.status = "error" if e.is_error else "ok"
+        if entry.started_at:
+            entry.duration = time.time() - entry.started_at
+        t0 = info.get("t0")
+        call = self._card_call(e.id, e.name, inp, content, e.is_error, "done", out_no, entry.why,
+                               (time.time() - t0) if t0 else None)
+        preview = _tool_cards.output_rows(call, 120)
+        entry.summary = _plain(preview[0]) if preview else ""
+        entry.then = self._then_text(e)
+        self._round_obs_count += 1
+        self._queue_card(e.id, _tool_cards.card_rows(call, self._card_width()), content)
+        self._set_phase("idle")
+        if not self._active_tools:
+            self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
+
+    def _queue_card(self, call_id: str, rows: list[str], content: str) -> None:
+        if call_id in self._batch_order[self._batch_next:]:
+            self._ready_cards[call_id] = (rows, content)
+            self._flush_cards()
+        else:
+            self._print_card(rows, content, batched=False)
+
+    def _flush_cards(self, force: bool = False) -> None:
+        """Print finished cards in the order the model called them; *force* also closes calls that never finished."""
+        while self._batch_next < len(self._batch_order):
+            call_id = self._batch_order[self._batch_next]
+            ready = self._ready_cards.pop(call_id, None)
+            if ready is None:
+                if not force:
+                    return
+                ready = self._stopped_card(call_id)
+            if ready is not None:
+                self._print_card(*ready)
+            self._batch_next += 1
+        if force:
+            for call_id in list(self._calls):
+                ready = self._stopped_card(call_id)
+                if ready is not None:
+                    self._print_card(*ready)
+
+    def _stopped_card(self, call_id: str) -> tuple[list[str], str] | None:
+        saved = self._calls.get(call_id)
+        if saved is None:
+            return None
+        self._active_tools.pop(call_id, None)
+        entry = self._t_tools.pop(call_id, None)
+        if entry is not None:
+            entry.status, entry.summary = "error", "stopped before it finished"
+        call = self._card_call(call_id, str(saved.get("name", "tool")), dict(saved.get("input") or {}), "", False,
+                               "stopped", 0, entry.why if entry else "", time.time() - float(saved.get("t0") or time.time()))
+        return _tool_cards.card_rows(call, self._card_width()), ""
+
+    def _print_card(self, rows: list[str], content: str, batched: bool = True) -> None:
+        if not batched:
+            self._section(_tool_cards.tools_label(1, "", getattr(self, "_card_common", ""), self._section_width()), gap=True)
+        elif not self._tools_header_done:
+            self._tools_header_done = True
+            self._section(_tool_cards.tools_label(self._batch_total, self._batch_mode, self._batch_common or "",
+                                                       self._section_width()), gap=True)
+        self._card_out(rows)
+        self._step_results[0] += 1
+        self._step_results[1] += len(content.encode("utf-8", errors="replace"))
+        self._step_results[2] += max(1, int(len(content) / 3.7)) if content else 0
+        self._step_calls_due -= 1
+        self._step_line_open = True
+        if self._step_calls_due <= 0:
+            self._flush_step_line()
+
+    def _flush_step_line(self) -> None:
+        """'→ 2 results (314 B, ~84 tokens) go to step 2': one line under the last tool of a step."""
+        if not self._step_line_open:
+            return
+        self._step_line_open = False
+        count, n_bytes, est = self._step_results
+        self._step_results, self._step_calls_due = [0, 0, 0], 0
+        if count:
+            self._card_out([_tool_cards.step_results_text(count, n_bytes, est, self._current_iteration + 1,
+                                                          self._card_width())])
+
+    def _then_text(self, e: ToolExecutionResult) -> str:
+        """Where this result goes: 'result (54 B, ~14 tokens) goes to the model in step 3' (detailed: '#n [id]')."""
+        content = e.content or ""
+        n_bytes = len(content.encode("utf-8", errors="replace"))
+        est = max(1, int(len(content) / 3.7)) if content else 0     # the estimate the next step's 'includes' line uses
+        next_step = self._current_iteration + 1 if self._turn_open else 0
+        if self.level >= 2:
+            return _decision.then_text(n_bytes, est, next_step, self._round_obs_count, e.id or "")
+        return _decision.then_text(n_bytes, est, next_step)
+
     def _on_turn_complete(self, e: TurnComplete) -> None:
+        self._flush_cards(force=True)
         self._flush_blocks(force=True)
+        self._flush_step_line()
         self._finish_stream()
         if not self._step_stats_done:
             self._pending_stats = (e.usage, e.stop_reason)
@@ -2850,10 +3438,15 @@ class Renderer:
                 self._line(f"{ERROR}{glyph('fail')} model call failed: {_one_line(_get(e, 'error', default='unknown error'), 160)}{RST}", "  ")
             elif str(_get(e, "outcome", default="ok")) == "interrupted":
                 self._line(f"{WARNING}{glyph('warn')} interrupted{RST}", "  ")
+            self._step_tool_uses = int(_get(e, "tool_use_count", default=0) or 0)
             if str(_get(e, "stop_reason", default="")) != "tool_use":
                 self.spinner.stop()
+                if str(_get(e, "outcome", default="ok")) == "ok":
+                    self._answer_step = (self._step, self._step_model)
         elif kind == "LLMRequestInfo":
-            if self.level >= 2 and int(_get(e, "iteration", default=1) or 1) == 1:
+            self._step_tool_count = int(_get(e, "tool_count", default=0) or 0)
+            self._step_prompt_tools = bool(_get(e, "prompt_tools", default=False))
+            if self.level >= 2:          # detailed / debug: what each step's request holds
                 self._line(f"{SUBTLE}request: system ~{_fmt_tokens(int(_get(e, 'system_tokens', default=0) or 0))} {dot} "
                            f"{_plural(int(_get(e, 'tool_count', default=0) or 0), 'tool')} ~{_fmt_tokens(int(_get(e, 'tool_schema_tokens', default=0) or 0))} {dot} "
                            f"conversation ~{_fmt_tokens(int(_get(e, 'conversation_tokens', default=0) or 0))} tokens{RST}", "    ")
@@ -2866,21 +3459,16 @@ class Renderer:
             source = str(_get(e, "source", default=""))
             reason = str(_get(e, "reason", default=""))
             approval = _get(e, "approval", default=None)
-            if outcome == "allow":
-                label = "approved by user" if source == "user" or approval else (
-                    f"allowed by {source}" if source and source not in ("mode",) else "auto-allowed")
-                color, mark = SUCCESS, glyph("ok")
-            elif outcome == "deny":
-                label, color, mark = (f"denied by {source}" if source else "denied"), ERROR, glyph("fail")
-            else:
-                label, color, mark = f"{outcome or 'ask'}", WARNING, glyph("warn")
-            if outcome == "allow" and source in ("mode", "") and not approval and self.level < 2:
-                return          # routine approvals (bypass mode, read-only tools) are noise at the normal level
-            if outcome == "allow" and source == "delegation" and not approval and self.level < 2:
-                return          # every Task call is allowed; the subagent's own tool calls are what get checked
-            text = (f"{color}{mark}{RST} {MUTED}{label}" + (f": {_one_line(reason, 200)}" if reason else "")
-                    + (f" ({_one_line(approval, 80)})" if approval else "") + RST)
-            self._annotate_tool(str(_get(e, "id", default="")), str(_get(e, "tool", default="")), text)
+            call_id = str(_get(e, "id", default=""))
+            text = tool_allowed_row(outcome, source, reason, approval)
+            allowed_text = _decision.allowed_because(outcome, source, reason, approval)
+            self._allowed_info[call_id] = allowed_text
+            if call_id in self._t_tools:
+                self._t_tools[call_id].allowed = allowed_text
+            if self.level == 1:
+                return          # normal level: the card's 'run' line carries the permission outcome
+            self._annotate_tool(call_id, str(_get(e, "tool", default="")), text)
+            self._print_exact_call(call_id)
         elif kind == "HookEvent":
             if self.level < 1:
                 return
@@ -2894,6 +3482,10 @@ class Renderer:
                     + (f" {dot} {_one_line(msg, 100)}" if msg else "") + RST)
             for w in _get(e, "warnings", default=()) or ():
                 text += f"\n{WARNING}{glyph('warn')} {_one_line(w, 120)}{RST}"
+            if self.level == 1:       # normal level: a note on the call's card
+                self._call_notes.setdefault(str(_get(e, "tool_use_id", default="")), []).append(
+                    " ".join(_plain(text).split()))
+                return
             self._annotate_tool(str(_get(e, "tool_use_id", default="")), str(_get(e, "tool_name", default="")), text)
         elif kind == "RetryEvent":
             self._finish_stream()
@@ -2947,7 +3539,7 @@ class Renderer:
             name = _one_line(_get(e, "name", default="") or ("LLM call" if is_llm else "tool"), 60)
             label = f"{TEXT}LLM{RST} {MUTED}{name}{RST}" if is_llm else f"{BOLD}{name}{RST}"
             facts = []
-            summary = _one_line(_get(e, "summary", default=""), 90)
+            summary = _one_line(_get(e, "summary", default=""), 90).replace(" · ", f" {dot} ")   # subagent.py writes a literal dot
             if summary:
                 facts.append(summary)
             if is_llm and (_get(e, "input_tokens", default=0) or _get(e, "output_tokens", default=0)):
@@ -2990,13 +3582,20 @@ class Renderer:
         elif kind == "ToolRationale":
             if self.level >= 1:
                 call_id = str(_get(e, "id", default=""))
-                text = _one_line(_get(e, "text", default=""), 140)
+                text = _one_line(_get(e, "text", default=""), _decision.RATIONALE_MAX_CHARS)
+                source = str(_get(e, "source", default=""))
                 if call_id in self._active_tools:
-                    self._line(f"{SUBTLE}why: {DIM}{ITALIC}{text}{RST}", "      ")
+                    row = tool_why_row(text, source)
+                    if row and self.level >= 2:
+                        self._line(row, "      ")
+                    elif row and call_id in self._calls and not self._calls[call_id].get("why"):
+                        self._calls[call_id]["why"] = _clean(text)
+                        self._calls[call_id]["why_source"] = source
                     if call_id in self._t_tools and not self._t_tools[call_id].why:
                         self._t_tools[call_id].why = _plain(text)
+                        self._t_tools[call_id].why_source = source
                 elif text:
-                    self._pending_why[call_id] = text
+                    self._pending_why[call_id] = (text, source)
         elif kind == "ToolTiming":
             if self.level >= 3:
                 self._render_debug_fields(e, skip=set(), title="timing")
@@ -3028,6 +3627,15 @@ class Renderer:
         TurnComplete: _on_turn_complete,
     }
 
+    @staticmethod
+    def _generic_tip() -> str:
+        """Last-resort tip for the live rows: the tips engine's current pool tip ('' when tips are off)."""
+        try:
+            from axon.features.tips import tip_engine
+            return tip_engine().spinner_tip() or ""
+        except Exception:
+            return ""
+
     def _spinner_status(self) -> str:
         tokens = self._out_chars // 4
         return f"{_fmt_tokens(tokens)} tok {glyph('down')}" if tokens else ""
@@ -3047,9 +3655,21 @@ class Renderer:
         with self._lock:
             self._finish_stream()
             self._close_step_stats()
+            self._note_unfinished_step()
+            self._pending_exact.clear()       # calls that never got a result (the turn was stopped)
             self.spinner.stop()
             self.spinner.started_at = 0.0
+            self.live.end_turn()
+            if not self._tail.endswith("\n"):
+                self._out("\n")          # the summary never starts on a half-written line
             railed = self._railed
+            answer_step, answer_model = self._answer_step
+            if railed and not failed and llm_calls > 1 and answer_step:
+                # which call wrote the answer above (the earlier ones chose tools)
+                self._line(f"{MUTED}{glyph('arrow')} {_decision.final_answer_text(answer_step, answer_model)}{RST}", "  ")
+            if railed:
+                self._lines(turn_summary_rows(self._turn_steps, self._summary_width(), stopped=failed), "  ")
+            self._answer_step = (0, "")
             in_t = int(getattr(usage, "input", 0) or 0)
             out_t = int(getattr(usage, "output", 0) or 0)
             dot = f" {SUBTLE}{glyph('dot')}{RST} "
@@ -3064,6 +3684,9 @@ class Renderer:
                 f"{MUTED}{_fmt_tokens(out_t)} out{RST}",
                 money,
             ]
+            if railed and self._turn_context[0] and self._turn_context[1]:
+                parts.append(context_gauge(*self._turn_context))      # the context gauge, once per turn
+            self._turn_steps = []
             lead = f"{BORDER}{glyph('sq_bl')}{RST} " if railed else "  "
             if failed:
                 label = self._STOP_LABELS.get(stop_reason, "Failed")
@@ -3099,6 +3722,22 @@ class Renderer:
             self._out(text + "\n")
             _tag_rows(None)
 
+    def _note_unfinished_step(self) -> None:
+        """A step that never reported its usage (interrupted or failed mid-call) still gets a table row."""
+        if self._step_stats_done or not self._step:
+            return
+        self._step_stats_done = True
+        if any(s.get("step") == self._step for s in self._turn_steps):
+            return
+        duration = max(0.0, time.time() - self._step_t0) if self._step_t0 else None
+        row = step_usage(self._step, self._step_model, duration, None, None)
+        row["stopped"] = True
+        self._turn_steps.append(row)
+
+    def _summary_width(self) -> int:
+        """Columns the end-of-turn table may use under the rail."""
+        return max(20, term_width() - 1 - display_width(self._rail("    ")))
+
     def _footer_tip(self) -> str:
         """Contextual tip after a turn (LLM-generated by axon.features.tips; registry-derived fallback)."""
         pending = getattr(self, "pending_tip", "")
@@ -3130,6 +3769,14 @@ class Renderer:
         self._out(format_trace(turn_trace, level) + "\n")
 
 
+def _stored_why(d: dict[str, Any]) -> tuple[str, str]:
+    """(text, source) of a stored tool step's rationale: ``{"text", "source"}`` or an older plain string."""
+    why = d.get("why") or d.get("rationale") or ""
+    if isinstance(why, dict):
+        return str(why.get("text") or ""), str(why.get("source") or "")
+    return str(why), ""
+
+
 def format_trace(turn_trace: Any, level: str = "detailed") -> str:
     """Render a stored ``axon.agent.trace.TurnTrace`` (object or its ``to_dict()``) as a timeline."""
     if turn_trace is None:
@@ -3147,13 +3794,28 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
         head += f" {MUTED}{dot}{RST} {TEXT}\"{_one_line(prompt, 60)}\"{RST}"
     head += f"  {MUTED}{model}" + (f" {dot} {mode} mode" if mode else "") + RST
     out.append(head)
-    for step in _get(turn_trace, "steps", default=[]) or []:
+    llm: dict[str, Any] = {}          # the LLM call whose tool calls follow (for 'chosen by' / 'then')
+    answer_step = (0, "")
+    step_rows: list[dict[str, Any]] = []      # usage of each LLM call, for the end-of-turn table
+    context = (0, 0)
+    all_steps = list(_get(turn_trace, "steps", default=[]) or [])
+    for pos, step in enumerate(all_steps):
         kind = str(_get(step, "kind", default=""))
         d = _get(step, "data", default=None) or {}
         if kind == "llm":
-            out.append(f"{v}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {d.get('iteration', '?')}{RST}  {TEXT}LLM call{RST} {MUTED}{dot}{RST} {TEXT}{d.get('model', model)}{RST}"
-                       + (f" {MUTED}{dot} reads {_plural(int(d.get('message_count') or 0), 'message')}{RST}" if d.get("message_count") else ""))
-            fed = d.get("fed_back") or []
+            req = d.get("request") or {}
+            llm = {"step": int(d.get("iteration") or 0), "model": str(d.get("model") or model),
+                   "provider": str(req.get("provider") or ""), "tool_count": int(req.get("tool_count") or 0),
+                   "prompt_tools": bool(req.get("prompt_tools")), "uses": int(d.get("tool_use_count") or 0), "call_no": 0}
+            if d.get("stop_reason") and d.get("stop_reason") != "tool_use" and d.get("outcome", "ok") == "ok":
+                answer_step = (llm["step"], llm["model"])
+            if lvl <= 1:        # normal: no 'LLM call' / 'reads' (the turn header names the provider)
+                out.append(f"{v}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {d.get('iteration', '?')}{RST} {MUTED}{dot}{RST} {TEXT}{d.get('model', model)}{RST}"
+                           + (f" {MUTED}{dot} {_plural(int(d.get('message_count') or 0), 'message')}{RST}" if d.get("message_count") else ""))
+            else:
+                out.append(f"{v}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {d.get('iteration', '?')}{RST}  {TEXT}LLM call{RST} {MUTED}{dot}{RST} {TEXT}{d.get('model', model)}{RST}"
+                           + (f" {MUTED}{dot} reads {_plural(int(d.get('message_count') or 0), 'message')}{RST}" if d.get("message_count") else ""))
+            fed = (d.get("fed_back") or []) if lvl >= 2 else []
             if fed:
                 tok = sum(int(f.get("tokens", 0) or 0) for f in fed if isinstance(f, dict))
                 out.append(f"{v}  {MUTED}{glyph('arrow')} includes {_plural(len(fed), 'tool result')} (~{_fmt_tokens(tok)} tokens){RST}")
@@ -3167,6 +3829,11 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
                 rows = wrap_ansi(" ".join(thinking.split()), width - 8) if lvl >= 2 else [_one_line(thinking, width - 14)]
                 out += [f"{v}    {DIM}{ITALIC}{r}{RST}" for r in rows]
             if d.get("usage") is not None:
+                step_rows.append(step_usage(d.get("iteration") or 0, d.get("model") or model, d.get("duration_s"),
+                                            d["usage"], d.get("cost")))
+                if d.get("context_used") and d.get("context_window"):
+                    context = (int(d["context_used"]), int(d["context_window"]))
+            if d.get("usage") is not None and lvl >= 2:      # detailed / debug: each call's figures in place
                 gauge = context_gauge(int(d.get("context_used") or 0), int(d.get("context_window") or 0))
                 out.append(f"{v}  {SUBTLE}{glyph('wrap')}{RST} {MUTED}" + (f"replied in {float(d['duration_s']):.1f}s {dot} " if d.get("duration_s") is not None else "") + f"{_usage_line(d['usage'], cost=d.get('cost'), stop=str(d.get('stop_reason', '')) if lvl >= 2 else '')}{RST}"
                            + (f" {MUTED}{dot}{RST} {gauge}" if gauge else ""))
@@ -3179,22 +3846,63 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
             inp = d.get("input") or {}
             inp = inp if isinstance(inp, dict) else {}
             dur = d.get("duration_s")
-            call = tool_call_rows(name, inp, max(1, lvl), width - 10, why=str(d.get("why") or d.get("rationale") or ""))
+            why, why_source = _stored_why(d)
+            if lvl <= 1:           # normal: the phased card, like the live view
+                perm = d.get("permission") if isinstance(d.get("permission"), dict) else {}
+                allowed = _decision.allowed_because(str(perm.get("outcome", "")), str(perm.get("source", "")),
+                                                    str(perm.get("reason", "")), perm.get("approval")) if perm else ""
+                llm["call_no"] = llm.get("call_no", 0) + 1
+                if llm["call_no"] == 1 and not llm.get("uses"):      # the trace did not count them: the run of tool steps
+                    run = 0
+                    for nxt in all_steps[pos:]:
+                        if str(_get(nxt, "kind", default="")) != "tool":
+                            break
+                        run += 1
+                    llm["uses"] = run
+                total = int(llm.get("uses") or 1)
+                if llm["call_no"] == 1:
+                    run_perms = []
+                    for nxt in all_steps[pos:pos + total]:
+                        perm_d = (_get(nxt, "data", default=None) or {}).get("permission")
+                        if str(_get(nxt, "kind", default="")) == "tool" and isinstance(perm_d, dict):
+                            run_perms.append(_decision.allowed_because(str(perm_d.get("outcome", "")), str(perm_d.get("source", "")),
+                                                                       str(perm_d.get("reason", "")), perm_d.get("approval")))
+                    llm["common"] = _tool_cards.common_permission(run_perms)
+                    out.append(f"{v}{_tool_cards.tools_label(total, '', llm['common'], width - 4)}")
+                call = _tool_cards.CardCall(
+                    number=llm["call_no"], name=name, inp=inp, why=why, why_source=why_source, total=total, allowed=allowed, common_allowed=llm.get("common", ""),
+                    content=str(d.get("result_preview", "") or ""), is_error=bool(d.get("is_error")),
+                    duration=float(dur) if dur is not None else None, hint="/transcript",
+                    state="done" if "result_preview" in d else "stopped")
+                out += [f"{v}  {r}" for r in _tool_cards.card_rows(call, width - 6)]
+                llm["bytes"] = llm.get("bytes", 0) + int(d.get("bytes") or 0)
+                llm["tokens"] = llm.get("tokens", 0) + int(d.get("est_tokens") or 0)
+                if llm["call_no"] >= total:
+                    out.append(f"{v}  " + _tool_cards.step_results_text(total, llm["bytes"], llm["tokens"], llm.get("step", 0) + 1, width - 6))
+                continue
+            chosen = ""
+            if llm:
+                llm["call_no"] += 1
+                chosen = _decision.chosen_by_text(llm["model"], llm["provider"], llm["step"], llm["call_no"],
+                                                  llm["uses"], llm["tool_count"], llm["prompt_tools"])
+            call = tool_call_rows(name, inp, max(1, lvl), width - 10, why=why, why_source=why_source, chosen=chosen)
             for i, (indent, row) in enumerate(call):
                 if i == 0 and dur is not None:
                     row += f" {SUBTLE}{dot} {float(dur):.2f}s{RST}"
                 out += [f"{v}  {' ' * indent}{r}" for r in _hang(row, width - 4 - indent, "", "  ")]
             perm = d.get("permission")
             if isinstance(perm, dict):
-                out.append(f"{v}      {MUTED}permission: {perm.get('outcome', '')} by {perm.get('source', '')}" + (f": {perm.get('reason')}" if perm.get("reason") else "") + RST)
+                out.append(f"{v}      " + tool_allowed_row(str(perm.get("outcome", "")), str(perm.get("source", "")),
+                                                          str(perm.get("reason", "")), perm.get("approval")))
             for hk in d.get("hooks") or []:
                 if isinstance(hk, dict):
                     out.append(f"{v}      {MUTED}hook {hk.get('event', '')}: {'blocked' if hk.get('blocked') else 'ran'}" + (f" {dot} {_one_line(hk.get('message'), 80)}" if hk.get("message") else "") + RST)
             content = str(d.get("result_preview", "") or "")
             is_err = bool(d.get("is_error"))
             rows = tool_result_rows(name, inp, content, is_err, width - 12, detail=min(lvl, 2))
-            if rows and d.get("bytes") is not None:
-                rows[0] += f"{SUBTLE} {dot} {int(d.get('bytes') or 0) / 1024:.1f} KB {dot} ~{_fmt_tokens(int(d.get('est_tokens') or 0))} tok {glyph('arrow')} model{RST}"
+            if d.get("bytes") is not None:
+                next_step = llm["step"] + 1 if llm.get("step") else 0
+                rows = rows + [tool_then_row(_decision.then_text(int(d.get("bytes") or 0), int(d.get("est_tokens") or 0), next_step))]
             if _is_card_rows(name, rows):
                 out += [f"{v}    " + r for r in rows]
             elif rows:
@@ -3242,19 +3950,29 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
         elif kind in ("permission", "hook"):
             out.append(f"{v}  {MUTED}{kind}: {_one_line(d.get('reason') or d.get('message') or d.get('outcome') or '', 120)}{RST}")
     final = str(_get(turn_trace, "final_text", default="") or "")
+    stop = str(_get(turn_trace, "stop_reason", default="") or "")
+    stopped = stop in Renderer._STOP_LABELS
     if final:
         out.append(f"{BORDER}{glyph('t_right')}{glyph('h')}{RST} {BOLD}Answer{RST}")
         out += format_markdown(final, max_width=_width(110)).splitlines()
+    if final and answer_step[0] > 1 and not stopped:
+        out.append(f"{v}  {MUTED}{glyph('arrow')} {_decision.final_answer_text(*answer_step)}{RST}")
+    out += [f"{v}  {r}" for r in turn_summary_rows(step_rows, width - 4, stopped=stopped)]
     usage = {"input": _get(turn_trace, "input_tokens", default=0), "output": _get(turn_trace, "output_tokens", default=0),
              "cache_read": _get(turn_trace, "cache_read_tokens", default=0), "cache_write": _get(turn_trace, "cache_write_tokens", default=0)}
     dur = _get(turn_trace, "duration_s", default=None)
     if dur is None:
         st, en = _get(turn_trace, "started_at", default=0) or 0, _get(turn_trace, "ended_at", default=0) or 0
         dur = max(0.0, float(en) - float(st)) if en else None
-    out.append(f"{BORDER}{glyph('sq_bl')}{RST} {SUCCESS}{glyph('ok')} Done{RST} {MUTED}{dot} "
+    status = (f"{ERROR}{glyph('fail')} {Renderer._STOP_LABELS[stop]}{RST}" if stopped
+              else f"{SUCCESS}{glyph('ok')} Done{RST}")
+    gauge = context_gauge(*context) if context[0] and context[1] else ""
+    out.append(f"{BORDER}{glyph('sq_bl')}{RST} {status} {MUTED}{dot} "
                f"{_plural(int(_get(turn_trace, 'llm_calls', default=0) or 0), 'LLM call')} {dot} "
                f"{_plural(int(_get(turn_trace, 'tool_calls', default=0) or 0), 'tool call')} {dot} "
-               f"{_usage_line(usage, duration=dur, cost=_get(turn_trace, 'cost', default=None), stop=str(_get(turn_trace, 'stop_reason', default='') or ''))}{RST}")
+               f"{_usage_line(usage, duration=dur, cost=_get(turn_trace, 'cost', default=None), stop=stop)}{RST}")
+    if gauge:
+        out.append(f"    {gauge}")          # the context gauge, once, under the turn's totals
     return "\n".join(r if r.startswith("  ") else truncate(r, width) for r in out)
 
 def _block_text(content: Any) -> str:
@@ -3303,23 +4021,72 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
                 spans.append((start, len(out), by_call[call_id]))
 
     spans: list[tuple[int, int, int]] = []
+    phased = detail <= 1
+    # the assistant message being drawn: its calls, their reasons, and what its TOOLS section has shown so far
+    msg: dict[str, Any] = {"n": 0, "i": 0, "bytes": 0, "tokens": 0, "names": [], "why": {}, "step": 0}
+
+    def start_message(m: dict[str, Any], blocks: list[Any]) -> None:
+        uses = [(str(b.get("id", "")), str(b.get("name", "tool")), b.get("input") if isinstance(b.get("input"), dict) else {})
+                for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+        for tc in m.get("tool_calls") or []:
+            fn = (tc or {}).get("function", {}) if isinstance(tc, dict) else {}
+            uses.append((str(tc.get("id", "")) if isinstance(tc, dict) else "", str(fn.get("name", "tool")), {}))
+        reply = []
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                reply.append(("text", b.get("text") or ""))
+            elif b.get("type") in ("thinking", "reasoning"):
+                reply.append(("thinking", b.get("thinking") or b.get("text") or ""))
+            elif b.get("type") == "tool_use":
+                reply.append(("tool", (str(b.get("id", "")), str(b.get("name", "tool")), b.get("input") or {})))
+        try:
+            why = _decision.pick_rationales(reply)
+        except Exception:
+            why = {}
+        msg.update(n=len(uses), i=0, bytes=0, tokens=0, names=[u[1] for u in uses], why=why, step=msg["step"] + 1)
+
+    def phased_tool(name: str, inp: dict[str, Any], call_id: str) -> None:
+        msg["i"] += 1
+        if msg["i"] == 1:
+            if out and strip_ansi(out[-1]).strip(" │|"):
+                out.append(rail.rstrip())
+            out.append(f"{rail}{_tool_cards.tools_label(msg['n'], _tool_cards.batch_mode(msg['names'], registry))}")
+        has_result = call_id in results
+        content, is_err = results.get(call_id, ("", False))
+        why, why_source = msg["why"].get(call_id) or ("", "")
+        call = _tool_cards.CardCall(
+            number=msg["i"], name=name, inp=inp, why=why, why_source=why_source, content=sanitize(content),
+            is_error=is_err, state="done" if has_result else "stopped", hint="/transcript", registry=registry,
+            name_w=_tool_cards.name_column_width(msg["names"] or [name], width - 6), total=msg["n"])
+        out.extend(f"{rail}  {r}" for r in _tool_cards.card_rows(call, width - 6))
+        msg["bytes"] += len(content.encode("utf-8", errors="replace"))
+        msg["tokens"] += max(1, int(len(content) / 3.7)) if content else 0
+        if msg["i"] >= msg["n"]:
+            out.append(f"{rail}  {_tool_cards.step_results_text(msg['n'], msg['bytes'], msg['tokens'], msg['step'] + 1, width - 6)}")
 
     def _tool_rows(name: str, inp: dict[str, Any], call_id: str) -> None:
+        if phased:
+            phased_tool(name, inp, call_id)
+            return
         for indent, row in tool_call_rows(name, inp, max(1, detail), width - 8, registry):
-            out.extend(f"{rail}  {' ' * indent}{r}" for r in _hang(row, width - indent, "", "  "))
+            out.extend(f"{rail}  {' ' * indent}{r}" for r in _hang(row, width - 4 - indent, "", "  "))
+        out.extend(f"{rail}      {r}" for r in exact_call_rows(name, inp, width - 10, max(1, detail)))
         if call_id in results:
             global _MORE_HINT
             content, is_err = results[call_id]
             _MORE_HINT = "/transcript"            # restored outputs are browsed in the transcript viewer
             try:
-                rows = tool_result_rows(name, inp, sanitize(content), is_err, width - 8, registry, detail=detail)
+                rows = tool_result_rows_exact(name, inp, sanitize(content), is_err, width - 8, registry,
+                                              detail=detail, hint="/transcript")
             finally:
                 _MORE_HINT = "/output"
             if _is_card_rows(name, rows):
                 out.extend(f"{rail}    {r}" for r in rows)
             elif rows:
                 mark = f"{ERROR}{glyph('fail')}{RST} " if is_err else ""
-                first = _hang(mark + rows[0], width - 5, "", "")
+                first = _hang(mark + rows[0], width - 9, "", "")        # after the rail and '    ⎿  '
                 out.append(f"{rail}    {SUBTLE}{glyph('result')}{RST}  {first[0]}")
                 out.extend(f"{rail}       {r}" for r in first[1:] + rows[1:])
         else:
@@ -3336,7 +4103,8 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
                 continue
             close()
             turn += 1
-            out += format_user_prompt_banner(text, max_w=width + 4).splitlines() + [""]
+            msg["step"] = 0
+            out += format_user_prompt_banner(text, max_w=width + 2).splitlines() + [""]
             out.append(f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {turn}{RST}" + (f" {MUTED}{tag}{RST}" if tag else ""))
             turn_open = True
         elif role == "assistant":
@@ -3344,14 +4112,22 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
                 out.append(f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {turn or 1}{RST}" + (f" {MUTED}{tag}{RST}" if tag else ""))
                 turn_open = True
             blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}] if content else [])
+            start_message(m, blocks)
             for b in blocks:
                 if not isinstance(b, dict):
                     continue
                 kind = b.get("type")
                 if kind == "thinking" and str(b.get("thinking") or b.get("text") or "").strip():
+                    if phased:
+                        out.append(f"{rail}{_tool_cards.thinking_line(None, str(b.get('thinking') or b.get('text')), width - 2)}")
+                        continue
                     first = _one_line(b.get("thinking") or b.get("text"), max(20, width - 20))
                     out.append(f"{rail}  {SUBTLE}{glyph('star')} thought {glyph('chevron')}{RST} {DIM}{ITALIC}{first}{RST}")
                 elif kind == "text" and str(b.get("text", "")).strip():
+                    if phased:
+                        if out and strip_ansi(out[-1]).strip(" │|"):
+                            out.append(rail.rstrip())
+                        out.append(f"{rail}{_tool_cards.answer_label()}")
                     md = format_markdown(str(b["text"]).strip(), max_width=width - 2).splitlines()
                     out.extend(f"{rail}{says}{r[2:] if r.startswith('  ') else r}" for r in md)
                 elif kind == "tool_use":
@@ -3438,8 +4214,8 @@ def _fmt_secs(s: float) -> str:
 
 
 def _hang(text: str, width: int, first: str, rest: str) -> list[str]:
-    """Wrap styled *text* to *width* with prefix *first* on row one and *rest* (same width) after."""
-    avail = max(10, width - display_width(first))
+    """Wrap styled *text* so every row, its prefix included, fits *width*: *first* leads row one, *rest* the others."""
+    avail = max(10, width - max(display_width(first), display_width(rest)))
     return [(first if i == 0 else rest) + r for i, r in enumerate(wrap_ansi(text, avail) or [""])]
 
 

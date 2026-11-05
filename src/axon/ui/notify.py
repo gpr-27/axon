@@ -28,7 +28,11 @@ def _clean(text: str, limit: int) -> str:
 
 
 def send_desktop_notification(title: str, message: str) -> bool:
-    """Show a native notification. Returns True when the platform command was launched."""
+    """Show a native notification. Returns True when the platform command was launched.
+
+    ``AXON_NO_NOTIFY=1`` switches every desktop notification off, whoever asks (the test suite sets it)."""
+    if os.environ.get("AXON_NO_NOTIFY"):
+        return False
     title, message = _clean(title, 120), _clean(message, 400)
     try:
         if sys.platform == "darwin" and shutil.which("osascript"):

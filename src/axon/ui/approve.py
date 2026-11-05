@@ -8,6 +8,7 @@ import sys
 from typing import Any, Literal
 
 from axon import platform as plat
+from axon.ui import decision_help, live_status
 from axon.ui.picker import SelectItem, Selector
 from axon.ui.theme import BOLD, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, WHITE, sanitize, strip_ansi
 
@@ -87,7 +88,8 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
     tool_name_s = _clean(tool_name)
     header = [f"  {GOLD}{BOLD}⚠ Allow {tool_name_s}?{RST}", *_detail_lines(tool_name, args, reason), ""]
     rule = narrow_rule_label(tool_name, args)
-    with pause_spinners(), paused():
+    explain = decision_help.approval_lines(tool_name, args, reason, rule)   # what is asked, why, what each answer does
+    with pause_spinners(), paused(), live_status.waiting("user", what=f"approve {tool_name_s}"):
         if plat.is_interactive():
             items = [
                 SelectItem("Yes", value="once", hint="this call only · y"),
@@ -108,11 +110,13 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
 
             sys.stdout.write("\n" + "\n".join(header) + "\n")
             sys.stdout.flush()
-            chosen = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key,
-                              footer=f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny").run()
+            with decision_help.shown(explain):
+                chosen = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key,
+                                  footer=f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny").run()
             result: ApprovalResult = chosen.value if isinstance(chosen, SelectItem) else "deny"
         else:
             print("\n" + "\n".join(header))
+            decision_help.show(explain)
             print(f"  {MINT}[y]{RST} yes (this call)   {GOLD}[a]{RST} every {tool_name_s} call this session   {ROSE}[n]{RST} no")
             try:
                 answer = input(f"  {BOLD}› {RST}").strip().lower()

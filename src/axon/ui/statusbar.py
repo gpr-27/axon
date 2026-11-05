@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from axon.ui.theme import (
     CYAN, DARK_SLATE, GOLD, LBLUE, MINT,
-    PURPLE, RED, RST, SLATE, TEAL, term_width,
+    PURPLE, RED, RST, SLATE, TEAL, term_width, truncate,
 )
 from axon.platform import str_width
 
@@ -89,11 +89,10 @@ class StatusBar:
         """Construct the full styled Axon status line."""
         actual_tokens = context_tokens if context_tokens is not None else (total_tokens if total_tokens is not None else 0)
         actual_cost = session_cost if session_cost is not None else (cost if cost is not None else 0.0)
-        w = max(60, term_width() - 4)
+        w = max(40, term_width() - 4)          # the box never outgrows the window
 
         tok_str = format_tokens(actual_tokens)
         cap_str = format_tokens(context_capacity)
-        gauge = cls.render_gauge(actual_tokens, context_capacity, width=10)
         spark = generate_sparkline(cls._token_history) if len(cls._token_history) >= 2 else ""
         spark_str = f" {CYAN}{spark}{RST}" if spark else ""
         pct = 100.0 * actual_tokens / max(1, context_capacity)
@@ -106,15 +105,22 @@ class StatusBar:
         try:
             from axon.ui.render import render_status_line  # shared status-line format
             core = render_status_line(model, mode=mode, context_pct=pct, session_cost=actual_cost,
-                                      trace_level=trace_level, width=w)
+                                      trace_level=trace_level, width=10_000)
         except (ImportError, AttributeError, TypeError):
             core = (f"{TEAL}{model}{RST} {DARK_SLATE}·{RST} {PURPLE}{mode}{RST} {DARK_SLATE}·{RST} "
                     f"ctx {pct:.0f}% {DARK_SLATE}·{RST} {GOLD}${actual_cost:.4f}{RST}")
         left_side = f"  {DARK_SLATE}│{RST} {core} {DARK_SLATE}·{RST} {SLATE}{effort}{RST}{extra_str}"
-        right_side = f"{SLATE}{tok_str}/{cap_str}{RST} {gauge}{spark_str} {DARK_SLATE}│{RST}"
-
-        left_len = str_width(left_side)
+        # Right side: drop the sparkline, then shrink the gauge, then the gauge itself until both sides fit; a left
+        # side that is still too wide loses its tail (effort, counts) rather than wrapping the box.
+        right_side = ""
+        for gauge_cells, with_spark in ((10, True), (10, False), (4, False), (0, False)):
+            gauge = f" {cls.render_gauge(actual_tokens, context_capacity, width=gauge_cells)}" if gauge_cells else ""
+            right_side = f"{SLATE}{tok_str}/{cap_str}{RST}{gauge}{spark_str if with_spark else ''} {DARK_SLATE}│{RST}"
+            if str_width(left_side) + str_width(right_side) + 2 <= w:
+                break
         right_len = str_width(right_side)
+        left_side = truncate(left_side, max(10, w - right_len - 2))
+        left_len = str_width(left_side)
         spacing = max(2, w - left_len - right_len)
         inner = max(2, left_len + spacing + right_len - 4)
         top_border = f"  {DARK_SLATE}┌{'─' * inner}┐{RST}"

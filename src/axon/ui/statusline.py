@@ -297,3 +297,60 @@ def prompt_status_rows(agent: Any, width: int | None = None) -> list[str]:
         return [default_status_line(agent, width)]
     except Exception:
         return []
+
+
+def ordered_tasks(agent: Any) -> list[Any]:
+    """Subagent tasks in roster order: running first, then the most recently finished."""
+    mgr = getattr(agent, "subagents", None)
+    try:
+        tasks = list(mgr.all_tasks()) if mgr is not None else []
+    except Exception:
+        return []
+    running = [t for t in tasks if t.status == "running"]
+    return running + [t for t in reversed(tasks) if t.status != "running"]
+
+
+def running_tasks(agent: Any) -> list[Any]:
+    """Subagents that are still working: the only ones the roster lists (finished ones disappear)."""
+    return [t for t in ordered_tasks(agent) if t.status == "running"]
+
+
+def agent_panel_rows(agent: Any, width: int | None = None, max_rows: int = 6, selected: int | None = None,
+                     row_ids: list | None = None) -> list[str]:
+    """Live roster under the prompt: ``main`` plus one row per subagent (running first) with what
+    it is doing, how long it has run and its tokens. ``selected`` marks one agent row (index into
+    :func:`ordered_tasks`); ``row_ids``, when given, receives (row offset, task id) for every agent row
+    so clicks can be mapped back. Empty when the session has no subagents."""
+    import time as _time
+    from axon.ui.theme import BOLD, CYAN, GOLD, MINT, ROSE, RST, SLATE, WHITE, display_width, sanitize, strip_ansi, term_width, truncate
+    order = running_tasks(agent)
+    if not order:
+        return []
+    w = (width or term_width()) - 1
+    head = f"  {GOLD}{len(order)} agent{'s' if len(order) != 1 else ''} running{RST}"
+    hint = "↓ select · enter open · /tell · /stop" if selected is None else "↑↓ move · enter open · x stop · esc back"
+    rows = [truncate(head + f"{SLATE} · {hint}{RST}", w), f"  {WHITE}● main{RST}"]
+    spin = "◐◓◑◒"[int(_time.monotonic() * 6) % 4]          # running agents turn
+    glyphs = {"running": (GOLD, spin), "completed": (MINT, "✓"), "error": (ROSE, "✗"), "exhausted": (ROSE, "✗")}
+    first = 0
+    if selected is not None and selected >= max_rows:
+        first = selected - max_rows + 1              # keep the selected row in view
+    for i, t in enumerate(order[first:first + max_rows], start=first):
+        color, mark = glyphs.get(t.status, (SLATE, "○"))
+        secs = (_time.time() - t.start_time) if t.status == "running" and t.start_time else float(t.elapsed_s or 0.0)
+        mins, sec = divmod(int(secs), 60)
+        clock = f"{mins}m {sec:02d}s" if mins else f"{sec}s"
+        tok = int(t.tokens_consumed or 0)
+        tokens = f"{tok / 1000:.1f}k" if tok >= 1000 else str(tok)
+        right = f"{clock} · ↓ {tokens} tokens"
+        lead = f"{CYAN}{BOLD}❯{RST} " if i == selected else "  "
+        what = " ".join(sanitize(strip_ansi(str(t.activity or t.title or ""))).split())   # model / tool text: no escapes
+        left = f"{lead}{color}{mark}{RST} {WHITE}{t.id}{RST} {sanitize(strip_ansi(str(t.agent_type)))}  {SLATE}{what}{RST}"
+        room = w - display_width(right) - 2
+        left = truncate(left, max(10, room))
+        if row_ids is not None:
+            row_ids.append((len(rows), t.id))
+        rows.append(left + " " * max(1, w - display_width(left) - display_width(right)) + f"{SLATE}{right}{RST}")
+    if len(order) > first + max_rows:
+        rows.append(f"  {SLATE}… and {len(order) - first - max_rows} more{RST}")
+    return rows

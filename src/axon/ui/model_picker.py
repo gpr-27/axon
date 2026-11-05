@@ -15,15 +15,14 @@ from axon.ui.provider_picker import (
     apply_provider,
     choose_model_option,
     find_key,
+    is_active_preset,
     run_provider_picker,
-    same_endpoint,
 )
 from axon.ui.theme import GOLD, MINT, RST
 
 if TYPE_CHECKING:
     from axon.agent.loop import Agent
 
-_HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 _CONNECT = "__connect__"
 
 
@@ -52,14 +51,13 @@ def run_model_picker(agent: Agent) -> bool:
     if not plat.is_interactive():
         return _fallback_model_picker(agent)
     presets = _linked(agent)
-    cur_url = agent.settings.base_url
-    tab = next((i for i, p in enumerate(presets) if same_endpoint(p.base_url, cur_url)), 0)
+    tab = next((i for i, p in enumerate(presets) if is_active_preset(agent.settings, p)), 0)
 
     def items_for_tab(i: int) -> list[SelectItem]:
         if i >= len(presets):
             return [SelectItem(label="＋ Connect a new provider (API key & endpoint)…", value=_CONNECT)]
         p = presets[i]
-        active_tab = same_endpoint(p.base_url, cur_url)
+        active_tab = is_active_preset(agent.settings, p)
         out = []
         for m in get_models_for_provider(p, agent):
             is_cur = active_tab and m == agent.settings.model
@@ -69,7 +67,7 @@ def run_model_picker(agent: Agent) -> bool:
         out.append(SelectItem(label=RANDOM_MODEL_OPTION, value=(p, RANDOM_MODEL_OPTION), badge=" "))
         return out
 
-    tabs = [("● " if same_endpoint(p.base_url, cur_url) else "") + p.name for p in presets] + ["＋ Connect"]
+    tabs = [("● " if is_active_preset(agent.settings, p) else "") + p.name for p in presets] + ["＋ Connect"]
     sel = Selector(title="Switch model", subtitle=f"{GOLD}{agent.settings.model}{RST}", tabs=tabs, tab_index=tab,
                    items_for_tab=items_for_tab, filterable=True, placeholder="type to filter models", max_visible=12,
                    fullscreen=True, footer="↑↓ move · tab/shift-tab provider · enter select · esc cancel")
@@ -96,7 +94,7 @@ def _apply_model_selection(agent: Agent, preset: ProviderPreset, selected_option
     key: str | None = None
     if preset.requires_key:
         key = find_key(preset)
-        if not key and same_endpoint(preset.base_url, agent.settings.base_url):
+        if not key and is_active_preset(agent.settings, preset):
             cur = agent.settings.api_key
             key = cur.get_secret_value() if hasattr(cur, "get_secret_value") else str(cur or "")
     return apply_provider(agent, preset, model, key)
@@ -105,8 +103,7 @@ def _apply_model_selection(agent: Agent, preset: ProviderPreset, selected_option
 def _fallback_model_picker(agent: Agent) -> bool:
     """Line-mode picker: step 1 provider, step 2 model."""
     linked = _linked(agent)
-    cur_url = agent.settings.base_url
-    options = [f"✓ {p.name} ({p.base_url}){' [Active]' if same_endpoint(p.base_url, cur_url) else ''}" for p in linked]
+    options = [f"✓ {p.name} ({p.base_url}){' [Active]' if is_active_preset(agent.settings, p) else ''}" for p in linked]
     connect = "➕ Connect a New Provider..."
     options.append(connect)
     chosen = pick(options, title="Switch Active Model · Select Provider")

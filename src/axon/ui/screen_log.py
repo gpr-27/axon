@@ -8,8 +8,8 @@ so the file ends up with what stayed on screen: timelines, tool outputs, command
 Transient rows (spinner frames, the tip under the spinner, picker redraws) are erased before they
 are committed and never reach the file. Colours and hyperlinks are stripped.
 
-Files live per project and are never rotated or truncated:
-``~/.axon/projects/<project>/screen/<started>-<session>.log``.
+Files live in the folder of the session the REPL started in and are never rotated or truncated
+(a resumed session continues the same file): ``~/.axon/projects/<project>/sessions/<session>/screen.log``.
 """
 from __future__ import annotations
 

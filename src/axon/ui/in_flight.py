@@ -6,7 +6,7 @@ Windows consoles via axon.platform). Typed text is edited with the prompt's Edit
 keys Ctrl+A/E/K/U/W/Y, Alt+B/F, Shift/Alt+Enter newline) and shown on the spinner line. Enter
 queues it marked ``steer=True``: the agent loop hands steer messages to the model between tool
 rounds ("[User added while you were working]: ..."), and whatever is left runs as the next prompt.
-/btw runs a side question, /q edits the queue. Up on an empty draft pulls the last queued message
+/btw runs a side question, /q edits the queue, read-only commands (/cost, /context, /status, /tasks ...) answer at once. Up on an empty draft pulls the last queued message
 back for editing. Ctrl+X Ctrl+S (or Ctrl+Enter) queues the draft and interrupts the turn so the
 queue runs now. Ctrl+X Ctrl+K stops all background subagents (press twice within 3 s). Esc on an
 empty draft interrupts the running turn, like Ctrl+C.
@@ -84,6 +84,21 @@ def push_queued(queue: Any, text: str, steer: bool = False) -> Any:
     return item
 
 
+# Read-only commands that answer immediately while a turn runs (everything else is queued).
+INSTANT_COMMANDS = frozenset({"cost", "usage", "ledger", "context", "tokens", "status", "help", "tasks", "tell", "msg", "list-agents", "peers", "stop"})
+
+def is_instant_command(line: str) -> bool:
+    """True for a read-only built-in that may run beside the turn (``/context limit ...`` changes
+    settings, so it still waits in the queue)."""
+    words = line.split()
+    if not words or not words[0].startswith("/"):
+        return False
+    name = words[0][1:].lower()
+    if name not in INSTANT_COMMANDS:
+        return False
+    return not (name in ("context", "tokens") and len(words) > 1 and words[1].lower() in ("limit", "size", "window"))
+
+
 _type_ahead: list[str] = []
 _type_ahead_lock = threading.Lock()
 
@@ -127,6 +142,8 @@ class InFlightInputListener:
         self._lock = threading.Lock()
         self._pending_ctrl_x = False
         self._kill_armed = 0.0
+        self._interrupting = False      # "Interrupting…" was printed for this turn
+        self._footer: Any = None
 
     # Draft accessors (kept for callers/tests that used the old list buffer).
     @property
@@ -152,14 +169,23 @@ class InFlightInputListener:
     # ── lifecycle ──────────────────────────────────────────────────────────
     def __enter__(self) -> InFlightInputListener:
         self._stop_event.clear()
+        self._interrupting = False
         if not plat.is_interactive():
             return self
         with _active_lock:
             _active.append(self)
+        from axon.ui import footer as _footer
+        if _footer.enabled():
+            try:
+                self._footer = _footer.PinnedFooter(self.agent, self.draft)
+                self._footer.start()
+            except Exception:
+                self._footer = None
         try:
             from axon.ui.render import Renderer, Spinner
             Renderer.interrupt_hint = "esc to interrupt"
-            Spinner.draft_provider = self.draft
+            if self._footer is None:     # the pinned box shows the draft; otherwise it rides the spinner line
+                Spinner.draft_provider = self.draft
         except (ImportError, AttributeError):
             pass
         self._thread = threading.Thread(target=self._run, daemon=True, name="InFlightInputListener")
@@ -172,6 +198,9 @@ class InFlightInputListener:
         self._resume_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        if self._footer is not None:
+            self._footer.stop()
+            self._footer = None
         with _active_lock:
             if self in _active:
                 _active.remove(self)
@@ -193,6 +222,8 @@ class InFlightInputListener:
         with self._pause_lock:
             self._pause_count += 1
             self._resume_event.clear()
+        if self._footer is not None:
+            self._footer.suspend()
         if self._thread is not None and self._thread.is_alive() and threading.current_thread() is not self._thread:
             self._idle_event.wait(timeout)
 
@@ -202,6 +233,8 @@ class InFlightInputListener:
             if self._pause_count == 0:
                 self._idle_event.clear()
                 self._resume_event.set()
+                if self._footer is not None:
+                    self._footer.resume()
 
     @property
     def is_paused(self) -> bool:
@@ -219,7 +252,7 @@ class InFlightInputListener:
                     while not self._stop_event.is_set() and not self.is_paused:
                         key = plat.read_key(timeout=0.05, report_resize=False)
                         if key:
-                            self.handle_key(key)
+                            self._handle_key_safely(key)
             except EOFError:
                 break
             except Exception:
@@ -227,7 +260,25 @@ class InFlightInputListener:
         self._idle_event.set()
 
     # ── key handling (public for tests) ────────────────────────────────────
+    def _handle_key_safely(self, key: str) -> None:
+        """A key whose handling fails must not end the listener: Esc would stop working for the rest
+        of the turn."""
+        try:
+            self.handle_key(key)
+        except Exception as e:  # noqa: BLE001
+            _say(f"\n  {ROSE}Key {key!r} failed: {type(e).__name__}: {e}{RST}\n")
+
     def handle_key(self, key: str) -> None:
+        try:
+            self._handle_key(key)
+        finally:
+            if self._footer is not None:
+                self._footer.poke()          # repaint on the footer's own thread: never stall key reading
+
+    def _handle_key(self, key: str) -> None:
+        footer = self._footer
+        if footer is not None and footer.nav(key, not self._ed.buf):
+            return
         if self._pending_ctrl_x:
             self._pending_ctrl_x = False
             if key == "ctrl-s":
@@ -264,8 +315,9 @@ class InFlightInputListener:
                 _say(f"\n  {SLATE}Backgrounding is not available for this turn.{RST}\n")
             return
         if key.startswith(plat.PASTE_PREFIX):
+            from axon.ui.input import strip_paste_controls
             with self._lock:
-                self._ed.insert(plat.normalize_newlines(key[len(plat.PASTE_PREFIX):]))
+                self._ed.insert(strip_paste_controls(key[len(plat.PASTE_PREFIX):]))
             return
         line = None
         with self._lock:
@@ -364,7 +416,9 @@ class InFlightInputListener:
                 pass
         else:
             _thread.interrupt_main()
-        _say(f"\n  {ROSE}⏹ Interrupting…{RST}\n")
+        if not self._interrupting:      # a second Esc while the turn winds down says nothing new
+            self._interrupting = True
+            _say(f"\n  {ROSE}⏹ Interrupting…{RST}\n")
 
     # ── submissions ────────────────────────────────────────────────────────
     def _submit_line(self, line: str, steer: bool = True) -> None:
@@ -382,11 +436,32 @@ class InFlightInputListener:
         if head in ("/q", "/queue"):
             self._handle_queue_command(line)
             return
+        footer = self._footer
+        target = footer.reply_to if footer is not None and not line.startswith("/") else None
+        mgr = getattr(self.agent, "subagents", None)
+        if target and mgr is not None and hasattr(mgr, "send"):
+            task = mgr.send(target, line)
+            footer.notice(f"sent to {target}" if task is not None else f"{target} has finished", 2.0)
+            return
+        if is_instant_command(line):
+            threading.Thread(target=self._run_instant, args=(line,), daemon=True, name="InstantCommand").start()
+            return
         queue = getattr(self.agent, "message_queue", None)
         if queue is not None:
             item = push_queued(queue, line, steer=steer)
             how = "will be shown to the model at the next step" if steer else "runs next"
             _say(f"\n  {CYAN}📥 Queued #{item.id} ({len(queue)} pending, {how}):{RST} {WHITE}{line}{RST}\n")
+
+    def _run_instant(self, line: str) -> None:
+        """Run a read-only slash command right now, beside the running turn, instead of queueing it."""
+        from axon.commands.registry import dispatch_command
+        with _output_lock():
+            try:
+                sys.stdout.write("\n")
+                dispatch_command(line, self.agent)
+                sys.stdout.flush()
+            except Exception as e:
+                _say(f"\n  {ROSE}{line.split()[0]} failed: {e}{RST}\n")
 
     def _handle_queue_command(self, line: str) -> None:
         queue = getattr(self.agent, "message_queue", None)
@@ -424,17 +499,19 @@ class InFlightInputListener:
             _say(f"\n  {CYAN}📥 Queued #{item.id} ({len(queue)} pending):{RST} {WHITE}{text}{RST}\n")
 
     def _run_async_btw(self, question: str) -> None:
-        """Answer a side question with a separate, context-free model call."""
+        """Answer a side question with a separate model call that sees the recent conversation."""
         try:
             from axon.providers import provider_for
             from axon.ui.render import render_side_question_box
+            from axon.commands.code_cmds import _BTW_SYSTEM, session_context
             settings = self.agent.settings
             side = provider_for(settings.model, settings)
-            system = [{"type": "text", "text": (
-                "You are a concise technical assistant. Answer the user's side question directly and "
-                "factually in 2-4 sentences or a short snippet. Do not speculate.")}]
-            for _ in side.stream(model=settings.model, system=system, messages=[{"role": "user", "content": question}],
-                                 tools=[], max_tokens=600, effort="low", thinking=False):
+            context_text, n_ctx = session_context(self.agent)
+            prompt = (f"<session_context>\n{context_text}\n</session_context>\n\n"
+                      f"Side question (answer it; do not continue the task): {question}") if n_ctx else question
+            system = [{"type": "text", "text": _BTW_SYSTEM}]
+            for _ in side.stream(model=settings.model, system=system, messages=[{"role": "user", "content": prompt}],
+                                 tools=[], max_tokens=800, effort="low", thinking=False):
                 pass
             turn = side.finalize()
             ledger = getattr(self.agent, "ledger", None)

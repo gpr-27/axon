@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from axon import platform as plat
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, MINT, ROSE, RST, SLATE, WHITE
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, DIM, GOLD, GRAY_BG, MINT, ROSE, RST, SLATE, WHITE, sanitize
 
 # Back-compat feature flags (tests and older callers inspect these).
 _HAS_TERMIOS = plat.HAS_TERMIOS
@@ -118,6 +118,20 @@ class SelectItem:
         return all(tok in f"{self.label} {self.hint} {self.group} {self.search}".lower() for tok in q.split())
 
 
+_menus_run = 0
+
+
+def note_menu_started() -> None:
+    """Called by every menu when it opens (Selector.run does it itself)."""
+    global _menus_run
+    _menus_run += 1
+
+
+def menus_run() -> int:
+    """How many selectors have been started so far (lets a caller tell whether a command showed a menu)."""
+    return _menus_run
+
+
 class Selector:
     """Interactive selector. `run()` returns the chosen SelectItem, a value passed to
     `finish()`, or None when cancelled (Esc / Ctrl+C / q)."""
@@ -140,8 +154,11 @@ class Selector:
         footer: str | None = None,
         on_key: Callable[["Selector", str], bool] | None = None,
         extra_lines: Callable[["Selector"], list[str]] | None = None,
+        slash_filter: bool = False,
     ) -> None:
         self.title = title
+        # slash_filter: j/k move until "/" is pressed, then typing filters (Esc clears the filter)
+        self.slash_filter = slash_filter and not filterable
         self.subtitle = subtitle
         self.filterable = filterable
         self.filter_fn = filter_fn
@@ -321,7 +338,7 @@ class Selector:
             elif key == "ctrl-u":
                 buf = ""
             elif key and key.startswith(plat.PASTE_PREFIX):
-                buf += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+                buf += sanitize(key[len(plat.PASTE_PREFIX):].replace("\n", " "))
             elif key and len(key) == 1 and key >= " ":
                 buf += key
 
@@ -338,6 +355,7 @@ class Selector:
 
     # ── main loop ──────────────────────────────────────────────────────────
     def run(self) -> Any:
+        note_menu_started()
         if not plat.is_interactive():
             return self._fallback()
         plat.setup_console()
@@ -369,6 +387,14 @@ class Selector:
 
     def _default_key(self, key: str) -> None:
         n = len(self.items)
+        if self.slash_filter and not self.filterable and key == "/":
+            self.filterable = True
+            return
+        if self.slash_filter and self.filterable and key == "esc":
+            self.filterable = False
+            self.query = ""
+            self.refresh_items()
+            return
         if key in ("esc", "ctrl-c"):
             if self.filterable and self.query and key == "esc":
                 self.query = ""
@@ -401,7 +427,7 @@ class Selector:
             self.query = ""
             self.refresh_items()
         elif self.filterable and key.startswith(plat.PASTE_PREFIX):
-            self.query += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+            self.query += sanitize(key[len(plat.PASTE_PREFIX):].replace("\n", " "))
             self.refresh_items()
         elif self.filterable and len(key) == 1 and key >= " ":
             self.query += key
@@ -448,7 +474,7 @@ def _numbered_pick(options: list[str], title: str, idx: int) -> str | None:
         return None
     if not choice:
         return options[idx]
-    if choice.isdigit() and 1 <= int(choice) <= len(options):
+    if choice.isdecimal() and 1 <= int(choice) <= len(options):      # not isdigit(): int('²') raises
         return options[int(choice) - 1]
     return None
 

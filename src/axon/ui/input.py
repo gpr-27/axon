@@ -26,7 +26,7 @@ from axon import platform as plat
 from axon.ui.picker import LiveFrame
 from axon.ui.theme import (
     AMBER, BOLD, CYAN, DARK_SLATE, GOLD, GRAY_BG, MINT, PURPLE, ROSE, RST, SLATE, TEAL, UNDER, WHITE,
-    term_width,
+    glyph, term_width,
 )
 
 _HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
@@ -37,6 +37,7 @@ HISTORY_LIMIT = 1000
 
 # In-process history of this session (also persisted to ~/.axon/history).
 _SESSION_HISTORY: list[str] = []
+_SESSION_PASTES: dict[str, dict[int, str]] = {}   # prompt text -> {chip number: stored paste id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,27 +77,53 @@ THINK_KEYWORD_RE = re.compile(r"\b(?:ultrathink|think\s+harder|think\s+hard|mega
 INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 
 
+ECHO_PASTE_HEAD = 3     # lines of a pasted text shown at the start in the echoed prompt
+ECHO_PASTE_TAIL = 3     # ... and at the end; everything between is hidden
+
+
+def paste_preview(content: str, head: int = ECHO_PASTE_HEAD, tail: int = ECHO_PASTE_TAIL) -> list[str]:
+    """The first and last lines of a pasted text with the middle replaced by a '… N lines hidden …' marker."""
+    lines = content.strip("\n").split("\n")
+    hidden = len(lines) - head - tail
+    if hidden <= 1:                       # hiding one line would take more room than showing it
+        return lines
+    dots = glyph("ellipsis")
+    return [*lines[:head], f"{dots} {hidden} lines hidden {dots}", *lines[-tail:]]
+
+
+def echo_text(shown: str, pastes: dict[int, str]) -> str:
+    """The prompt as echoed into the transcript: each [Pasted text #N] chip is followed by a short preview
+    of that paste. What the model receives is unchanged and still complete."""
+    def with_preview(match: re.Match[str]) -> str:
+        content = pastes.get(int(match.group(1)))
+        if content is None:
+            return match.group(0)
+        return match.group(0) + "\n" + "\n".join(f"  {line}" for line in paste_preview(content)) + "\n"
+    return PASTE_CHIP_RE.sub(with_preview, shown)
+
+
 def format_user_prompt_banner(text: str, subagent_label: str | None = "", is_bash: bool = False,
                               max_w: int | None = None) -> str:
     """Render a submitted prompt as a full-width tinted block (echoed into the transcript)."""
     from axon.ui.theme import layout_width
     tw = max_w or layout_width(0)            # same measure as the turn timeline
+    chevron, dots = glyph("chevron"), glyph("ellipsis")      # ASCII under AXON_ASCII / on a legacy console
     width = max(20, tw - 4)
     lines = text.strip().splitlines() or [""]
     if is_bash:
         first = "! "
         lines[0] = lines[0][1:].lstrip() if lines[0].startswith("!") else lines[0]   # the prefix already shows it
     elif subagent_label:
-        first = f"[{subagent_label}] › "
+        first = f"[{subagent_label}] {chevron} "
     else:
-        first = "› "
+        first = f"{chevron} "
     out = []
     for i, line in enumerate(lines):
         pref = first if i == 0 else "  "
         body = highlight_prompt_syntax(line, allow_prefix=(i == 0 and not is_bash)).replace(RST, f"{RST}{GRAY_BG}")
         avail = width - 2 - plat.str_width(pref)
         if plat.str_width(body) > avail:
-            body = plat.truncate_ansi(body, avail) + GRAY_BG
+            body = plat.truncate_ansi(body, avail, dots) + GRAY_BG
         pad = max(0, avail - plat.str_width(body))
         out.append(f"  {GRAY_BG}{BOLD}{WHITE} {pref}{RST}{GRAY_BG}{body}{' ' * pad} {RST}")
     return "\n".join(out)
@@ -224,20 +251,53 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
         return out
 
 
-def load_history(limit: int = HISTORY_LIMIT, cwd: str | None = None) -> list[str]:
-    """Oldest-first prompts for this project (records without a project count everywhere),
-    then this session's prompts; duplicates collapse to their most recent position. Entries from
-    the legacy ~/.axon/history file are still read."""
-    here = os.path.normcase(os.path.abspath(cwd or os.getcwd()))
+_project_of_cache: dict[str, str] = {}
+
+
+def _project_of(folder: str) -> str:
+    """The project root of a folder a history record was written in (old records hold the raw folder)."""
+    if folder not in _project_of_cache:
+        try:
+            from axon.storage import history_project
+            root = history_project(Path(folder))
+        except ImportError:
+            root = Path(folder)
+        _project_of_cache[folder] = os.path.normcase(os.path.abspath(root))
+    return _project_of_cache[folder]
+
+
+def _same_project(record_project: str, here: str) -> bool:
+    """True when a history record belongs to the project whose root is *here*."""
+    return _project_of(record_project) == here
+
+
+def history_entries(limit: int = HISTORY_LIMIT, cwd: str | None = None) -> tuple[list[str], dict[str, dict[int, str]]]:
+    """One prompt history for the whole project folder, across all of its chats.
+
+    Returns (prompts oldest-first, {prompt: {chip number: stored paste id}}). Records written from the project
+    root or any folder below it count; records without a project count everywhere. This session's prompts come
+    last, and duplicates collapse to their most recent position. The legacy ~/.axon/history file is still read."""
+    try:
+        from axon.storage import history_project
+        root = history_project(Path(cwd or os.getcwd()))
+    except ImportError:
+        root = Path(cwd or os.getcwd())
+    here = os.path.normcase(os.path.abspath(root))
     entries: list[str] = []
+    pastes: dict[str, dict[int, str]] = {}
     for path in (_legacy_history_path(), history_path()):
         for rec in _read_records(path):
             text = str(rec.get("display") or rec.get("text") or "")
             proj = rec.get("project") or rec.get("cwd")
-            if not text or (proj and os.path.normcase(os.path.abspath(str(proj))) != here):
+            if not text or (proj and not _same_project(str(proj), here)):
                 continue
             entries.append(text)
+            stored = rec.get("pastes")
+            if isinstance(stored, dict):
+                pastes[text] = {int(n): str(paste_id) for n, paste_id in stored.items() if str(n).isdecimal()}
     entries.extend(_SESSION_HISTORY)
+    for text, ids in _SESSION_PASTES.items():
+        pastes[text] = ids
     seen: set[str] = set()
     out: list[str] = []
     for text in reversed(entries):
@@ -247,11 +307,19 @@ def load_history(limit: int = HISTORY_LIMIT, cwd: str | None = None) -> list[str
         if len(out) >= limit:
             break
     out.reverse()
-    return out
+    return out, {text: pastes[text] for text in out if text in pastes}
 
 
-def add_history(text: str, session_id: str = "") -> None:
-    """Record a submitted prompt (this module is the only writer of prompt history)."""
+def load_history(limit: int = HISTORY_LIMIT, cwd: str | None = None) -> list[str]:
+    """Just the prompts of :func:`history_entries`."""
+    return history_entries(limit, cwd)[0]
+
+
+def add_history(text: str, session_id: str = "", pastes: dict[int, str] | None = None) -> None:
+    """Record a submitted prompt (this module is the only writer of prompt history).
+
+    *text* may contain ``[Pasted text #N +M lines]`` chips; *pastes* holds their full text, which is kept
+    once outside the history file so recalling the prompt brings the chips back."""
     text = text.strip()
     if not text:
         return
@@ -263,8 +331,10 @@ def add_history(text: str, session_id: str = "") -> None:
     if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != text:
         _SESSION_HISTORY.append(text)
     try:
-        from axon.storage import record_history
-        record_history(Path(os.getcwd()), text, session_id)
+        from axon.storage import record_history, store_paste
+        if pastes:
+            _SESSION_PASTES[text] = {n: store_paste(content) for n, content in pastes.items()}
+        record_history(Path(os.getcwd()), text, session_id, pastes)
     except ImportError:
         try:
             path = history_path()
@@ -342,7 +412,7 @@ def mcp_resource_mentions(ttl: float = 10.0) -> list[str]:
                     continue
                 for res in client.list_resources(refresh=False)[:200]:
                     uri = str(res.get("uri") or "") if isinstance(res, dict) else ""
-                    if uri:
+                    if uri and not _bridge_mod.is_ui_resource(res):  # MCP Apps pages are not content
                         items.append(f"{name}:{uri}")
             except Exception:
                 continue
@@ -392,6 +462,7 @@ def match_files(query: str, cwd: Path | None = None, limit: int = 50) -> list[st
 
 _SLASH_RE = re.compile(r"(?:^|\s)/([\w:.-]*)$")
 _AT_RE = re.compile(r"(?:^|\s)@([^\s]*)$")
+PASTE_MERGE_SECONDS = 1.0  # pieces of one paste arrive back to back
 PASTE_CHIP_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
 LARGE_PASTE_CHARS = 1200
 LARGE_PASTE_LINES = 12
@@ -415,6 +486,8 @@ class EditorState:
     hist_idx: int = -1         # -1 = editing a fresh line
     hist_prefix: str = ""
     draft: str = ""
+    draft_pastes: dict[int, str] = field(default_factory=dict)       # the draft's chips while browsing history
+    history_pastes: dict[str, dict[int, str]] = field(default_factory=dict)   # prompt -> {chip number: paste id}
     undo: list[tuple[str, int]] = field(default_factory=list)
     stash: str = ""
     dismissed: bool = False    # popup closed with Esc until the buffer changes
@@ -432,6 +505,7 @@ class EditorState:
     search_saved: tuple[str, int] = ("", 0)
     vim: Any = None            # axon.ui.vim.VimState when vim mode is on
     status_rows: list[str] = field(default_factory=list)  # custom / built-in status line
+    ghost: str = ""            # suggested next prompt shown dim in the empty bar (never part of the buffer)
 
     # -- editing primitives -------------------------------------------------------------------
     def _snapshot(self) -> None:
@@ -454,15 +528,43 @@ class EditorState:
         self._changed()
 
     def insert_paste(self, text: str) -> None:
-        """Insert pasted text; very large pastes collapse into a [Pasted text #N] chip."""
+        """Insert pasted text; very large pastes collapse into a [Pasted text #N] chip.
+
+        A paste that arrives right after the previous one, with the cursor still at the end of its chip,
+        is the same paste split by the terminal: it is merged into that chip instead of starting a new one."""
+        if self._merge_into_last_chip(text):
+            return
         lines = text.count("\n") + 1
         if len(text) >= LARGE_PASTE_CHARS or lines > LARGE_PASTE_LINES:
             n = max(self.pastes, default=0) + 1
             self.pastes[n] = text
             _save_paste(text)
             self.insert(f"[Pasted text #{n} +{lines} lines]")
+            self._last_chip = (n, time.monotonic())
         else:
             self.insert(text)
+
+    def _merge_into_last_chip(self, text: str) -> bool:
+        last = getattr(self, "_last_chip", None)
+        if not last or time.monotonic() - last[1] > PASTE_MERGE_SECONDS:
+            return False
+        n = last[0]
+        chip = self._chip_text(n)
+        if not chip or not self.buf[:self.pos].endswith(chip):
+            return False
+        merged = self.pastes[n] + text
+        self.pastes[n] = merged
+        _save_paste(merged)
+        new_chip = f"[Pasted text #{n} +{merged.count(chr(10)) + 1} lines]"
+        start = self.pos - len(chip)
+        self.buf = self.buf[:start] + new_chip + self.buf[self.pos:]
+        self.pos = start + len(new_chip)
+        self._last_chip = (n, time.monotonic())
+        return True
+
+    def _chip_text(self, n: int) -> str:
+        text = self.pastes.get(n)
+        return f"[Pasted text #{n} +{text.count(chr(10)) + 1} lines]" if text is not None else ""
 
     def expanded(self) -> str:
         """Buffer with paste chips replaced by their full content (what gets submitted)."""
@@ -501,6 +603,7 @@ class EditorState:
             self.draft = ""
             if self.buf.strip() and (not self.history or self.history[-1] != self.buf):
                 self.history.append(self.buf)  # Up restores the cleared draft
+                self._remember_chips(self.buf)
         self.set_text("")
         self._changed()
 
@@ -584,7 +687,8 @@ class EditorState:
         if self.hist_idx == -1:
             self.hist_prefix = self.buf if "\n" not in self.buf else ""
             self.draft = self.buf
-        matches = [i for i, h in enumerate(self.history) if h.startswith(self.hist_prefix) and h != self.draft]
+            self.draft_pastes = dict(self.pastes)
+        matches = self._history_matches()
         if not matches:
             return False
         if self.hist_idx == -1:
@@ -597,14 +701,48 @@ class EditorState:
             if nxt >= len(matches):
                 self.hist_idx = -1
                 self.set_text(self.draft)
+                self.pastes = dict(self.draft_pastes)
                 return True
             if nxt < 0:
                 return False
             target = matches[nxt]
         self.hist_idx = target
         self.set_text(self.history[target])
+        self.pastes = self._recalled_pastes(self.history[target])
         self.dismissed = True
         return True
+
+    def _history_matches(self) -> list[int]:
+        return [i for i, h in enumerate(self.history) if h.startswith(self.hist_prefix) and h != self.draft]
+
+    def history_position(self) -> tuple[int, int] | None:
+        """(n, total) while browsing history, counted oldest = 1 across every chat of the project; else None."""
+        if self.hist_idx == -1:
+            return None
+        matches = self._history_matches()
+        if self.hist_idx not in matches:
+            return None
+        return matches.index(self.hist_idx) + 1, len(matches)
+
+    def _recalled_pastes(self, entry: str) -> dict[int, str]:
+        """The full text behind the chips of a recalled prompt (empty for prompts stored without chips)."""
+        try:
+            from axon.storage import load_paste
+        except ImportError:
+            return {}
+        found = {n: load_paste(paste_id) for n, paste_id in self.history_pastes.get(entry, {}).items()}
+        return {n: text for n, text in found.items() if text is not None}
+
+    def _remember_chips(self, entry: str) -> None:
+        used = {int(m.group(1)): self.pastes[int(m.group(1))] for m in PASTE_CHIP_RE.finditer(entry)
+                if int(m.group(1)) in self.pastes}
+        if not used:
+            return
+        try:
+            from axon.storage import store_paste
+            self.history_pastes[entry] = {n: store_paste(text) for n, text in used.items()}
+        except ImportError:
+            pass
 
     def search_start(self) -> None:
         self.search = ""
@@ -684,11 +822,11 @@ class EditorState:
 
 
 def _save_paste(text: str) -> None:
-    """Keep large pastes in ~/.axon/projects/<key>/pastes so a session can be inspected later."""
+    """Keep large pastes in the active session's folder (sessions/<id>/pastes) so it can be inspected later."""
     try:
         import hashlib
-        from axon.storage import project_subdir
-        d = project_subdir(None, "pastes")
+        from axon.storage import active_session_subdir
+        d = active_session_subdir("pastes")
         (d / f"{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}.txt").write_text(text, encoding="utf-8")
     except OSError:
         pass
@@ -801,6 +939,30 @@ def render_popup(pop: Popup, cols: int, max_rows: int) -> list[str]:
     return lines
 
 
+def _top_rule(position: tuple[int, int] | None, width: int, color: str) -> str:
+    """The line above the prompt. While browsing history it carries a counter: ── History 90/100 ────."""
+    if position is None:
+        return f"  {color}{'─' * width}{RST}"
+    label = f" History {position[0]}/{position[1]} "
+    lead = "──"
+    tail = max(2, width - len(lead) - len(label))
+    return f"  {color}{lead}{DARK_SLATE}{label}{color}{'─' * tail}{RST}"
+
+
+GHOST_KEY_HINT = "tab to accept"
+
+
+def ghost_text(suggestion: str, width: int) -> str:
+    """The suggested next prompt in dim text, followed by a smaller dim key hint when there is room."""
+    hint = f"  {GHOST_KEY_HINT}"
+    room = width - len(hint)
+    if plat.str_width(suggestion) > room:
+        room = width                        # too long to share the row with the hint: drop the hint
+        hint = ""
+    shown = safe_ansi_truncate(suggestion, room)
+    return f"{SLATE}{shown}{RST}" + (f"{DARK_SLATE}{hint}{RST}" if hint else "")
+
+
 def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple[int, int]]:
     cols, rows_total = plat.term_size()
     width = max(20, cols - 4)
@@ -819,8 +981,10 @@ def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple
     max_rows = max(3, rows_total - 6)
     first = max(0, min(crow - max_rows // 2, len(rows) - max_rows)) if len(rows) > max_rows else 0
     shown = rows[first:first + max_rows]
-    lines = [f"  {rule_color}{'─' * width}{RST}"]
-    if not body:
+    lines = [_top_rule(st.history_position(), width, rule_color)]
+    if not body and st.ghost and st.search is None:
+        lines.append(f"  {prefix}{ghost_text(st.ghost, text_w)}")
+    elif not body:
         hint = ("shell mode · run a command, then Axon responds to its output (esc to leave)" if bash
                 else "Ask anything · / commands · @ files · ! shell · # memory · ? shortcuts")
         lines.append(f"  {prefix}{DARK_SLATE}{hint}{RST}")
@@ -877,9 +1041,18 @@ def _plain_input(mode: str, chrome: PromptChrome) -> tuple[str, str | None, int]
 _IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|gif|webp|bmp)\b", re.IGNORECASE)
 
 
+_PASTE_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def strip_paste_controls(text: str) -> str:
+    """Pasted text without terminal control characters (ESC, BEL, C1 ...; newlines and tabs stay). The prompt
+    echoes its buffer to the terminal, so a pasted escape sequence would otherwise run there."""
+    return _PASTE_CONTROL_RE.sub("", plat.normalize_newlines(text))
+
+
 def _paste_text(text: str) -> str:
     """Normalize pasted text; pasted image file paths become [Image #N] attachment chips."""
-    text = plat.normalize_newlines(text)
+    text = strip_paste_controls(text)
     if _IMAGE_EXT_RE.search(text):
         try:
             from axon.agent.images import compact_image_paths
@@ -946,7 +1119,7 @@ _last_empty_ctrl_c = 0.0
 _SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "ctrl-o": TRACE_CYCLE, "ctrl-f": "/transcript", "alt-p": "/model",
                       "alt-t": "/thinking"}
 _ACTION_COMMANDS = {"app:todos": "/todos", "app:traceCycle": TRACE_CYCLE, "app:transcript": "/transcript",
-                    "app:modelPicker": "/model",
+                    "app:modelPicker": "/model", "app:menu": "/menu",
                     "app:thinkingToggle": "/thinking", "app:fastToggle": "/fast"}
 
 
@@ -1090,7 +1263,7 @@ class PromptEditor:
             st.search += key
             st.search_update()
         elif key.startswith(plat.PASTE_PREFIX):
-            st.search += key[len(plat.PASTE_PREFIX):].replace("\n", " ")
+            st.search += strip_paste_controls(key[len(plat.PASTE_PREFIX):]).replace("\n", " ")
             st.search_update()
         elif key != "resize":
             st.search_end(accept=True)
@@ -1250,10 +1423,60 @@ def _status_rows(agent: Any) -> list[str]:
     if agent is None:
         return []
     try:
-        from axon.ui.statusline import prompt_status_rows
-        return prompt_status_rows(agent)
+        from axon.ui.statusline import agent_panel_rows, prompt_status_rows
+        return prompt_status_rows(agent) + agent_panel_rows(agent)
     except Exception:
         return []
+
+
+def _agents_running(agent: Any) -> bool:
+    mgr = getattr(agent, "subagents", None)
+    try:
+        return any(t.status == "running" for t in mgr.all_tasks()) if mgr is not None else False
+    except Exception:
+        return False
+
+
+# Ghost-text suggestion (see axon.agent.suggest): Tab / End / Right at the empty bar accept it;
+# typing, Esc, Up and Ctrl+C dismiss it. Enter does nothing special.
+_GHOST_ACCEPT_KEYS = ("tab", "right", "end")
+_GHOST_DISMISS_KEYS = ("esc", "up", "ctrl-c")
+
+
+def _suggestion_box(agent: Any, subagent_label: str | None) -> Any:
+    """The agent's SuggestionBox, or None (no agent, a subagent view, or an older agent object)."""
+    box = getattr(agent, "suggestions", None)
+    ok = not subagent_label and callable(getattr(box, "snapshot", None)) and callable(getattr(box, "clear", None))
+    return box if ok else None
+
+
+def _sync_ghost(st: EditorState, box: Any, seen: int) -> int:
+    """Show the box's suggestion when it changed and the bar is empty. Returns the version now seen."""
+    text, version = box.snapshot()
+    if version == seen:
+        return seen
+    if text and st.buf:
+        box.clear()                 # the user is already typing: drop it for good
+        return box.snapshot()[1]
+    st.ghost = text
+    return version
+
+
+def _is_typing(key: str) -> bool:
+    return (len(key) == 1 and key >= " ") or key.startswith(plat.PASTE_PREFIX)
+
+
+def _accept_ghost(st: EditorState, box: Any) -> None:
+    """Move the suggestion into the buffer (editable, cursor at the end)."""
+    st._snapshot()
+    st.set_text(st.ghost)
+    st.ghost = ""
+    box.clear()
+
+
+def _dismiss_ghost(st: EditorState, box: Any) -> None:
+    st.ghost = ""
+    box.clear()
 
 
 def read_input(
@@ -1297,7 +1520,8 @@ def read_input(
         set_tag(None)              # whatever prints after the prompt (commands) is not a transcript block
     except ImportError:
         pass
-    st = EditorState(mode=mode, history=load_history(cwd=str(cwd)), cwd=cwd)
+    history, history_pastes = history_entries(cwd=str(cwd))
+    st = EditorState(mode=mode, history=history, history_pastes=history_pastes, cwd=cwd)
     vim_on = kwargs.get("vim_mode")
     if vim_on if vim_on is not None else _VIM_ENABLED:
         from axon.ui.vim import VimState
@@ -1322,6 +1546,8 @@ def read_input(
         st.set_text(str(initial))
     editor = PromptEditor(st)
     wake = _loop_wake_event()
+    box = _suggestion_box(agent, subagent_label)
+    seen = _sync_ghost(st, box, -1) if box is not None else -1
     frame = LiveFrame()
     sys.stdout.write("\n")
     _ACTIVE_EDITOR = st
@@ -1343,8 +1569,10 @@ def read_input(
                 shown = redact_command_line(shown)
             except Exception:
                 pass
-            _echo_submitted(shown, chrome)
-            add_history(text, session_id)
+            _echo_submitted(echo_text(shown, st.pastes), chrome)
+            chips = {int(m.group(1)): st.pastes[int(m.group(1))] for m in PASTE_CHIP_RE.finditer(shown)
+                     if int(m.group(1)) in st.pastes}
+            add_history(shown if chips else text, session_id, chips)
         return (text, changed_mode(), 0)
 
     width0 = term_width()          # the real window (shutil's size prefers a stale $COLUMNS)
@@ -1355,9 +1583,12 @@ def read_input(
             frame.render(*build_frame(st, chrome))
             if clicks is not None:
                 clicks.measure(frame)
+
             while True:
                 try:
-                    key = plat.read_key(timeout=0.25 if (wake is not None or resized_at) else None)
+                    waiting_for_suggestion = box is not None and bool(getattr(box, "pending", False))
+                    key = plat.read_key(timeout=0.25 if (wake is not None or resized_at or waiting_for_suggestion)
+                                        else (1.0 if _agents_running(agent) else None))
                 except EOFError:
                     frame.clear()
                     raise
@@ -1387,11 +1618,38 @@ def read_input(
                             clicks.update(frame)
                     continue
                 if key is None:
+                    if box is not None and not resized_at:
+                        shown_before = st.ghost
+                        seen = _sync_ghost(st, box, seen)       # a suggestion that arrived while we wait
+                        if st.ghost != shown_before:
+                            frame.render(*build_frame(st, chrome))
+                            if clicks is not None:
+                                clicks.update(frame)
+                    rows_now = _status_rows(agent)       # the bar is live: agents progress while you type
+                    if rows_now != st.status_rows and not resized_at:
+                        st.status_rows = rows_now
+                        frame.render(*build_frame(st, chrome))
+                        if clicks is not None:
+                            clicks.update(frame)
                     if wake is not None and wake.is_set() and not st.buf:
                         wake.clear()
                         return finish("")
                     continue
+                if st.ghost and box is not None and st.search is None:
+                    if key in _GHOST_ACCEPT_KEYS:
+                        _accept_ghost(st, box)
+                        seen = box.snapshot()[1]
+                        frame.render(*build_frame(st, chrome))
+                        if clicks is not None:
+                            clicks.update(frame)
+                        continue
+                    if key in _GHOST_DISMISS_KEYS or _is_typing(key):
+                        _dismiss_ghost(st, box)
+                        seen = box.snapshot()[1]
                 outcome = editor.handle(key)
+                if st.ghost and st.buf and box is not None:     # e.g. a history entry filled the bar
+                    _dismiss_ghost(st, box)
+                    seen = box.snapshot()[1]
                 if outcome is not None:
                     kind, value = outcome
                     if kind == "submit":

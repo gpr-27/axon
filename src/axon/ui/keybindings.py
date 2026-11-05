@@ -65,9 +65,10 @@ ACTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "app:clickExpand": ("Mouse: click a block above the prompt to expand it · wheel up scrolls history "
                         "(⌥/shift+drag selects text; setting mouse_click_expand)", ("click",)),
     "app:modelPicker": ("Open the model picker", ("alt-p",)),
+    "app:menu": ("Walk through every command with the arrow keys", ("alt-h",)),
     "app:thinkingToggle": ("Toggle reasoning display", ("alt-t",)),
     "app:suspend": ("Suspend Axon (POSIX job control)", ("ctrl-z",)),
-    "app:fastToggle": ("Toggle fast mode (/fast)", ("alt-o",)),
+    "app:fastToggle": ("Toggle fast mode", ("alt-o",)),
     "app:vimToggle": ("Toggle vim editing mode", ()),
 }
 
@@ -169,7 +170,7 @@ def _apply_entries(bindings: dict[str, list[str]], entries: Any, errors: list[st
         if key is None:
             errors.append(f"unknown action or key {k!r}")
             continue
-        if v is not None and v not in ACTIONS:
+        if v is not None and not (isinstance(v, str) and v in ACTIONS):   # a list / object value is unhashable
             errors.append(f"{k}: unknown action {v!r}")
             continue
         for other in bindings.values():
