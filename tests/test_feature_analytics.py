@@ -55,7 +55,7 @@ def _trace(ws: Path, session: str, turn: int, prompt: str, cost: float, tools: l
     for i, (name, d, err) in enumerate(tools, start=2):
         steps.append({"index": i, "kind": "tool", "started_at": started + i, "ended_at": started + i + d,
                       "data": {"name": name, "duration_s": d, "is_error": err}})
-    storage.append_jsonl(storage.traces_dir(ws) / f"{session}.jsonl", {
+    storage.append_jsonl(storage.trace_path(ws, session), {
         "turn": turn, "prompt": prompt, "model": "claude-sonnet-4-5", "mode": "normal", "started_at": started,
         "ended_at": started + 10, "llm_calls": 2, "tool_calls": len(tools), "input_tokens": 5000,
         "output_tokens": 300, "cost": cost, "steps": steps,
@@ -218,7 +218,7 @@ def test_traces_tools_and_turns(home, ws):
 
 def test_session_title_falls_back_to_transcript(home, ws):
     _usage(ws, session="abc")
-    path = storage.sessions_dir(ws) / "abc.jsonl"
+    path = storage.session_dir(ws, "abc") / "session.jsonl"
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps({"type": "session_meta", "timestamp": 1, "data": {}}) + "\n")
         f.write(json.dumps({"type": "user_message", "timestamp": 2, "data": {"role": "user", "content": "hello\x1b[31m world"}}) + "\n")

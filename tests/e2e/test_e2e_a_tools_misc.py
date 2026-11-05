@@ -203,7 +203,7 @@ def test_todowrite_renders_list_and_persists_in_session(axon_env: AxonEnv) -> No
     _ok(r)
     c = results(ev, "TodoWrite")[0]["content"]
     assert "3 items" in c and "1/3" in c and "Active Step: TODO-BETA" in c
-    blob = "\n".join(p.read_text(encoding="utf-8") for p in axon_env.sessions_dir().glob("*.jsonl"))
+    blob = "\n".join(p.read_text(encoding="utf-8") for p in axon_env.transcripts())
     assert "TODO-GAMMA" in blob
 
 

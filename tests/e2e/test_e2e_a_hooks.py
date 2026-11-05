@@ -201,13 +201,13 @@ def test_user_prompt_submit_additional_context_json(axon_env: AxonEnv) -> None:
 # ─── Stop / SessionStart / SessionEnd ───────────────────────────────────────
 
 def test_stop_hook_forces_one_continuation(axon_env: AxonEnv) -> None:
-    """A Stop hook exiting 2 makes the agent continue once with the feedback; the second Stop
-    (stop_hook_active=true) is respected so the loop cannot spin forever."""
+    """A Stop hook exiting 2 makes the agent continue with the feedback; the continuation cap
+    (here 1) ends a hook that always blocks, so the loop cannot spin forever."""
     log = axon_env.root / "stop.jsonl"
     body = LOG_PAYLOAD + "sys.stderr.write('KEEP-GOING-STOP')\nsys.exit(2)\n"  # always blocks
     _hooks(axon_env, {"Stop": [{"hooks": [py_hook(axon_env, "stop.py", body, str(log))]}]})
     axon_env.llm.enqueue([{"text": "first stop"}], [{"text": "second stop"}], [{"text": "third (must not happen)"}])
-    r = axon_env.run(["-p", "--output-format", "json", "go"])
+    r = axon_env.run(["-p", "--output-format", "json", "go"], env={"AXON_STOP_HOOK_BLOCK_CAP": "1"})
     _ok(r)
     reqs = axon_env.llm.completion_requests()
     assert len(reqs) == 2

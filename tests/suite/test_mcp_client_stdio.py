@@ -135,7 +135,10 @@ def test_bridge_registers_tools_and_renders(fake_server: Path, tmp_path: Path):
         assert echo.run({"text": "yo"}, None) == "echo: yo"  # type: ignore[arg-type]
         with pytest.raises(ToolError, match="boom"):
             reg.get("mcp__fake__fail").run({}, None)  # type: ignore[arg-type]
-        assert reg.get("mcp__fake__image").run({}, None) == "[image: image/png, 5 bytes]"  # type: ignore[arg-type]
+        shown = reg.get("mcp__fake__image").run({}, None)  # type: ignore[arg-type]
+        # the original bytes are saved to a file and the model gets the path
+        assert shown.startswith("[image: image/png, 5 bytes, saved to ") and shown.endswith(".png]")
+        assert Path(shown.rsplit("saved to ", 1)[1][:-1]).read_bytes() == b"hello"
         assert '"temp": 21' in reg.get("mcp__fake__structured").run({}, None)  # type: ignore[arg-type]
         assert "file:///readme.md" in reg.get("mcp__list_resources").run({}, None)  # type: ignore[arg-type]
         assert "# Hello" in reg.get("mcp__read_resource").run(  # type: ignore[arg-type]

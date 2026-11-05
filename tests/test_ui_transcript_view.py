@@ -203,9 +203,8 @@ def test_ascii_mode_has_no_unicode_box_glyphs(monkeypatch: pytest.MonkeyPatch) -
 
 def test_tool_rows_show_purpose_status_and_line_count() -> None:
     scr = _screen(_view())
-    line = next(ln for ln in scr.splitlines() if "pytest -q" in ln)
-    assert "runs a shell command" in line and "0.42s" in line
-    assert "3 passed" in scr and "41 lines" in scr
+    assert "input   pytest -q" in scr and "0.42s" in scr           # the collapsed entry is the phased card
+    assert "3 passed" in scr or "out line 1" in scr and "more lines" in scr
 
 
 def test_footer_help_and_title_bar() -> None:

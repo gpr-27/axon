@@ -270,3 +270,33 @@ def test_paused_stops_and_resumes_listener(monkeypatch) -> None:
             threading.Event().wait(0.01)
         assert states.count("raw") >= 2
     assert not listener._thread
+
+
+def test_agent_panel_rows_list_main_and_running_agents_first():
+    import time
+    from types import SimpleNamespace as N
+    from axon.ui.statusline import agent_panel_rows
+    done = N(id="sub-1", status="completed", agent_type="explore", activity="", title="Scan", start_time=0, elapsed_s=40, tokens_consumed=900)
+    live = N(id="sub-2", status="running", agent_type="general-purpose", activity="Reading x.ts", title="", start_time=time.time() - 65,
+             elapsed_s=0, tokens_consumed=2500)
+    rows = agent_panel_rows(N(subagents=N(all_tasks=lambda: [done, live])), 100)
+    text = "\n".join(rows)
+    assert "1 agent running" in text and "main" in text and "2.5k tokens" in text
+    assert "explore" not in text          # finished agents leave the roster
+    assert agent_panel_rows(N(subagents=N(all_tasks=lambda: [])), 100) == []
+
+
+def test_footer_agent_selection_opens_feed_and_routes_replies():
+    from types import SimpleNamespace as N
+    from axon.agent.subagent import SubagentManager
+    from axon.ui.footer import PinnedFooter
+    mgr = SubagentManager()
+    task = mgr.register("Read x", title="Read x")
+    task.add_entry("tool", "Read x.ts")
+    f = PinnedFooter(N(settings=N(model="m", mode="auto", workspace="."), subagents=mgr), lambda: "")
+    assert not f.nav("down", draft_empty=False)           # typing: arrows are not taken
+    assert f.nav("down", draft_empty=True) and f.nav("enter", True)
+    assert f.reply_to == task.id
+    text = "\n".join(f.build(100))
+    assert "▸ Read x.ts" in text and f"[{task.id}]" in text
+    assert f.nav("esc", True) and f.reply_to is None

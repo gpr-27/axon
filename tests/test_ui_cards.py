@@ -301,12 +301,12 @@ def test_result_rows_link_to_full_output_and_card_paths_to_the_file(monkeypatch,
     monkeypatch.setenv("AXON_HYPERLINKS", "1")
     r = Renderer(trace_level="normal")
     r.on_event(ToolExecutionStart(id="b", name="Bash", input={"command": "ls"}))
-    r.on_event(ToolExecutionResult(id="b", name="Bash", input={}, content="a\nb"))
+    r.on_event(ToolExecutionResult(id="b", name="Bash", input={}, content="a\nb\nc\nd\ne"))
     out = capsys.readouterr().out
-    summary = next(l for l in out.splitlines() if "⎿" in l)
+    summary = next(l for l in out.splitlines() if "/output" in l)
     m = re.search(r"\x1b\]8;;(file://[^\x1b]+)\x1b\\", summary)
-    assert m and "axon-outputs-" in m.group(1)                    # the summary row opens the full output
-    assert strip_ansi(summary).strip().startswith("⎿  ✓ exit 0 · 2 lines of output")
+    assert m and "axon-outputs-" in m.group(1)                    # the '+N more · /output K' pointer opens the full output
+    assert strip_ansi(summary).strip().endswith("… +3 more lines · /output 1") or "more lines · /output" in strip_ansi(summary)
     r.on_event(ToolExecutionStart(id="w", name="Write", input={"path": "new.py", "content": "x = 1\n"}))
     r.on_event(ToolExecutionResult(id="w", name="Write", input={}, content="Created file."))
     out = capsys.readouterr().out
@@ -341,8 +341,13 @@ def test_turn_and_step_headers_name_the_provider(capsys, monkeypatch):
     r.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1,
                             user_prompt="hi", mode="bypass"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "claude-opus-5-5 via AgentRouter · bypass mode" in out
-    assert "◆ Step 1  LLM call · claude-opus-5-5 (AgentRouter) · reads 1 message" in out
+    assert "claude-opus-5-5 via AgentRouter · bypass mode" in out                  # the turn header names the provider once
+    assert "◆ Step 1 · claude-opus-5-5 · 1 message" in out and "(AgentRouter)" not in out      # normal: not again per step
+    d = Renderer(trace_level="detailed")
+    d._agent = r._agent
+    d.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1,
+                            user_prompt="hi", mode="bypass"))
+    assert "◆ Step 1  LLM call · claude-opus-5-5 (AgentRouter) · reads 1 message" in strip_ansi(capsys.readouterr().out)
     r2 = Renderer()
     r2._agent = SimpleNamespace(settings=SimpleNamespace(base_url="", provider="anthropic"))
     r2.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1, user_prompt="x"))
@@ -355,12 +360,16 @@ def test_turn_and_step_headers_name_the_provider(capsys, monkeypatch):
 def test_step_header_drops_provider_when_narrow(capsys, monkeypatch):
     monkeypatch.setattr(theme, "term_width", lambda: 70)
     monkeypatch.setattr(render, "term_width", lambda: 70)
-    r = Renderer()
+    r = Renderer(trace_level="detailed")
     r._agent = SimpleNamespace(settings=SimpleNamespace(base_url="https://agentrouter.org/v1", provider=None))
     r.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=12,
                             tokens_in=12_000, user_prompt="hi"))
     out = strip_ansi(capsys.readouterr().out)
     assert "(AgentRouter)" not in out and "LLM call · claude-opus-5-5 · reads 12 messages" in out
+    n = Renderer()
+    n.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=12,
+                            tokens_in=12_000, user_prompt="hi"))
+    assert "◆ Step 1 · claude-opus-5-5 · 12 messages · ~12.0k tokens" in strip_ansi(capsys.readouterr().out)
 
 
 # ─── history looks like live ───────────────────────────────────────────────

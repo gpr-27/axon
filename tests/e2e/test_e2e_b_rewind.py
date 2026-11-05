@@ -45,7 +45,7 @@ def _f(env: AxonEnv) -> str | None:
 def test_checkpoints_persisted_per_turn(axon_env: AxonEnv) -> None:
     """Each prompt that edits files persists one numbered snapshot with a manifest."""
     sid = _two_prompts(axon_env)
-    cdir = project_dir(axon_env) / "checkpoints" / sid
+    cdir = project_dir(axon_env) / "sessions" / sid / "checkpoints"
     snaps = sorted(p for p in cdir.iterdir() if p.is_dir())
     assert len(snaps) == 2, list(cdir.rglob("*"))
     assert all((p / "manifest.json").is_file() for p in snaps)
@@ -135,7 +135,7 @@ def test_rewind_record_written_to_transcript(axon_env: AxonEnv) -> None:
     """A conversation rewind is persisted as a `rewind` record with mode and prompt index."""
     sid = _two_prompts(axon_env)
     _rewind(axon_env, "to 2 conversation")
-    recs = [r for r in records(axon_env.sessions_dir() / f"{sid}.jsonl") if r["type"] == "rewind"]
+    recs = [r for r in records(axon_env.transcript(sid)) if r["type"] == "rewind"]
     assert recs and recs[-1]["data"]["mode"] == "conversation" and recs[-1]["data"]["prompt_index"] == 2
 
 

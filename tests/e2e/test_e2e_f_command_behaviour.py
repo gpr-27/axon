@@ -243,7 +243,8 @@ def _simplify(c: Ctx) -> None:
 def _skill_doctor_setup(env: AxonEnv) -> None:
     d = env.workspace / ".axon" / "skills" / "broken"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("no frontmatter here\n", encoding="utf-8")
+    # no description anywhere (a body line would be used as the description, as in Claude Code)
+    (d / "SKILL.md").write_text("---\nname: broken\n---\n", encoding="utf-8")
 
 
 def _skill_doctor(c: Ctx) -> None:
@@ -262,7 +263,7 @@ def _star_tag(c: Ctx) -> None:
 def _transcript(c: Ctx) -> None:
     out = c.out
     assert "Turn 1" in out and "create seed.py" in out, out
-    assert "Write  seed.py" in out and "BASH-OUT-123" in out, out
+    assert re.search(r"Write\s+input\s+seed\.py", out) and "BASH-OUT-123" in out, out
 
 
 def _terminal_setup(c: Ctx) -> None:
@@ -581,13 +582,13 @@ def test_delete_without_id_never_deletes_and_with_id_does(tmp_path: Path, fake_l
     env = create_axon_env(tmp_path, fake_llm)
     fake_llm.enqueue([{"text": "hello back"}])
     assert env.run(["-p", "hello"]).code == 0
-    files = sorted(env.sessions_dir().glob("*.jsonl"))
+    files = sorted(env.transcripts())
     assert len(files) == 1
     r0 = env.run(["-p", "--continue", "/delete"])
     no_crash(r0)
     assert "Usage: /delete" in r0.output, r0.output
     assert files[0].exists(), "/delete without an id deleted the session"
-    sid = files[0].stem
+    sid = files[0].parent.name
     r1 = env.run(["-p", "--continue", f"/delete {sid}"])
     no_crash(r1)
     assert "Deleted session" in r1.output or "to the trash" in r1.output, r1.output
@@ -606,7 +607,7 @@ def test_output_shows_full_tool_output_in_repl(axon_env: AxonEnv) -> None:
     s = open_repl(axon_env)
     try:
         out = s.turn("count to 300")
-        m = re.search(r"/output (\d+) to view all", out)
+        m = re.search(r"/output (\d+)", out)
         assert m, out[-2000:]
         n = m.group(1)
         full = s.command(f"/output {n}", r"300 lines")

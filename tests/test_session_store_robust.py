@@ -53,7 +53,7 @@ def test_sessions_are_scoped_per_workspace(tmp_path: Path):
     assert [m.session_id for m in a.list_recent()] == ["sa"]
     assert b.latest() == "sb"
     assert b.delete_all_sessions() == 1
-    assert (shared / "sa.jsonl").exists()
+    assert (shared / "sa" / "session.jsonl").exists()  # the other workspace's session is untouched
 
 
 def test_default_dir_is_per_project_and_legacy_is_read(tmp_path: Path):
@@ -114,7 +114,7 @@ def test_skill_content_and_frontmatter(tmp_path: Path):
     from axon.skills.manager import skill_content, skills_prompt_section, SkillManager
     d = tmp_path / ".axon" / "skills" / "lint"
     d.mkdir(parents=True)
-    (d / "SKILL.md").write_text("---\nname: lint\ndescription: >-\n  Lint the\n  code\nallowed-tools:\n  - Bash(ruff:*)\n---\nRun ruff on $1 then !`echo nope`\n", encoding="utf-8")
+    (d / "SKILL.md").write_text("---\nname: lint\ndescription: >-\n  Lint the\n  code\nallowed-tools:\n  - Bash(ruff:*)\n---\nRun ruff on $0 then !`echo nope`\n", encoding="utf-8")
     text = skill_content("lint", tmp_path, "src")
     assert "Run ruff on src" in text and "not permitted" in text
     mgr = SkillManager(tmp_path)

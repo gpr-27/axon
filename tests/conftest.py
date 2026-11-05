@@ -1,8 +1,15 @@
 """
 Pytest configuration and shared fixtures for Axon.
 """
+import os
 import sys
 from pathlib import Path
+
+# Tests must never open a real browser window (the usage report, MCP sign-in and similar pages do). Programs
+# started by tests, such as the e2e `axon` subprocesses, inherit this: $BROWSER names the command webbrowser runs.
+os.environ["BROWSER"] = "true"
+# ... and must never show a desktop notification either (macOS plays a sound for each one).
+os.environ["AXON_NO_NOTIFY"] = "1"
 _here = Path(__file__).parent
 _root = _here.parent
 for p in [str(_root), str(_root / "src"), str(_here)]:
@@ -17,10 +24,20 @@ from axon.session.store import SessionStore
 from axon.session.ledger import Ledger
 
 @pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In-process calls of webbrowser.open*() do nothing and report that no browser opened."""
+    import webbrowser
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, lambda *args, **kwargs: False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_user_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate user home directory so test runs never overwrite ~/.axon/config.toml."""
     fake_home = tmp_path_factory.mktemp("axon_fake_home")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    from axon import storage
+    storage.set_active_session("", "")  # the "current session" registry is process-wide state
     return fake_home
 
 @pytest.fixture(autouse=True)

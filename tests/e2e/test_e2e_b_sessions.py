@@ -28,13 +28,15 @@ def _tool_turn(env: AxonEnv, prompt: str = "make a file", *extra: str) -> dict:
 
 @parallel
 def test_storage_layout_sessions_traces_checkpoints(axon_env: AxonEnv) -> None:
-    """A turn that edits a file creates sessions/, traces/ and checkpoints/<sid>/ under the project dir."""
+    """A turn that edits a file creates sessions/<sid>/ with the transcript, trace and checkpoints in it."""
     data = _tool_turn(axon_env)
     sid = data["session_id"]
     pdir = project_dir(axon_env)
-    assert (pdir / "sessions" / f"{sid}.jsonl").is_file()
-    assert (pdir / "traces").is_dir() and list((pdir / "traces").glob(f"{sid}*")), list(pdir.rglob("*"))
-    assert (pdir / "checkpoints").is_dir(), list(pdir.rglob("*"))
+    sdir = pdir / "sessions" / sid
+    assert (sdir / "session.jsonl").is_file()
+    assert (sdir / "trace.jsonl").is_file(), list(pdir.rglob("*"))
+    assert (sdir / "checkpoints").is_dir(), list(pdir.rglob("*"))
+    assert not any((pdir / old).exists() for old in ("traces", "checkpoints", "outputs", "todos")), list(pdir.rglob("*"))
     meta = json.loads((pdir / "project.json").read_text(encoding="utf-8"))
     assert meta["workspace"] == str(axon_env.workspace.resolve())
 
@@ -46,7 +48,7 @@ def test_checkpoint_snapshot_written_after_edit_of_existing_file(axon_env: AxonE
     axon_env.llm.enqueue([{"tool": "Read", "args": {"path": "made.txt"}}])  # read-before-write guard
     data = _tool_turn(axon_env)
     assert (axon_env.workspace / "made.txt").read_text(encoding="utf-8") == "v1\n"
-    cdir = project_dir(axon_env) / "checkpoints" / data["session_id"]
+    cdir = project_dir(axon_env) / "sessions" / data["session_id"] / "checkpoints"
     assert cdir.is_dir(), list(project_dir(axon_env).rglob("*"))
     blobs = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in cdir.rglob("*") if p.is_file())
     assert "ORIGINAL-CONTENT" in blobs
@@ -57,7 +59,7 @@ def test_transcript_first_record_is_session_meta(axon_env: AxonEnv) -> None:
     """Every transcript starts with a session_meta record naming the workspace."""
     axon_env.llm.enqueue([{"text": "hi"}])
     sid = run_json(axon_env, "hello")["session_id"]
-    recs = records(axon_env.sessions_dir() / f"{sid}.jsonl")
+    recs = records(axon_env.transcript(sid))
     assert recs[0]["type"] == "session_meta"
     assert recs[0]["data"]["workspace"] == str(axon_env.workspace)
     assert all("timestamp" in r for r in recs)
@@ -67,7 +69,7 @@ def test_transcript_first_record_is_session_meta(axon_env: AxonEnv) -> None:
 def test_transcript_contains_input_output_tools_usage_cost(axon_env: AxonEnv) -> None:
     """The transcript stores the prompt, assistant text, tool inputs, tool results, usage and cost."""
     data = _tool_turn(axon_env, "PROMPT-MARKER-123 please")
-    recs = records(axon_env.sessions_dir() / f"{data['session_id']}.jsonl")
+    recs = records(axon_env.transcript(data['session_id']))
     kinds = [r["type"] for r in recs]
     assert "user_message" in kinds and "assistant_turn" in kinds and "tool_results" in kinds, kinds
     user = next(r for r in recs if r["type"] == "user_message")
@@ -88,7 +90,7 @@ def test_transcript_contains_input_output_tools_usage_cost(axon_env: AxonEnv) ->
 def test_transcript_records_permission_decisions(axon_env: AxonEnv) -> None:
     """Permission outcomes for tool calls are persisted as `permission` records."""
     data = _tool_turn(axon_env, "write it", "--mode", "acceptEdits")
-    recs = records(axon_env.sessions_dir() / f"{data['session_id']}.jsonl")
+    recs = records(axon_env.transcript(data['session_id']))
     perms = [r["data"] for r in recs if r["type"] == "permission"]
     assert perms, [r["type"] for r in recs]
     assert perms[0]["tool"] == "Write" and perms[0]["outcome"]
@@ -99,7 +101,7 @@ def test_transcript_records_denied_permission_in_plan_mode(axon_env: AxonEnv) ->
     """A tool blocked by plan mode is still recorded with a non-allow outcome."""
     axon_env.llm.enqueue([{"tool": "Write", "args": {"path": "x.txt", "content": "no"}}], [{"text": "ok"}])
     data = run_json(axon_env, "--mode", "plan", "write x")
-    recs = records(axon_env.sessions_dir() / f"{data['session_id']}.jsonl")
+    recs = records(axon_env.transcript(data['session_id']))
     perms = [r["data"] for r in recs if r["type"] == "permission"]
     assert perms and perms[0]["outcome"] != "allow", perms
     res = [r["data"] for r in recs if r["type"] == "tool_results"]
@@ -123,7 +125,7 @@ def test_auto_title_from_first_prompt(axon_env: AxonEnv) -> None:
     """Without -n, the session is auto-titled from the first prompt (session_rename record)."""
     axon_env.llm.enqueue([{"text": "sure"}])
     sid = run_json(axon_env, "Refactor the payment module. Then add tests.")["session_id"]
-    recs = records(axon_env.sessions_dir() / f"{sid}.jsonl")
+    recs = records(axon_env.transcript(sid))
     titles = [r["data"]["title"] for r in recs if r["type"] == "session_rename"]
     assert titles, [r["type"] for r in recs]
     assert "payment" in titles[-1].lower()
@@ -134,7 +136,7 @@ def test_name_flag_sets_title_and_skips_auto_title(axon_env: AxonEnv) -> None:
     """`-n NAME` records the name; the auto title does not overwrite it."""
     axon_env.llm.enqueue([{"text": "sure"}])
     sid = run_json(axon_env, "-n", "my-named-session", "Some unrelated first prompt")["session_id"]
-    recs = records(axon_env.sessions_dir() / f"{sid}.jsonl")
+    recs = records(axon_env.transcript(sid))
     titles = [r["data"]["title"] for r in recs if r["type"] == "session_rename"]
     assert titles and titles[-1] == "my-named-session", titles
 
@@ -218,13 +220,13 @@ def test_fork_session_creates_new_id_with_history(axon_env: AxonEnv) -> None:
     """--continue --fork-session copies history into a new session; the original is unchanged."""
     axon_env.llm.enqueue([{"text": "Codeword OSPREY."}])
     sid = run_json(axon_env, "remember")["session_id"]
-    before = (axon_env.sessions_dir() / f"{sid}.jsonl").read_text(encoding="utf-8")
+    before = (axon_env.transcript(sid)).read_text(encoding="utf-8")
     axon_env.llm.enqueue({"steps": [{"text": "OSPREY"}], "expect": [text_in_request("OSPREY")]})
     data = run_json(axon_env, "--continue", "--fork-session", "which?")
     assert data["session_id"] != sid
     assert not axon_env.llm.failures
-    assert (axon_env.sessions_dir() / f"{sid}.jsonl").read_text(encoding="utf-8") == before
-    forked = (axon_env.sessions_dir() / f"{data['session_id']}.jsonl").read_text(encoding="utf-8")
+    assert (axon_env.transcript(sid)).read_text(encoding="utf-8") == before
+    forked = (axon_env.transcript(data['session_id'])).read_text(encoding="utf-8")
     assert "OSPREY" in forked and "which?" in forked
 
 
@@ -265,7 +267,7 @@ def test_rename_command_persists_title(axon_env: AxonEnv) -> None:
     r = axon_env.run(["-p", "--continue", "/rename Shiny Title"])
     no_crash(r)
     assert "Shiny Title" in r.output
-    recs = records(axon_env.sessions_dir() / f"{sid}.jsonl")
+    recs = records(axon_env.transcript(sid))
     assert [x["data"]["title"] for x in recs if x["type"] == "session_rename"][-1] == "Shiny Title"
     axon_env.llm.enqueue([{"text": "y"}])
     assert run_json(axon_env, "--resume", "Shiny Title", "again")["session_id"] == sid
@@ -279,7 +281,7 @@ def test_rename_without_title_generates_one(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([{"text": "Rocket Building Session"}])
     r = axon_env.run(["-p", "--continue", "/rename"])
     no_crash(r)
-    recs = records(axon_env.sessions_dir() / f"{sid}.jsonl")
+    recs = records(axon_env.transcript(sid))
     assert [x["data"]["title"] for x in recs if x["type"] == "session_rename"][-1] == "Rocket Building Session"
 
 
@@ -290,7 +292,7 @@ def test_branch_command_creates_named_branch_session(axon_env: AxonEnv) -> None:
     sid = run_json(axon_env, "remember")["session_id"]
     r = axon_env.run(["-p", "--continue", "/branch exp"])
     no_crash(r)
-    branch = axon_env.sessions_dir() / f"{sid}_branch_exp.jsonl"
+    branch = axon_env.transcript(f"{sid}_branch_exp")
     assert branch.is_file(), [p.name for p in session_files(axon_env)]
     text = branch.read_text(encoding="utf-8")
     assert "KESTREL" in text and "remember" in text
@@ -325,7 +327,7 @@ def test_clear_starts_new_session_and_keeps_old(axon_env: AxonEnv) -> None:
     r = axon_env.run(["-p", "--continue", "/clear"])
     no_crash(r)
     assert "New session" in r.output
-    assert (axon_env.sessions_dir() / f"{sid}.jsonl").is_file()
+    assert (axon_env.transcript(sid)).is_file()
 
 
 def _export(env: AxonEnv, fmt: str, needle: str) -> str:
@@ -372,11 +374,11 @@ def test_export_infers_format_from_extension(axon_env: AxonEnv) -> None:
 
 @parallel
 def test_export_default_path_under_axon_home(axon_env: AxonEnv) -> None:
-    """`/export md` with no path writes AXON_HOME/projects/<key>/exports/<sid>.md."""
+    """`/export md` with no path writes AXON_HOME/projects/<key>/sessions/<sid>/exports/<sid>.md."""
     axon_env.llm.enqueue([{"text": "A"}])
     sid = run_json(axon_env, "q")["session_id"]
     no_crash(axon_env.run(["-p", "--continue", "/export md"]))
-    assert list((axon_env.axon_home / "projects").glob(f"*/exports/{sid}.md"))
+    assert list((axon_env.axon_home / "projects").glob(f"*/sessions/{sid}/exports/{sid}.md"))
 
 
 @parallel
@@ -426,7 +428,7 @@ def test_tag_and_star_records(axon_env: AxonEnv) -> None:
     sid = run_json(axon_env, "hello")["session_id"]
     no_crash(axon_env.run(["-p", "--continue", "/tag important"]))
     no_crash(axon_env.run(["-p", "--continue", "/star"]))
-    kinds = [r["type"] for r in records(axon_env.sessions_dir() / f"{sid}.jsonl")]
+    kinds = [r["type"] for r in records(axon_env.transcript(sid))]
     assert "session_tag" in kinds and "session_star" in kinds
 
 
@@ -448,8 +450,8 @@ def test_repl_clear_then_resume_previous(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([{"text": "REPL-FIRST-ANSWER"}])
     with start_repl(axon_env) as s:
         repl_cmd(s, "first question", "REPL-FIRST-ANSWER", 20)
-        sid = session_files(axon_env)[0].stem
-        repl_cmd(s, "/clear", "New session")
+        sid = session_files(axon_env)[0].parent.name
+        repl_cmd(s, "/clear first-chat", "New session")   # a bare /clear asks in a menu first
         out = repl_cmd(s, f"/resume {sid}", r"REPL-FIRST-ANSWER|first question")
         assert "Traceback" not in out
         axon_env.llm.enqueue({"steps": [{"text": "SECOND"}], "expect": [text_in_request("REPL-FIRST-ANSWER")]})
@@ -469,5 +471,5 @@ def test_repl_rename_and_branch(axon_env: AxonEnv) -> None:
         repl_cmd(s, "/branch side", "Branched")
         s.sendline("/exit")
         s.wait(10)
-    names = [p.name for p in session_files(axon_env)]
-    assert any(n.endswith("_branch_side.jsonl") for n in names), names
+    names = [p.parent.name for p in session_files(axon_env)]
+    assert any(n.endswith("_branch_side") for n in names), names

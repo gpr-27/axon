@@ -86,6 +86,19 @@ def test_subagent_trace_files_are_not_transcripts(workspace: Path) -> None:
     store = SessionStore(workspace)
     sid = store.active_session_id
     store.append_user("hi")
+    subdir = store.session_dir / sid / "subagents"
+    subdir.mkdir(parents=True)
+    (subdir / "1.jsonl").write_text("", encoding="utf-8")
+    (subdir / "1.trace.jsonl").write_text("{}\n", encoding="utf-8")
+    assert [p.name for p in store._subagent_files(sid)] == ["1.jsonl"]
+    assert store.delete_session(sid)
+    assert not (subdir / "1.trace.jsonl").exists()  # still moved to the trash
+
+
+def test_flat_subagent_trace_files_are_not_transcripts(workspace: Path) -> None:
+    store = SessionStore(workspace)
+    sid = store.active_session_id
+    store.append_user("hi")
     (store.session_dir / f"{sid}_sub_1.jsonl").write_text("", encoding="utf-8")
     (store.session_dir / f"{sid}_sub_1.traces.jsonl").write_text("{}\n", encoding="utf-8")
     assert [p.name for p in store._subagent_files(sid)] == [f"{sid}_sub_1.jsonl"]
@@ -105,7 +118,7 @@ def test_git_info_branch_with_slash(tmp_path: Path) -> None:
 def test_substituted_arguments_are_not_rescanned() -> None:
     from axon.skills.manager import substitute_arguments
     assert substitute_arguments("Fix: $ARGUMENTS", "price shows $5 not $1") == "Fix: price shows $5 not $1"
-    assert substitute_arguments("A=$1 B=$2", "x '$2'") == "A=x B=$2"
+    assert substitute_arguments("A=$0 B=$1", "x '$1'") == "A=x B=$1"
     assert substitute_arguments("Env ${env}, ref $ref", "prod $1 main", ["env", "ref"]) == "Env prod, ref $1 main"
     assert substitute_arguments("no placeholder", "hello") == "no placeholder\n\nARGUMENTS: hello"
 

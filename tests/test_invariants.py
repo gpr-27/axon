@@ -393,3 +393,27 @@ def test_btw_and_keybindings():
         res = dispatch_command(cmd, agent)
         assert res is not None and res.handled is True
 
+
+
+def test_history_window_drops_stale_thinking_signatures():
+    """Trimming history invalidates thinking signatures (Anthropic 400): they must not be replayed."""
+    from axon.agent.context import ContextManager
+    from axon.agent.state import Conversation
+    from axon.config import Settings
+    msgs = []
+    for i in range(6):
+        msgs.append({"role": "user", "content": f"q{i}"})
+        msgs.append({"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "hm", "signature": "sig"}, {"type": "text", "text": f"a{i}"}]})
+    conv = Conversation(msgs)
+    ContextManager(Settings(max_history_turns=2)).prepare(conv, [], [])
+    assert len(conv.messages) == 4
+    assert all(b["type"] != "thinking" for m in conv.messages if m["role"] == "assistant" for b in m["content"])
+
+
+def test_parity_commands_registered_and_reload_skills_runs(tmp_path):
+    from axon.commands.registry import COMMANDS, ALIASES, _ensure_loaded
+    _ensure_loaded()
+    for name in ("stop", "reload-skills", "list-agents", "subtask"):
+        assert name in COMMANDS
+    assert ALIASES["peers"] == "list-agents" and ALIASES["stats"] == "cost"

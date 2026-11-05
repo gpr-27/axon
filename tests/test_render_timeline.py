@@ -61,10 +61,13 @@ def test_normal_timeline_with_stats_and_answer(capsys):
     r.turn_footer(0, Usage(input=12_400, output=412), 0.0031, 1.9, 1)
     out = strip_ansi(capsys.readouterr().out)
     assert '┌ Turn 1 · "fix the failing test"' in out
-    assert "◆ Step 1  LLM call · claude-opus-5" in out
-    assert "thought for" in out and "I need to read the file." in out
+    assert "◆ Step 1 · claude-opus-5" in out and "LLM call" not in out.split("Done")[0]
+    assert "✻ THINKING" in out and "I need to read the file." in out      # normal: one line, the full text is for detailed
     assert "▎ All good." in out                 # response rows carry the accent bar
-    assert "12.4k in (79% cached) · 412 out" in out
+    assert "replied in" not in out              # no cost line mid-turn at the normal level ...
+    table = [" ".join(r.strip("│ ").split()) for r in out.splitlines()]
+    assert "usage by step" in table             # ... the end-of-turn table has the figures
+    assert any(r.startswith("1 claude-opus-5") and "12.4k 79% - 412" in r for r in table), table
     assert "└ ✓ Done" in out
 
 
@@ -85,10 +88,12 @@ def test_glass_box_events(capsys):
     r.on_event(trace.SubagentEvent(phase="end", task_id="s", agent_type="explore", title="map db", model="m", cost=0.002, status="completed"))
     r.on_event(object())  # unknown events are ignored
     out = strip_ansi(capsys.readouterr().out)
-    assert "replied in 1.2s · 100 in · 10 out · $0.5000" in out   # LLMCallEnd figures, printed once
-    assert out.count("100 in") == 1
+    assert "replied in" not in out            # normal level: the figures wait for the end of the turn
+    r.turn_footer(1, Usage(input=100, output=10), 0.5, 1.3, 1)
+    summary = [" ".join(row.strip("│ ").split()) for row in strip_ansi(capsys.readouterr().out).splitlines()]
+    assert "1 claude-opus-5 1.2s 100 - - 10 $0.5000" in summary      # LLMCallEnd figures, one table row
     assert "runs 1 tool" not in out           # single-tool plan line only at detailed
-    assert "denied by rule: Bash(rm:*)" in out
+    assert "denied (rule)" in out and "✗ blocked" in out        # the card's run line (detailed: 'denied by rule: Bash(rm:*)')
     assert "hook PreToolUse blocked" in out
     assert "529 overloaded · retrying in 0.8s (retry 1 of 3)" in out
     assert "context compacted (auto) 150k → 20.0k tokens" in out
@@ -268,9 +273,12 @@ def test_restored_conversation_replay_shows_tools_results_and_answers():
     ]
     out = strip_ansi("\n".join(format_conversation_replay(msgs, width=80)))
     assert "› list files" in out and "Turn 1 (restored)" in out
-    assert "● Bash  $ ls" in out and "runs a shell command" in out
+    assert "input   ls" in out and "output  a.py" in out     # the phased card
     assert "a.py" in out and "b.py" in out                 # the result is shown, not just the call
-    assert "thought › I should run ls." in out
+    assert "THINKING" in out and "I should run ls." in out
+    detailed = strip_ansi("\n".join(format_conversation_replay(msgs, width=80, detail=2)))
+    assert "● Bash  $ ls" in detailed and "runs a shell command" in detailed
+    assert "thought › I should run ls." in detailed
     assert "▎ There are two files." in out
     assert out.count("Turn 1") == 1                      # the tool_result message does not open a new turn
 
@@ -282,8 +290,18 @@ def test_tool_rows_say_what_the_tool_does_and_why(capsys):
     r.on_event(ToolExecutionStart(id="g", name="Grep", input={"pattern": "x"}, rationale="find the handler"))
     r.on_event(ToolExecutionResult(id="g", name="Grep", input={"pattern": "x"}, content="a.py:1:x\nb.py:2:x"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "searches inside files · why: find the handler" in out
-    assert "a.py · 1 match" in out and "1: x" in out     # search results are grouped by file under the summary
+    assert "choose  find the handler" in out and 'input   "x"' in out          # normal: the phased card
+    assert "output  a.py:1  x" in out and "b.py:2  x" in out
+    assert "exact result sent to the model" not in out and "chosen by" not in out
+    r = Renderer(trace_level="detailed")
+    _turn(r)
+    capsys.readouterr()
+    r.on_event(ToolExecutionStart(id="g", name="Grep", input={"pattern": "x"}, rationale="find the handler"))
+    r.on_event(ToolExecutionResult(id="g", name="Grep", input={"pattern": "x"}, content="a.py:1:x\nb.py:2:x"))
+    out = strip_ansi(capsys.readouterr().out)
+    assert "searches inside files" in out and 'model said: "find the handler"' in out
+    assert "2 matches in 2 files" in out                  # the summary row, then the exact text the model gets
+    assert "exact result sent to the model (2 lines)" in out and "│ a.py:1:x" in out and "│ b.py:2:x" in out
 
 
 def test_spinner_live_timer_counts_the_current_activity(monkeypatch):

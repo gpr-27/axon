@@ -98,21 +98,26 @@ def test_missing_key_message_points_at_setup(workspace: Path) -> None:
 
 def test_prune_old_and_once_per_day(isolate_user_home: Path, workspace: Path) -> None:
     from axon import storage
-    sess = storage.sessions_dir(workspace) / "old.jsonl"
+    old_dir = storage.session_dir(workspace, "old")
+    sess = old_dir / "session.jsonl"
     sess.write_text("{}\n", encoding="utf-8")
-    keep = storage.sessions_dir(workspace) / "new.jsonl"
+    keep = storage.session_dir(workspace, "new") / "session.jsonl"
     keep.write_text("{}\n", encoding="utf-8")
     cp = storage.checkpoints_dir(workspace, "old") / "1"
     cp.mkdir(parents=True)
     (cp / "f.txt").write_text("x", encoding="utf-8")
+    flat = storage.sessions_dir(workspace) / "flat.jsonl"  # session of the older flat layout
+    flat.write_text("{}\n", encoding="utf-8")
     old = time.time() - 40 * 86400
-    for f in (sess, cp / "f.txt", cp, cp.parent):
+    for f in (*old_dir.rglob("*"), old_dir, flat):
         os.utime(f, (old, old))
     assert storage.prune_old(30) >= 2
-    assert not sess.exists() and keep.exists() and not cp.parent.exists()
+    assert not old_dir.exists() and not flat.exists() and keep.exists()  # the whole session folder goes
     assert storage.prune_on_startup(30) == 0  # nothing left to prune
+    old_dir.mkdir()
     sess.write_text("{}\n", encoding="utf-8")
     os.utime(sess, (old, old))
+    os.utime(old_dir, (old, old))
     assert storage.prune_on_startup(30) == 0 and sess.exists()  # stamped: skipped within a day
 
 
@@ -452,7 +457,7 @@ def test_tool_search_defers_mcp_schemas(workspace: Path) -> None:
     search = defer_mcp_tools(reg, context_window=20_000)
     assert isinstance(search, ToolSearchTool)
     assert not any(n.startswith("mcp__") for n in reg.visible_names()) and "ToolSearch" in reg.visible_names()
-    assert "mcp__slack__send_message" in search.description
+    assert "mcp__slack__ (1): send_message" in search.description  # grouped by server, prefix written once
     agent = make_agent(FakeProvider([]), workspace, registry=reg)
     before = json.dumps(reg.schemas())
     out = search.run({"query": "slack message"}, _ctx(agent))

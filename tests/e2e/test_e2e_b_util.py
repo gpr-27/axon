@@ -29,7 +29,7 @@ def project_dir(env: AxonEnv) -> Path:
 
 def session_files(env: AxonEnv) -> list[Path]:
     d = env.sessions_dir()
-    return sorted(d.glob("*.jsonl")) if d.is_dir() else []
+    return sorted(d.glob("*/session.jsonl")) if d.is_dir() else []
 
 
 def records(path: Path) -> list[dict[str, Any]]:

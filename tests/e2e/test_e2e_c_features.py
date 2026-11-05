@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import shlex
 import sys
 from pathlib import Path
 
@@ -368,7 +369,7 @@ def test_fix_with_command_runs_it_then_fixes(xenv: AxonEnv) -> None:
     """/fix <command>: runs the failing command, parses failures, hands them to the agent."""
     _buggy_project(xenv.workspace)
     _fixing_model(xenv, ("calc.py", "test_add"))
-    r = xenv.run(["-p", f"/fix {sys.executable} -m pytest -q -p no:cacheprovider"], env=venv_path_env(xenv), timeout=90)
+    r = xenv.run(["-p", f"/fix {shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider"], env=venv_path_env(xenv), timeout=90)
     assert r.code == 0, str(r)
     assert not xenv.llm.failures, xenv.llm.failures
     assert "return a + b" in (xenv.workspace / "calc.py").read_text(encoding="utf-8")
@@ -444,7 +445,7 @@ def test_solve_with_unparseable_plan_reports_error(xenv: AxonEnv) -> None:
 
 def test_solve_step_failure_aborts_non_interactively(xenv: AxonEnv) -> None:
     """A step whose verify command fails is marked failed and the plan aborts (no TTY to ask retry)."""
-    plan = {"goal": "g", "steps": [{"title": "Do it", "detail": "", "verify": f"`{sys.executable} -c \"import sys; sys.exit(1)\"`"},
+    plan = {"goal": "g", "steps": [{"title": "Do it", "detail": "", "verify": f"`{shlex.quote(sys.executable)} -c \"import sys; sys.exit(1)\"`"},
                                     {"title": "Never", "detail": "", "verify": ""}]}
     xenv.llm.enqueue([{"text": json.dumps(plan)}], [{"text": "did it"}])
     r = xenv.run(["-p", "/solve g --yes"], timeout=60)
@@ -494,6 +495,8 @@ def test_commit_interactive_confirm_creates_commit(xgit_env: AxonEnv, tmp_path: 
         s.drain(0.5)
         m = s.mark()
         s.sendline("/commit")
+        s.expect("Run it", timeout=10, since=m)     # a bare /commit opens its menu first
+        s.send("\r")
         s.expect(r"Commit with this message\?", timeout=30, since=m)
         s.send("y\r")
         s.expect(r"Committed [0-9a-f]+", timeout=20, since=m)
@@ -586,7 +589,7 @@ def test_next_suggests_verify_and_commit_after_edit_turn(xgit_env: AxonEnv) -> N
 
 def test_next_suggests_fix_after_failing_bash(xenv: AxonEnv) -> None:
     """A turn whose Bash test command failed -> /next proposes /fix (or /autofix)."""
-    cmd = f'{sys.executable} -m pytest -q nonexistent_test_file.py'
+    cmd = f'{shlex.quote(sys.executable)} -m pytest -q nonexistent_test_file.py'
     xenv.llm.enqueue([{"tool": "Bash", "args": {"command": cmd, "description": "run tests"}}], [{"text": "tests failed"}])
     assert xenv.run(["-p", "run the tests"]).code == 0
     r = xenv.run(["-p", "--continue", "/next"])

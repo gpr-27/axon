@@ -35,17 +35,20 @@ def test_earlier_turns_keep_thinking_tool_calls_and_outputs_after_compaction(tmp
     out = strip_ansi("\n".join(format_session_history(_session(tmp_path), width=90)))
     assert "Turn 1" in out and "Turn 2" in out
     assert "The handler is probably in app.py." in out          # thinking of an old turn
-    assert "● Grep" in out and "src/app.py" in out and "def handle(x)" in out   # its tool call and output
+    assert "Grep  input" in out and "src/app.py" in out and "def handle(x)" in out   # its tool call and output
     assert "▎ It is in app.py." in out and "▎ All 5 tests pass." in out
     assert "context compacted" in out                            # the compaction is shown, nothing hidden
-    assert "replied in 1.5s" in out and "deepseek-v4-flash" in out
+    assert "replied in" not in out                               # usage is shown once, at the end of the turn
+    table = [" ".join(r.strip("│ ").split()) for r in out.splitlines()]
+    assert "usage by step" in table
+    assert "1 deepseek-v4-flash 1.5s 9.0k - - 40 $0.0100" in table
 
 
 def test_row_tags_follow_tool_blocks(tmp_path: Path) -> None:
     tags: list = []
     rows = format_session_history(_session(tmp_path), width=90, row_tags=tags, tool_tags={"t1": 42})
     assert len(tags) == len(rows)
-    grep_rows = [i for i, r in enumerate(rows) if "● Grep" in strip_ansi(r)]
+    grep_rows = [i for i, r in enumerate(rows) if "Grep  input" in strip_ansi(r)]
     assert grep_rows and tags[grep_rows[0]] == 42
 
 
@@ -71,7 +74,7 @@ def test_restored_step_shows_what_the_live_step_showed(tmp_path: Path) -> None:
                                                            "lines": 1, "bytes": 10900, "tokens": 2900,
                                                            "is_error": False}]},
                                     "thinking_s": [0.0]})
-    out = strip_ansi("\n".join(format_session_history(Path(store._file(sid)), width=110)))
+    out = strip_ansi("\n".join(format_session_history(Path(store._file(sid)), width=110, trace_level="detailed")))
     assert "LLM call · deepseek-v4-flash (AgentRouter) · reads 2 messages (~900 tokens)" in out
     assert "reads 16 messages (~14.1k tokens)" in out
     assert "includes 1 tool result from step 1 (10.6 KB · ~2.9k tokens)" in out

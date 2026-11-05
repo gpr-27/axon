@@ -171,7 +171,7 @@ def test_budget_too_small_for_first_request(axon_env: AxonEnv) -> None:
 def test_turn_token_budget_from_env(axon_env: AxonEnv) -> None:
     """AXON_TURN_TOKEN_BUDGET stops a tool loop once the turn's token usage reaches it."""
     axon_env.llm.enqueue(*[[{"tool": "Bash", "args": {"command": "echo t", "description": "x"}}]] * 5)
-    r = axon_env.run(["-p", "--output-format", "json", "go"], env={"AXON_TURN_TOKEN_BUDGET": "9000"})
+    r = axon_env.run(["-p", "--output-format", "json", "go"], env={"AXON_TURN_TOKEN_BUDGET": "12000"})
     d = r.json()
     assert d["stop_reason"] == "token_budget", d
     assert len(axon_env.llm.completion_requests()) == 2
@@ -182,7 +182,7 @@ def test_turn_token_budget_from_env(axon_env: AxonEnv) -> None:
 def test_auto_compaction_summarizes_older_turns(axon_env: AxonEnv) -> None:
     """With a tiny compactAt threshold, a long session is auto-compacted: a summary request (no tools) is
     made, and the next main request carries the summary instead of the old huge turn."""
-    big = "HUGE-OLD-TURN " + ("lorem ipsum dolor sit amet " * 900)
+    big = "HUGE-OLD-TURN " + ("lorem ipsum dolor sit amet " * 2500)   # larger than 12% of the window even with the lean prompt
     axon_env.llm.enqueue([{"text": "ack1"}])
     assert axon_env.run(["-p", big]).code == 0
     for i in (2, 3):

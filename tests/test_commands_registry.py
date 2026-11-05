@@ -72,7 +72,7 @@ def test_custom_command_frontmatter_args_namespace_and_include(agent: Agent, wor
     (workspace / "notes.txt").write_text("INCLUDED-CONTENT", encoding="utf-8")
     (cmd_dir / "component.md").write_text(
         "---\ndescription: Make a component\nargument-hint: <name> <style>\n---\n"
-        "Create component $1 in $2 style. All: $ARGUMENTS. See @notes.txt\n", encoding="utf-8")
+        "Create component $0 in $1 style. All: $ARGUMENTS. See @notes.txt\n", encoding="utf-8")
     names = dict(list_command_names(workspace))
     assert names.get("/frontend:component") == "Make a component"
     dispatch_command("/frontend:component Button flat", agent)
@@ -87,8 +87,9 @@ def test_custom_command_shell_injection_needs_permission(agent: Agent, workspace
     d.mkdir(parents=True)
     (d / "ctx.md").write_text("Status: !`echo injected-ok`\n", encoding="utf-8")
     (d / "ctx2.md").write_text("---\nallowed-tools: Bash(echo:*)\n---\nStatus: !`echo injected-ok`\n", encoding="utf-8")
-    dispatch_command("/ctx", agent)  # default mode, no TTY -> not approved
-    assert "not permitted" in _last_user(agent)
+    before = len(agent.conversation.messages)
+    dispatch_command("/ctx", agent)  # default mode, no TTY -> not approved -> the command is aborted
+    assert len(agent.conversation.messages) == before
     dispatch_command("/ctx2", agent)
     assert "injected-ok" in _last_user(agent)
 

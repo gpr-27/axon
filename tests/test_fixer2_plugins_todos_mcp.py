@@ -65,8 +65,8 @@ def test_todos_persist_and_restore_per_session(workspace: Path) -> None:
     sess = SimpleNamespace(active_session_id="s1")
     t = TodoState().bind(workspace, lambda: sess.active_session_id)
     t.replace([{"content": "a", "status": "in_progress", "activeForm": "Doing a"}, {"content": "b", "status": "pending"}])
-    from axon.storage import todos_dir
-    assert (todos_dir(workspace) / "s1.json").is_file()
+    from axon.storage import session_dir, todos_path
+    assert todos_path(workspace, "s1") == session_dir(workspace, "s1") / "todos.json" and todos_path(workspace, "s1").is_file()
     sess.active_session_id = "s2"
     assert t.items == []
     fresh = TodoState().bind(workspace, lambda: "s1")
@@ -103,11 +103,16 @@ def test_mcp_argv_list_keeps_spaces(workspace: Path, monkeypatch: pytest.MonkeyP
 
 def test_mcp_menu_default_is_harmless_and_install_needs_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
     from axon.mcp import commands as c
+    from axon.ui import menus
     picked: list[list[str]] = []
-    monkeypatch.setattr(c, "_pick", lambda options, title: (picked.append(options), options[0])[1])
-    monkeypatch.setattr(c, "_cmd_list", lambda ctx, a: None)
-    c._menu(SimpleNamespace())
-    assert picked[0][0] == "Close"
+    # /mcp in a terminal opens the server browser; Esc (None) leaves without running anything.
+    monkeypatch.setattr(menus, "_select", lambda items, *a, **k: (picked.append([i.label for i in items]), None)[1])
+    specs = {"srv": SimpleNamespace(disabled=False, approval="approved", managed=False, scope="user", type="stdio")}
+    menu_ctx = SimpleNamespace(config=SimpleNamespace(load_specs=lambda: specs),
+                               bridge=SimpleNamespace(connections={}, active_tools=[]))
+    monkeypatch.setattr(c.approval, "pending", lambda specs: False)
+    c._menu(menu_ctx)
+    assert picked[0][0] == "srv" and "Add a server" in picked[0]
     # Installing a preset interactively: a stray Enter at the confirm prompt cancels.
     saved: list = []
     ctx = SimpleNamespace(config=SimpleNamespace(add_preset=lambda *a, **k: saved.append(a), global_config_file="x"),
@@ -118,6 +123,7 @@ def test_mcp_menu_default_is_harmless_and_install_needs_confirm(monkeypatch: pyt
     assert saved == []
     # The install picker's default entry is Cancel.
     picked.clear()
+    monkeypatch.setattr(c, "_pick", lambda options, title: (picked.append(options), options[0])[1])
     c._cmd_install(ctx, [])
     assert picked[0][0] == "Cancel" and saved == []
 

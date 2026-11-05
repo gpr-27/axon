@@ -134,8 +134,8 @@ def test_read_input_uses_history_of_the_workspace(keys, monkeypatch, tmp_path):
 
     def fake_load(limit=1000, cwd=None):
         seen["cwd"] = cwd
-        return ["from this project"]
-    monkeypatch.setattr(ui_input, "load_history", fake_load)
+        return ["from this project"], {}
+    monkeypatch.setattr(ui_input, "history_entries", fake_load)
     monkeypatch.setattr(ui_input, "registered_slash_commands", lambda cwd=None: [])
     keys(["up", "enter"])
     assert read_input(cwd=str(tmp_path))[0] == "from this project"

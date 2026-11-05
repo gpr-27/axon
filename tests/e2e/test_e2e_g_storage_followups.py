@@ -37,7 +37,7 @@ def test_failed_first_turn_is_not_replayed_after_continue(axon_env: AxonEnv) -> 
     assert len(msgs) == 1, msgs
     assert "Provider error" not in json.dumps(msgs) and "first q" not in json.dumps(msgs)
     # nothing is lost: the transcript still records the failed prompt
-    text = "".join(p.read_text(encoding="utf-8") for p in axon_env.sessions_dir().glob("*.jsonl"))
+    text = "".join(p.read_text(encoding="utf-8") for p in axon_env.transcripts())
     assert '"turn_failed"' in text and "first q" in text
 
 

@@ -109,6 +109,24 @@ def test_status_line_updates_ctx_and_cost_after_turn(axon_env: AxonEnv) -> None:
         assert int(ctx) > 0 and float(cost) > 0, m
 
 
+def test_next_prompt_suggestion_shows_as_ghost_text_and_tab_accepts_it(axon_env: AxonEnv) -> None:
+    """After an answer the small model's guess appears in the empty prompt; Tab moves it into the editor."""
+    axon_env.llm.enqueue([{"text": "hello there"}])
+    axon_env.llm.default_script = [{"text": "run the tests"}]    # the suggestion call (and the title call)
+    with open_repl(axon_env, extra_env={"AXON_PROMPT_SUGGESTIONS": "1"}) as s:
+        m = s.submit("hi")
+        s.expect(r"❯ run the tests\s+tab to accept", timeout=25, since=m)
+        s.send("\t")                                            # Tab: into the editor, editable
+        s.drain(0.3)
+        s.send("\r")                                            # sent like anything the user typed
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if "run the tests" in [r.last_user_text() for r in axon_env.llm.completion_requests()]:
+                break
+            s.drain(0.2)
+        assert "run the tests" in [r.last_user_text() for r in axon_env.llm.completion_requests()]
+
+
 # ─── the glass-box timeline ────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
@@ -133,17 +151,19 @@ def test_timeline_turn_header(timeline_out: str) -> None:
 
 
 def test_timeline_step_rows(timeline_out: str) -> None:
-    """Each LLM call is a numbered `◆ Step N  <model> · reads N messages` row."""
+    """Each LLM call is a numbered `◆ Step N · <model> · N messages` row (normal level: no 'LLM call' label)."""
     out = timeline_out
-    assert re.search(r"◆ Step 1  LLM call · gpt-4o(?: \([^)\n]+\))? · reads 1 message", out), out[-2500:]
-    assert re.search(r"◆ Step 2  LLM call · gpt-4o(?: \([^)\n]+\))? · reads 3 messages", out), out[-2500:]
+    assert re.search(r"◆ Step 1 · gpt-4o · 1 message\b", out), out[-2500:]
+    assert re.search(r"◆ Step 2 · gpt-4o · 3 messages\b", out), out[-2500:]
 
 
 def test_timeline_tool_row_and_result_summary(timeline_out: str) -> None:
-    """A tool call renders as `● Bash  $ <command>` followed by a `⎿` summary with the output."""
+    """A tool call renders as a `▣ TOOLS` card: the call's input, its run status and time, and its output."""
     out = timeline_out
-    assert "● Bash  $ echo hi-from-tool" in out
-    assert re.search(r"⎿\s+hi-from-tool · [\d.]+s", out), out[-2500:]
+    assert re.search(r"▣ TOOLS · 1 call", out), out[-2500:]
+    assert re.search(r"Bash\s+input\s+echo hi-from-tool", out), out[-2500:]
+    assert re.search(r"run\s+✓ [\d.]+s", out), out[-2500:]
+    assert re.search(r"output\s+hi-from-tool", out), out[-2500:]
     assert "auto-allowed" not in out           # routine bypass-mode approvals are hidden at normal level
 
 
@@ -161,16 +181,16 @@ def test_timeline_done_footer_has_tokens_and_cost(timeline_out: str) -> None:
 
 
 def test_timeline_feedback_row_between_steps(timeline_out: str) -> None:
-    """Step 2 says which tool results from step 1 it includes."""
+    """Under step 1's tools a line says how many results go back to the model at step 2."""
     out = timeline_out
-    assert "→ includes 1 tool result from step 1" in out
+    assert re.search(r"→ 1 result \([^)\n]+\) goes to step 2", out), out[-2500:]
 
 
 # ─── trace levels via /trace ───────────────────────────────────────────────
 
 TRACE_MARKERS = {
     "compact": (["● Bash(echo hi-from-tool)", "✓ Done"], ["┌ Turn", "◆ Step", "request: system", "LLMCallStart"]),
-    "normal": (["┌ Turn", "◆ Step 1", "● Bash  $ echo hi-from-tool", "└ ✓ Done"],
+    "normal": (["┌ Turn", "◆ Step 1", "▣ TOOLS", "Bash  input   echo hi-from-tool", "└ ✓ Done"],
                ["request: system", "result #1 [", "LLMCallStart", "usage: input="]),
     "detailed": (["┌ Turn", "request: system", "runs 1 tool may change files", "result #1"],
                  ["LLMCallStart", "usage: input=", "timing: id="]),
@@ -243,18 +263,18 @@ def test_inspect_replays_last_turn_with_answer(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue(*tool_turn("echo inspected-out", "FIN-INSPECT"))
     with open_repl(axon_env, ("--mode", "bypass")) as s:
         s.turn("do it")
-        out = s.command("/inspect", r"└ ✓ Done")
+        out = s.command("/inspect last", r"└ ✓ Done")   # a bare /inspect opens a menu
         assert '┌ Turn 1 · "do it"' in out
         assert "◆ Step 1" in out and "◆ Step 2" in out
         assert "● Bash  $ echo inspected-out" in out and "run a command" in out
         assert "├─ Answer" in out and "FIN-INSPECT" in out
-        assert "permission: allow by mode" in out
+        assert "✓ allowed" in out                     # the permission decision, in plain words
 
 
 def test_inspect_before_any_turn_is_graceful(idle) -> None:
     """`/inspect` on a fresh session prints a message instead of crashing."""
     with _shared(idle) as s:
-        m = s.submit("/inspect")
+        m = s.submit("/inspect last")   # a bare /inspect opens a menu
         s.ready(since=m)
         out = s.screen[m:]
         assert TRACEBACK not in out
@@ -686,7 +706,7 @@ def vim_repl(tmp_path_factory: pytest.TempPathFactory):
     s = open_repl(env)
     s.env = env
     try:
-        s.command("/vim", "Editor mode vim")
+        s.command("/vim on", "Editor mode vim")   # a bare /vim opens a menu in a terminal
         s.ready()
         yield s
     finally:
@@ -849,7 +869,7 @@ def _start_slow(axon_env: AxonEnv, s, kind: str) -> int:
         axon_env.llm.enqueue([{"tool": "Bash", "args": {"command": "sleep 3; echo SLEPT-$((40+2))", "description": "s"}}],
                              [{"text": "after tool"}])
         m = s.submit("long tool")
-        s.expect(r"Bash  \$ sleep 3", timeout=10, since=m)
+        s.expect(r"Running Bash sleep 3", timeout=10, since=m)     # the live label of a running tool
     time.sleep(0.5)
     return m
 
@@ -1060,11 +1080,14 @@ def test_question_mark_shows_shortcuts(idle) -> None:
 
 
 def test_help_lists_commands(idle) -> None:
-    """/help lists core commands."""
+    """/help opens the command navigator (every command by category, no typing); /help <word> lists matches."""
     with _shared(idle) as s:
-        out = s.command("/help", r"/exit")
-        for c in ("/model", "/trace", "/inspect"):
-            assert c in out
+        out = s.command("/help", r"All commands")
+        assert "/activity" in out and "/ filter" in out
+        s.send(ESC)
+        s.ready()
+        out = s.command("/help model", r"/model")
+        assert "/model" in out
 
 
 def test_sigwinch_resize_does_not_crash(axon_env: AxonEnv) -> None:
@@ -1113,7 +1136,7 @@ def test_resize_at_prompt_redraws_conversation_at_new_width_and_keeps_draft(axon
         s.expect(r"Redrawn for the new window width \(64 columns\)", timeout=10, since=m)
         s.expect("❯ half typed", timeout=8, since=m)
         out = s.screen[m:]
-        assert re.search(r"● Bash  (\$ )?echo hi-from-tool", out)   # the conversation is drawn again
+        assert re.search(r"Bash\s+input\s+echo hi-from-tool", out)   # the conversation is drawn again
         assert "\x1b[3J" not in s._raw.decode("utf-8", "replace")  # the scrollback is never erased: first messages stay
         assert TRACEBACK not in s.screen and s.proc.poll() is None
 

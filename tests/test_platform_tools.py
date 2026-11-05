@@ -137,6 +137,7 @@ def test_clipboard_windows_uses_utf16_for_clip(monkeypatch) -> None:
 
 def test_windows_notification_passes_text_as_data(monkeypatch) -> None:
     import axon.ui.notify as nt
+    monkeypatch.delenv("AXON_NO_NOTIFY", raising=False)   # this test fakes the launcher, so the real path may run
     launched = {}
     monkeypatch.setattr(nt.sys, "platform", "win32")
     monkeypatch.setattr(nt.plat, "IS_WINDOWS", True)

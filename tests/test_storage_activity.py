@@ -242,14 +242,16 @@ def test_activity_command_and_cli(workspace: Path, tmp_path: Path, capsys, monke
 
 def test_retention_default_keeps_everything(workspace: Path) -> None:
     assert Settings(workspace=workspace).cleanup_period_days == 0
-    old = storage.sessions_dir(workspace) / "ancient.jsonl"
+    folder = storage.session_dir(workspace, "ancient")
+    old = folder / "session.jsonl"
     old.write_text("{}\n", encoding="utf-8")
     then = time.time() - 400 * 86400
     os.utime(old, (then, then))
+    os.utime(folder, (then, then))
     assert storage.prune_on_startup(Settings(workspace=workspace).cleanup_period_days) == 0
     assert storage.prune_old(0) == 0
     assert old.exists()
-    assert storage.prune_old(30) == 1 and not old.exists()  # explicit opt-in still works
+    assert storage.prune_old(30) == 1 and not folder.exists()  # explicit opt-in still works (whole session folder)
 
 
 def test_purge_still_deletes_on_request(workspace: Path) -> None:
@@ -272,7 +274,7 @@ def test_truncated_tool_output_is_saved_in_full(workspace: Path) -> None:
     res = recs[-1]["data"][0]
     assert len(res["content"]) < 12000
     full_path = Path(res["full_output"])
-    assert full_path.is_file() and full_path.parent.parent.name == "outputs"
+    assert full_path.is_file() and full_path.parent.name == "outputs" and full_path.parent.parent.parent.name == "sessions"
     full = full_path.read_text(encoding="utf-8")
     assert "line 000000" in full and "line 002999" in full and "line 001500" in full
     tool = activity.read(workspace, kinds=["tool"])[-1]["data"]
@@ -309,9 +311,11 @@ def test_delete_moves_to_trash_and_restore_brings_back(workspace: Path) -> None:
     store = SessionStore(workspace)
     sid = store.active_session_id
     store.append_user("keep me")
-    sub = store.session_dir / f"{sid}_sub_1.jsonl"
+    sub = store.path_for(f"{sid}_sub_1")
+    assert sub == store.session_dir / sid / "subagents" / "1.jsonl"
+    sub.parent.mkdir(parents=True, exist_ok=True)
     sub.write_text('{"type": "user_message", "data": {"content": "sub"}}\n', encoding="utf-8")
-    trace = storage.traces_dir(workspace) / f"{sid}.jsonl"
+    trace = storage.trace_path(workspace, sid)
     trace.write_text("{}\n", encoding="utf-8")
     cp = storage.checkpoints_dir(workspace, sid) / "1"
     cp.mkdir(parents=True)
@@ -321,8 +325,9 @@ def test_delete_moves_to_trash_and_restore_brings_back(workspace: Path) -> None:
 
     assert store.delete_session(sid)
     assert not transcript.exists() and not sub.exists() and not trace.exists() and not cp.exists()
+    assert not (store.session_dir / sid).exists()  # the whole session folder moved
     trash = store.list_trash()
-    assert trash and trash[0]["id"] == sid and trash[0]["files"] >= 4
+    assert trash and trash[0]["id"] == sid and trash[0]["files"] >= 1
     assert sid not in [m.session_id for m in store.list_recent()]
     assert any(e["kind"] == "delete" for e in activity.read(workspace))
 

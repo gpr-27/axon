@@ -179,3 +179,17 @@ def test_auto_compaction_is_saved_so_a_resume_replays_the_compacted_history(work
     assert agent.compact(trigger="auto", summary="SUMMARY OF EARLIER WORK")
     restored = agent.session.read_conversation("sess_c").messages
     assert restored == agent.conversation.messages and "SUMMARY OF EARLIER WORK" in str(restored)
+
+
+def test_manager_send_reaches_running_subagent_only():
+    from axon.agent.state import MessageQueue
+    from axon.agent.subagent import SubagentManager
+    from types import SimpleNamespace as N
+    mgr = SubagentManager()
+    task = mgr.register("find x", title="find x")
+    assert mgr.send("1", "hi") is None            # no live agent yet
+    task.live_agent = N(message_queue=MessageQueue())
+    assert mgr.send("1", "focus on tests") is task
+    assert [i.text for i in task.live_agent.message_queue.drain_steer()] == ["focus on tests"]
+    mgr.complete(task.id, "done", None)  # type: ignore[arg-type]
+    assert task.live_agent is None and mgr.send("1", "late") is None

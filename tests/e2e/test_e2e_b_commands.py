@@ -62,7 +62,7 @@ def test_unknown_command_suggests_close_match(axon_env: AxonEnv) -> None:
     """An unknown command is not sent to the model and suggests the closest name."""
     out = cmd(axon_env, "/stauts").output
     assert "Unknown command /stauts" in out and "Did you mean:" in out
-    assert "/status" in out and "/stats" in out              # the closest names, with what they do
+    assert "/status" in out and ("/stats" in out or "/statusbar" in out)   # the closest names, with what they do
     assert axon_env.llm.completion_requests() == []
 
 
@@ -488,6 +488,8 @@ def test_repl_model_effort_mode_switch(axon_env: AxonEnv) -> None:
         repl_cmd(s, "/mode plan", "plan")
         out = repl_cmd(s, "/status", "Mode")
         assert "plan" in out and "fake-model" in out and "reflex" in out, out
+        s.send("\x1b")      # /status ends with a "What next?" menu; Esc leaves it
+        s.drain(0.4)
         axon_env.llm.enqueue([{"tool": "Write", "args": {"path": "p.txt", "content": "x"}}], [{"text": "PLANNED"}])
         repl_cmd(s, "try writing", "PLANNED", 20)
         s.sendline("/exit")
@@ -561,6 +563,8 @@ def test_repl_todos_after_todowrite(axon_env: AxonEnv) -> None:
         repl_cmd(s, "plan it", "PLANNED-TODOS", 20)
         out = repl_cmd(s, "/todos", "Add tests")
         assert "Write the parser" in out
+        s.send("\x1b")      # /todos ends with a "What next?" menu; Esc leaves it
+        s.drain(0.4)
         s.sendline("/exit")
         s.wait(10)
 
@@ -572,7 +576,7 @@ def test_todos_survive_resume(axon_env: AxonEnv) -> None:
     run_json(axon_env, "plan it")
     out = cmd(axon_env, "/todos", "--continue").output
     assert "Write the parser" in out and "Add tests" in out, out
-    assert list((project_dir(axon_env) / "todos").glob("*.json"))
+    assert list((project_dir(axon_env) / "sessions").glob("*/todos.json"))
 
 
 @parallel

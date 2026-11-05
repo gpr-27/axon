@@ -204,7 +204,7 @@ def test_example_commands(tmp_path: Path) -> None:
         assert cmds[name].description and cmds[name].argument_hint
     assert cmds["fix-issue"].allowed_tools == ["Bash(gh issue view:*)", "Bash(git status:*)", "Bash(git diff:*)"]
     body = substitute_arguments(cmds["fix-issue"].body, "42 urgent")
-    assert "gh issue view 42" in body and "$1" not in body and "$ARGUMENTS" not in body
+    assert "gh issue view 42" in body and "$0" not in body and "$ARGUMENTS" not in body
 
 
 def test_example_skill_and_output_style() -> None:

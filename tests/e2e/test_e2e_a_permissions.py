@@ -385,5 +385,5 @@ def test_session_records_permission_decisions(axon_env: AxonEnv) -> None:
     """The denied call and its denial result are persisted in the session transcript."""
     r, ev = run_tools(axon_env, [("Write", {"path": "w.txt", "content": "x"})], "--mode", "plan")
     _ran(r)
-    blob = "\n".join(p.read_text(encoding="utf-8") for p in axon_env.sessions_dir().glob("*.jsonl"))
+    blob = "\n".join(p.read_text(encoding="utf-8") for p in axon_env.transcripts())
     assert "Plan mode" in blob and json.dumps("w.txt") in blob

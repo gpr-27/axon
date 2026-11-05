@@ -189,7 +189,7 @@ def test_click_on_tool_row_expands_it_in_the_transcript_and_q_returns_with_draft
         _wait(s, lambda: MOUSE_ON in s.raw_since(0)[s.raw_since(0).rfind("CLICK-DONE"):], what="mouse reporting at the prompt")
         s.type("my draft")
         main_before = s.term.rows()
-        y = s.term.find(r"● Bash .*line-\$i")
+        y = s.term.find(r"Bash\s+input\s+for i in .*line-\$i")     # the tool card's input row
         assert y is not None, "\n".join(main_before)
         assert not any("line-15" in r for r in main_before)  # the scrollback shows only a preview
 

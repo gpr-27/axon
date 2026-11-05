@@ -71,7 +71,7 @@ def test_index_lists_every_project(tmp_path: Path, isolate_user_home: Path) -> N
 def test_readmes_are_pure_and_written_only_on_change(tmp_path: Path, isolate_user_home: Path) -> None:
     home_text = layout.render_home_readme()
     assert home_text == layout.render_home_readme()
-    for needle in ("activity.jsonl", "screen/", "trash/", "outputs/", "cleanup_period_days", "axon purge",
+    for needle in ("activity.jsonl", "screen.log", "trash/", "outputs/", "session.jsonl", "cleanup_period_days", "axon purge",
                    "/restore", "projects/index.json", "Global", "Per project"):
         assert needle in home_text, needle
     info = {"name": "shop", "key": "k", "workspace": "/w/shop", "sessions": 3, "memory_files": 1,
@@ -212,7 +212,11 @@ def test_project_specific_files_live_in_the_project(tmp_path: Path, isolate_user
     monkeypatch.chdir(repo)
     from axon.agent.images import get_images_cache_dir
     pdir = storage.project_dir(repo)
-    assert get_images_cache_dir() == pdir / "images"
+    # no session yet: the documented fallback folder
+    assert get_images_cache_dir() == pdir / "sessions" / "_unattached" / "images"
+    # with an active session, images and pastes live inside that session's folder
+    storage.set_active_session(repo, "sess_one")
+    assert get_images_cache_dir() == pdir / "sessions" / "sess_one" / "images"
     from axon.ui.input import _save_paste
     _save_paste("a large paste")
-    assert list((pdir / "pastes").glob("*.txt"))
+    assert list((pdir / "sessions" / "sess_one" / "pastes").glob("*.txt"))

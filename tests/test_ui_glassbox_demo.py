@@ -114,9 +114,11 @@ def test_live_timeline_structure(out):
     assert rows[0].startswith("┌ Turn 1") and rows[0].rstrip().endswith("claude-opus-5 · default mode")
     assert all(display_width(r) <= WIDTH for r in rows)
     for n in (1, 2, 3, 4):
-        assert f"◆ Step {n}  LLM call · claude-opus-5 · reads" in plain
-    # per-step context gauge from LLMCallEnd.context_used / context_window
-    assert "context █░░░░░░░ 6% of 200k" in plain and "context ██████░░ 75% of 200k" in plain
+        assert f"◆ Step {n} · claude-opus-5 · " in plain
+    # no per-step cost / context line mid-turn: the gauge of the last call is shown once, after the turn
+    assert "replied in" not in plain and "75% of 200k" not in plain
+    assert plain.count("context █░░░░░░░ 8% of 200k") == 1
+    assert "usage by step" in plain
     # timeline rows keep the rail; only response bodies (markdown) and the footer leave it
     body_rows = [r for r in rows[1:] if r.strip() and not r.startswith("  ") and not r.startswith("└")]
     assert all(r.startswith("│") for r in body_rows), body_rows
@@ -125,14 +127,21 @@ def test_live_timeline_structure(out):
     end = next(i for i, r in enumerate(rows) if "subagent completed" in r)
     assert not [r for r in rows[start + 1:end] if "┊" in r]
     # ... and appear, labelled with the subagent, between its start and end lines at the detailed level
-    drows = strip_ansi(out("detailed")[0]).splitlines()
+    detailed = strip_ansi(out("detailed")[0])
+    assert "replied in" in detailed and "75%" in detailed      # detailed keeps the per-step line
+    drows = detailed.splitlines()
     start = next(i for i, r in enumerate(drows) if "subagent started" in r)
     end = next(i for i, r in enumerate(drows) if "subagent completed" in r)
     nested = [r for r in drows[start + 1:end] if "┊" in r]
     assert len(nested) == 2 and "LLM claude-haiku-4" in nested[0] and "Bash" in nested[1]
     assert "1 message you typed during the turn sent to the model" in plain
-    assert "took " in plain                           # timing under the subagent card, not glued to it
-    assert "auto-allowed" not in plain and "approved by user (once)" in plain
+    assert "took " in detailed                        # timing under the subagent card, not glued to it
+    assert "auto-allowed" not in plain and "approved by you" in plain       # the Task card's run line
+    assert "approved by you (once)" in detailed
+    # normal level: one TOOLS section per step, cards numbered in call order, the results line under the last card
+    assert plain.count("▣ TOOLS") == 3 and "▣ TOOLS · 2 calls · in parallel" in plain
+    assert plain.index(" 1 Read") < plain.index(" 2 Grep") < plain.index("→ 2 results")
+    assert plain.count("claude-opus-5 (") == 0 and "chosen by" not in plain
     assert "hook PreToolUse ran" in plain
     assert plain.count("▎ ") == 2                    # both responses carry the accent bar
     assert rows[-3].startswith("└ ✓ Done") or any(r.startswith("└ ✓ Done") for r in rows)
@@ -150,6 +159,8 @@ def test_stored_trace_replay_has_nested_steps_and_gauges(out, monkeypatch):
     replay = strip_ansi(format_trace(trace, "normal"))
     assert "subagent run the test suite completed · 2 steps · 4.2s · $0.0009" in replay
     assert replay.count("┊") == 2
-    assert "context ██████░░ 75% of 200k" in replay
+    assert "context █░░░░░░░ 8% of 200k" in replay and "75% of 200k" not in replay   # once, after the turn
+    assert "usage by step" in replay
+    assert "replied in" in strip_ansi(format_trace(trace, "detailed"))     # per step at the detailed level
     assert "you typed during the turn" in replay
     assert all(display_width(r) <= WIDTH for r in replay.splitlines())

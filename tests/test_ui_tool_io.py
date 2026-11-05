@@ -143,15 +143,26 @@ CALLS = [
 ]
 
 
-def test_live_timeline_shows_input_and_output_sections(capsys, tmp_path, monkeypatch):
+def test_live_normal_level_draws_one_phased_card_per_call(capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     out = strip_ansi(_live(capsys, "normal", CALLS))
+    assert "input   pytest -q \\" in out and "--maxfail 1" in out and "timeout" not in out     # the exact command
+    assert "run     ✗ failed · exit 1" in out and "output  1 failed in 0.1s" in out
+    assert "input   label:bug state:open" in out
+    assert "output  JSON object · 2 keys" in out
+    assert "✗ failed" in out and "output  File not found: nope.py" in out
+    assert "exact call" not in out and "exact result" not in out
+
+
+def test_live_timeline_shows_input_and_output_sections(capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = strip_ansi(_live(capsys, "detailed", CALLS))
     assert "● Bash  $ pytest -q \\" in out and "--maxfail 1" in out and "timeout  120" in out
     assert "⎿  ✗ exit 1 · " in out
     assert "● github › search_issues  label:bug state:open" in out
     assert "owner     acme" in out and "per_page  5" in out
     assert "⎿  JSON object · 2 keys" in out and '"total_count": 2,' in out
-    assert "glob  *.py" in out
+    assert "(*.py files)" in out                      # the glob is said in plain words on the 'what' row
     assert "✗ error: File not found: nope.py" in out
 
 
@@ -175,7 +186,10 @@ def test_inspect_and_restored_views_draw_calls_like_the_live_view():
         t.record(ToolExecutionStart(id=f"c{i}", name=name, input=inp))
         t.record(ToolExecutionResult(id=f"c{i}", name=name, input=inp, content=out, is_error=err))
     t.finish("done", "end_turn")
-    text = strip_ansi(format_trace(t, "normal"))
+    card = strip_ansi(format_trace(t, "normal"))
+    assert "▣ TOOLS · 4 calls" in card
+    assert " 1 Bash" in card and "input   pytest -q" in card and "run     ✗ failed · exit 1" in card
+    text = strip_ansi(format_trace(t, "detailed"))
     assert "│   ● Bash  $ pytest -q \\" in text and "│       timeout  120" in text
     assert "│     ⎿  ✗ exit 1 · " in text
     assert "│       owner     acme" in text and "│     ⎿  JSON object · 2 keys" in text
@@ -183,7 +197,10 @@ def test_inspect_and_restored_views_draw_calls_like_the_live_view():
     msgs = [{"role": "user", "content": "go"},
             {"role": "assistant", "content": [{"type": "tool_use", "id": "m1", "name": MCP, "input": MCP_ARGS}]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "m1", "content": MCP_OUT}]}]
-    replay = [strip_ansi(r) for r in format_conversation_replay(msgs, width=96)]
+    cards = "\n".join(strip_ansi(r) for r in format_conversation_replay(msgs, width=96))
+    assert "github › search_issues  input   label:bug state:open" in cards
+    assert "input   label:bug state:open" in cards
+    replay = [strip_ansi(r) for r in format_conversation_replay(msgs, width=96, detail=2)]
     assert "│   ● github › search_issues  label:bug state:open" in replay
     assert "│       owner     acme" in replay and "│       per_page  5" in replay
     assert any(r.startswith("│     ⎿  JSON object · 2 keys") for r in replay)

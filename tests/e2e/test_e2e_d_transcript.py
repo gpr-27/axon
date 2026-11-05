@@ -55,19 +55,19 @@ def test_ctrl_f_opens_transcript_click_expands_tool_output_q_restores_prompt(axo
         assert "\x1b[?1049h" in raw and all(seq in raw for seq in MOUSE_ON)
         assert any("click/enter expand" in v for v in frame.values())
         tool_y = next(y for y, v in sorted(frame.items()) if "Bash" in v and "row-$i" in v)
-        assert not any("row-25" in v for v in frame.values())
+        assert not any("row-12" in v for v in frame.values())
 
         # left click on the tool row -> expanded: input JSON + full numbered output
         raw1 = len(s._raw)
         s.send(f"\x1b[<0;6;{tool_y}M\x1b[<0;6;{tool_y}m")
-        frame = _wait_frame(s, raw1, lambda f: any("row-25" in v for v in f.values()))
+        frame = _wait_frame(s, raw1, lambda f: any("row-12" in v for v in f.values()))
         text = "\n".join(frame.values())
-        assert "Input" in text and "Output" in text and re.search(r"\b25 . row-25", text), text
+        assert "Input" in text and "Output" in text and re.search(r"\b12 . row-12", text), text
 
         # Enter on the (now selected) tool row collapses it again
         raw2 = len(s._raw)
         s.send("\r")
-        frame = _wait_frame(s, raw2, lambda f: not any("row-25" in v for v in f.values())
+        frame = _wait_frame(s, raw2, lambda f: not any("row-12" in v for v in f.values())
                             and any("Bash" in v for v in f.values()))
 
         # q closes: alternate screen left, mouse off after the last enable, prompt back

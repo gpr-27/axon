@@ -59,9 +59,8 @@ def test_renderer_human_readable_observation_tracking(capsys):
     plain1 = strip_ansi(capsys.readouterr().out)
     assert "● FileTree" in plain1
     assert "max_depth  2" in plain1                         # detailed: every input argument as key  value
-    assert "to step 2" in plain1                           # where the result goes
     assert "axon/" in plain1                               # detailed: result preview
-    assert "result #1 [call_00_H1bn] goes to the model in step 2" in plain1
+    assert "result #1 [call_00_H1bn] (21 B, ~5 tokens) goes to the model in step 2" in plain1
 
     renderer.on_event(
         LLMCallStart(
@@ -83,12 +82,11 @@ def test_renderer_multi_observation_numbering(capsys):
     renderer.on_event(ToolExecutionStart(id="call_01", name="Ls", input={"path": "src/axon"}))
     renderer.on_event(ToolExecutionResult(id="call_01", name="Ls", input={"path": "src/axon"}, content="agent/\nui/\n"))
     out1 = strip_ansi(capsys.readouterr().out)
-    assert "result #1 [call_01] goes to the model in step 3" in out1
+    assert "result #1 [call_01] (11 B, ~2 tokens) goes to the model in step 3" in out1
     renderer.on_event(ToolExecutionStart(id="call_02", name="Read", input={"path": "pyproject.toml"}))
     renderer.on_event(ToolExecutionResult(id="call_02", name="Read", input={"path": "pyproject.toml"}, content="[project]\nversion = '0.27.1'\n"))
     out2 = strip_ansi(capsys.readouterr().out)
-    assert "result #2 [call_02] goes to the model in step 3" in out2
-    assert "to step 3" in out2
+    assert "result #2 [call_02]" in out2 and "goes to the model in step 3" in out2
 
 def test_render_side_question_box_format():
     """Verify high-clarity text field box format for /btw side questions."""
@@ -151,12 +149,17 @@ def test_renderer_tool_plan_and_invocation(capsys):
         ToolUseBlock(id="call_03_bash", name="Bash", input={"command": "echo 'hello from bash'"}),
     ]
     renderer.on_event(ToolBatchStart(total_count=3, tools=tools, user_prompt="Test tool calling", mode="bypass"))
-    plan_out = strip_ansi(capsys.readouterr().out)
-    assert "runs 3 tools one after another" in plan_out
+    assert strip_ansi(capsys.readouterr().out) == ""           # normal level: the TOOLS header comes with the first card
 
     renderer.on_event(ToolExecutionStart(id="call_03_bash", name="Bash", input={"command": "echo 'hello from bash'"}, mode="bypass"))
     renderer.on_event(PermissionDecisionEvent(id="call_03_bash", tool="Bash", outcome="allow", reason="bypass mode", source="mode"))
+    assert strip_ansi(capsys.readouterr().out) == ""            # a card is drawn once its result is in
+    for tid in ("call_00_doc", "call_01_ls"):
+        renderer.on_event(ToolExecutionStart(id=tid, name="Ls", input={}, mode="bypass"))
+        renderer.on_event(ToolExecutionResult(id=tid, name="Ls", input={}, content="x"))
+    renderer.on_event(ToolExecutionResult(id="call_03_bash", name="Bash", input={}, content="hello from bash"))
     bash_out = strip_ansi(capsys.readouterr().out)
-    assert "● Bash  $ echo 'hello from bash'" in bash_out
+    assert "▣ TOOLS · 3 calls · one after another" in bash_out
+    assert "input   echo 'hello from bash'" in bash_out and "output  hello from bash" in bash_out
     assert "auto-allowed" not in bash_out          # routine bypass-mode approvals are hidden at normal level
 

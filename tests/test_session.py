@@ -121,7 +121,7 @@ def test_active_session_synchronization_and_re_render(workspace: Path):
     assert store.active_session_id == "session_active_test_1"
     store.open("session_active_test_2")
     assert store.active_session_id == "session_active_test_2"
-    assert store.active_file.name == "session_active_test_2.jsonl"
+    assert store.active_file.parent.name == "session_active_test_2" and store.active_file.name == "session.jsonl"
 
     # Verify that returning to the current active session properly renders without disappearing
     conv = store.load("session_active_test_1")
@@ -147,7 +147,7 @@ def test_switcher_new_session_flow(workspace: Path):
     new_s = store.open()
     assert new_s != s1
     assert store.active_session_id == new_s
-    assert store.active_file.name == f"{new_s}.jsonl"
+    assert store.active_file.parent.name == new_s
 
 def test_subagent_per_session_synchronization(workspace: Path):
     from unittest.mock import MagicMock

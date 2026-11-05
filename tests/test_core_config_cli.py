@@ -165,7 +165,7 @@ def test_find_and_fork_session(workspace: Path) -> None:
     found, _ = cli.find_session(agent, sid)
     assert found == sid
     new_id = cli.fork_session(agent, lambda m: None)
-    assert new_id != sid and (agent.session.session_dir / f"{new_id}.jsonl").is_file()
+    assert new_id != sid and (agent.session.session_dir / new_id / "session.jsonl").is_file()
     assert cli.find_session(agent, "zzz-no-such-session")[0] is None
 
 
@@ -216,17 +216,19 @@ def test_claude_code_settings_never_switch_axons_model(tmp_path, monkeypatch) ->
     assert "Bash(git status)" in (s2.permissions.allow if hasattr(s2.permissions, "allow") else s2.permissions["allow"])
 
 
-def test_context_limit_defaults_to_128k_and_caps_the_model_window(tmp_path) -> None:
+def test_context_limit_defaults_to_auto_and_caps_the_model_window(tmp_path) -> None:
     from types import SimpleNamespace
     from axon.config import Settings
     from axon.agent.context import ContextManager
     from axon.providers.registry import effective_context_window, parse_token_count
     s = Settings(workspace=tmp_path, model="deepseek-v4-flash")
-    assert s.context_limit == 128_000
+    assert s.context_limit == 0                                  # auto: the model's full window
     ctx = ContextManager(s)
-    assert ctx.context_window() == 128_000                       # 1M model, 128k used by default
+    assert ctx.context_window() == 1_000_000                     # 1M model, all of it by default
+    assert ContextManager(s.model_copy(update={"model": "gpt-4o"})).context_window() == 128_000   # follows the model
+    assert ContextManager(s.model_copy(update={"context_limit": 128_000})).context_window() == 128_000
     assert 0.70 <= ctx.threshold() / ctx.context_window() <= 0.80  # auto-compact near 75%
     assert ContextManager(s.model_copy(update={"context_limit": 256_000})).context_window() == 256_000
     assert ContextManager(s.model_copy(update={"context_limit": 0})).context_window() == 1_000_000
     assert effective_context_window("gpt-4o", SimpleNamespace(context_limit=1_000_000)) == 128_000  # never above the model
-    assert [parse_token_count(x) for x in ("128k", "256K", "1m", "max")] == [128_000, 256_000, 1_000_000, 0]
+    assert [parse_token_count(x) for x in ("128k", "256K", "1m", "max", "auto")] == [128_000, 256_000, 1_000_000, 0, 0]

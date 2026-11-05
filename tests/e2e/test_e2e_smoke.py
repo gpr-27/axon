@@ -265,7 +265,9 @@ def test_repl_prompt_help_exit(axon_env: AxonEnv) -> None:
         s.drain(0.5)
         m = s.mark()
         s.sendline("/help")
-        s.expect(r"/exit|/clear|/model", timeout=10, since=m)
+        s.expect(r"/exit|/clear|/model", timeout=10, since=m)    # /help opens the command navigator
+        s.drain(0.5)
+        s.send("\x1b")                                            # Esc closes it
         s.drain(0.5)
         s.sendline("/exit")
         code = s.wait(10)

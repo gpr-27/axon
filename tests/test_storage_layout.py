@@ -14,8 +14,9 @@ def test_home_override_and_project_layout(tmp_path, monkeypatch):
     assert pd == tmp_path / "home" / "projects" / key
     assert (pd / "project.json").exists()
     assert storage.sessions_dir(ws).is_dir()
-    assert storage.traces_dir(ws).parent == pd
-    assert storage.checkpoints_dir(ws, "s1").name == "s1"
+    assert storage.session_dir(ws, "s1") == pd / "sessions" / "s1"
+    assert storage.trace_path(ws, "s1") == pd / "sessions" / "s1" / "trace.jsonl"
+    assert storage.checkpoints_dir(ws, "s1") == pd / "sessions" / "s1" / "checkpoints"
     # nothing written into the workspace itself
     assert list(ws.iterdir()) == []
 

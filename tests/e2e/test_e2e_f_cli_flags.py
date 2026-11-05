@@ -191,11 +191,11 @@ def test_continue_without_sessions_fails(axon_env: AxonEnv) -> None:
 def test_fork_session_keeps_history_but_writes_a_new_session(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([{"text": "ORIG"}], [{"text": "FORKED"}])
     assert axon_env.run(["-p", "say ORIG-MARK"]).code == 0
-    before = {p.name for p in axon_env.sessions_dir().glob("*.jsonl")}
+    before = {p.parent.name for p in axon_env.transcripts()}
     r = axon_env.run(["-p", "--continue", "--fork-session", "continue"])
     assert r.code == 0 and "FORKED" in r.stdout, str(r)
     assert "ORIG-MARK" in json.dumps(_calls(axon_env)[-1].messages)
-    after = {p.name for p in axon_env.sessions_dir().glob("*.jsonl")}
+    after = {p.parent.name for p in axon_env.transcripts()}
     assert len(after - before) == 1, (before, after)
 
 
@@ -204,15 +204,15 @@ def test_fork_session_keeps_history_but_writes_a_new_session(axon_env: AxonEnv) 
 def test_purge_project_requires_yes_then_removes_sessions(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([{"text": "x"}])
     assert axon_env.run(["-p", "hi"]).code == 0
-    assert any(axon_env.sessions_dir().glob("*.jsonl"))
+    assert any(axon_env.transcripts())
     refused = axon_env.run(["purge", "project"])
     assert refused.code == 2 and "--yes" in refused.output, str(refused)
-    assert any(axon_env.sessions_dir().glob("*.jsonl"))
+    assert any(axon_env.transcripts())
     bad = axon_env.run(["purge", "everything-now", "--yes"])
     assert bad.code == 2 and "usage: axon purge" in bad.output
     ok = axon_env.run(["purge", "project", "--yes"])
     assert ok.code == 0 and "removed" in ok.output, str(ok)
-    assert not any(axon_env.sessions_dir().glob("*.jsonl"))
+    assert not any(axon_env.transcripts())
 
 
 def test_doctor_reports_active_configuration(axon_env: AxonEnv) -> None:

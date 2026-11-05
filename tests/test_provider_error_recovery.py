@@ -418,15 +418,15 @@ def test_context_command_reports_full_window_and_reply_reserve(workspace: Path, 
 def test_context_limit_default_and_command(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from axon.commands import dispatch_command
     agent = make_agent(FakeProvider([]), workspace, model="deepseek-v4-flash")
-    assert agent.context.context_window("deepseek-v4-flash") == 128_000      # default limit on a 1M model
+    assert agent.context.context_window("deepseek-v4-flash") == 1_000_000   # default: auto, the model's full window
     dispatch_command("/context", agent)
     out = capsys.readouterr().out
-    assert "window 128.0k (limit; model max 1.00M" in out
+    assert "window 1.00M" in out
     dispatch_command("/context limit 256k", agent)
     assert agent.settings.context_limit == 256_000 and agent.context.context_window("deepseek-v4-flash") == 256_000
     assert "auto-compact at 192.0k (75%)" in capsys.readouterr().out
-    dispatch_command("/context limit max", agent)
-    assert agent.context.context_window("deepseek-v4-flash") == 1_000_000
+    dispatch_command("/context limit auto", agent)
+    assert agent.settings.context_limit == 0 and agent.context.context_window("deepseek-v4-flash") == 1_000_000
 
 
 def test_undecodable_image_is_not_retried_and_says_so() -> None:

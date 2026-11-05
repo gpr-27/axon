@@ -92,6 +92,13 @@ class AxonEnv:
         from_key = _project_key(self.workspace)
         return self.axon_home / "projects" / from_key / "sessions"
 
+    def transcript(self, session_id: str) -> Path:
+        """``sessions/<id>/session.jsonl``: every session has its own folder."""
+        return self.sessions_dir() / session_id / "session.jsonl"
+
+    def transcripts(self) -> list[Path]:
+        return sorted(self.sessions_dir().glob("*/session.jsonl"))
+
 
 def _project_key(workspace: Path) -> str:
     sys.path.insert(0, str(SRC)) if str(SRC) not in sys.path else None
@@ -115,6 +122,8 @@ def make_env(home: Path, axon_home: Path, base_url: str, model: str = "gpt-4o") 
         "AXON_OFFLINE": "1",
         "AXON_NO_UPDATE_CHECK": "1",
         "AXON_TIPS_LLM": "0",          # model-written tips would consume scripted LLM replies
+        "AXON_TITLE_LLM": "0",         # the model-written session title is one more request; scripted replies are for the turn
+        "AXON_PROMPT_SUGGESTIONS": "0",  # ghost text replaces the "Ask anything" placeholder the tests wait for, and its call eats a scripted reply
         "AXON_NO_NOTIFY": "1",         # never pop desktop notifications from test sessions
         "PYTHONPATH": str(SRC),
         "PYTHONIOENCODING": "utf-8",

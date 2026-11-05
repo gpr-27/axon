@@ -43,6 +43,8 @@ def _stdio_spec(ae: AxonEnv, name: str = "srv", **extra) -> dict:
 
 def _project_mcp(env: AxonEnv, servers: dict) -> None:
     write_file(env.workspace / ".mcp.json", json.dumps({"mcpServers": servers}))
+    # The REPL asks before it uses a project's .mcp.json servers; your own settings can pre-approve them.
+    write_file(env.workspace / ".axon" / "settings.local.json", json.dumps({"enableAllProjectMcpServers": True}))
 
 
 def _tool_names(env: AxonEnv) -> set[str]:
@@ -194,7 +196,7 @@ def test_mcp_tool_error_is_reported_to_model(axon_env: AxonEnv) -> None:
                          {"steps": [{"text": "saw error"}], "expect": [has_tool_result("BOOM-FAILED")]})
     data = run_json(axon_env, "boom")
     assert not axon_env.llm.failures, axon_env.llm.failures
-    recs = [json.loads(ln) for ln in (axon_env.sessions_dir() / f"{data['session_id']}.jsonl").read_text(
+    recs = [json.loads(ln) for ln in (axon_env.transcript(data['session_id'])).read_text(
         encoding="utf-8").splitlines()]
     res = [r for r in recs if r["type"] == "tool_results"]
     assert res and res[0]["data"][0]["is_error"] is True
@@ -429,3 +431,24 @@ def test_plugin_mcp_server_loaded(axon_env: AxonEnv) -> None:
 
 def _unused(_: Recorded) -> None:  # keep the Recorded import meaningful for type hints
     pass
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="pty is POSIX-only")
+def test_repl_asks_before_using_a_project_mcp_server(axon_env: AxonEnv) -> None:
+    """A cloned repo's .mcp.json must not launch programs unasked: the REPL shows the servers and waits for an
+    answer; approving connects them, and the answer is remembered."""
+    write_file(axon_env.workspace / ".mcp.json", json.dumps({"mcpServers": {"srv": _stdio_spec(axon_env)}}))
+    s = axon_env.pty([])
+    s.expect(r"not approved yet", timeout=25)
+    s.drain(0.3)
+    s.sendline("a")
+    s.expect(r"(?i)(ask anything|❯)", timeout=25)
+    s.drain(0.8)
+    repl_cmd(s, "/mcp", "srv", 20)
+    s.sendline("/exit")
+    s.wait(10)
+    s2 = axon_env.pty([])        # remembered: no second question
+    s2.expect(r"(?i)(ask anything|❯)", timeout=25)
+    assert "not approved yet" not in s2.screen
+    s2.sendline("/exit")
+    s2.wait(10)

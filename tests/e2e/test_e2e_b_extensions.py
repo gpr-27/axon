@@ -52,8 +52,8 @@ def test_custom_command_claude_dir(axon_env: AxonEnv) -> None:
 
 @parallel
 def test_custom_command_positional_args(axon_env: AxonEnv) -> None:
-    """$1 and $2 are replaced by positional arguments."""
-    _cmd_file(axon_env, ".axon/commands/pair.md", "first=$1 second=$2")
+    """$0 and $1 are replaced by positional arguments (0-based, as in Claude Code)."""
+    _cmd_file(axon_env, ".axon/commands/pair.md", "first=$0 second=$1")
     _p(axon_env, "/pair alpha beta")
     assert "first=alpha second=beta" in _last_user(axon_env)
 
@@ -247,11 +247,11 @@ def test_plugin_list_and_info_show_components(axon_env: AxonEnv) -> None:
 
 @parallel
 def test_plugin_command_and_skill(axon_env: AxonEnv) -> None:
-    """A plugin's command runs as /myplug:hello and its skill as /plugskill."""
+    """A plugin's command runs as /myplug:hello and its skill as /myplug:plugskill (plugin skills are namespaced)."""
     _plugin(axon_env)
     _p(axon_env, "/myplug:hello there")
     assert "PLUGIN-HELLO there" in _last_user(axon_env)
-    _p(axon_env, "/plugskill")
+    _p(axon_env, "/myplug:plugskill")
     assert "PLUGIN-SKILL-BODY" in axon_env.llm.completion_requests()[-1].all_text()
 
 

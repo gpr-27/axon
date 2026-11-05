@@ -139,6 +139,12 @@ def test_bash_changes_render_as_a_coloured_change_list(tmp_path, monkeypatch, ca
     out = strip_ansi(capsys.readouterr().out)
     assert "3 files changed · +5 −4" in out
     assert "✚ Created  docs/new.md" in out and "⟳ Modified keep.py" in out and "✖ Deleted  gone.txt" in out
+    assert "2 - b = 2" not in out                               # normal: the list only, the diffs are one level up
+    r = Renderer(trace_level="detailed")
+    r.on_event(ToolExecutionStart(id="b", name="Bash", input={"command": "python tool.py"}))
+    r.on_event(ToolExecutionResult(id="b", name="Bash", input={"command": "python tool.py"}, content="ok",
+                                   changes=changes))
+    out = strip_ansi(capsys.readouterr().out)
     assert "2 - b = 2" in out and "2 + b = 20" in out           # the modified file's diff is shown
     assert render.tool_result_rows("Bash", {"command": "x"}, "ok", width=80)  # no changes: unchanged path
 

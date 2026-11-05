@@ -31,6 +31,17 @@ def _ok(r) -> None:
     assert r.code == 0, str(r)
 
 
+def _retry_from_menu(s, expect: str) -> str:
+    """/retry has no arguments, so in a terminal it opens its menu; "Run it" is the first entry."""
+    m = s.mark()
+    s.sendline("/retry")
+    s.expect("Run it", timeout=10, since=m)
+    s.send("\r")
+    s.expect(expect, timeout=30, since=m)
+    s.drain(0.4)
+    return s.screen[m:]
+
+
 def _flat(req: Recorded) -> str:
     return req.all_text()
 
@@ -69,7 +80,7 @@ def test_multi_step_grep_read_edit_bash_fixes_bug(axon_env: AxonEnv) -> None:
     grep_res = axon_env.llm.completion_requests()[1].tool_results()
     assert any("calc.py" in t and "other.py" not in t for t in grep_res), grep_res
     # persisted: every tool call and its result are in the session transcript
-    sess = [p for p in session_files(axon_env) if p.stem == data["session_id"]][0]
+    sess = [p for p in session_files(axon_env) if p.parent.name == data["session_id"]][0]
     names = [u["name"] for rec in records(sess) if rec["type"] == "assistant_turn" for u in rec["data"].get("tool_uses") or []]
     assert names == ["Grep", "Read", "Edit", "Bash"], names
 
@@ -225,7 +236,7 @@ def test_esc_interrupt_then_continue_keeps_progress(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([_bash("sleep 4; echo LATE > late.txt", "slow")], [{"text": "RESUMED-OK"}])
     with open_repl(axon_env) as s:
         m = s.submit("start the slow job")
-        s.expect(r"Bash  (\$ )?sleep 4", timeout=10, since=m)
+        s.expect(r"Running Bash sleep 4", timeout=10, since=m)     # the live label of a running tool
         started = time.monotonic()
         time.sleep(0.5)
         s.send(ESC)
@@ -251,10 +262,12 @@ def test_provider_500_mid_turn_then_retry_resumes_with_tool_results(axon_env: Ax
         s.expect(r"/retry", timeout=40, since=m)
         s.ready(since=m, timeout=20)
         assert (axon_env.workspace / "half.txt").read_text() == "HALF\n"
-        out = s.command("/retry", "RETRY-FINISHED", timeout=30)
+        out = _retry_from_menu(s, "RETRY-FINISHED")
         assert "▸ /retry" in out
         s.ready()
         m2 = s.submit("/retry")
+        s.expect("Run it", timeout=10, since=m2)
+        s.send("\r")                      # a bare /retry opens a menu: "Run it" is first
         s.expect("Nothing to retry", timeout=10, since=m2)
     reqs = axon_env.llm.completion_requests()
     assert len(reqs) == 6, [r.last_user_text() for r in reqs]
@@ -288,7 +301,7 @@ def test_provider_500_on_first_call_rolls_back_and_retry_resends(axon_env: AxonE
         m = s.submit("original question")
         s.expect(r"/retry", timeout=40, since=m)
         s.ready(since=m, timeout=20)
-        s.command("/retry", "SECOND-TRY-OK", timeout=30)
+        _retry_from_menu(s, "SECOND-TRY-OK")
     reqs = axon_env.llm.completion_requests()
     last = reqs[-1]
     users = [m for m in last.messages if m.get("role") == "user"]
@@ -305,7 +318,7 @@ def test_clear_resets_turn_numbering_and_history(axon_env: AxonEnv) -> None:
     with open_repl(axon_env) as s:
         assert re.search(r'Turn 1 · "first prompt"', s.turn("first prompt"))
         assert re.search(r'Turn 2 · "second prompt"', s.turn("second prompt"))
-        s.command("/clear", "New session")
+        s.command("/clear scenario", "New session")   # a bare /clear asks in a menu first
         s.ready()
         out = s.turn("after clear")
         assert re.search(r'Turn 1 · "after clear"', out), out[-1500:]
@@ -333,7 +346,7 @@ def test_resume_flag_replays_previous_session_and_continues_it(axon_env: AxonEnv
         out = s.turn("new prompt")
         assert "CONTINUED" in out
     assert not axon_env.llm.failures, axon_env.llm.failures
-    assert [p.stem for p in session_files(axon_env)] == [sid]
+    assert [p.parent.name for p in session_files(axon_env)] == [sid]
 
 
 # ─── 10. /compact ──────────────────────────────────────────────────────────
@@ -396,6 +409,8 @@ def test_mcp_tool_call_in_repl_with_approval(axon_env: AxonEnv) -> None:
     log = axon_env.root / "mcp.log"
     write_file(axon_env.workspace / ".mcp.json", json.dumps({"mcpServers": {"srv": {
         "command": sys.executable, "args": [FAKE_MCP, "--name", "srv", "--log", str(log)]}}}))
+    # the REPL asks before using a project's .mcp.json servers; your own settings can pre-approve them
+    write_file(axon_env.workspace / ".axon" / "settings.local.json", json.dumps({"enableAllProjectMcpServers": True}))
     axon_env.llm.enqueue([{"tool": "mcp__srv__echo", "args": {"text": "via-repl-31"}}],
                          {"steps": [{"text": "MCP-REPL-DONE"}], "expect": [has_tool_result("ECHO:via-repl-31")]})
     with open_repl(axon_env, ("--mode", "default")) as s:

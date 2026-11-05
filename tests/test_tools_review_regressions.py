@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -179,7 +180,7 @@ def test_bash_saved_full_output_has_no_cwd_sentinel(workspace):
     ctx = ToolContext(workspace=workspace, file_state=FileState(), todos=TodoState(),
                       settings=Settings(workspace=workspace, tool_output_cap=5000))
     bash = shell_mod.BashTool()
-    out = bash.run({"command": f"{sys.executable} -c \"print('y' * 80000)\"", "description": "big"}, ctx)
+    out = bash.run({"command": f"{shlex.quote(sys.executable)} -c \"print('y' * 80000)\"", "description": "big"}, ctx)
     m = re.search(r"saved to (\S+?)\)", out)
     assert m, out[-500:]
     saved = Path(m.group(1)).read_text(encoding="utf-8")
