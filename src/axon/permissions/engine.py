@@ -33,7 +33,7 @@ from typing import Any, Literal
 from axon.storage import axon_home as _axon_home
 from axon.config import Mode, Settings
 from axon.permissions.paths import additional_dirs, is_protected_path, is_within, outside_allowlist
-from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, parse_rule, split_shell_commands,
+from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, parse_rule, redirect_targets, split_shell_commands,
                                     strip_wrappers, tool_paths)
 
 DecisionOutcome = Literal["allow", "ask", "deny"]
@@ -259,7 +259,7 @@ class PermissionEngine:
             cred = shell_credential_access(str(args.get("command", "")), ws)
             if cred:
                 return Decision("deny", f"Access to protected credential location '{cred}' is blocked.")
-        paths = tool_paths(name, args)
+        paths = tool_paths(name, args, keep_prefixed=True)
         for p in paths:
             why = is_protected_path(p, ws)
             if why:
@@ -288,6 +288,8 @@ class PermissionEngine:
         # 4. Allow rules
         for r in self.allow_rules:
             if r.matches(name, args, ws):
+                if name == "Bash" and r.pattern and r.pattern.strip() != "*" and self._redirects_outside(r, args):
+                    continue        # `Bash(git diff:*)` must not let `git diff > ~/.bashrc` through: ask
                 return Decision("allow", f"Allowed by rule: {r}", str(r))
 
         # 5. Tools that are denied by default
@@ -322,6 +324,21 @@ class PermissionEngine:
         if mode == "acceptEdits":
             return Decision("ask", "acceptEdits requires confirmation for shell/network commands.")
         return Decision("ask", f"Command or modification '{name}' requires user approval.")
+
+    def _redirects_outside(self, rule: Rule, args: dict[str, Any]) -> bool:
+        """True when a prefix/glob allow rule matched a command that redirects its output to a file outside the
+        workspace or to a protected path. A rule that is the whole command line was approved as it stands."""
+        cmd = str(args.get("command", ""))
+        if " ".join((rule.pattern or "").split()) == " ".join(cmd.split()):
+            return False
+        for target in redirect_targets(cmd):
+            if target in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+                continue
+            target = os.path.expandvars(target)
+            if "$" in target or is_protected_path(target, self.workspace) \
+                    or not self._inside_or_allowlisted(target, "Bash"):
+                return True
+        return False
 
     def _readonly_git(self, name: str, args: dict[str, Any]) -> bool:
         if name != "Git":
@@ -368,7 +385,8 @@ class PermissionEngine:
         rule = parse_rule(spec)
         spec_s = str(rule)
         path = self.local_settings_path(project_dir)
-        data = _read_json(path) if path.is_file() else {}
+        from axon.session.store import read_json_object_strict
+        data = read_json_object_strict(path)      # ValueError (file untouched) when it cannot be parsed
         perms = data.setdefault("permissions", {})
         if not isinstance(perms, dict):
             perms = data["permissions"] = {}

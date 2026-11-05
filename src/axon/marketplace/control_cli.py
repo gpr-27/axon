@@ -240,7 +240,10 @@ def cmd_import(shop: "Marketplace", args: "Args", rest: list[str]) -> "Outcome":
 def cmd_auto(shop: "Marketplace", args: "Args", rest: list[str]) -> "Outcome":
     word = rest[0].lower() if rest else "status"
     if word in ("on", "off"):
-        path = automation.save_automation({"enabled": word == "on"})
+        try:
+            path = automation.save_automation({"enabled": word == "on"})
+        except ValueError as e:
+            return shop.fail(str(e))
         shop.say(f"  OK: Automation is {word.upper()} (saved in {path}).")
         if word == "on":
             shop.say(automation.status_lines(shop.workspace))
@@ -261,7 +264,10 @@ def set_automation_value(shop: "Marketplace", words: list[str]) -> "Outcome":
         value = automation.parse_value(words[0], words[1])
     except ValueError as e:
         return shop.fail(str(e))
-    automation.save_automation({words[0]: value})
+    try:
+        automation.save_automation({words[0]: value})
+    except ValueError as e:
+        return shop.fail(str(e))
     shop.say(f"  OK: {words[0]} = {value}")
     return shop.outcome
 

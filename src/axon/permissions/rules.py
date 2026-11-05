@@ -40,8 +40,9 @@ PATH_ARG_KEYS = ("path", "file_path", "notebook_path", "path_a", "path_b")
 _GLOB_CHARS = set("*?[")
 
 
-def tool_paths(tool_name: str, args: dict[str, Any]) -> list[str]:
-    """Return every path-like argument a tool call refers to."""
+def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False) -> list[str]:
+    """Return every path-like argument a tool call refers to. ``keep_prefixed``: a patch's ``a/x`` header
+    is listed as well as ``x`` (for deny / protected-path checks; see ``patch_paths``)."""
     out: list[str] = []
     for k in PATH_ARG_KEYS:
         v = args.get(k)
@@ -54,15 +55,16 @@ def tool_paths(tool_name: str, args: dict[str, Any]) -> list[str]:
     if tool_name in ("Patch", "ApplyPatch", "apply_patch") and not out:
         # The files a unified diff touches are named in its ---/+++ headers, not in a path argument;
         # without them acceptEdits, deny rules and the outside-workspace check would never see them.
-        out.extend(patch_paths(args.get("patch") or args.get("diff")))
+        out.extend(patch_paths(args.get("patch") or args.get("diff"), keep_prefixed))
     if not out and tool_name in ("Ls", "Glob", "Grep", "CodeSearch", "FileTree"):
         out.append(".")  # these default to the workspace root
     return out
 
 
-def patch_paths(patch: Any) -> list[str]:
+def patch_paths(patch: Any, keep_prefixed: bool = False) -> list[str]:
     """File paths named by a unified diff's ``--- a/x`` / ``+++ b/x`` header pairs (/dev/null skipped),
-    parsed the same way as axon.tools.patch.parse_patch."""
+    parsed the same way as axon.tools.patch.parse_patch. ``keep_prefixed`` also lists ``a/x`` itself:
+    the Patch tool edits that file when a real directory called ``a`` holds it."""
     if not isinstance(patch, str):
         return []
     lines = patch.replace("\r\n", "\n").split("\n")
@@ -76,10 +78,10 @@ def patch_paths(patch: Any) -> list[str]:
                 p = p[1:-1]
             if not p or p == "/dev/null":
                 continue
+            names = [p]
             if p.startswith(("a/", "b/")):
-                p = p[2:]
-            if p not in out:
-                out.append(p)
+                names = [p[2:], p] if keep_prefixed else [p[2:]]
+            out.extend(n for n in names if n not in out)
     return out
 
 
@@ -147,6 +149,46 @@ def split_shell_commands(cmd: str) -> list[str]:
         i += 1
     parts.append("".join(buf))
     return [p.strip() for p in parts if p.strip()]
+
+
+def redirect_targets(cmd: str) -> list[str]:
+    """Files a shell line writes to with ``>``, ``>>``, ``>|``, ``&>`` or ``N>`` (quotes respected; fd
+    duplications such as ``2>&1`` are not files)."""
+    out: list[str] = []
+    for sub in split_shell_commands(cmd):
+        quote: str | None = None
+        i, n = 0, len(sub)
+        while i < n:
+            ch = sub[i]
+            i += 1
+            if quote:
+                if ch == "\\" and quote == '"':
+                    i += 1
+                elif ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "\\":
+                i += 1
+            elif ch == ">" and not (i < n and sub[i] == "("):
+                while i < n and sub[i] in ">|":
+                    i += 1
+                dup = i < n and sub[i] == "&"
+                while i < n and sub[i] in "& \t":
+                    i += 1
+                start = i
+                while i < n and (quote or sub[i] not in " \t<>;|&"):
+                    if quote:
+                        quote = None if sub[i] == quote else quote
+                    elif sub[i] in "'\"":
+                        quote = sub[i]
+                    i += 1
+                target = sub[start:i].replace("'", "").replace('"', "")
+                if not target:
+                    out.append("$?")      # `>| file` (the | split the line): the file is unknown, so not a safe one
+                elif not (dup and (target.isdigit() or target == "-")):
+                    out.append(target)
+    return out
 
 
 def has_substitution(cmd: str) -> bool:
@@ -435,7 +477,7 @@ class Rule:
             dom = pat[len("domain:"):].strip().lower()
             return bool(host) and (host == dom or host.endswith("." + dom))
 
-        paths = tool_paths(tool_name, args)
+        paths = tool_paths(tool_name, args, keep_prefixed=for_deny)
         if paths:
             hits = [path_matches(pat, p, workspace) for p in paths]
             return any(hits) if for_deny else all(hits)

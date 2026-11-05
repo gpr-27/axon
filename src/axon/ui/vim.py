@@ -21,6 +21,7 @@ NORMAL = "normal"
 
 _MOTIONS = set("hlwbe0^$")
 _OPERATORS = set("dcy")
+MAX_COUNT = 9999            # a typed count such as 99999999p must not hang the prompt
 
 
 def _cls(ch: str) -> int:
@@ -208,11 +209,11 @@ class VimState:
         # counts
         if key in "0123456789" and (key != "0" or (self.op_count if self.op else self.count)):
             if self.op:
-                self.op_count += key
+                self.op_count = str(min(int(self.op_count + key), MAX_COUNT))
             else:
-                self.count += key
+                self.count = str(min(int(self.count + key), MAX_COUNT))
             return True
-        n = int(self.count or "1") * int(self.op_count or "1")
+        n = min(int(self.count or "1") * int(self.op_count or "1"), MAX_COUNT)
         if self.op:
             op = self.op
             if key == op:            # dd / cc / yy

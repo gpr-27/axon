@@ -747,8 +747,8 @@ def _resolve_model(parent: Agent, agent_def: AgentDefinition, override: str | No
         m = (cand or "").strip()
         if m and m.lower() not in _INHERIT_MODELS:
             return m
-        if m and cand is not os.environ.get("AXON_SUBAGENT_MODEL"):
-            return parent.settings.model        # an explicit "inherit" / alias stops the search
+        if m:
+            return parent.settings.model        # an explicit "inherit" / alias (also AXON_SUBAGENT_MODEL=inherit) stops the search
     if agent_def.fast_model and agent_def.source == "builtin":
         small = str(getattr(parent.settings, "small_model", "") or "").strip()
         if small:

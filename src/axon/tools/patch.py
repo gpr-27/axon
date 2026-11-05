@@ -42,15 +42,24 @@ class FilePatch:
     hunks: list[Hunk] = field(default_factory=list)
 
 
-def _strip_prefix(p: str) -> str | None:
+def _clean_path(p: str) -> str | None:
     p = p.strip().split("\t")[0].strip()
     if p.startswith('"') and p.endswith('"'):
         p = p[1:-1]
-    if p == "/dev/null":
-        return None
-    if p.startswith(("a/", "b/")):
-        p = p[2:]
-    return p
+    return None if p == "/dev/null" else p
+
+
+def _drop_git_prefix(ctx: ToolContext, raw: str | None) -> str | None:
+    """``a/x.py`` / ``b/x.py`` from `git diff` name ``x.py``. The prefix stays only when that path really
+    exists (a directory called ``a``) and the unprefixed one does not."""
+    if raw is None or not raw.startswith(("a/", "b/")):
+        return raw
+    try:
+        if resolve_path(ctx, raw).exists() and not resolve_path(ctx, raw[2:]).exists():
+            return raw
+    except ToolError:
+        pass
+    return raw[2:]
 
 
 def parse_patch(text: str) -> list[FilePatch]:
@@ -62,7 +71,7 @@ def parse_patch(text: str) -> list[FilePatch]:
     while i < len(lines):
         line = lines[i]
         if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
-            cur = FilePatch(_strip_prefix(line[4:]), _strip_prefix(lines[i + 1][4:]))
+            cur = FilePatch(_clean_path(line[4:]), _clean_path(lines[i + 1][4:]))
             files.append(cur)
             hunk = None
             i += 2
@@ -128,7 +137,26 @@ def _find(hay: list[str], needle: list[str], expected: int, used_until: int) -> 
     return None
 
 
-def apply_hunks(text: str, hunks: list[Hunk], label: str) -> str:
+def _with_own_endings(h: Hunk, lines: list[str], pos: int) -> list[str]:
+    """The hunk's new lines for a mixed CRLF/LF file: context lines are the file's own lines, added lines
+    copy the ending of the line before them."""
+    out: list[str] = []
+    j = pos
+    for op, text in h.lines:
+        if op == "-":
+            j += 1
+        elif op == " ":
+            out.append(lines[j])
+            j += 1
+        else:
+            prev = out[-1] if out else (lines[pos - 1] if pos else "")
+            out.append(text + ("\r" if prev.endswith("\r") else ""))
+    return out
+
+
+def apply_hunks(text: str, hunks: list[Hunk], label: str, keep_cr: bool = False) -> str:
+    """``keep_cr``: ``text`` mixes CRLF and LF. Lines keep their own trailing "\\r" (matching ignores it), and
+    an added line takes the ending of the line before it."""
     final_nl = text.endswith("\n") or text == ""
     lines = text.split("\n")
     if lines and lines[-1] == "":
@@ -152,6 +180,8 @@ def apply_hunks(text: str, hunks: list[Hunk], label: str) -> str:
                 f"{f' near line {h.old_start}' if h.old_start else ''}. Re-read the file and regenerate the patch "
                 f"(or use Edit). Expected:\n{preview}"
             )
+        if keep_cr:
+            new = _with_own_endings(h, lines, pos)
         lines[pos : pos + len(old)] = new
         offset += len(new) - len(old)
         used_until = pos + len(new)
@@ -192,6 +222,11 @@ class PatchTool(Tool):
         files = parse_patch(str(patch_text))
         if not files:
             raise ToolError("No hunks found in patch. Expected unified diff format with '@@ -a,b +c,d @@' headers.")
+        for fp in files:
+            old, new = fp.old_path, fp.new_path
+            fp.old_path, fp.new_path = _drop_git_prefix(ctx, old), _drop_git_prefix(ctx, new)
+            if old and new and fp.old_path == old != fp.new_path and old[2:] == new[2:]:
+                fp.new_path = fp.old_path       # a real directory "a": both headers name that same file
         if raw_path:
             if len(files) > 1:
                 raise ToolError("'path' can only be used with a single-file patch; this patch touches several files.")
@@ -239,8 +274,7 @@ class PatchTool(Tool):
                 raise ToolError(f"Cannot patch non-existent file: {display_path(source, ctx.workspace)}")
             ctx.file_state.check_writable(source)
             tf = read_text_file(source)  # a rename (--- a/old +++ b/new) patches old's content into new
-            text = tf.text if tf.newline else normalize_newlines(tf.text)
-            new_text = apply_hunks(text, fp.hunks, label)
+            new_text = apply_hunks(tf.text, fp.hunks, label, keep_cr=not tf.newline)     # "" = mixed endings
             plans.append(("create" if renaming else "modify", p, new_text, tf.encoding, tf.newline or "\n"))
             if src_path is not None and src_path.exists():
                 ctx.file_state.check_writable(src_path)

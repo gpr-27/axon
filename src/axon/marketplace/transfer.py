@@ -291,7 +291,11 @@ def import_automation(block: Any, report: Report, dry_run: bool) -> None:
         report.add("  automation: auto_install and auto_update are never imported; set them yourself "
                    "with /marketplace auto set")
     if keep and not dry_run:
-        automation.save_automation(keep)
+        try:
+            automation.save_automation(keep)
+        except ValueError as e:
+            report.add(f"  automation: not imported ({e})")
+            return
     if keep:
         report.add(f"  automation: {'would set' if dry_run else 'set'} {', '.join(sorted(keep))}")
 

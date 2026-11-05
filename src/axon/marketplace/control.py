@@ -293,10 +293,13 @@ def set_skill_enabled(workspace: Path, name: str, enabled: bool, scope: str = "u
         return failed(f"No skill called '{name}'. See: /marketplace list skills --installed")
     if skill.scope == "plugin":
         return failed(f"'{name}' comes from a plugin ({skill.plugin}); enable or disable the plugin instead.")
-    if enabled:
-        skill_settings.enable_skill(workspace, skill.name)
-        return Done(True, f"Enabled skill '{skill.name}'.")
-    path = skill_settings.disable_skill(workspace, skill.name, scope)
+    try:
+        if enabled:
+            skill_settings.enable_skill(workspace, skill.name)
+            return Done(True, f"Enabled skill '{skill.name}'.")
+        path = skill_settings.disable_skill(workspace, skill.name, scope)
+    except ValueError as e:      # an unparsable settings.json is left as it is
+        return failed(str(e))
     return Done(True, f"Disabled skill '{skill.name}' (saved in {path}). Turn it on again: /marketplace enable {skill.name}")
 
 

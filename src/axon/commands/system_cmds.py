@@ -287,7 +287,9 @@ def set_config_value(agent: Any, key: str, raw: Any, persist: bool = True) -> st
             update_settings(agent, **{key: value})
     if persist:
         from axon.commands.common import update_settings_file
-        update_settings_file({jkey: _json_value(key, value)})
+        if update_settings_file({jkey: _json_value(key, value)}) is None:
+            raise ValueError(f"applied for this session, but ~/.axon/settings.json could not be updated "
+                             f"(is it valid JSON?); {key} was not saved")
     return f"{key} = {value}"
 
 

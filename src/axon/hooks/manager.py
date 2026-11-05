@@ -1100,8 +1100,15 @@ class HookManager:
         headers.update({k: expand(v) for k, v in hook.headers.items()})
         req = urllib.request.Request(hook.url, data=stdin_data.encode("utf-8"), headers=headers, method="POST")
 
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            """A redirect would carry the custom headers (secrets) to another host and skip allowedHttpHookUrls."""
+            def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+                return None      # the 3xx response then surfaces as an HTTPError
+
+        opener = urllib.request.build_opener(_NoRedirect)
+
         def post() -> tuple[str, int]:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - user-configured URL
+            with opener.open(req, timeout=timeout) as resp:  # noqa: S310 - user-configured URL
                 return resp.read(1_000_000).decode("utf-8", errors="replace"), int(getattr(resp, "status", 200) or 200)
 
         try:

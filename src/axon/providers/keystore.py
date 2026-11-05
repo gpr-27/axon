@@ -498,12 +498,14 @@ def redact_keys_arg(arg: str) -> str:
         if "=" in target and not target.startswith("-"):
             name, _, val = target.partition("=")
             out.append(f"{name}={REDACTED}" if val else target)
-        else:
+        elif target.startswith("-") or resolve_target(target) is not None:
             out.append(target)
+        else:
+            out.append(REDACTED)      # not a provider or variable name: a bare `/keys <key>`
         i += 1
     redacted = False
     for w in words[i:]:
-        if w.startswith("--") or w in ("-y", "-p"):
+        if w.startswith("--") or w in ("-y", "-p", "-u"):
             out.append(w)
         elif not redacted:
             out.append(REDACTED)

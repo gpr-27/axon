@@ -82,7 +82,8 @@ def _axon_layer_files(workspace: Path | None) -> list[Path]:
 
 def _write_overrides(path: Path, change: Any) -> None:
     from axon.session.store import atomic_write_text
-    data = read_json(path)
+    from axon.session.store import read_json_object_strict
+    data = read_json_object_strict(path)      # ValueError (file untouched) when it cannot be parsed
     overrides = data.get(SKILL_OVERRIDES)
     overrides = dict(overrides) if isinstance(overrides, dict) else {}
     change(overrides)

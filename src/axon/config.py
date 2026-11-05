@@ -273,11 +273,14 @@ class Settings(BaseSettings):
                 json_layers.append(("project", ws / ".axon" / name))
         if extra_settings:
             json_layers.append(("cli", extra_settings))
+        user_level_base_url = user_data.get("base_url", cls.model_fields["base_url"].default)
         for level, src in json_layers:
             data = _load_json_settings(src, warnings)
             if not data:
                 continue
             mapped = map_json_settings(data)
+            if level == "user" and "base_url" in mapped:
+                user_level_base_url = mapped["base_url"]      # ~/.axon/settings.json beats config.toml
             if level == "project-claude":
                 # Claude Code's model names ("opus", "sonnet") pick Anthropic models; they must never switch
                 # the model chosen in Axon's own config (that silently moved a DeepSeek user onto Opus).
@@ -335,10 +338,10 @@ class Settings(BaseSettings):
                     "another host. Set base_url in ~/.axon/config.toml or pass --base-url to use it."
                 )
                 if "base_url" in proj_data:
-                    merged["base_url"] = user_data.get("base_url", cls.model_fields["base_url"].default)
+                    merged["base_url"] = user_level_base_url
                 if "AXON_BASE_URL" in project_env_keys:
                     os.environ.pop("AXON_BASE_URL", None)
-                    merged.setdefault("base_url", user_data.get("base_url", cls.model_fields["base_url"].default))
+                    merged.setdefault("base_url", user_level_base_url)
 
         # 6. CLI overrides (non-null)
         clean_overrides = {k: v for k, v in cli_overrides.items() if v is not None}

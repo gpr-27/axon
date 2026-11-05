@@ -302,7 +302,10 @@ def _configure_and_apply_preset(agent: Agent, preset: ProviderPreset) -> bool:
         if not selection:
             print(f"\n  {SLATE}Connection cancelled.{RST}\n")
             return False
-        model = choose_model_option(preset, selection) or preset.default_model
+        model = choose_model_option(preset, selection)
+        if not model:       # the custom-model prompt was cancelled (or there is no terminal to type in)
+            print(f"\n  {SLATE}Connection cancelled.{RST}\n")
+            return False
         if not new_key:
             break
         ok, msg = _verify(preset, api_key or "", model)

@@ -44,7 +44,11 @@ def handle_permissions(agent: Any, arg: str) -> CommandResult:
         if not hasattr(perms, "add_rule"):
             err("This permission engine does not support persistent rules.")
             return CommandResult(handled=True)
-        rule = perms.add_rule(kind, rest)
+        try:
+            rule = perms.add_rule(kind, rest)
+        except ValueError as e:
+            err(str(e))
+            return CommandResult(handled=True)
         color = _KIND_COLOR[kind]
         ok(f"{color}{kind}{RST} {BOLD}{rule}{RST} {SLATE}→ {perms.local_settings_path()}{RST}")
         return CommandResult(handled=True)

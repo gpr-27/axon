@@ -86,6 +86,22 @@ def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> N
         raise
 
 
+def read_json_object_strict(path: str | Path) -> dict:
+    """The JSON object in ``path`` ({} when the file does not exist). Raises ValueError when it is
+    unreadable or not an object, so a writer never replaces the user's data with an empty file."""
+    import json
+    target = Path(path)
+    if not target.exists():
+        return {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8-sig") or "{}")
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{target} is not valid JSON ({e}); fix it by hand: Axon will not overwrite it") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"{target} is not a JSON object; fix it by hand: Axon will not overwrite it")
+    return data
+
+
 def _append_line(path: Path, line: str) -> None:
     from axon.storage import append_line
     _retry(lambda: append_line(path, line, fsync=True))

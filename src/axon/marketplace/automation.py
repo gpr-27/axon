@@ -141,14 +141,9 @@ def load_automation(workspace: Path | None = None) -> Automation:
 
 def save_automation(changes: dict[str, Any]) -> Path:
     """Write the given keys into the user's settings.json, keeping everything else in the file."""
-    from axon.session.store import atomic_write_text
+    from axon.session.store import atomic_write_text, read_json_object_strict
     path = user_settings_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = read_json_object_strict(path)      # ValueError (file untouched) when it cannot be parsed
     block = data.get(KEY) if isinstance(data.get(KEY), dict) else {}
     block.update(changes)
     data[KEY] = block

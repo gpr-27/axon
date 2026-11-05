@@ -65,7 +65,10 @@ def persist(agent: Any, field: str, value: Any, json_key: str | None = None) -> 
     try:
         from axon.commands.system_cmds import _panel_keys, set_config_value
         if any(k == field for k, *_ in _panel_keys(agent)):
-            set_config_value(agent, field, value)
+            try:
+                set_config_value(agent, field, value)
+            except ValueError:      # applied to the session, but settings.json could not be written
+                return "this session only"
             return "settings.json"
     except ImportError:
         pass
