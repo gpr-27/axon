@@ -55,9 +55,10 @@ def parse_number(text: str) -> float | None:
         s = s[:-1]
     s = re.sub(r"[$€£¥,_\s]", "", s)
     try:
-        return float(s) * mult
+        value = float(s) * mult
     except ValueError:
         return None
+    return value if math.isfinite(value) else None      # '9' * 400 overflows to inf: not plottable
 
 
 def _from_json(body: str) -> tuple[str, list[str], list[float]] | None:
@@ -71,11 +72,14 @@ def _from_json(body: str) -> tuple[str, list[str], list[float]] | None:
         if "values" in data or "data" in data:
             vals = data.get("values", data.get("data"))
             if isinstance(vals, dict):
-                return title, [str(k) for k in vals], [float(v) for v in vals.values() if parse_number(str(v)) is not None]
-            labels = data.get("labels") or [str(i + 1) for i in range(len(vals or []))]
+                pairs = [(str(k), parse_number(str(v))) for k, v in vals.items()]     # "$5" / "1,200" are numbers too
+                return title, [k for k, n in pairs if n is not None], [n for _, n in pairs if n is not None]
+            labels = [str(x) for x in (data.get("labels") or [])]
             nums = [parse_number(str(v)) for v in (vals or [])]
             if nums and all(n is not None for n in nums):
-                return title, [str(x) for x in labels][: len(nums)], [float(n) for n in nums if n is not None]
+                labels = labels[: len(nums)]
+                labels += [str(i + 1) for i in range(len(labels), len(nums))]       # one label per value
+                return title, labels, [float(n) for n in nums if n is not None]
             return None
         pairs = [(str(k), parse_number(str(v))) for k, v in data.items() if k != "title"]
         if pairs and all(v is not None for _, v in pairs):
@@ -122,7 +126,9 @@ def _from_rows(rows: list[list[str]]) -> tuple[str, list[str], list[float]] | No
         if all(n is not None for n in nums):
             return (header[0] if header else ""), [str(i + 1) for i in range(len(nums))], [float(n) for n in nums if n is not None]
         return None
-    col = next((c for c in range(ncols)
+    # values: the first numeric column after the first one ("year,sales" plots sales, not years); a lone
+    # numeric first column ("5,label") is used when no later column is numeric
+    col = next((c for c in [*range(1, ncols), 0]
                 if all(c < len(r) and parse_number(r[c]) is not None for r in rows)), None)
     if col is None:
         return None
@@ -143,7 +149,7 @@ def parse_chart(body: str) -> tuple[str, list[str], list[float]] | None:
         return None
     if text[:1] in "[{":
         res = _from_json(text)
-        if res:
+        if res and all(math.isfinite(v) for v in res[2]):      # JSON allows Infinity / NaN
             return res
     lines = [ln for ln in text.splitlines() if ln.strip()]
     title = ""
@@ -174,7 +180,7 @@ def parse_chart(body: str) -> tuple[str, list[str], list[float]] | None:
         sep = "\t" if all("\t" in ln for ln in lines) else (";" if all(";" in ln for ln in lines) else ",")
         rows = [[c.strip().strip('"') for c in ln.split(sep)] for ln in lines]
         res = _from_rows(rows)
-    if not res or not res[2]:
+    if not res or not res[2] or not all(math.isfinite(v) for v in res[2]):
         return None
     return (title or res[0]), res[1], res[2]
 
@@ -271,7 +277,8 @@ def sparkline_rows(labels: list[str], values: list[float], width: int, title: st
     room = max(4, width - indent - display_width(stats) - 2)
     line = sparkline(values, room)
     if display_width(line) + display_width(stats) + 2 > width - indent:
-        out.append(f"{sp}{PRIMARY}{sparkline(values, max(4, width - indent))}{RST}")
+        line = sparkline(values, max(4, width - indent))      # the labels below line up with the line shown
+        out.append(f"{sp}{PRIMARY}{line}{RST}")
         out.append(truncate(f"{sp}{MUTED}{stats}{RST}", width))
     else:
         out.append(f"{sp}{PRIMARY}{line}{RST}  {MUTED}{stats}{RST}")

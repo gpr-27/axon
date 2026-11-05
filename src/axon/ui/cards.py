@@ -216,9 +216,15 @@ def _word_changes(a: str, b: str) -> tuple[list[tuple[int, int]], list[tuple[int
     return ra, rb
 
 
+_PAIR_MAX_CHARS = 400      # character-level similarity is quadratic: longer lines are not paired
+
+
 def _pair_lines(old: list[str], new: list[str]) -> tuple[dict[int, list], dict[int, list]]:
     """Match removed lines with the added lines they became (in order, by similarity) and return the
-    changed character ranges of each paired line: ({old index: ranges}, {new index: ranges})."""
+    changed character ranges of each paired line: ({old index: ranges}, {new index: ranges}).
+    Ranges refer to the tab-expanded text, which is what the diff rows draw."""
+    old = [ln.expandtabs(4) for ln in old]
+    new = [ln.expandtabs(4) for ln in new]
     old_ch: dict[int, list] = {}
     new_ch: dict[int, list] = {}
     if len(old) * len(new) > 400:
@@ -228,6 +234,8 @@ def _pair_lines(old: list[str], new: list[str]) -> tuple[dict[int, list], dict[i
         for i, a in enumerate(old):
             best, best_r = -1, 0.0
             for k in range(j, len(new)):
+                if len(a) > _PAIR_MAX_CHARS or len(new[k]) > _PAIR_MAX_CHARS:
+                    continue
                 sm = difflib.SequenceMatcher(a=a, b=new[k], autojunk=False)
                 if sm.real_quick_ratio() <= best_r or sm.quick_ratio() <= best_r:
                     continue
@@ -441,8 +449,10 @@ def parse_unified_diff(text: str) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     hunk: list[str] | None = None
-    for ln in (text or "").splitlines():
-        if ln.startswith("--- "):
+    lines = (text or "").splitlines()
+    for n, ln in enumerate(lines):
+        # "--- " opens a file only when "+++ " follows; inside a hunk it is a removed line "-- ..." (SQL, Lua)
+        if ln.startswith("--- ") and (hunk is None or (n + 1 < len(lines) and lines[n + 1].startswith("+++ "))):
             cur = {"path": "", "old": ln[4:].split("\t")[0].strip(), "added": 0, "removed": 0, "hunks": []}
             files.append(cur)
             hunk = None
@@ -684,13 +694,15 @@ def find_json(text: str) -> tuple[str, str] | None:
     body = re.sub(r"\n\n\[\.\.\. .*$", "", body, flags=re.S)       # tool footers ('[... 120 more chars ...]')
     try:
         data = json.loads(body)
+        if not isinstance(data, (dict, list)):
+            return None
+        return head, json.dumps(data, indent=2, ensure_ascii=False)
+    except RecursionError:     # absurdly deep nesting (older Pythons): not worth pretty-printing
+        return None
     except ValueError:
         if body[:1] in "[{" and "\n" in body and re.search(r'^\s*"[^"]+":', body, re.M):
             return head, body      # already pretty but truncated: still highlight it
         return None
-    if not isinstance(data, (dict, list)):
-        return None
-    return head, json.dumps(data, indent=2, ensure_ascii=False)
 
 
 def json_rows(pretty: str, width: int, max_lines: int = 12, hint: str = "") -> list[str]:

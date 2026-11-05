@@ -299,6 +299,9 @@ class Stats:
 
 # ─── Loading ───────────────────────────────────────────────────────────────
 
+_MAX_TS = 32503680000.0        # 3000-01-01: well past any real record, safely inside datetime's range
+
+
 def _int(v: Any) -> int:
     try:
         return max(0, int(v or 0))
@@ -315,14 +318,20 @@ def _float(v: Any) -> float:
 
 
 def _parse_ts(v: Any) -> float | None:
+    """Epoch seconds from a number or an ISO string; None for anything that is not a usable date
+    (NaN, 1e20, year 1: ``datetime.fromtimestamp`` would raise later and sink the whole report)."""
+    if isinstance(v, bool):
+        return None
     if isinstance(v, (int, float)):
-        return float(v)
-    if not isinstance(v, str) or not v:
+        ts = float(v)
+    elif isinstance(v, str) and v:
+        try:
+            ts = datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return None
+    else:
         return None
-    try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
+    return ts if 0 < ts < _MAX_TS else None
 
 
 def load_usage(since: float | None = None, project: str | None = None) -> list[UsageRec]:
@@ -1248,7 +1257,7 @@ def usage_summary_text(stats: Stats, group_by: str = "model", limit: int = 25) -
 
     agg_head = ["", "calls", "input", "output", "cache_read", "cache_write", "hit", "cost", "share"]
     if group_by == "source":
-        rows = [agg_row(f"{_source_label(s)} [{s}]", a) for s, a in stats.by_source[:limit]]
+        rows = [agg_row(_clean(f"{_source_label(s)} [{s}]", 60), a) for s, a in stats.by_source[:limit]]
         lines += _plain_table(["source"] + agg_head[1:], rows, "lrrrrrrrr")
     elif group_by == "day":
         rows = [agg_row(d.isoformat(), a) for d, a in stats.days[-limit:]]
@@ -1257,16 +1266,16 @@ def usage_summary_text(stats: Stats, group_by: str = "model", limit: int = 25) -
         if not stats.tools:
             lines.append("No traced tool calls in this period.")
         else:
-            rows = [[a.name, f"{a.calls:,}", fmt_dur(a.total_s), fmt_dur(a.total_s / a.calls if a.calls else 0), str(a.errors)]
+            rows = [[_clean(a.name, 60), f"{a.calls:,}", fmt_dur(a.total_s), fmt_dur(a.total_s / a.calls if a.calls else 0), str(a.errors)]
                     for a in stats.tools[:limit]]
             lines += _plain_table(["tool", "calls", "total_time", "avg", "errors"], rows, "lrrrr")
     elif group_by == "session":
-        rows = [[_clean(s.title or "(untitled)", 60), s.id, datetime.fromtimestamp(s.last_ts).strftime("%Y-%m-%d %H:%M"),
+        rows = [[_clean(s.title or "(untitled)", 60), _clean(s.id, 60), datetime.fromtimestamp(s.last_ts).strftime("%Y-%m-%d %H:%M"),
                  str(s.turns), f"{s.calls:,}", f"{s.tokens:,}", fmt_dur(s.duration_s), fmt_usd(s.cost)]
                 for s in sorted(stats.sessions, key=lambda x: x.cost, reverse=True)[:limit]]
         lines += _plain_table(["session", "id", "last", "turns", "calls", "tokens", "span", "cost"], rows, "lllrrrrr")
     else:
-        rows = [agg_row(m, a) for m, a in stats.by_model[:limit]]
+        rows = [agg_row(_clean(m, 60), a) for m, a in stats.by_model[:limit]]
         lines += _plain_table(["model"] + agg_head[1:], rows, "lrrrrrrrr")
     if group_by != "tool" and stats.turns:
         lines += ["", "Most expensive turns:"]

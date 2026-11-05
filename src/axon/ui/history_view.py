@@ -41,9 +41,11 @@ def _records(path: Path) -> list[dict[str, Any]]:
         try:
             for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
                 try:
-                    out.append(json.loads(line))
+                    rec = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(rec, dict):       # a stray `123` / `"x"` line is not a record
+                    out.append(rec)
         except OSError:
             pass
         return out
@@ -313,7 +315,7 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                     add(f"{rail}    {status} {BOLD}{_clean(f.get('name', 'Tool'))}{RST} {MUTED}{_clean(f.get('target') or '')}{RST} "
                         f"{SUBTLE}{dot} {int(f.get('lines') or 0)} lines {dot} {int(f.get('bytes') or 0):,} bytes {dot} "
                         f"~{_fmt_tokens(int(f.get('tokens') or 0))} tok{RST}")
-            thinking = str(data.get("thinking") or "").strip()
+            thinking = sanitize(str(data.get("thinking") or "")).strip()        # model text: no raw escapes
             if thinking and show_thinking and phased:
                 secs = sum(float(x) for x in (data.get("thinking_s") or []) if isinstance(x, (int, float)))
                 add(f"{rail}{tool_cards.thinking_line(secs or None, thinking, width - 2)}")
@@ -323,7 +325,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                     add_many(wrap_rows(f"{DIM}{ITALIC}{para}{RST}", f"{rail}  {SUBTLE}{glyph('thinking_bar')}{RST} ",
                                        f"{rail}  {SUBTLE}{glyph('thinking_bar')}{RST} "))
                 for secs in data.get("thinking_s") or []:
-                    add(f"{rail}  {SUBTLE}{glyph('star')} thought for {float(secs):.1f}s{RST}")
+                    if isinstance(secs, (int, float)):
+                        add(f"{rail}  {SUBTLE}{glyph('star')} thought for {secs:.1f}s{RST}")
             text = str(data.get("text") or "").strip()
             if text and phased:
                 gap()

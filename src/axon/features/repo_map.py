@@ -113,7 +113,7 @@ _RX: dict[str, list[tuple[re.Pattern[str], str]]] = {
     ],
     "java": [
         (re.compile(r"^(\s*)" + _MODS + r"*(?:class|interface|enum|record|@interface)\s+([A-Za-z_]\w*)"), "class"),
-        (re.compile(r"^(\s*)" + _MODS + r"+(?:<[^>]+>\s+)?[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*(\([^)]*\)?)\s*(?:throws\s+[\w., ]+)?\s*\{?\s*$"), "method"),
+        (re.compile(r"^(\s*)" + _MODS + r"+(?:<[^>]+>\s+)?[\w<>\[\],.?]+\s+([A-Za-z_]\w*)\s*(\([^)]*\)?)(?:\s*throws\s+[\w.,\s]*[\w.])?\s*(?:\{\s*)?$"), "method"),
     ],
     "csharp": [
         (re.compile(r"^(\s*)" + _MODS + r"*(?:class|interface|enum|record|struct)\s+([A-Za-z_]\w*)"), "class"),
@@ -297,7 +297,7 @@ def build_index(ws: Path | str, rebuild: bool = False) -> tuple[dict[str, Any], 
                 st = fp.stat()
             except OSError:
                 continue
-            if st.st_size > MAX_FILE_BYTES:
+            if st.st_size > MAX_FILE_BYTES or _CTRL_RE.search(rel):      # a name with escapes / newlines would corrupt the map
                 continue
             prev = old_files.get(rel)
             if prev and prev.get("m") == st.st_mtime_ns and prev.get("s") == st.st_size:
@@ -375,7 +375,7 @@ def rank_files(index: dict[str, Any], recent: Iterable[str] = ()) -> list[Ranked
     defs = {k: v for k, v in defs.items() if len(v) <= 6 and not (k.startswith("__") and k.endswith("__"))}
 
     file_refs: dict[str, float] = defaultdict(float)
-    sym_refs: dict[tuple[str, str], float] = defaultdict(float)
+    sym_refs: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))     # owner -> symbol -> weight
     for rel in sorted(files):
         for ident in files[rel].get("id", ()):
             owners = defs.get(ident)
@@ -385,7 +385,7 @@ def rank_files(index: dict[str, Any], recent: Iterable[str] = ()) -> list[Ranked
             for owner in owners:
                 if owner != rel:
                     file_refs[owner] += w
-                    sym_refs[(owner, ident)] += w
+                    sym_refs[owner][ident] += w
 
     recent_list = [r for r in recent if r in files]
     recent_rank = {p: i for i, p in enumerate(recent_list)}
@@ -406,8 +406,7 @@ def rank_files(index: dict[str, Any], recent: Iterable[str] = ()) -> list[Ranked
             score *= 0.4
         if not info["sym"]:
             score *= 0.3
-        refs = {name: v for (owner, name), v in sym_refs.items() if owner == rel}
-        ranked.append(RankedFile(rel, round(score, 6), info["sym"], refs))
+        ranked.append(RankedFile(rel, round(score, 6), info["sym"], dict(sym_refs.get(rel, {}))))
     ranked.sort(key=lambda r: (-r.score, r.path))
     return ranked
 
@@ -418,12 +417,13 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
 
-_SELF_RE = re.compile(r"\((?:self|cls)(?:,\s*)?")
+_SELF_RE = re.compile(r"\((?:self|cls)\b(?:,\s*)?")        # \b: "(selfie)" keeps its name
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _sig(sym: list[Any]) -> str:
     name, kind, _line, sig, _parent = sym
-    sig = _SELF_RE.sub("(", str(sig or name)).strip()
+    sig = _SELF_RE.sub("(", _CTRL_RE.sub("", str(sig or name))).strip()     # source text: no terminal escapes
     if len(sig) > 80:
         sig = sig[:77] + "..."
     if kind == "constant" and "=" in sig:
@@ -594,10 +594,10 @@ def _parse_args(arg: str) -> tuple[str, int, bool, bool]:
     i = 0
     while i < len(parts):
         p = parts[i]
-        if p in ("--tokens", "-t") and i + 1 < len(parts):
+        if p in ("--tokens", "-t"):
             try:
                 tokens = max(64, int(parts[i + 1]))
-            except ValueError:
+            except (ValueError, IndexError):        # not a number, or no value at all
                 bad = True
             i += 2
             continue

@@ -118,9 +118,14 @@ _SYMBOLS = {
 def _extract_brace_arg(s: str, pos: int) -> tuple[str, int]:
     """Extract content inside { } starting at pos, handling nested braces."""
     if pos >= len(s) or s[pos] != "{":
-        # Single character arg (no braces)
+        # Single character arg (no braces); a bare command such as ``\alpha`` is one argument
         if pos < len(s):
-            return s[pos], pos + 1
+            end = pos + 1
+            if s[pos] == "\\":
+                while end < len(s) and s[end].isalpha():
+                    end += 1
+                end = max(end, min(len(s), pos + 2))
+            return s[pos:end], end
         return "", pos
     depth = 0
     start = pos + 1
@@ -160,9 +165,14 @@ def _to_subscript(text: str) -> str:
     return "".join(result)
 
 
-def latex_to_unicode(latex: str) -> str:
+_MAX_LATEX_DEPTH = 24   # deeper nesting is shown as typed instead of raising RecursionError
+
+
+def latex_to_unicode(latex: str, _depth: int = 0) -> str:
     """Convert a LaTeX math expression to readable Unicode text for terminal display."""
     s = latex.strip()
+    if _depth > _MAX_LATEX_DEPTH:
+        return s
 
     # Manual \frac parsing (regex can't handle nested braces)
     result = []
@@ -184,8 +194,8 @@ def latex_to_unicode(latex: str) -> str:
             if cmd == "frac":
                 num, j = _extract_brace_arg(s, j)
                 den, j = _extract_brace_arg(s, j)
-                num_u = latex_to_unicode(num)
-                den_u = latex_to_unicode(den)
+                num_u = latex_to_unicode(num, _depth + 1)
+                den_u = latex_to_unicode(den, _depth + 1)
                 # Simple fractions don't need parens
                 if len(num_u) <= 3 and not any(c in num_u for c in "+-×÷"):
                     frac_str = f"{num_u}/{den_u}"
@@ -202,12 +212,12 @@ def latex_to_unicode(latex: str) -> str:
                     root_n = s[j + 1:k]
                     j = k + 1
                     arg, j = _extract_brace_arg(s, j)
-                    arg_u = latex_to_unicode(arg)
+                    arg_u = latex_to_unicode(arg, _depth + 1)
                     root_sup = _to_superscript(root_n)
                     result.append(f"{root_sup}√({arg_u})")
                 else:
                     arg, j = _extract_brace_arg(s, j)
-                    arg_u = latex_to_unicode(arg)
+                    arg_u = latex_to_unicode(arg, _depth + 1)
                     if len(arg_u) <= 2:
                         result.append(f"√{arg_u}")
                     else:
@@ -219,7 +229,7 @@ def latex_to_unicode(latex: str) -> str:
                 i = j
             elif cmd in ("hat", "bar", "vec", "dot", "ddot", "tilde", "overline"):
                 arg, j = _extract_brace_arg(s, j)
-                arg_u = latex_to_unicode(arg)
+                arg_u = latex_to_unicode(arg, _depth + 1)
                 accents = {"hat": "̂", "bar": "̄", "vec": "⃗", "dot": "̇", "ddot": "̈", "tilde": "̃", "overline": "̄"}
                 result.append(f"{arg_u}{accents.get(cmd, '')}")
                 i = j
@@ -240,13 +250,13 @@ def latex_to_unicode(latex: str) -> str:
         elif s[i] == "^":
             # Superscript
             arg, j = _extract_brace_arg(s, i + 1)
-            arg_u = latex_to_unicode(arg)
+            arg_u = latex_to_unicode(arg, _depth + 1)
             result.append(_to_superscript(arg_u))
             i = j
         elif s[i] == "_":
             # Subscript
             arg, j = _extract_brace_arg(s, i + 1)
-            arg_u = latex_to_unicode(arg)
+            arg_u = latex_to_unicode(arg, _depth + 1)
             result.append(_to_subscript(arg_u))
             i = j
         elif s[i] in ("{" , "}"):
@@ -273,7 +283,7 @@ def file_uri(path_str: str, workspace: Path | None = None) -> str:
         if not p.is_absolute():
             p = (workspace or Path.cwd()) / p
         return p.resolve().as_uri()
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):     # RuntimeError: ``~nosuchuser`` has no home directory
         return ""
 
 
@@ -391,7 +401,7 @@ _HTML_RE = re.compile(
 )
 _CSS_RE = re.compile(
     r"(?P<COMMENT>/\*.*?(?:\*/|$))|(?P<STRING>\"[^\"]*\"?|'[^']*'?)|(?P<AT>@[\w-]+)|(?P<HEX>#[0-9a-fA-F]{3,8}\b)"
-    r"|(?P<NUMBER>-?\d*\.?\d+(?:px|em|rem|%|vh|vw|s|ms|deg|fr|ch|pt)?\b)|(?P<IMPORTANT>!important)"
+    r"|(?P<NUMBER>-?(?:\d+(?:\.\d+)?|\.\d+)(?:px|em|rem|%|vh|vw|s|ms|deg|fr|ch|pt)?\b)|(?P<IMPORTANT>!important)"
     r"|(?P<WORD>-?[A-Za-z_][\w-]*)|(?P<OTHER>\s+|.)"
 )
 
@@ -732,12 +742,12 @@ def _style_inline(s: str) -> str:
             return stash(hyperlink(link_target(path), f"{CODE_FG}{code}{RST}"))
         return stash(f"{CODE_BG}{CODE_FG}{code}{RST}" if CODE_FG else f"`{code}`")
 
-    s = re.sub(r"(`+)(.+?)\1", _code, s)
+    s = re.sub(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", _code, s)
     # 2. Backslash escapes.
     s = re.sub(r"\\([\\`*_{}\[\]()#+\-.!|~$<>])", lambda m: stash(m.group(1)), s)
     # 3. Links: [label](target), <autolink>, bare URLs.
     s = re.sub(
-        r"\[([^\]\n]+)\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)",
+        r"\[([^\]\n]{1,500})\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)",
         lambda m: stash(make_clickable(_emphasis(m.group(1)), m.group(2))),
         s,
     )
@@ -784,8 +794,8 @@ def _inline_closed(src: str) -> bool:
 
 def _emphasis(s: str) -> str:
     s = re.sub(r"\*\*\*(?=\S)([^\n*]+?)(?<=\S)\*\*\*", rf"{BOLD}{ITALIC}\1{RST}", s)
-    s = re.sub(r"\*\*(?=\S)([^\n]+?)(?<=\S)\*\*", rf"{BOLD}\1{RST}", s)
-    s = re.sub(r"(?<![\w_])__(?=\S)([^\n]+?)(?<=\S)__(?![\w_])", rf"{BOLD}\1{RST}", s)
+    s = re.sub(r"\*\*(?=\S)([^\n]{1,1000}?)(?<=\S)\*\*", rf"{BOLD}\1{RST}", s)
+    s = re.sub(r"(?<![\w_])__(?=\S)([^\n]{1,1000}?)(?<=\S)__(?![\w_])", rf"{BOLD}\1{RST}", s)
     s = re.sub(r"~~(?=\S)([^\n~]+?)(?<=\S)~~", rf"{STRIKE}{MUTED}\1{RST}", s)
     s = re.sub(r"(?<![\w*])\*(?=[^\s*])([^\n*]+?)(?<=[^\s*])\*(?![\w*])", rf"{ITALIC}\1{RST}", s)
     s = re.sub(r"(?<![\w/\\.])_(?=[^\s_])([^\n_]+?)(?<=[^\s_])_(?![\w/\\.])", rf"{ITALIC}\1{RST}", s)
@@ -926,8 +936,8 @@ def _render_table_vertical(header: list[str] | None, body: list[list[str]], widt
 
 CODE_NUMBER_AFTER = 5          # code blocks longer than this get line numbers
 CHART_LANGS = {"chart", "bar", "bars", "barchart", "bar-chart", "hbar", "sparkline", "spark", "sparklines"}
-_FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^`\s]*)[^`]*$")
-_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^`\s]*)(?:\s[^`]*)?$")   # (lang)(info string): no overlapping classes
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 _HR_RE = re.compile(r"^\s{0,3}((?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$")
 _TASK_RE = re.compile(r"^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$")
 _BULLET_RE = re.compile(r"^(\s*)[-*+•]\s+(.*)$")
@@ -1262,7 +1272,7 @@ class MarkdownStream:
         hm = _HEADING_RE.match(line)
         if hm:
             level = len(hm.group(1))
-            title = _style_inline(hm.group(2))
+            title = _style_inline(hm.group(2).rstrip().rstrip("#").rstrip())       # drop the closing ``##``
             if self._emitted_any and not self._last_blank:
                 rows.append("")
             if level == 1:

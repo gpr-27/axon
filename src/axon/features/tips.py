@@ -492,7 +492,7 @@ def parse_tips_json(text: str) -> list[Any]:
                 continue
             try:
                 obj, _end = dec.raw_decode(cand[i:])
-            except ValueError:
+            except (ValueError, RecursionError):      # RecursionError: a reply that is nothing but "[[[[..."
                 continue
             if isinstance(obj, dict):
                 for key in ("tips", "items", "data"):

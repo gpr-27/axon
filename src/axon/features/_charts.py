@@ -211,7 +211,7 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[Any]], aligns: str = "
     """Column-aligned table (ANSI and wide-char aware). ``aligns`` is a string of l/r/c per column.
     The first column shrinks (truncated with an ellipsis) when the table exceeds ``max_width``."""
     cols = len(headers)
-    cells = [[str(c) for c in r] + [""] * (cols - len(r)) for r in rows]
+    cells = [([str(c) for c in r] + [""] * cols)[:cols] for r in rows]       # a long row never outgrows the headers
     widths = [display_width(h) for h in headers]
     for r in cells:
         for i in range(cols):
@@ -219,7 +219,7 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[Any]], aligns: str = "
     if max_width:
         excess = indent + sum(widths) + gap * (cols - 1) - max_width
         if excess > 0:
-            widths[0] = max(8, widths[0] - excess)
+            widths[0] = min(widths[0], max(8, widths[0] - excess))     # shrink only, never widen
     al = (aligns or "l" + "r" * (cols - 1)).ljust(cols, "r")
     mode = {"l": "left", "r": "right", "c": "center"}
     sep = " " * gap
