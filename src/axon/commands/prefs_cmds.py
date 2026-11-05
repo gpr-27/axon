@@ -1,4 +1,4 @@
-"""Preference commands: /output-style /statusline /theme /vim /color /fast /goal /terminal-setup /release-notes.
+"""Preference commands: /output-style /statusline /theme /vim /suggestions /color /fast /goal /terminal-setup /release-notes.
 
 User-level preferences are saved to ``~/.axon/settings.json`` with the Claude-Code key names
 (``outputStyle``, ``statusLine``, ``theme``, ``editorMode``, ``promptColor``) via a load-modify-dump
@@ -16,6 +16,8 @@ from typing import Any
 from axon.commands.common import (
     confirm, err, header, hint, info, is_tty, kv, ok, section, update_settings, update_settings_file, usage, warn,
     ws_of,
+    typed_hint,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, TEAL, WHITE
@@ -79,7 +81,7 @@ def handle_output_style(agent: Any, arg: str) -> CommandResult:
         if is_tty() and confirm("Open it in your editor now?", default=True):
             from axon.commands.common import open_in_editor
             open_in_editor(path)
-        hint(f"    Activate it with /output-style {path.stem}")
+        typed_hint(f"    Activate it with /output-style {path.stem}")
         print()
         return _done()
 
@@ -93,7 +95,7 @@ def handle_output_style(agent: Any, arg: str) -> CommandResult:
                 mark = f"{MINT}●{RST}" if s.name == current else f"{DARK_SLATE}○{RST}"
                 print(f"    {mark} {WHITE}{s.name:<14}{RST} {SLATE}{s.description[:64]}{RST} {DARK_SLATE}{s.source}{RST}")
             print()
-            hint("    /output-style <name> · /output-style new <name>")
+            typed_hint("    /output-style <name> · /output-style new <name>")
             print()
             return _done()
     style = get_style(target, ws)
@@ -161,7 +163,7 @@ def handle_statusline(agent: Any, arg: str) -> CommandResult:
         else:
             kv("Command", "none (built-in status bar)")
         print()
-        hint("    " + STATUSLINE_USAGE.replace("\n", "\n    "))
+        typed_hint("    " + STATUSLINE_USAGE.replace("\n", "\n    "))
         print()
         return _done()
     if a.lower() in ("off", "remove", "clear", "none", "reset"):
@@ -271,6 +273,34 @@ def handle_vim(agent: Any, arg: str) -> CommandResult:
     return _done()
 
 
+# ─── /suggestions ──────────────────────────────────────────────────────────
+
+@command("suggestions", category=CAT_SYS, usage="/suggestions [on|off]",
+         description="Show a guess of your next message as ghost text in the empty prompt (Tab accepts it)")
+def handle_suggestions(agent: Any, arg: str) -> CommandResult:
+    a = arg.strip().lower()
+    cur = bool(getattr(agent.settings, "prompt_suggestions", True))
+    if a in ("on", "true", "1", "enable"):
+        new = True
+    elif a in ("off", "false", "0", "disable"):
+        new = False
+    elif not a or a == "toggle":
+        new = not cur
+    else:
+        usage("/suggestions [on|off]")
+        return _done()
+    update_settings(agent, prompt_suggestions=new)
+    if not new and hasattr(agent, "suggestions"):
+        agent.suggestions.clear()            # drop the one on screen or on its way
+    path = update_settings_file({"promptSuggestions": new})
+    ok(f"Next-prompt suggestions {BOLD}{'on' if new else 'off'}{RST} {_saved_note(path)}")
+    if new:
+        hint("    After an answer the likely next message shows as dim text in the empty prompt: Tab accepts it, any key dismisses it.")
+        hint("    It costs a few hundred input tokens and ~15 output tokens per turn on the small model.")
+        print()
+    return _done()
+
+
 # ─── /color ────────────────────────────────────────────────────────────────
 
 PROMPT_COLORS: dict[str, str] = {
@@ -308,6 +338,29 @@ def handle_color(agent: Any, arg: str) -> CommandResult:
 
 # ─── /fast ─────────────────────────────────────────────────────────────────
 
+def _connection_of(settings: Any) -> dict[str, Any]:
+    """The settings that decide which endpoint a model is sent to."""
+    return {"provider": settings.provider, "base_url": settings.base_url, "api_key": settings.api_key}
+
+
+def _restore_connection(agent: Any, model: str) -> None:
+    """Go back to *model* on exactly the provider, URL and key that were active before /fast."""
+    from axon.commands.common import update_settings
+    from axon.commands.model_cmds import switch_model
+    from axon.providers.registry import provider_for
+
+    saved = getattr(agent, "_fast_prev_connection", None)
+    if not saved:
+        switch_model(agent, model, persist=False)
+        return
+    update_settings(agent, model=model, **saved)
+    agent.provider = provider_for(model, agent.settings)
+    try:
+        agent.session.model = model
+    except Exception:
+        pass
+
+
 @command("fast", category=CAT_MODEL, description="Toggle the small/fast model for this session",
          usage="/fast [on|off]   (uses settings.small_model; set it with smallModel in settings.json)")
 def handle_fast(agent: Any, arg: str) -> CommandResult:
@@ -324,17 +377,18 @@ def handle_fast(agent: Any, arg: str) -> CommandResult:
     if want:
         small = getattr(agent.settings, "small_model", None)
         if not small or small == agent.settings.model:
-            warn("No small model configured. Set smallModel in ~/.axon/settings.json or /config small_model <model>.")
+            warn("No small model configured. Set smallModel in ~/.axon/settings.json" + typed_only(" or /config small_model <model>") + ".")
             return _done()
         prev = agent.settings.model
+        agent._fast_prev_connection = _connection_of(agent.settings)
         if switch_model(agent, small, persist=False) is False:
             return _done()
         agent.fast_mode = True
         agent._fast_prev_model = prev
-        ok(f"⚡ Fast mode on: {CYAN}{small}{RST} {SLATE}(was {prev}; /fast off to return){RST}")
+        ok(f"⚡ Fast mode on: {CYAN}{small}{RST} {SLATE}(was {prev}{typed_only('; /fast off to return')}){RST}")
     else:
         prev = getattr(agent, "_fast_prev_model", None) or agent.settings.model
-        switch_model(agent, prev, persist=False)
+        _restore_connection(agent, prev)
         agent.fast_mode = False
         ok(f"Fast mode off: back to {CYAN}{prev}{RST}")
     return _done()
@@ -377,7 +431,7 @@ def handle_goal(agent: Any, arg: str) -> CommandResult:
             kv("Goal", f"{WHITE}{current}{RST}")
             print()
         else:
-            info("No session goal. /goal <condition> sets one.")
+            info("No session goal." + typed_only(" /goal <condition> sets one."))
         return _done()
     if a.lower() in ("clear", "off", "none", "-", "reset"):
         agent.goal = None
@@ -387,7 +441,7 @@ def handle_goal(agent: Any, arg: str) -> CommandResult:
     agent.goal = a[:500]
     update_settings(agent, goal=agent.goal)
     ok(f"Goal set: {WHITE}{agent.goal}{RST}")
-    hint("    Shown in /status and the prompt; the model is told to keep working until it holds.")
+    hint("    Shown in the status view and the prompt; the model is told to keep working until it holds.")
     print()
     return _done()
 

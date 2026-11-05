@@ -4,8 +4,10 @@
     /endpoint set <provider> <url>                send a provider's traffic to another URL (proxy, gateway)
     /endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--use]
     /endpoint reset <provider|name>               back to the preset default / delete a custom endpoint
-    /endpoint test [provider|url]                 connectivity, latency, model count
+    /endpoint test [provider|url] [--model M]     connectivity, latency, model count, tool-call support
+    /endpoint native-tools <name> true|false      false: the gateway drops `tools`, so describe them in the prompt
     /endpoint use <provider|name> [--model M]     switch this session (and the default) to it
+    /endpoint models <name> [import|add <model>...|clear]   manage the models offered by /model for it
 
 Everything is saved in ~/.axon/config.toml ([endpoints.<id>]); project files can never redirect a key.
 The same engine backs ``axon endpoint ...``.
@@ -15,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from axon.commands.common import ask_text, err, header, hint, info, is_tty, ok, update_settings, usage, warn
+from axon.commands.common import ask_text, err, header, info, is_tty, ok, update_settings, usage, warn, typed_hint, typed_only
 from axon.commands.keys_cmds import _prepare_cli, parse_opts, refresh_agent_key, set_key, split_args
 from axon.commands.registry import CommandResult, command
 from axon.providers import endpoints as ep
@@ -26,13 +28,15 @@ CAT = "Model & Modes"
 USAGE = (
     "/endpoint                                        menu (a list without a terminal)\n"
     "/endpoint set <provider> <url>                   redirect a provider to another base URL (proxy/gateway)\n"
-    "/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--use]\n"
+    "/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--import] [--use]\n"
     "/endpoint reset <provider|name>                  preset default URL again / delete a custom endpoint\n"
-    "/endpoint test [provider|url]                    connectivity, latency and model count\n"
+    "/endpoint test [provider|url] [--model M]        connectivity, latency, model count and tool-call support\n"
+    "/endpoint native-tools <name> true|false         false: the gateway drops `tools` (tools go in the prompt)\n"
     "/endpoint use <provider|name> [--model M]        switch to it now (also saved as the default)\n"
+    "/endpoint models <name> [import|add <model>...|clear]   list, import from its /models, add or forget models\n"
     "saved in ~/.axon/config.toml (user scope only)"
 )
-_VALUED = ("--key-env", "--env", "--env-var", "--model", "--format", "--name")
+_VALUED = ("--key-env", "--env", "--env-var", "--model", "--format", "--name", "--native-tools")
 
 
 def _ws(agent: Any, workspace: Path | str | None) -> Path:
@@ -91,9 +95,13 @@ def _status(p: Any) -> str:
             bits.append(f"model {p.default_model}")
         if p.api_format != "openai":
             bits.append(p.api_format)
+        if not p.native_tools:
+            bits.append("tools in prompt")
         return " · ".join(bits)
     if ep.is_overridden(p):
-        return f"custom URL (default {ep.default_url(p.id)})"
+        return f"custom URL (default {ep.default_url(p.id)})" + ("" if p.native_tools else " · tools in prompt")
+    if not p.native_tools:
+        return "tools in prompt"
     return "default"
 
 
@@ -109,7 +117,7 @@ def list_endpoints(agent: Any = None) -> int:
     if s is not None and active == "":
         print(f"\n  {GOLD}▸{RST} {SLATE}this session:{RST} {CYAN}{getattr(s, 'base_url', '')}{RST} {SLATE}(not a saved endpoint){RST}")
     print()
-    hint("    /endpoint set <provider> <url> · /endpoint add <name> <url> --key-env VAR · /endpoint reset <provider> · "
+    typed_hint("    /endpoint set <provider> <url> · /endpoint add <name> <url> --key-env VAR · /endpoint reset <provider> · "
          "/endpoint test [provider]")
     print()
     return 0
@@ -124,7 +132,7 @@ def _sync_agent(agent: Any, change: ep.EndpointChange) -> None:
     if not on_it:
         return
     if not change.new_url:
-        warn("This session still uses that endpoint; pick another one with /provider or /endpoint use <name>.")
+        warn("This session still uses that endpoint." + typed_only(" Pick another one with /provider or /endpoint use <name>."))
         return
     try:
         from axon.providers.registry import provider_for
@@ -137,7 +145,7 @@ def _sync_agent(agent: Any, change: ep.EndpointChange) -> None:
 
 
 def set_url(agent: Any, token: str, url: str, *, env_var: str | None = None, model: str | None = None,
-            test: bool = False) -> int:
+            test: bool = False, native_tools: bool | None = None) -> int:
     preset = _find(token)
     if preset is None:
         err(f"Unknown provider '{token}'. To add a new endpoint: /endpoint add <name> <url>")
@@ -148,7 +156,7 @@ def set_url(agent: Any, token: str, url: str, *, env_var: str | None = None, mod
     if w := ep.url_warning(url):
         warn(w)
     try:
-        change = ep.save_endpoint(preset.id, url, env_var=env_var, model=model)
+        change = ep.save_endpoint(preset.id, url, env_var=env_var, model=model, native_tools=native_tools)
     except (OSError, ValueError) as e:
         err(f"Could not save: {e}")
         return 1
@@ -181,12 +189,13 @@ def reset(agent: Any, token: str) -> int:
 
 
 def add(agent: Any, ws: Path, name: str, url: str, *, env_var: str | None, model: str | None, fmt: str | None,
-        display: str | None, use: bool, interactive: bool) -> int:
+        display: str | None, use: bool, interactive: bool, import_list: bool = False,
+        native_tools: bool | None = None) -> int:
     eid = ep.slug(name)
     existing = _find(eid)
     if existing is not None and not ep.is_custom(existing) and existing.id == eid:
         info(f"'{eid}' is a built-in provider; changing its URL instead.")
-        return set_url(agent, eid, url, env_var=env_var, model=model)
+        return set_url(agent, eid, url, env_var=env_var, model=model, native_tools=native_tools)
     if not ep.valid_url(url):
         err(f"Not a valid http(s) URL: {url}")
         return 2
@@ -199,7 +208,7 @@ def add(agent: Any, ws: Path, name: str, url: str, *, env_var: str | None, model
         env_var = ""
     try:
         change = ep.save_endpoint(eid, url, env_var=env_var, model=model or "", name=display or "",
-                                  api_format=fmt or None)
+                                  api_format=fmt or None, native_tools=native_tools)
     except (OSError, ValueError) as e:
         err(f"Could not save: {e}")
         return 1
@@ -212,16 +221,20 @@ def add(agent: Any, ws: Path, name: str, url: str, *, env_var: str | None, model
             if interactive:
                 set_key(agent, ws, env_var, interactive=True)
             else:
-                hint(f"    Add it with: /keys set {env_var} <key>   (or axon keys set {env_var})")
+                typed_hint(f"    Add it with: /keys set {env_var} <key>   (or axon keys set {env_var})")
     else:
         print(f"  {SLATE}No API key is sent to this endpoint.{RST}")
+    if import_list:
+        created = _find(eid)
+        if created is not None:
+            import_models(agent, created)
     if interactive:
         test_target(agent, eid)
         from axon.commands.common import confirm
         use = use or confirm(f"Switch to {eid} now?", default=False)
     if use:
         return use_endpoint(agent, eid, model=model, interactive=interactive)
-    hint(f"    Switch to it with /endpoint use {eid}")
+    typed_hint(f"    Switch to it with /endpoint use {eid}")
     print()
     return 0
 
@@ -235,10 +248,174 @@ def _key_for(preset: Any, agent: Any) -> str:
     return ks.preset_status(preset).value
 
 
-def test_target(agent: Any, token: str = "") -> int:
+def _remember_model(preset: Any, model: str) -> None:
+    """Save a model that the preset does not list, so /model and the picker offer it."""
+    if not model or model in preset.models or model == preset.default_model:
+        return
+    try:
+        ep.add_models(preset.id, [model])
+    except (OSError, ValueError):
+        warn(f"Could not save {model} to config.toml; it works for this session only.")
+
+
+def models_cmd(agent: Any, token: str, action: str = "", names: Sequence[str] = ()) -> int:
+    """/endpoint models: show, import, add or clear the models saved for an endpoint."""
+    preset = _find(token)
+    if preset is None:
+        err(f"Unknown provider or endpoint '{token}'.")
+        return 2
+    action = action.lower()
+    if action in ("import", "sync", "fetch"):
+        return import_models(agent, preset)
+    if action == "add":
+        return add_models_cmd(preset, names)
+    if action in ("clear", "forget", "remove", "rm"):
+        removed = ep.remove_models(preset.id)
+        ok(f"Forgot {removed} saved model{'s' if removed != 1 else ''} for {preset.name}")
+        return 0
+    if action:
+        usage("/endpoint models <name> [import|add <model>...|clear]")
+        return 2
+    return show_models(preset)
+
+
+def show_models(preset: Any) -> int:
+    from axon.providers.catalog import get_models_for_provider
+    models = get_models_for_provider(preset)
+    saved = set(ep.saved_models(preset.id))
+    header(f"{preset.name} models", f"{len(models)} offered by /model")
+    for model in models:
+        tag = f"{SLATE}saved{RST}" if model in saved else ""
+        print(f"    {WHITE}{model}{RST} {tag}")
+    if not models:
+        info("No models yet. Import them with /endpoint models " + preset.id + " import, or add one by name.")
+    print()
+    return 0
+
+
+def add_models_cmd(preset: Any, names: Sequence[str]) -> int:
+    if not names:
+        usage("/endpoint models <name> add <model> [<model> ...]")
+        return 2
+    try:
+        added = ep.add_models(preset.id, list(names))
+    except (OSError, ValueError) as e:
+        err(f"Could not save: {e}")
+        return 1
+    ok(f"Saved {len(added)} model{'s' if len(added) != 1 else ''} for {preset.name}: use them with /model {names[0]}")
+    return 0
+
+
+def import_models(agent: Any, preset: Any) -> int:
+    """Fetch the endpoint's /models list and save every chat model so /model and the picker offer them."""
+    key = _key_for(preset, agent)
+    result = ep.fetch_models(preset.base_url, key, preset.api_format)
+    if result.error:
+        err(result.error)
+        return 1
+    try:
+        added = ep.add_models(preset.id, result.models)
+    except (OSError, ValueError) as e:
+        err(f"Could not save: {e}")
+        return 1
+    ok(f"{BOLD}{preset.name}{RST}: {len(result.models)} models found, {len(added)} new saved")
+    typed_hint(f"    Pick one with /model {result.models[0]}")
+    print()
+    return 0
+
+
+def native_tools_cmd(agent: Any, token: str, value: str) -> int:
+    """/endpoint native-tools <name> true|false: choose native tool calling or tools described in the prompt."""
+    preset = _find(token)
+    if preset is None:
+        err(f"Unknown provider or endpoint '{token}'.")
+        return 2
+    wanted = value.strip().lower()
+    if wanted not in _TRUE_WORDS + _FALSE_WORDS:
+        usage("/endpoint native-tools <name> true|false")
+        return 2
+    native = wanted in _TRUE_WORDS
+    try:
+        change = ep.set_native_tools(preset.id, native)
+    except (OSError, ValueError) as e:
+        err(f"Could not save: {e}")
+        return 1
+    if native:
+        ok(f"{BOLD}{preset.name}{RST}: native tool calling (tools sent in the request) · saved to {change.path}")
+    else:
+        ok(f"{BOLD}{preset.name}{RST}: tools are described in the prompt (native_tools = false) · saved to {change.path}")
+    _refresh_provider(agent)
+    return 0
+
+
+_TRUE_WORDS = ("true", "on", "yes", "1", "native")
+_FALSE_WORDS = ("false", "off", "no", "0", "prompt")
+
+
+def _parse_bool_option(text: str | None) -> bool | None:
+    """True / False for a recognised word, None when the option was not given. Raises ValueError otherwise."""
+    if text is None:
+        return None
+    word = text.strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    raise ValueError(f"expected true or false, got {text!r}")
+
+
+def _refresh_provider(agent: Any) -> None:
+    """Rebuild the running session's provider so a changed setting applies now."""
+    settings = getattr(agent, "settings", None)
+    if agent is None or settings is None:
+        return
+    try:
+        from axon.providers.registry import provider_for
+        agent.provider = provider_for(settings.model, settings)
+    except Exception as e:
+        warn(f"Saved, but this session could not reload the provider ({e}). Restart Axon to use it.")
+
+
+def _probe_model(preset: Any, agent: Any, override: str | None) -> str:
+    """The model for the tool probe: --model, the endpoint's default, a saved one, else the session's."""
+    if override:
+        return override
+    if preset is not None and preset.default_model:
+        return preset.default_model
+    if preset is not None and ep.saved_models(preset.id):
+        return ep.saved_models(preset.id)[0]
+    return str(getattr(getattr(agent, "settings", None), "model", "") or "")
+
+
+def report_tool_support(agent: Any, preset: Any, url: str, key: str, model: str | None = None) -> None:
+    """Probe the endpoint with one tiny tool request and say what to do when it drops tools.
+    Runs only from /endpoint test, never during normal chat."""
+    if preset is not None and not preset.native_tools:
+        print(f"  {SLATE}Tools: described in the prompt (native_tools = false), nothing to probe.{RST}\n")
+        return
+    if preset is not None and preset.api_format != "openai":
+        return
+    probe_model = _probe_model(preset, agent, model)
+    print(f"  {SLATE}Probing tool-call support with {probe_model or 'no model'} …{RST}", flush=True)
+    probe = ep.probe_tool_support(url, key, probe_model)
+    if not probe.ran:
+        print(f"  {GOLD}!{RST} {WHITE}Could not probe tool support: {probe.message}{RST}\n")
+        return
+    if probe.native_tools:
+        print(f"  {MINT}✓ Tools{RST} {SLATE}· the endpoint returned a tool call{RST}\n")
+        return
+    name = preset.id if preset is not None else "<name>"
+    print(f"  {GOLD}!{RST} {WHITE}This endpoint drops tool definitions{RST} {SLATE}(no tool call came back for {probe_model}).{RST}")
+    print(f"    {SLATE}Agents cannot use tools through it. Describe the tools in the prompt instead:{RST}")
+    print(f"      {CYAN}/endpoint native-tools {name} false{RST}\n")
+
+
+def test_target(agent: Any, token: str = "", model: str | None = None) -> int:
     from axon.providers.catalog import find_preset_by_url
+    typed_url = False
     if token and ep.valid_url(token):
         url, preset = token, find_preset_by_url(token)
+        typed_url = True
     elif token:
         preset = _find(token)
         if preset is None:
@@ -259,6 +436,8 @@ def test_target(agent: Any, token: str = "") -> int:
             err("No endpoint configured.")
             return 2
     key = _key_for(preset, agent)
+    if typed_url and preset is None and ep.norm(url) != ep.norm(str(getattr(getattr(agent, "settings", None), "base_url", "") or "")):
+        key = ""   # an unknown host never gets the session's key: only the URL the session already uses does
     fmt = getattr(preset, "api_format", "openai") if preset is not None else "openai"
     print(f"  {SLATE}Testing {url} …{RST}", flush=True)
     res = ep.test_endpoint(url, key, fmt)
@@ -267,11 +446,12 @@ def test_target(agent: Any, token: str = "") -> int:
         bits.append(f"{res.models} models")
     if res.ok:
         print(f"  {MINT}✓ Reachable{RST} {SLATE}· {' · '.join(bits)}{RST}\n")
+        report_tool_support(agent, preset, url, key, model)
         return 0
     color = GOLD if res.reachable else ROSE
     print(f"  {color}{'!' if res.reachable else '✗'}{RST} {WHITE}{res.message}{RST} {SLATE}· {bits[0]}{RST}")
     if res.status in (401, 403) and preset is not None and preset.requires_key:
-        hint(f"    Fix the key with /keys set {preset.id}")
+        typed_hint(f"    Fix the key with /keys set {preset.id}")
     print()
     return 1
 
@@ -285,7 +465,8 @@ def use_endpoint(agent: Any, token: str, *, model: str | None = None, interactiv
         err(f"Unknown provider or endpoint '{token}'.")
         return 2
     cur_model = str(getattr(getattr(agent, "settings", None), "model", "") or "")
-    chosen = model or preset.default_model or ""
+    saved = ep.saved_models(preset.id)
+    chosen = model or preset.default_model or (saved[0] if saved else "")
     if not chosen and interactive:
         chosen = ask_text(f"Model to use on {preset.name}{(' [' + cur_model + ']') if cur_model else ''}:") or cur_model
     chosen = chosen or cur_model
@@ -294,7 +475,8 @@ def use_endpoint(agent: Any, token: str, *, model: str | None = None, interactiv
         return 2
     key = _key_for(preset, agent)
     if preset.requires_key and not key:
-        warn(f"No key for {preset.name} yet: /keys set {preset.id}")
+        warn(f"No key for {preset.name} yet." + typed_only(f" /keys set {preset.id}"))
+    _remember_model(preset, chosen)
     from axon.commands.common import update_global_config
     if not update_global_config({"provider": preset.id, "base_url": preset.base_url, "model": chosen}):
         warn("Could not update ~/.axon/config.toml (malformed?); this session switches anyway.")
@@ -348,6 +530,7 @@ def _menu(agent: Any, ws: Path) -> int:
             opts.append(("Remove this endpoint", "reset", "deletes it from config.toml"))
         if p.requires_key:
             opts.append(("API key…", "key", ks.preset_status(p, ws).masked or "not set"))
+        opts.append(("Import models from its /models list", "import", "saved so /model offers them"))
         opts += [("Use it now", "use", "switch this session and save as default"), ("Back", None, "")]
         action = choose(opts, title=p.name, subtitle=p.base_url)
         if action == "url":
@@ -360,6 +543,8 @@ def _menu(agent: Any, ws: Path) -> int:
             reset(agent, p.id)
         elif action == "key":
             set_key(agent, ws, p.id, interactive=True)
+        elif action == "import":
+            import_models(agent, p)
         elif action == "use":
             use_endpoint(agent, p.id, interactive=True)
 
@@ -393,6 +578,11 @@ def run_endpoint(arg: str | Sequence[str] = "", agent: Any = None, workspace: Pa
     if fmt and fmt not in ("openai", "anthropic"):
         err("--format must be openai or anthropic")
         return 2
+    try:
+        native_tools = _parse_bool_option(opts.get("--native-tools"))
+    except ValueError as e:
+        err(f"--native-tools: {e}")
+        return 2
     if "--help" in flags or (words and words[0].lower() in ("help", "-h")):
         usage(USAGE)
         return 0
@@ -405,7 +595,8 @@ def run_endpoint(arg: str | Sequence[str] = "", agent: Any = None, workspace: Pa
         if len(rest) < 2:
             usage("/endpoint set <provider> <url>")
             return 2
-        return set_url(agent, rest[0], rest[1], env_var=env_var, model=model, test="--test" in flags)
+        return set_url(agent, rest[0], rest[1], env_var=env_var, model=model, test="--test" in flags,
+                       native_tools=native_tools)
     if sub in ("add", "new", "custom"):
         if len(rest) < 2:
             if is_tty() and not rest:
@@ -413,19 +604,30 @@ def run_endpoint(arg: str | Sequence[str] = "", agent: Any = None, workspace: Pa
             usage("/endpoint add <name> <url> [--key-env VAR] [--model M] [--format openai|anthropic] [--use]")
             return 2
         return add(agent, ws, rest[0], rest[1], env_var=env_var, model=model, fmt=fmt, display=opts.get("--name"),
-                   use="--use" in flags, interactive=False)
+                   use="--use" in flags, interactive=False, import_list="--import" in flags,
+                   native_tools=native_tools)
     if sub in ("reset", "default", "remove", "rm", "delete"):
         if not rest:
             usage("/endpoint reset <provider|name>")
             return 2
         return reset(agent, rest[0])
     if sub in ("test", "check", "ping"):
-        return test_target(agent, rest[0] if rest else "")
+        return test_target(agent, rest[0] if rest else "", model=model)
+    if sub in ("native-tools", "native_tools", "tools"):
+        if len(rest) < 2:
+            usage("/endpoint native-tools <name> true|false")
+            return 2
+        return native_tools_cmd(agent, rest[0], rest[1])
     if sub in ("use", "switch"):
         if not rest:
             usage("/endpoint use <provider|name> [--model M]")
             return 2
         return use_endpoint(agent, rest[0], model=model, interactive=is_tty())
+    if sub in ("models", "model"):
+        if not rest:
+            usage("/endpoint models <name> [import|add <model>...|clear]")
+            return 2
+        return models_cmd(agent, rest[0], rest[1] if len(rest) > 1 else "", rest[2:])
     if len(words) >= 2 and ep.valid_url(words[1]) and _find(words[0]) is not None:
         return set_url(agent, words[0], words[1], env_var=env_var, model=model)
     usage(USAGE)
@@ -445,5 +647,5 @@ def endpoint_main(argv: list[str]) -> int:
     return run_endpoint(list(argv), agent=None, workspace=Path.cwd())
 
 
-__all__ = ["USAGE", "add", "endpoint_main", "handle_endpoint", "list_endpoints", "reset", "run_endpoint", "set_url",
-           "test_target", "use_endpoint"]
+__all__ = ["USAGE", "add", "endpoint_main", "handle_endpoint", "import_models", "list_endpoints", "models_cmd",
+           "native_tools_cmd", "report_tool_support", "reset", "run_endpoint", "set_url", "test_target", "use_endpoint"]

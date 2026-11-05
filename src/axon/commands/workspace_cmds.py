@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from axon.commands.common import (
     confirm, err, header, hint, info, is_tty, kv, ok, update_settings, update_settings_file, usage, ws_of,
+    typed_hint,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, RST, SLATE, WHITE
@@ -91,7 +93,7 @@ def handle_add_dir(agent: Any, arg: str) -> CommandResult:
         for d in dirs:
             kv("Additional", d)
         if not dirs:
-            print(f"    {SLATE}No additional directories. {ADD_DIR_USAGE.splitlines()[1].strip()}{RST}")
+            print(f"    {SLATE}No additional directories.{typed_only(' ' + ADD_DIR_USAGE.splitlines()[1].strip())}{RST}")
         print()
         return _done()
     if rest.lower().startswith(("remove ", "rm ")):
@@ -120,6 +122,12 @@ def handle_add_dir(agent: Any, arg: str) -> CommandResult:
         err(f"Refusing to add {p}: {why}.")
         return _done()
     saved = add_working_dir(agent, p, save=save)
+    skills = getattr(agent, "skills", None)
+    if skills is not None and hasattr(skills, "add_directory"):
+        try:
+            skills.add_directory(p)          # skills under <dir>/.claude/skills become available
+        except Exception:
+            pass
     ok(f"Added working directory {WHITE}{p}{RST}" + (f" {SLATE}(saved to {saved}){RST}" if saved else ""))
     return _done()
 
@@ -342,7 +350,7 @@ def handle_loop(agent: Any, arg: str) -> CommandResult:
         if not jobs:
             print(f"    {SLATE}No active loops.{RST}")
         print()
-        hint("    " + LOOP_USAGE.replace("\n", "\n    "))
+        typed_hint("    " + LOOP_USAGE.replace("\n", "\n    "))
         print()
         return _done()
     if words[0].lower() in ("stop", "off", "cancel", "clear"):
@@ -370,12 +378,12 @@ def handle_loop(agent: Any, arg: str) -> CommandResult:
         q = _queue(agent)
         for _ in range(n):
             q.push(prompt)
-        ok(f"Queued {BOLD}{n}×{RST} {WHITE}{prompt}{RST} {SLATE}(runs now, one after another · /queue clear stops it){RST}")
+        ok(f"Queued {BOLD}{n}×{RST} {WHITE}{prompt}{RST} {SLATE}(runs now, one after another{typed_only(' · /queue clear stops it')}){RST}")
         return _done()
     job = start_interval_loop(agent, prompt, interval, max_runs=count)
     cap = f", at most {count} times" if count else ""
     ok(f"Loop #{job.id}: {WHITE}{prompt}{RST} every {BOLD}{_fmt_interval(job.interval_s)}{RST}{cap}")
-    hint("    Runs while the prompt is idle (press Enter on an empty prompt to pick up a due run) · /loop stop")
+    typed_hint("    Runs while the prompt is idle (press Enter on an empty prompt to pick up a due run) · /loop stop")
     print()
     return _done()
 

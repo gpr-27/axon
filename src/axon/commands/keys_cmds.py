@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from axon.commands.common import (
-    confirm, err, header, hint, info, is_tty, ok, open_in_editor, update_settings, usage, warn,
+    confirm, err, header, info, is_tty, ok, open_in_editor, update_settings, usage, warn,
+    typed_hint, typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.providers import keystore as ks
@@ -179,7 +180,7 @@ def list_keys(agent: Any = None, workspace: Path | None = None) -> int:
     if local:
         print(f"\n    {SLATE}No key needed: {', '.join(local)}{RST}")
     print()
-    hint("    /keys set <provider> [key] · /keys test [provider|all] · /keys remove <provider> · /keys where · /keys edit")
+    typed_hint("    /keys set <provider> [key] · /keys test [provider|all] · /keys remove <provider> · /keys where · /keys edit")
     print()
     return 0
 
@@ -225,7 +226,7 @@ def show_where(agent: Any = None, workspace: Path | None = None) -> int:
     scope = _SAVE_SCOPE["scope"]
     print(f"\n    {SLATE}New keys are saved to {WHITE}{ks.scope_label(scope, ws)}{RST}"
           f"{SLATE} · --project / --user choose per command{RST}")
-    print(f"    {SLATE}Base URLs and custom endpoints live in ~/.axon/config.toml: /endpoint{RST}\n")
+    print(f"    {SLATE}Base URLs and custom endpoints live in ~/.axon/config.toml{typed_only(': /endpoint')}{RST}\n")
     return 0
 
 
@@ -288,7 +289,7 @@ def set_key(agent: Any, ws: Path, token: str, key: str = "", *, scope: str = "us
             break
         print(f"  {ROSE}✗ {preset.name} rejected the key:{RST} {WHITE}{tested.message}{RST}")
         if not interactive:
-            hint("    Not saved. Pass --no-verify to save it anyway.")
+            typed_hint("    Not saved. Pass --no-verify to save it anyway.")
             print()
             return 1
         from axon.ui.picker import choose
@@ -355,7 +356,7 @@ def test_keys(agent: Any, ws: Path, token: str = "") -> int:
     targets = _targets_for_test(agent, ws, token)
     if not targets:
         if token.lower() in ("", "all"):
-            info("No API keys are set. Add one with /keys set <provider>.")
+            info("No API keys are set." + typed_only(" Add one with /keys set <provider>."))
             return 1
         return 2
     header("Key check", "live request to each provider")

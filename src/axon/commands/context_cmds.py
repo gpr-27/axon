@@ -7,8 +7,9 @@ from decimal import Decimal
 from typing import Any
 
 from axon.commands.common import (
-    bar, err, estimate_tokens, fmt_tokens, fmt_usd, header, hint, info, kv, ok, record_usage, section,
+    bar, err, estimate_tokens, fmt_tokens, fmt_usd, header, info, kv, ok, record_usage, section,
     table, update_settings, usage, width,
+    typed_hint,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, DIM, GOLD, LBLUE, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE
@@ -171,11 +172,11 @@ def context_grid(parts: list[tuple[int, str]], window: int, threshold: int, lege
 
 
 def _limit_label(n: int) -> str:
-    return "model maximum" if not n else fmt_tokens(n)
+    return "auto (the model's full window)" if not n else fmt_tokens(n)
 
 
 def handle_context_limit(agent: Any, arg: str) -> CommandResult:
-    """/context limit [128k|256k|1m|max]: how much of the model's window Axon uses (picker when bare)."""
+    """/context limit [auto|128k|256k|1m]: how much of the model's window Axon uses (picker when bare)."""
     from axon.providers.registry import CONTEXT_LIMIT_CHOICES, get_context_window, parse_token_count
     from axon.commands.common import is_tty, update_settings_file
     model_max = get_context_window(agent.settings.model)
@@ -185,14 +186,14 @@ def handle_context_limit(agent: Any, arg: str) -> CommandResult:
         if not is_tty():
             header("Context limit", f"{agent.settings.model} supports {fmt_tokens(model_max)}")
             kv("Using", f"{_limit_label(current)} (auto-compact near 75% of it)")
-            hint("    /context limit 128k | 256k | 1m | max")
+            typed_hint("    /context limit auto | 128k | 256k | 1m")
             print()
             return CommandResult(handled=True)
         from axon.ui.picker import pick
-        labels = {f"{fmt_tokens(n)} tokens" + (" (default)" if n == 128_000 else "")
-                  + ("" if n <= model_max else f" — this model stops at {fmt_tokens(model_max)}"): n
-                  for n in CONTEXT_LIMIT_CHOICES}
-        labels[f"Model maximum ({fmt_tokens(model_max)})"] = 0
+        labels = {f"Auto: the model's full window, now {fmt_tokens(model_max)} (default)": 0}
+        for n in CONTEXT_LIMIT_CHOICES:
+            note = "" if n <= model_max else f" — this model stops at {fmt_tokens(model_max)}"
+            labels[f"{fmt_tokens(n)} tokens{note}"] = n
         cur = next((k for k, v in labels.items() if v == current), None)
         choice = pick(list(labels), title="Context limit: how much of the model's window to use", current=cur)
         if not choice:
@@ -203,7 +204,7 @@ def handle_context_limit(agent: Any, arg: str) -> CommandResult:
         try:
             limit = parse_token_count(value)
         except ValueError as e:
-            usage(f"/context limit 128k | 256k | 1m | max   ({e})")
+            usage(f"/context limit auto | 128k | 256k | 1m   ({e})")
             return CommandResult(handled=True)
     update_settings(agent, context_limit=limit)
     try:
@@ -219,7 +220,7 @@ def handle_context_limit(agent: Any, arg: str) -> CommandResult:
 
 
 @command("context", category=CAT, description="Context usage by category; --why explains each block; limit sets the window size",
-         aliases=("tokens",), usage="/context          coloured usage grid + breakdown by category\n/context --why    every injected block, its trigger and tokens\n/context all      include per-tool token sizes\n/context limit    how much of the model's window to use: 128k (default), 256k, 1m or max")
+         aliases=("tokens",), usage="/context          coloured usage grid + breakdown by category\n/context --why    every injected block, its trigger and tokens\n/context all      include per-tool token sizes\n/context limit    how much of the model's window to use: auto (default: the model's full window), 128k, 256k or 1m")
 def handle_context(agent: Any, arg: str) -> CommandResult:
     a = arg.strip().lower()
     if a in ("--why", "why", "xray", "--xray"):
@@ -283,15 +284,23 @@ def handle_context(agent: Any, arg: str) -> CommandResult:
         for name, tok in sized:
             print(f"    {WHITE}{name:<28}{RST} {SLATE}{fmt_tokens(tok):>7}{RST}")
         print()
-    hint("    /context --why explains each block · /payload shows the exact prompt · /compact [focus]")
+    typed_hint("    /context --why explains each block · /payload shows the exact prompt · /compact [focus]")
     print()
     return CommandResult(handled=True)
 
 
 @command("payload", category=CAT, description="Inspect the exact prompt sent to the model",
-         aliases=("breakdown", "input"), usage="/payload          section summary with token counts\n/payload full     full system prompt, tool list and messages")
+         aliases=("breakdown", "input"), usage="/payload          section summary with token counts (a menu to expand one in a terminal)\n/payload full     full system prompt, tool list and messages\n/payload system|tools|history|last   one section in full")
 def handle_payload(agent: Any, arg: str = "") -> CommandResult:
-    full = arg.strip().lower() in ("full", "raw", "all")
+    word = arg.strip().lower()
+    full = word in ("full", "raw", "all")
+    only = PAYLOAD_SECTIONS.get(word, "")   # one section, shown in full
+
+    def wants(section: str) -> bool:
+        return not only or only == section
+
+    def expanded(section: str) -> bool:
+        return full or only == section
     blocks = _system_blocks(agent)
     schemas = _tool_schemas(agent)
     msgs = list(agent.conversation.messages)
@@ -314,25 +323,27 @@ def handle_payload(agent: Any, arg: str = "") -> CommandResult:
 
     print(f"\n  {GOLD}{BOLD}Active Input Payload Breakdown{RST}  {SLATE}{agent.settings.model} · ~{fmt_tokens(total)} tokens{RST}")
 
-    box(f"[1] SYSTEM PROMPT · {len(blocks)} blocks · ~{fmt_tokens(sys_tok)}", TEAL)
-    for i, b in enumerate(blocks, 1):
-        txt = str(b.get("text", "")).strip()
-        kind = _block_kind(txt)
-        line(f"{CYAN}Block {i}{RST} {DARK_SLATE}({kind}, ~{fmt_tokens(estimate_tokens(txt))}){RST} {WHITE}{(txt.splitlines() or [''])[0][:60]}{RST}", TEAL)
-        if full:
-            for ln in txt.splitlines()[1:]:
-                line(f"  {SLATE}{ln}{RST}", TEAL)
-    end(TEAL)
+    if wants("system"):
+        box(f"[1] SYSTEM PROMPT · {len(blocks)} blocks · ~{fmt_tokens(sys_tok)}", TEAL)
+        for i, b in enumerate(blocks, 1):
+            txt = str(b.get("text", "")).strip()
+            kind = _block_kind(txt)
+            line(f"{CYAN}Block {i}{RST} {DARK_SLATE}({kind}, ~{fmt_tokens(estimate_tokens(txt))}){RST} {WHITE}{(txt.splitlines() or [''])[0][:60]}{RST}", TEAL)
+            if expanded("system"):
+                for ln in txt.splitlines()[1:]:
+                    line(f"  {SLATE}{ln}{RST}", TEAL)
+        end(TEAL)
 
-    box(f"[2] TOOL DEFINITIONS · {len(schemas)} tools · ~{fmt_tokens(tool_tok)}", LBLUE)
-    names = [_schema_name(s) for s in schemas]
-    if full:
-        for s in schemas:
-            desc = str(s.get("description") or s.get("function", {}).get("description", "")).splitlines()
-            line(f"{WHITE}{_schema_name(s):<16}{RST} {SLATE}{(desc[0] if desc else '')[:70]}{RST}", LBLUE)
-    else:
-        line(f"{WHITE}{', '.join(names)[: w - 8]}{RST}", LBLUE)
-    end(LBLUE)
+    if wants("tools"):
+        box(f"[2] TOOL DEFINITIONS · {len(schemas)} tools · ~{fmt_tokens(tool_tok)}", LBLUE)
+        names = [_schema_name(s) for s in schemas]
+        if expanded("tools"):
+            for s in schemas:
+                desc = str(s.get("description") or s.get("function", {}).get("description", "")).splitlines()
+                line(f"{WHITE}{_schema_name(s):<16}{RST} {SLATE}{(desc[0] if desc else '')[:70]}{RST}", LBLUE)
+        else:
+            line(f"{WHITE}{', '.join(names)[: w - 8]}{RST}", LBLUE)
+        end(LBLUE)
 
     def show_msg(i: int, m: dict[str, Any], color: str, limit: int) -> None:
         role = str(m.get("role", "?")).upper()
@@ -359,19 +370,25 @@ def handle_payload(agent: Any, arg: str = "") -> CommandResult:
             fn = tc.get("function", {}) if isinstance(tc, dict) else {}
             line(f"  {GOLD}tool_call{RST} {fn.get('name')} {SLATE}{str(fn.get('arguments', ''))[:90]}{RST}", color)
 
-    box(f"[3] PREVIOUS CONVERSATION · {len(prev)} messages · ~{fmt_tokens(prev_tok)}", PURPLE)
-    if not prev:
-        line(f"{SLATE}(none){RST}", PURPLE)
-    for i, m in enumerate(prev, 1):
-        show_msg(i, m, PURPLE, 1000 if full else 1)
-    end(PURPLE)
+    if wants("history"):
+        box(f"[3] PREVIOUS CONVERSATION · {len(prev)} messages · ~{fmt_tokens(prev_tok)}", PURPLE)
+        if not prev:
+            line(f"{SLATE}(none){RST}", PURPLE)
+        for i, m in enumerate(prev, 1):
+            show_msg(i, m, PURPLE, 1000 if expanded("history") else 1)
+        end(PURPLE)
 
-    box(f"[4] LAST MESSAGE · ~{fmt_tokens(last_tok)}", MINT)
-    if last is None:
-        line(f"{SLATE}(none){RST}", MINT)
-    else:
-        show_msg(len(msgs), last, MINT, 1000 if full else 12)
-    end(MINT)
+    if wants("last"):
+        box(f"[4] LAST MESSAGE · ~{fmt_tokens(last_tok)}", MINT)
+        if last is None:
+            line(f"{SLATE}(none){RST}", MINT)
+        else:
+            show_msg(len(msgs), last, MINT, 1000 if expanded("last") else 12)
+        end(MINT)
+
+    if only:
+        print()
+        return CommandResult(handled=True)
 
     box("[5] TOTAL INPUT TOKEN RECONCILIATION", GOLD)
     for label, tok in (("System prompt", sys_tok), ("Tool definitions", tool_tok), ("Prior messages", prev_tok), ("Last message", last_tok)):
@@ -384,10 +401,34 @@ def handle_payload(agent: Any, arg: str = "") -> CommandResult:
         line(f"{SLATE}{'':<18} the ~ figures above are estimates (characters / 4) of the request as it would be "
              f"sent now; the provider's tokenizer usually counts code and JSON as fewer tokens{RST}", GOLD)
     end(GOLD)
+    from axon.commands.common import is_tty
+    if not full and not word and is_tty():
+        print()
+        _payload_menu(agent)
+        return CommandResult(handled=True)
     if not full:
-        hint("  /payload full shows every line")
+        typed_hint("  /payload full shows every line")
     print()
     return CommandResult(handled=True)
+
+
+PAYLOAD_SECTIONS = {"system": "system", "tools": "tools", "history": "history", "previous": "history",
+                    "last": "last"}
+
+
+def _payload_menu(agent: Any) -> None:
+    """Pick a section to expand (instead of telling you to type /payload full); Esc closes."""
+    from axon.ui.menus import choose_value
+    options = [("System prompt", "system", "every block in full"),
+               ("Tool definitions", "tools", "one line per tool"),
+               ("Previous conversation", "history", "every message in full"),
+               ("Last message", "last", "in full"),
+               ("Everything", "full", "all of the above")]
+    while True:
+        section = choose_value("Expand a section of the payload", options)
+        if section is None:
+            return
+        handle_payload(agent, section)
 
 
 def _safe_cut_fallback(messages: list[dict[str, Any]], keep: int = 4) -> int:
@@ -468,7 +509,7 @@ def handle_window(agent: Any, arg: str) -> CommandResult:
         header("Sliding window")
         kv("Window", f"{turns} turns (~{turns * 2} messages)" if turns else "unlimited")
         kv("Messages now", len(agent.conversation.messages))
-        hint("    /window <turns> · /window 0 for unlimited")
+        typed_hint("    /window <turns> · /window 0 for unlimited")
         print()
         return CommandResult(handled=True)
     if a in ("unlimited", "all", "none", "off"):
@@ -530,9 +571,13 @@ def _is_ledger(obj: Any) -> bool:
 
 
 @command("cost", category=CAT, description="Cost by source and model, cache savings, $/turn",
-         aliases=("usage", "ledger"), usage="/cost            session breakdown\n/cost calls      every API call\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
+         aliases=("usage", "ledger", "stats"), usage="/cost            session breakdown\n/cost calls      every API call\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
 def handle_cost(agent: Any, arg: str) -> CommandResult:
     a = arg.strip().lower()
+    if a in ("--all", "all", "lifetime", "global"):   # the usage log does not need this session's ledger
+        return usage_log_summary(agent, project_only=False)
+    if a in ("--project", "project"):
+        return usage_log_summary(agent, project_only=True)
     ledger = getattr(agent, "ledger", None)
     model = agent.settings.model if isinstance(getattr(getattr(agent, "settings", None), "model", None), str) else ""
     session = getattr(agent, "session", None)
@@ -549,11 +594,6 @@ def handle_cost(agent: Any, arg: str) -> CommandResult:
     if not _is_ledger(ledger):
         info("No usage recorded yet.")
         return CommandResult(handled=True)
-
-    if a in ("--all", "all", "lifetime", "global"):
-        return usage_log_summary(agent, project_only=False)
-    if a in ("--project", "project"):
-        return usage_log_summary(agent, project_only=True)
 
     if a in ("calls", "call", "detail", "details", "history", "-v", "--verbose"):
         print(f"\n  {GOLD}{BOLD}Detailed Call-by-Call API History{RST}")
@@ -638,7 +678,7 @@ def handle_cost(agent: Any, arg: str) -> CommandResult:
             kv("Workspace total", f"{fmt_usd(ws_ledger.total(), 4)} across {chats} session(s)")
     except Exception:
         pass
-    hint("    /cost calls lists every API call · /pricing shows model rates")
+    typed_hint("    /cost calls lists every API call · /pricing shows model rates")
     print()
     return CommandResult(handled=True)
 
@@ -674,7 +714,7 @@ def handle_pricing(agent: Any, arg: str) -> CommandResult:
         return CommandResult(handled=True)
     table(rows[:60], ["Model", "Input", "Output", "Cache read", "Cache write"])
     if len(rows) > 60:
-        hint(f"    … {len(rows) - 60} more; filter with /pricing <text>")
+        typed_hint(f"    … {len(rows) - 60} more; filter with /pricing <text>")
     print()
     return CommandResult(handled=True)
 
@@ -772,7 +812,9 @@ def handle_faq(agent: Any, arg: str) -> CommandResult:
         for _, content in cards.values():
             print(content)
             print()
-    print(f"\n  {DARK_SLATE}Topics: /faq 402 · 400 · 401 · sensitive · backup · credit · gpt6 · pricing{RST}\n")
+    print()
+    typed_hint("  Topics: /faq 402 · 400 · 401 · sensitive · backup · credit · gpt6 · pricing")
+    print()
     return CommandResult(handled=True)
 
 

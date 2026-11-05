@@ -63,6 +63,19 @@ def hint(text: str) -> None:
     print(f"  {DIM}{text}{RST}")
 
 
+def typed_only(text: str) -> str:
+    """``text`` when there is no terminal, "" in a terminal. For the part of a line that tells the
+    user to type a command ("... Start one with /plan-run <task>."): the menu offers it instead."""
+    return "" if is_tty() else text
+
+
+def typed_hint(text: str) -> None:
+    """A dim line telling the user which command to type next. Only printed without a terminal:
+    in a terminal the command's menu offers the same choice with the arrow keys."""
+    if not is_tty():
+        hint(text)
+
+
 def bar(fraction: float, cells: int = 24, color: str = TEAL) -> str:
     f = max(0.0, min(1.0, fraction))
     full = int(round(f * cells))
@@ -198,7 +211,11 @@ def is_tty() -> bool:
 
 
 def confirm(question: str, default: bool = False) -> bool:
-    """Ask y/n on a TTY. Non-interactive sessions get ``default``."""
+    """Ask y/n on a TTY. Non-interactive sessions get ``default``. A question already answered
+    Yes in a keyboard menu (axon.ui.menus) is not asked again."""
+    from axon.ui.menus import already_confirmed
+    if already_confirmed():
+        return True
     if not is_tty():
         return default
     suffix = "[Y/n]" if default else "[y/N]"

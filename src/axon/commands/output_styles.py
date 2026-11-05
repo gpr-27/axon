@@ -1,7 +1,7 @@
 """
 Output styles: named system-prompt additions that change how Axon writes its answers.
 
-Built-ins: ``default`` (no addition), ``explanatory``, ``learning`` and ``concise``.
+Built-ins: ``default`` (no addition), ``proactive``, ``concise``, ``explanatory`` and ``learning``.
 Custom styles are Markdown files in the Claude Code format::
 
     ---
@@ -11,10 +11,17 @@ Custom styles are Markdown files in the Claude Code format::
     ---
     <style instructions>
 
-Search order (later wins on a name clash): built-in, ``~/.axon/output-styles``,
-``<ws>/.claude/output-styles``, ``<ws>/.axon/output-styles``. Plugins may ship an
-``output-styles/`` folder too. The active style is ``settings.output_style``;
-P-CORE injects :func:`active_style_prompt` into the system prompt.
+``keep-coding-instructions`` defaults to false for a custom style (the standard software-engineering
+rules are left out unless it is ``true``); the built-ins keep them. A plugin style may set
+``force-for-plugin: true`` to apply whenever the plugin is enabled (it overrides the user's choice; the
+first such style loaded wins).
+
+Search order (later wins on a name clash): built-in, plugins (``output-styles/`` or the manifest
+``outputStyles`` paths), ``~/.claude/output-styles``, ``~/.axon/output-styles``, then project
+``.claude/output-styles`` / ``.axon/output-styles`` of every directory from the repository root down to
+the workspace (the one nearest the workspace wins). The active style is ``settings.output_style``
+(``outputStyle`` in settings.json, matched ignoring case); the system prompt gets
+:func:`active_style_prompt`. Files are re-read on every call, so edits apply from the next message.
 """
 from __future__ import annotations
 
@@ -32,6 +39,7 @@ class Style:
     source: str = "built-in"
     keep_coding_instructions: bool = True
     path: Path | None = None
+    force_for_plugin: bool = False
 
 
 _BUILTINS: tuple[Style, ...] = (
@@ -57,37 +65,71 @@ _BUILTINS: tuple[Style, ...] = (
         "- When the user's contribution arrives, review it kindly and precisely, then continue.",
     ),
     Style(
+        "proactive", "Starts work right away and makes reasonable assumptions instead of asking about routine decisions",
+        "# Output style: Proactive\n"
+        "Start implementing as soon as the user sends a task. Make reasonable assumptions about routine decisions "
+        "instead of stopping to ask, and do not switch to plan mode unless the user asks for a plan. The user can "
+        "redirect you at any point.\n"
+        "Before an action that deletes data or changes a shared or production system, check with the user in the "
+        "conversation first. That check is an instruction you follow and is separate from permission prompts.",
+    ),
+    Style(
         "concise", "Minimal prose: short answers, no preamble or recap, code and facts only",
         "# Output style: Concise\n"
-        "Answer with the minimum words needed. No preamble, no restating the question, no closing summary. "
-        "Prefer bullet points and code over paragraphs. Report results in one or two lines unless the user "
-        "asks for detail.",
+        "The first sentence of a response states what happened or what the answer is. Leave out the lead-in, the "
+        "step-by-step narration and the closing recap; answer a simple question in one to three sentences. Do the "
+        "engineering work as thoroughly as usual. Still write at full length when the user asks for an explanation "
+        "or more detail, and keep error reports, failing test output, security warnings and confirmations for "
+        "destructive actions complete.",
     ),
 )
 
 _TRUE = {"true", "yes", "1", "on"}
 
 
+def _git_root(start: Path) -> Path | None:
+    cur = start
+    for _ in range(64):
+        if (cur / ".git").exists():
+            return cur
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+    return None
+
+
 def _style_dirs(workspace: Path | None) -> list[tuple[Path, str]]:
-    dirs: list[tuple[Path, str]] = []
+    """User then project directories, lowest precedence first."""
+    dirs: list[tuple[Path, str]] = [(Path.home() / ".claude" / "output-styles", "user")]
     try:
         from axon.storage import user_ext_dir
         dirs.append((user_ext_dir("output-styles"), "user"))
     except Exception:
         pass
     if workspace is not None:
-        ws = Path(workspace)
-        dirs.append((ws / ".claude" / "output-styles", "project"))
-        dirs.append((ws / ".axon" / "output-styles", "project"))
+        try:
+            ws = Path(workspace).resolve()
+        except OSError:
+            ws = Path(workspace)
+        root = _git_root(ws)
+        chain = [ws]
+        if root is not None:
+            cur = ws
+            while cur != root and cur.parent != cur:
+                cur = cur.parent
+                chain.append(cur)
+        for d in reversed(chain):  # repository root first, the workspace last (nearest wins)
+            dirs.append((d / ".claude" / "output-styles", "project"))
+            dirs.append((d / ".axon" / "output-styles", "project"))
     return dirs
 
 
-def _plugin_style_dirs(workspace: Path | None) -> list[tuple[Path, str]]:
+def _plugin_style_files(workspace: Path | None) -> list[tuple[Path, str]]:
     try:
         if workspace is None:
             return []
-        from axon.commands.plugins import load_plugins
-        return [(Path(p.path) / "output-styles", f"plugin:{p.name}") for p in load_plugins(Path(workspace)) if p.enabled]
+        from axon.commands.plugins import enabled_plugins, plugin_output_style_files
+        return [(f, f"plugin:{p.name}") for p in enabled_plugins(Path(workspace)) for f in plugin_output_style_files(p)]
     except Exception:
         return []
 
@@ -114,22 +156,40 @@ def parse_style_file(path: Path, source: str) -> Style | None:
     desc = str(meta.get("description") or "").strip()
     if not desc:
         desc = next((ln.strip("# ").strip() for ln in body.splitlines() if ln.strip()), "")[:100]
-    keep = str(meta.get("keep-coding-instructions", meta.get("keep_coding_instructions", "true"))).strip().lower() in _TRUE
+    keep = str(meta.get("keep-coding-instructions", meta.get("keep_coding_instructions", "false"))).strip().lower() in _TRUE
+    force = source.startswith("plugin:") and str(meta.get("force-for-plugin", meta.get("force_for_plugin", "false"))).strip().lower() in _TRUE
     return Style(name=_slug(raw_name) or path.stem.lower(), description=desc, prompt=body, source=source,
-                 keep_coding_instructions=keep, path=Path(path))
+                 keep_coding_instructions=keep, path=Path(path), force_for_plugin=force)
 
 
 def list_styles(workspace: Path | None) -> list[Style]:
-    """Every available style: built-ins first, then user, plugin and project files (later wins)."""
+    """Every available style: built-ins first, then plugin, user and project files (later wins)."""
     by_name: dict[str, Style] = {s.name: s for s in _BUILTINS}
-    for d, source in _style_dirs(workspace)[:1] + _plugin_style_dirs(workspace) + _style_dirs(workspace)[1:]:
+    for f, source in _plugin_style_files(workspace):
+        st = parse_style_file(f, source)
+        if st is not None:
+            by_name[st.name] = st
+    for d, source in _style_dirs(workspace):
         if not d.is_dir():
             continue
-        for f in sorted(d.glob("*.md")):
+        try:
+            files = sorted(d.glob("*.md"))
+        except OSError:
+            continue
+        for f in files:
             st = parse_style_file(f, source)
             if st is not None:
                 by_name[st.name] = st
     return list(by_name.values())
+
+
+def forced_plugin_style(workspace: Path | None) -> Style | None:
+    """The first enabled-plugin style with ``force-for-plugin: true`` (overrides the user's choice)."""
+    for f, source in _plugin_style_files(workspace):
+        st = parse_style_file(f, source)
+        if st is not None and st.force_for_plugin:
+            return st
+    return None
 
 
 def get_style(name: str, workspace: Path | None) -> Style | None:
@@ -141,6 +201,11 @@ def get_style(name: str, workspace: Path | None) -> Style | None:
 
 
 def active_style_name(settings: Any) -> str:
+    """The style in force: a plugin's ``force-for-plugin`` style, else ``settings.output_style``."""
+    ws = getattr(settings, "workspace", None)
+    forced = forced_plugin_style(Path(ws)) if ws is not None else None
+    if forced is not None:
+        return forced.name
     return str(getattr(settings, "output_style", None) or "default").strip() or "default"
 
 

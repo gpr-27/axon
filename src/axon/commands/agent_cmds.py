@@ -12,8 +12,10 @@ from typing import Any
 
 from axon.storage import axon_home as _axon_home
 from axon.commands.common import (
-    clip, confirm, err, fmt_tokens, fmt_usd, header, hint, info, is_tty, kv, ok, open_in_editor, section,
+    clip, confirm, err, fmt_tokens, fmt_usd, header, info, is_tty, kv, ok, open_in_editor, section,
     table, usage, ws_of,
+    typed_hint,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE
@@ -24,21 +26,69 @@ CAT = "Agents, Skills & Tools"
 # ─── Skills & MCP prompts as commands ───────────────────────────────────────
 
 def run_skill(agent: Any, name: str, arguments: str) -> None:
-    from axon.commands.custom import make_shell_gate, run_with_overrides
+    """Run a skill typed as ``/name args``. Several inline skills can be stacked at the start of the
+    message (``/write-tests /fix-issue 123``): up to five more are expanded into the same turn and the
+    trailing text becomes ``$ARGUMENTS`` of each. ``context: fork`` skills run in a subagent."""
+    from axon.commands.custom import make_shell_gate, run_forked, run_with_overrides, session_id_of
+    from axon.skills.manager import SkillShellError
     mgr = agent.skills
     skill = mgr.get(name) if hasattr(mgr, "get") else mgr.skills.get(name)
     if skill is None:
         err(f"Skill '{name}' not found.")
         return
-    allowed = list(getattr(skill, "allowed_tools", []) or [])
+    if getattr(skill, "user_invocable", True) is False:
+        err(f"Skill '{skill.name}' is background knowledge for the model and cannot be run as a command.")
+        return
+    stack = [skill]
+    args = arguments
+    if getattr(skill, "context", "") != "fork":
+        while len(stack) < 6 and args.startswith("/"):
+            tok, _, rest = args.partition(" ")
+            other = mgr.get(tok[1:]) if hasattr(mgr, "get") else None
+            if (other is None or getattr(other, "context", "") == "fork" or getattr(other, "user_invocable", True) is False
+                    or other in stack):
+                break
+            stack.append(other)
+            args = rest.strip()
+    sid = session_id_of(agent)
+    effort = str(getattr(agent.settings, "effort", "") or "")
+    allowed: list[str] = []
+    for sk in stack:
+        for t in (mgr.allowed_tools_for(sk, sid) if hasattr(mgr, "allowed_tools_for") else list(getattr(sk, "allowed_tools", []) or [])):
+            if t not in allowed:
+                allowed.append(t)
+    parts: list[str] = []
     try:
-        prompt = mgr.execute_skill(skill.name, arguments, allow_shell=make_shell_gate(agent, allowed))
-    except TypeError:  # very old SkillManager signature
-        prompt = mgr.execute_skill(skill.name)
-        if arguments:
-            prompt += f"\n\nARGUMENTS: {arguments}"
-    print(f"\n  {TEAL}▸ Skill /{skill.name}{RST} {SLATE}{getattr(skill, 'scope', '')}{RST}\n")
-    result = run_with_overrides(agent, prompt, model=getattr(skill, "model", None), allowed_tools=allowed)
+        for sk in stack:
+            sk_allowed = mgr.allowed_tools_for(sk, sid) if hasattr(mgr, "allowed_tools_for") else list(getattr(sk, "allowed_tools", []) or [])
+            try:
+                parts.append(mgr.execute_skill(sk.name, args, allow_shell=make_shell_gate(agent, sk_allowed),
+                                               session_id=sid, effort=effort))
+            except TypeError:  # very old SkillManager signature
+                text = mgr.execute_skill(sk.name)
+                parts.append(text + (f"\n\nARGUMENTS: {args}" if args else ""))
+    except SkillShellError as e:
+        err(f"/{skill.name} not run: {e}")
+        return
+    prompt = "\n\n".join(parts)
+    hooks = getattr(agent, "hooks", None)
+    for sk in stack:  # `hooks:` frontmatter: registered when the skill is invoked, kept for the session
+        if getattr(sk, "hooks", None) and hasattr(hooks, "add_scoped"):
+            try:
+                hooks.remove_scoped(f"skill:{sk.name}")
+                hooks.add_scoped(sk.hooks, f"skill:{sk.name}")
+            except Exception:
+                pass
+    names = " ".join(f"/{sk.name}" for sk in stack)
+    print(f"\n  {TEAL}▸ Skill {names}{RST} {SLATE}{getattr(skill, 'scope', '')}{RST}\n")
+    result = None
+    if getattr(skill, "context", "") == "fork":
+        run_forked(agent, prompt, label=f"/{skill.name}", agent_type=getattr(skill, "agent", None),
+                   background=bool(getattr(skill, "background", True)))
+    else:
+        result = run_with_overrides(agent, prompt, model=getattr(skill, "model", None), allowed_tools=allowed,
+                                    disallowed_tools=list(getattr(skill, "disallowed_tools", []) or []),
+                                    effort=getattr(skill, "effort", None))
     record_invocation(agent, "skill_run", skill.name, arguments, result, scope=getattr(skill, "scope", ""),
                       path="" if getattr(skill, "scope", "") == "bundled" else str(getattr(skill, "path", "")),
                       source="user")
@@ -242,7 +292,7 @@ def _load_agent_defs(ws: Path) -> list[Any]:
 
 
 @command("agents", category=CAT, description="List, show, create or edit subagent definitions",
-         usage="/agents                         list built-in and custom agents\n/agents show <name>\n/agents create [name] [--global] [description]   (wizard on a terminal)\n/agents edit <name>\n/agents delete <name>")
+         usage="/agents                         list built-in and custom agents\n/agents show <name>\n/agents check                   files that were skipped or have unrecognized fields\n/agents create [name] [--global] [description]   (wizard on a terminal)\n/agents edit <name>\n/agents delete <name>")
 def handle_agents(agent: Any, arg: str) -> CommandResult:
     ws = ws_of(agent)
     parts = arg.strip().split(maxsplit=1)
@@ -254,6 +304,17 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
         err(f"Agent definitions are not available in this build ({e}).")
         return CommandResult(handled=True)
     by_name = {d.name.lower(): d for d in defs}
+
+    if sub in ("check", "validate", "doctor"):
+        from axon.agent.subagent import extra_agent_dirs, load_agent_definitions
+        problems: list[str] = []
+        load_agent_definitions(ws, report=problems, extra_dirs=extra_agent_dirs(agent.settings))
+        header("Agent files", f"{len(defs)} loaded")
+        if not problems:
+            ok("Every agent file loaded; no unrecognized fields.")
+        for line in problems:
+            print(f"    {GOLD}!{RST} {line}")
+        return CommandResult(handled=True)
 
     if sub in ("create", "new", "add"):
         glob = "--global" in rest.split()
@@ -271,7 +332,7 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
                 if confirm("Open it in your editor now?", default=False):
                     open_in_editor(path)
             return CommandResult(handled=True)
-        if not rest:
+        if not words:
             usage("/agents create <name> [--global] [description]")
             return CommandResult(handled=True)
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", words[0]).strip("-").lower()
@@ -300,6 +361,17 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
             kv("Description", d.description)
             kv("Tools", ", ".join(d.tools) if d.tools else "all parent tools (minus Task)")
             kv("Model", d.model or "inherit")
+            if d.disallowed_tools:
+                kv("Disallowed", ", ".join(d.disallowed_tools))
+            if d.spawn_types:
+                kv("May start", ", ".join(d.spawn_types))
+            for label, val in (("Permission mode", d.permission_mode), ("Max turns", d.max_turns), ("Effort", d.effort),
+                               ("Isolation", d.isolation), ("Memory", d.memory), ("Color", d.color),
+                               ("Skills", ", ".join(d.skills)), ("Background", "yes" if d.background else ""),
+                               ("MCP servers", ", ".join(next(iter(e)) if isinstance(e, dict) else str(e) for e in d.mcp_servers)),
+                               ("Hooks", ", ".join(d.hooks)), ("Initial prompt", d.initial_prompt)):
+                if val:
+                    kv(label, str(val))
             if d.system_prompt:
                 section("System prompt")
                 for ln in str(d.system_prompt).splitlines()[:40]:
@@ -319,15 +391,21 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
             ok(f"Deleted agent {d.name}")
         return CommandResult(handled=True)
 
+    if not sub and is_tty():
+        from axon.commands.browse_menus import agents_menu
+        agents_menu(agent)
+        return CommandResult(handled=True)
     header("Subagents", f"{len(defs)} available · used by the Task tool")
     rows = []
     for d in sorted(defs, key=lambda x: (str(x.source) != "builtin", x.name)):
         src = str(d.source)
         scope = "built-in" if src == "builtin" else ("project" if str(ws) in src or src == "project" else ("user" if src != "builtin" else src))
         tools = ", ".join(d.tools[:4]) + ("…" if d.tools and len(d.tools) > 4 else "") if d.tools else "all"
-        rows.append([f"{WHITE}{d.name}{RST}", f"{SLATE}{scope}{RST}", f"{DARK_SLATE}{tools}{RST}", (d.description or "")[:60]])
-    table(rows, ["Name", "Source", "Tools", "Description"])
-    hint("\n    /agents create <name> · /agents show <name> · running tasks: /tasks")
+        flags = "".join(f" {c}" for c in (("bg" if d.background else ""), (d.isolation or ""), (f"mem:{d.memory}" if d.memory else "")) if c)
+        rows.append([f"{WHITE}{d.name}{RST}", f"{SLATE}{scope}{RST}", f"{DARK_SLATE}{tools}{RST}",
+                     f"{SLATE}{d.model or 'inherit'}{RST}", (d.description or "")[:52] + (f"{DARK_SLATE}{flags}{RST}" if flags else "")])
+    table(rows, ["Name", "Source", "Tools", "Model", "Description"])
+    typed_hint("\n    /agents create <name> · /agents show <name> · running tasks: /tasks")
     print()
     return CommandResult(handled=True)
 
@@ -373,7 +451,7 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
     sub_id = f"{parent_id}_sub_{task.index}"
     store = agent.session
     store.open(sub_id)
-    if (store.session_dir / f"{sub_id}.jsonl").exists():
+    if store.exists(sub_id):
         agent.conversation = store.load(sub_id)
     else:
         msgs = list(task.conversation.messages) if getattr(task, "conversation", None) and task.conversation.messages else [
@@ -398,7 +476,7 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
     _clear_screen()
     from axon.session.interactive import render_restored_conversation
     render_restored_conversation(agent.conversation, sub_id, ledger=agent.ledger, path=_session_file(agent, sub_id))
-    print(f"  {CYAN}⚡ Viewing subagent #{task.index} ({task.title}){RST} · {SLATE}/main returns to the main session{RST}")
+    print(f"  {CYAN}⚡ Viewing subagent #{task.index} ({task.title}){RST}{typed_only(f' · {SLATE}/main returns to the main session{RST}')}")
     if getattr(task, "status", "") == "error":
         reason = " ".join(str(getattr(task, "error_msg", "") or "the model call failed").split())
         print(f"  {ROSE}✗ This subagent failed:{RST} {WHITE}{reason}{RST}")
@@ -406,7 +484,7 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
 
 
 @command("subagents", category=CAT, description="Open a subagent's transcript from this session as a chat",
-         aliases=("sub", "subagent"), usage="/subagents [n | main | queue]")
+         aliases=("sub", "subagent"), usage="/subagents [n | main | queue]\n/subagents edit <n>   edit a finished subagent's report (the main conversation sees the edit)\n/tell <n> <message>   talk to a running subagent")
 def handle_subagents(agent: Any, arg: str) -> CommandResult:
     curr_id = agent.session.active_session_id
     parent_id = curr_id.rsplit("_sub_", 1)[0]
@@ -414,6 +492,9 @@ def handle_subagents(agent: Any, arg: str) -> CommandResult:
     a = arg.strip()
     if a.lower() in ("main", "root", "parent", "0"):
         return handle_main(agent, "")
+    if a.lower().split(maxsplit=1)[:1] == ["edit"]:   # the word "edit", not a title that starts with "edit..."
+        from axon.commands.parity_cmds import edit_subagent_result
+        return edit_subagent_result(agent, a[4:].strip())
     if a.lower() in ("q", "queue"):
         from axon.commands.code_cmds import handle_queue
         return handle_queue(agent, "")
@@ -570,9 +651,9 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
                          f"{t.steps} steps", fmt_tokens(getattr(t, "input_tokens", 0) + getattr(t, "output_tokens", 0)), f"{elapsed:.1f}s"])
         table(rows, ["#", "Status", "Title", "Agent", "Steps", "Tokens", "Time"])
     if not (shells or turns or tasks):
-        print(f"    {SLATE}No background work. Shells start with Bash run_in_background; Ctrl+B backgrounds a turn. Checklist: /todos{RST}\n")
+        print(f"    {SLATE}No background work. Shells start with Bash run_in_background; Ctrl+B backgrounds a turn.{typed_only(' Checklist: /todos')}{RST}\n")
         return CommandResult(handled=True)
-    hint("\n    /tasks log <id> · /tasks kill <shell id> · /subagents <n> opens a subagent transcript")
+    typed_hint("\n    /tasks log <id> · /tasks kill <shell id> · /subagents <n> opens a subagent transcript")
     print()
     return CommandResult(handled=True)
 
@@ -580,43 +661,131 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
 # ─── /skills ────────────────────────────────────────────────────────────────
 
 @command("skills", category=CAT, description="Browse, create, install and manage skills", aliases=("skill",),
-         usage="/skills                         list\n/skills show <name>\n/skills create <name> [template] [--global]\n/skills install <github-url> [--global] [--force]\n/skills edit <name> · /skills delete <name> · /skills reload")
+         usage="/skills                         list\n/skills show <name>\n/skills create <name> [template] [--global]\n/skills install <github-url> [--global] [--force]\n/skills edit <name> · /skills delete <name> · /skills reload\n/skills enable|disable <name> · /skills test <name> · /skills scope <name> user|project · /skills status")
 def handle_skills(agent: Any, arg: str) -> CommandResult:
     from axon.skills.interactive import handle_skills_command
+    if not arg.strip() and is_tty():
+        from axon.commands.browse_menus import skills_menu
+        skills_menu(agent)
+        return CommandResult(handled=True)
     handle_skills_command(agent.skills, ws_of(agent), arg)
     return CommandResult(handled=True)
 
 
 # ─── /hooks ─────────────────────────────────────────────────────────────────
 
-@command("hooks", category=CAT, description="Configured lifecycle hooks (PreToolUse, Stop, …)")
+def _hook_source(raw: str) -> tuple[str, str]:
+    """(label, location) of a hook's ``source`` for /hooks."""
+    kind, _, rest = str(raw or "").partition(":")
+    if kind in ("user", "project", "local"):
+        return f"{kind} settings", rest
+    if kind == "plugin":
+        return f"plugin {rest}", ""
+    if kind == "scoped":
+        return f"session ({rest})", ""
+    return ("config.toml" if kind == "config.toml" else kind or "settings"), ""
+
+
+def _hook_summary(h: dict[str, Any]) -> str:
+    text = str(h.get("command", "")).replace("\n", " ")
+    if h.get("args"):
+        text += " " + " ".join(str(a) for a in h["args"])
+    return text if len(text) <= 90 else text[:87] + "..."
+
+
+@command("hooks", category=CAT, description="Browse configured lifecycle hooks (PreToolUse, Stop, ...)",
+         usage="/hooks                  list every configured hook, grouped by event\n"
+               "/hooks <n>              full text and origin of hook number n\n"
+               "/hooks <Event>          hooks of one event with what it can do\n"
+               "/hooks events           all events (also those with no hook) and their matcher\n"
+               "/hooks reload           re-read the settings files")
 def handle_hooks(agent: Any, arg: str) -> CommandResult:
+    import os
     try:
         from axon.hooks import HookManager
-        hooks = HookManager(agent.settings, ws_of(agent)).describe()
+        from axon.hooks.manager import CAN_BLOCK, EVENTS, _MATCH_FIELD, normalize_event
+        live = getattr(agent, "hooks", None)
+        mgr = live if isinstance(live, HookManager) else HookManager(agent.settings, ws_of(agent))
+        if arg.strip().lower() == "reload":
+            mgr.reload()
+        hooks = mgr.describe()
     except (ImportError, AttributeError) as e:
         err(f"Hooks are not available in this build ({e}).")
         return CommandResult(handled=True)
-    header("Hooks", f"{len(hooks)} configured")
-    if not hooks:
-        print(f"    {SLATE}No hooks configured. Add them to .axon/settings.json, e.g.:{RST}")
-        print(f"    {DARK_SLATE}{{\"hooks\": {{\"PostToolUse\": [{{\"matcher\": \"Edit|Write\", \"hooks\": [{{\"type\": \"command\", \"command\": \"ruff format .\"}}]}}]}}}}{RST}\n")
+    word = arg.strip()
+    if word.lower() == "reload":
+        ok(f"Hooks reloaded: {len(hooks)} configured")
         return CommandResult(handled=True)
-    by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for h in hooks:
-        by_event[str(h.get("event", "?"))].append(h)
+    if not word and hooks and is_tty():
+        from axon.commands.browse_menus import hooks_menu
+        hooks_menu(agent, hooks)
+        return CommandResult(handled=True)
+    if word.lower() == "events":
+        header("Hook events", f"{len(EVENTS)} events")
+        counts: dict[str, int] = defaultdict(int)
+        for h in hooks:
+            counts[str(h.get("event"))] += 1
+        for ev in EVENTS:
+            field = _MATCH_FIELD.get(ev)
+            note = f"matcher: {field}" if field else "no matcher"
+            block = "can block" if ev in CAN_BLOCK else ""
+            n = counts.get(ev, 0)
+            print(f"    {GOLD}{ev:<20}{RST} {WHITE}{n or '-':>3}{RST}  {DARK_SLATE}{note}{', ' + block if block else ''}{RST}")
+        print()
+        return CommandResult(handled=True)
+    if word.isdigit():
+        idx = int(word)
+        if not 1 <= idx <= len(hooks):
+            err(f"No hook number {idx}; /hooks lists {len(hooks)}.")
+            return CommandResult(handled=True)
+        h = hooks[idx - 1]
+        label, where = _hook_source(str(h.get("source")))
+        header(f"Hook {idx}", str(h.get("event")))
+        rows = [("event", h.get("event")), ("matcher", h.get("matcher")), ("type", h.get("type")),
+                ("handler", h.get("command")), ("args", h.get("args")), ("if", h.get("if") or None),
+                ("shell", h.get("shell") or None), ("timeout", f"{h.get('timeout')}s"),
+                ("async", "yes" if h.get("async") else None), ("onFailure", h.get("onFailure") or None),
+                ("model", h.get("model") or None), ("origin", label), ("file", where or None)]
+        for k, v in rows:
+            if v not in (None, "", []):
+                print(f"    {GOLD}{k:<10}{RST} {WHITE}{v}{RST}")
+        print()
+        return CommandResult(handled=True)
+    only = normalize_event(word) if word else ""
+    if only and only not in EVENTS:
+        err(f"Unknown event or hook number '{word}'. Try /hooks events.")
+        return CommandResult(handled=True)
+    shown = [(i, h) for i, h in enumerate(hooks, 1) if not only or h.get("event") == only]
+    header("Hooks", f"{len(shown)} configured" + (f" for {only}" if only else ""))
+    for note in getattr(mgr, "load_errors", []) or []:
+        print(f"    {GOLD}!{RST} {SLATE}{note}{RST}")
+    if os.environ.get("AXON_DISABLE_ALL_HOOKS") or (not hooks and mgr._all_disabled()):
+        print(f"    {SLATE}All hooks are disabled (disableAllHooks).{RST}")
+    if not shown:
+        print(f"    {SLATE}No hooks configured. Add them to .axon/settings.json (or .claude/settings.json), e.g.:{RST}")
+        print(f"    {DARK_SLATE}{{\"hooks\": {{\"PostToolUse\": [{{\"matcher\": \"Edit|Write\", \"hooks\": [{{\"type\": \"command\", \"command\": \"ruff format .\"}}]}}]}}}}{RST}")
+        typed_hint("    /hooks events lists every event.")
+        print()
+        return CommandResult(handled=True)
+    by_event: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for i, h in shown:
+        by_event[str(h.get("event", "?"))].append((i, h))
     for ev, items in by_event.items():
         section(ev, CYAN)
-        for h in items:
-            print(f"    {GOLD}{str(h.get('matcher') or '*'):<16}{RST} {WHITE}{h.get('command', '')}{RST}  {DARK_SLATE}{h.get('source', '')}{RST}")
-    print()
+        for i, h in items:
+            label, _where = _hook_source(str(h.get("source")))
+            extra = "".join([f" if {h['if']}" if h.get("if") else "", " async" if h.get("async") else "",
+                             f" [{h.get('type')}]" if h.get("type") != "command" else ""])
+            print(f"    {DARK_SLATE}{i:>2}{RST} {GOLD}{str(h.get('matcher') or '*'):<14}{RST} {WHITE}{_hook_summary(h)}{RST}"
+                  f"{SLATE}{extra}{RST}  {DARK_SLATE}{label}{RST}")
+    print(f"\n    {DARK_SLATE}/hooks <n> shows one hook in full - /hooks events lists all events.{RST}\n")
     return CommandResult(handled=True)
 
 
 # ─── /mcp ───────────────────────────────────────────────────────────────────
 
 @command("mcp", category=CAT, description="MCP servers: list, add, remove, connect, tools, prompts",
-         usage="/mcp [list|add|remove|enable|disable|connect|disconnect|tools|resources|prompts|logs|help]")
+         usage="/mcp [list|get|add|remove|enable|disable|reconnect|login|logout|approve|tools|resources|prompts|logs|test|scope|env|timeout|tool|dashboard|export|import|auto|suggest|updates|help]")
 def handle_mcp(agent: Any, arg: str) -> CommandResult:
     try:
         from axon.mcp.commands import handle_mcp_command
@@ -630,71 +799,23 @@ def handle_mcp(agent: Any, arg: str) -> CommandResult:
 # ─── /plugin ────────────────────────────────────────────────────────────────
 
 @command("plugin", category=CAT, description="Plugins bundling commands, skills, agents, hooks and MCP",
-         aliases=("plugins",), usage="/plugin                         list\n/plugin info <name>\n/plugin create <name> [--global]\n/plugin install <folder | https git URL> [--project]\n/plugin enable|disable|remove <name>")
+         aliases=("plugins",), usage="/plugin                         installed plugins and marketplaces\n"
+         "/plugin discover [marketplace]\n"
+         "/plugin install <name>@<marketplace> [--scope user|project|local]\n"
+         "/plugin install <name> --marketplace <source>\n"
+         "/plugin install <folder | https git URL> [--project]\n"
+         "/plugin marketplace add|list|update|remove [<source|name>]\n"
+         "/plugin enable|disable <name> [--scope …] · uninstall|update|info <name>\n"
+         "/plugin configure <name> [KEY=VALUE …]\n"
+         "/plugin validate <path> · create <name> [--global] · reload\n"
+         "/plugin status · test <name> · scope <name> user|project · export [file] · import <file>")
 def handle_plugin(agent: Any, arg: str) -> CommandResult:
-    from axon.commands import plugins as pl
-    ws = ws_of(agent)
-    words = arg.split()
-    sub = words[0].lower() if words else ""
-    rest = [w for w in words[1:] if not w.startswith("--")]
-    flags = {w for w in words[1:] if w.startswith("--")}
-    installed = {p.name: p for p in pl.load_plugins(ws)}
-
-    if sub in ("create", "new"):
-        if not rest:
-            usage("/plugin create <name> [--global]")
-            return CommandResult(handled=True)
-        root = (_axon_home() / "plugins") if "--global" in flags else (ws / ".axon" / "plugins")
-        d = pl.create_plugin(rest[0], root)
-        ok(f"Created plugin at {WHITE}{d}{RST}  {SLATE}(try /{d.name}:hello){RST}")
+    from axon.commands.plugin_cmds import run_plugin_command
+    if not arg.strip() and is_tty():
+        from axon.commands.browse_menus import plugins_menu
+        plugins_menu(agent)
         return CommandResult(handled=True)
-    if sub in ("install", "add"):
-        if not rest:
-            usage("/plugin install <folder | https git URL> [--project]")
-            return CommandResult(handled=True)
-        root = (ws / ".axon" / "plugins") if "--project" in flags else (_axon_home() / "plugins")
-        if not confirm(f"Install plugin from {rest[0]}? Plugins can add commands, skills and hooks that run code.", default=not is_tty()):
-            info("Cancelled.")
-            return CommandResult(handled=True)
-        p = pl.install_plugin(rest[0], root)
-        _refresh_extensions(agent)
-        ok(f"Installed {BOLD}{p.name}{RST} {SLATE}{p.version}{RST} → {p.path}")
-        return CommandResult(handled=True)
-    if sub in ("enable", "disable", "remove", "rm", "uninstall", "info", "show"):
-        if not rest or rest[0] not in installed:
-            err(f"No installed plugin named '{rest[0] if rest else ''}'.")
-            return CommandResult(handled=True)
-        p = installed[rest[0]]
-        if sub in ("info", "show"):
-            header(p.name, f"{p.version} · {p.scope} · {'enabled' if p.enabled else 'disabled'}")
-            kv("Path", p.path)
-            kv("Description", p.description or "-")
-            for k, n in p.components().items():
-                kv(k.capitalize(), n)
-            print()
-            return CommandResult(handled=True)
-        if sub in ("enable", "disable"):
-            pl.set_enabled(p.name, sub == "enable")
-            _refresh_extensions(agent)
-            ok(f"{'Enabled' if sub == 'enable' else 'Disabled'} plugin {p.name}")
-            return CommandResult(handled=True)
-        if confirm(f"Remove plugin {p.name} ({p.path})?", default=not is_tty()):
-            pl.remove_plugin(p)
-            _refresh_extensions(agent)
-            ok(f"Removed plugin {p.name}")
-        return CommandResult(handled=True)
-    if sub == "reload":
-        return handle_reload_plugins(agent, "")
-
-    header("Plugins", f"{len(installed)} installed")
-    if not installed:
-        print(f"    {SLATE}None. Plugins live in ~/.axon/plugins/<name>/ or .axon/plugins/<name>/ with a plugin.json.{RST}")
-    for p in installed.values():
-        comps = ", ".join(f"{n} {k}" for k, n in p.components().items()) or "empty"
-        state = f"{MINT}●{RST}" if p.enabled else f"{DARK_SLATE}○{RST}"
-        print(f"    {state} {WHITE}{p.name:<20}{RST} {SLATE}{p.version:<8} {p.scope:<8} {comps}{RST}")
-    hint("\n    /plugin create <name> · install <folder|git-url> · info|enable|disable|remove <name>")
-    print()
+    run_plugin_command(agent, arg, _refresh_extensions, handle_reload_plugins)
     return CommandResult(handled=True)
 
 
@@ -734,11 +855,53 @@ _TOOL_GROUPS = [
 ]
 
 
+def _deferred_tools(agent: Any) -> dict[str, Any]:
+    """MCP tools hidden behind ToolSearch (name -> tool); empty when nothing is deferred."""
+    try:
+        from axon.tools.interactive import ToolSearchTool
+        search = agent.registry.tools.get("ToolSearch")
+        return dict(search.deferred) if isinstance(search, ToolSearchTool) else {}
+    except Exception:
+        return {}
+
+
+def tool_table(agent: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(every tool by name, the deferred ones by name). MCP tools behind ToolSearch are tools too."""
+    tools = {t.name: t for t in agent.registry.all_tools() if not getattr(t, "hidden", False)}
+    deferred = _deferred_tools(agent)
+    tools.update(deferred)
+    return tools, deferred
+
+
+def tool_groups(tools: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """The tools in display groups: Files, Search, Shell, Web, Planning & agents, MCP, Other."""
+    groups = list(_TOOL_GROUPS)
+    mcp = sorted(n for n in tools if n.startswith("mcp__"))
+    if mcp:
+        groups.append(("MCP", mcp))
+    other = sorted(n for n in tools if n not in {x for _, g in groups for x in g})
+    if other:
+        groups.append(("Other", other))
+    return [(title, [n for n in names if n in tools]) for title, names in groups]
+
+
+def tool_permission(agent: Any, tool: Any) -> str:
+    """allow / ask / deny for the tool in the current mode."""
+    try:
+        return agent.permissions.check(tool, {}, agent.settings.mode).outcome
+    except Exception:
+        return tool.default_permission
+
+
 @command("tools", category=CAT, description="Tools the model can use and their permission",
          aliases=("tool",), usage="/tools [name]")
 def handle_tools(agent: Any, arg: str) -> CommandResult:
-    tools = {t.name: t for t in agent.registry.all_tools() if not getattr(t, "hidden", False)}
+    tools, deferred = tool_table(agent)
     q = arg.strip().lower()
+    if not q and is_tty():
+        from axon.commands.tools_menu import tools_menu
+        tools_menu(agent)
+        return CommandResult(handled=True)
     if q:
         # exact name first; otherwise prefix matches; otherwise substring matches
         hits = ([t for t in tools.values() if t.name.lower() == q]
@@ -748,7 +911,8 @@ def handle_tools(agent: Any, arg: str) -> CommandResult:
             err(f"No tool matching '{arg.strip()}'.")
             return CommandResult(handled=True)
         for t in hits:
-            header(t.name, ("read-only" if t.readonly else "can modify") + f" · default {t.default_permission}")
+            note = " · deferred: the model fetches this definition with ToolSearch when it needs it" if t.name in deferred else ""
+            header(t.name, ("read-only" if t.readonly else "can modify") + f" · default {t.default_permission}{note}")
             print(f"    {SLATE}{t.description}{RST}")
             props = t.schema.get("properties") or {}
             req = set(t.schema.get("required") or [])
@@ -757,38 +921,31 @@ def handle_tools(agent: Any, arg: str) -> CommandResult:
                 for pn, ps in props.items():
                     ps = ps if isinstance(ps, dict) else {}
                     mark = f"{ROSE}*{RST}" if pn in req else " "
-                    ptype = ps.get("type", "any")
-                    ptype = "|".join(map(str, ptype)) if isinstance(ptype, list) else str(ptype)  # e.g. ["string", "null"]
-                    print(f"    {mark}{WHITE}{pn:<16}{RST} {DARK_SLATE}{ptype:<8}{RST} {SLATE}{str(ps.get('description', ''))[:80]}{RST}")
+                    text = str(ps.get("description", ""))
+                    text = text if len(hits) == 1 else text[:80]   # one tool: the full text; a list: one line each
+                    print(f"    {mark}{WHITE}{pn:<16}{RST} {DARK_SLATE}{param_type(ps):<8}{RST} {SLATE}{text}{RST}")
             print()
         return CommandResult(handled=True)
-    mode = agent.settings.mode
-    header("Tools", f"{len(tools)} available · mode {mode}")
-    shown: set[str] = set()
-    groups = list(_TOOL_GROUPS)
-    mcp = sorted(n for n in tools if n.startswith("mcp__"))
-    if mcp:
-        groups.append(("MCP", mcp))
-    other = sorted(n for n in tools if n not in {x for _, g in groups for x in g})
-    if other:
-        groups.append(("Other", other))
-    for title, names in groups:
-        present = [tools[n] for n in names if n in tools]
-        if not present:
+    header("Tools", f"{len(tools)} available · mode {agent.settings.mode}")
+    for title, names in tool_groups(tools):
+        if not names:
             continue
         section(title)
-        for t in present:
-            shown.add(t.name)
-            try:
-                d = agent.permissions.check(t, {}, mode).outcome
-            except Exception:
-                d = t.default_permission
+        for name in names:
+            t = tools[name]
+            d = tool_permission(agent, t)
             dc = {"allow": MINT, "ask": GOLD, "deny": ROSE}.get(d, SLATE)
             print(f"    {WHITE}{t.name:<14}{RST} {dc}{d:<6}{RST} {SLATE}{clip((t.description.splitlines() or [''])[0], 66)}{RST}")
     print()
-    hint("    /tools <name> for parameters · rules: /permissions")
+    typed_hint("    /tools <name> for parameters · rules: /permissions")
     print()
     return CommandResult(handled=True)
+
+
+def param_type(schema: dict[str, Any]) -> str:
+    """"string", "integer", "string|null" ... for one parameter schema."""
+    ptype = schema.get("type", "any")
+    return "|".join(map(str, ptype)) if isinstance(ptype, list) else str(ptype)
 
 
 # ─── Traces: /inspect /explain /stats ───────────────────────────────────────

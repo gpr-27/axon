@@ -11,6 +11,8 @@ from axon.storage import axon_home as _axon_home
 from axon.commands.common import (
     ask_text, confirm, err, estimate_tokens, fmt_tokens, header, hint, info, is_tty, ok, one_shot,
     open_in_editor, section, usage, ws_of,
+    typed_hint,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, TEAL, WHITE
@@ -80,7 +82,7 @@ def quick_memory(agent: Any, text: str) -> Any:
     from axon.commands.registry import CommandResult
     t = text.strip()
     scope = "project"
-    for pfx in ("global ", "user ", "--global "):
+    for pfx in ("global ", "--global "):     # "#global <note>"; a note that starts with the word "user" is a note
         if t.lower().startswith(pfx):
             scope, t = "global", t[len(pfx):].strip()
             break
@@ -112,7 +114,7 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
 
     if sub in ("add", "learn", "+"):
         scope = "project"
-        for pfx in ("--global ", "global ", "--user ", "user "):
+        for pfx in ("--global ", "--user "):   # flags only: "/memory add global state is bad" is a memory about global state
             if rest.startswith(pfx) or rest == pfx.strip():
                 scope, rest = "global", rest[len(pfx):].strip()
         if not rest:
@@ -198,7 +200,8 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
         usage(MEMORY_USAGE)
         return CommandResult(handled=True)
 
-    if is_tty() and memory_picker(agent, items):
+    if is_tty():
+        memory_picker(agent, items)   # Esc just closes it: the list is the picker
         return CommandResult(handled=True)
 
     header("Memory", "loaded into every prompt")
@@ -211,7 +214,7 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
                 size = 0
             print(f"    {MINT}●{RST} {SLATE}{label:<8}{RST} {WHITE}{p}{RST} {DARK_SLATE}~{fmt_tokens(size)} tok{RST}")
         else:
-            print(f"    {DARK_SLATE}○ {label:<8} {p}  (not created · /memory edit {label}){RST}")
+            print(f"    {DARK_SLATE}○ {label:<8} {p}  (not created{typed_only(' · /memory edit ' + label)}){RST}")
     for title, scope, color in (("Project memories (.axon/memory)", "project", TEAL), ("User memories (~/.axon/memory)", "global", GOLD)):
         rows = [(i, it) for i, it in enumerate(items, 1) if it.scope == scope]
         if rows:
@@ -222,7 +225,7 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
     if not items:
         print(f"\n    {SLATE}No saved memories. Type {WHITE}#<note>{SLATE} to remember something.{RST}")
     print()
-    hint("    /memory add · edit · view · remove · search · clear   (/help memory)")
+    typed_hint("    /memory add · edit · view · remove · search · clear   (/help memory)")
     print()
     return CommandResult(handled=True)
 
@@ -249,6 +252,8 @@ def memory_picker(agent: Any, items: list[Any]) -> bool:
     for it in items:
         entries.append(SelectItem(label=it.title[:60], value=("mem", it.scope, _item_path(store, it)),
                                   group="Saved memories", hint=it.scope, search=it.content[:200]))
+    entries.append(SelectItem(label="Remember something new…", value=("add", "", None), group="Add a memory",
+                              hint="saved for this project"))
     auto = bool(getattr(agent.settings, "auto_memory", True))
     entries.append(SelectItem(label=f"Auto memory: {'on' if auto else 'off'}", value=("toggle", "", None),
                               group="Auto memory", hint="Enter toggles"))
@@ -262,6 +267,12 @@ def memory_picker(agent: Any, items: list[Any]) -> bool:
     if chosen is None:
         return False
     kind, label, path = chosen.value
+    if kind == "add":
+        from axon.ui.menus import ask_text
+        text = ask_text("What should Axon remember?")
+        if text:
+            handle_memory(agent, f"add {text}")
+        return True
     if kind == "toggle":
         from axon.commands.common import update_settings, update_settings_file
         update_settings(agent, auto_memory=not auto)
@@ -457,7 +468,7 @@ def handle_init(agent: Any, arg: str) -> CommandResult:
     if a in ("local", "--local", "personal"):
         p = ws / "AXON.local.md"
         if p.exists():
-            info(f"{p.name} already exists. /memory edit local opens it.")
+            info(f"{p.name} already exists.{typed_only(' /memory edit local opens it.')}")
             return CommandResult(handled=True)
         p.write_text(f"# Personal notes for {ws.name}\n\nPreferences that apply only to you (not committed).\n", encoding="utf-8")
         _gitignore_add(ws, "AXON.local.md")
@@ -585,7 +596,7 @@ def handle_prompt(agent: Any, arg: str) -> CommandResult:
         for name, (desc, tpl, src) in sorted(prompts.items()):
             phs = ", ".join(dict.fromkeys(m.group(1) for m in _PH.finditer(tpl)))
             print(f"    {CYAN}{name:<12}{RST} {WHITE}{desc[:44]:<44}{RST} {DARK_SLATE}{('{' + phs + '}') if phs else ''}{RST}")
-        hint("\n    /prompt <name> key=value · /prompt save <name> <text>")
+        typed_hint("\n    /prompt <name> key=value · /prompt save <name> <text>")
         print()
         return CommandResult(handled=True)
     if sub.lower() == "show":
@@ -616,7 +627,7 @@ def handle_prompt(agent: Any, arg: str) -> CommandResult:
         return CommandResult(handled=True)
     p = prompts.get(sub)
     if p is None:
-        err(f"No template '{sub}'. /prompt lists them.")
+        err(f"No template '{sub}'.{typed_only(' /prompt lists them.')}")
         return CommandResult(handled=True)
     names = list(dict.fromkeys(m.group(1) for m in _PH.finditer(p[1])))
     given, free = parse_template_args(rest, names)
@@ -662,6 +673,6 @@ def handle_optimize(agent: Any, arg: str) -> CommandResult:
     if is_tty() and confirm("Send it now?", default=False):
         agent.run_turn(better)
     else:
-        hint("    copy it, or /queue it")
+        typed_hint("    copy it, or /queue it")
         print()
     return CommandResult(handled=True)

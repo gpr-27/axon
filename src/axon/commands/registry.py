@@ -222,8 +222,17 @@ def list_command_names(workspace: Path | None = None, agent: Any = None) -> list
     def taken(n: str) -> bool:  # a built-in (or its alias) wins dispatch, so the extension needs its prefix
         return n in seen or resolve_builtin(n) is not None
 
+    skill_names: set[str] = set()
+    try:
+        if agent is not None:
+            skill_names = {k.lower() for k in _skills(agent)}
+        elif ws is not None:
+            from axon.skills.manager import _manager_for
+            skill_names = {k.lower() for k in _user_invocable(_manager_for(ws).skills)}
+    except Exception:
+        skill_names = set()
     for name, cc in sorted(_custom_commands(ws).items()):
-        key = name if not taken(name) else f"cmd:{name}"
+        key = name if not (taken(name) or name.lower() in skill_names) else f"cmd:{name}"
         out.append((f"/{key}", cc.description or "custom command"))
         seen.add(key)
     skills = _skills(agent) if agent is not None else {}
@@ -440,6 +449,11 @@ def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
         if arg in ("--help", "-h") and cmd.name != "help":
             # every built-in answers `/cmd --help` with its description, usage and aliases
             return _run_handler(lambda a, _t: render_help(a, cmd.name), agent, "", f"/{cmd.name}")
+        if not arg:
+            from axon.commands.usage_menu import bare_menu_runner
+            runner = bare_menu_runner(cmd)   # a menu in a terminal; None: just run the handler
+            if runner is not None:
+                return _run_handler(lambda a, _t: runner(a), agent, "", f"/{cmd.name}")
         return _run_handler(cmd.handler, agent, arg, f"/{cmd.name}")
 
     if not name or _looks_like_path(first):
@@ -451,7 +465,9 @@ def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
     # 2. custom commands
     customs = _custom_commands(ws)
     cc_key = name[4:] if lname.startswith("cmd:") else name
-    if cc_key in customs:
+    # A skill beats a command file of the same name (Claude Code); /cmd:<name> still reaches the file.
+    skill_wins = (not lname.startswith("cmd:")) and any(k.lower() == lname for k in _skills(agent))
+    if cc_key in customs and not skill_wins:
         from axon.commands.custom import run_custom_command
         return _run_handler(lambda a, t: run_custom_command(a, customs[cc_key], t), agent, arg, f"/{cc_key}")
 
@@ -463,9 +479,9 @@ def dispatch_command(line: Any, agent: Any) -> CommandResult | None:
         return _run_handler(lambda a, t: run_skill(a, skill_key, t), agent, arg, f"/{skill_key}")
 
     # 4. MCP prompts
-    if lname.startswith("mcp__"):
+    if lname.startswith("mcp__") or ":" in lname:  # /mcp__server__prompt and Claude Code's /server:prompt
         for p in _mcp_prompts():
-            if _mcp_prompt_name(p).lower() == lname:
+            if _mcp_prompt_name(p).lower() == lname or f"{p['server']}:{p['name']}".lower() == lname:
                 from axon.commands.agent_cmds import run_mcp_prompt
                 return _run_handler(lambda a, t: run_mcp_prompt(a, p, t), agent, arg, f"/{name}")
 

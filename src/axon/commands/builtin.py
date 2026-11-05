@@ -29,6 +29,8 @@ from axon.commands.context_cmds import (  # noqa: F401
 from axon.commands.memory_cmds import (  # noqa: F401
     handle_init, handle_learn, handle_memory, handle_optimize, handle_prompt, quick_memory,
 )
+from axon.commands import parity_cmds  # noqa: F401
+from axon.commands import marketplace_cmds  # noqa: F401  (/marketplace, /connectors, /store)
 from axon.commands.endpoint_cmds import handle_endpoint  # noqa: F401
 from axon.commands.keys_cmds import handle_keys  # noqa: F401
 from axon.commands.settings_cmds import handle_settings  # noqa: F401

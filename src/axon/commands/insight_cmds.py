@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from axon.commands.common import (
-    estimate_tokens, fmt_tokens, header, hint, info, section, table, usage, ws_of,
+    estimate_tokens, fmt_tokens, header, hint, info, section, table, typed_only, usage, ws_of,
 )
 from axon.commands.registry import CommandResult, command
 from axon.storage import axon_home as _axon_home
@@ -114,7 +114,7 @@ def skill_report(agent: Any) -> list[dict[str, Any]]:
 def handle_skill_doctor(agent: Any, arg: str) -> CommandResult:
     rows = skill_report(agent)
     if not rows:
-        info("No skills installed. /skills create <name> makes one.")
+        info("No skills installed." + typed_only(" /skills create <name> makes one."))
         return _done()
     always = sum(r["listing_tokens"] for r in rows)
     header("Skill doctor", f"{len(rows)} skills · ~{fmt_tokens(always)} tokens in every prompt for the listing")

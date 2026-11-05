@@ -9,7 +9,7 @@ from pydantic import SecretStr
 
 from axon.commands.common import (
     err, header, hint, info, is_cancel_word, is_tty, kv, lookup_key, ok, save_env_key,
-    update_global_config, update_settings, usage, warn,
+    typed_only, update_global_config, update_settings, usage, warn,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, GOLD, MINT, PURPLE, ROSE, RST, SLATE, TEAL, WHITE
@@ -64,23 +64,37 @@ def _verify_and_save(preset: Any, env_var: str, key: str, agent: Any = None) -> 
     return True
 
 
+def _target_preset(agent: Any, chosen: str) -> Any:
+    """The provider that should serve *chosen*, or None to keep the current one."""
+    try:
+        from axon.providers.registry import preset_for_model_switch
+        return preset_for_model_switch(chosen, agent.settings)
+    except Exception:
+        return None
+
+
 def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = True) -> bool:
     """Switch model (and endpoint/key when the model belongs to another provider).
 
     ``persist=False`` keeps the change to this session (used by /fast)."""
     from axon.providers.registry import provider_for
-    try:
-        from axon.providers.catalog import find_preset_for_model
-        preset = preset or find_preset_for_model(chosen)
-    except Exception:
-        preset = preset or None
+    if preset is None:
+        preset = _target_preset(agent, chosen)
+    prev_model = str(getattr(agent.settings, "model", "") or "")
+    gate = getattr(agent, "model_switch_hook", None)
+    if callable(gate) and chosen != prev_model:
+        allowed, why = gate("pre", prev_model, chosen, requested=chosen)
+        if not allowed:
+            err(f"Model switch blocked by a PreModelSwitch hook: {why}")
+            return False
     base_url = agent.settings.base_url
+    provider_id = getattr(agent.settings, "provider", None)
     key: SecretStr = agent.settings.api_key
     if preset is not None:
+        provider_id = preset.id
         if preset.id != "openrouter" and chosen.lower().startswith(f"{preset.id}/"):
             chosen = chosen[len(preset.id) + 1:]
-        if preset.base_url.rstrip("/") != str(agent.settings.base_url).rstrip("/"):
-            base_url = preset.base_url
+        base_url = preset.base_url
         if getattr(preset, "requires_key", True):
             var = preset.env_var or "AXON_API_KEY"
             k = _key_for_preset(preset)
@@ -90,11 +104,11 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
                 if not is_cancel_word(entered) and _verify_and_save(preset, var, entered):
                     k = entered
             if not k:
-                warn(f"No API key for {preset.name}; set {var} or run /keys {preset.id}")
+                warn(f"No API key for {preset.name}; set {var}{typed_only(f' or run /keys {preset.id}')}")
             key = SecretStr(k or "local")
         else:
             key = SecretStr("local")
-    update_settings(agent, model=chosen, base_url=base_url, api_key=key)
+    update_settings(agent, model=chosen, base_url=base_url, provider=provider_id, api_key=key)
     try:
         agent.provider = provider_for(chosen, agent.settings)
     except Exception as e:
@@ -105,7 +119,9 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
     except Exception:
         pass
     if persist:
-        update_global_config({"model": chosen, "base_url": base_url})
+        update_global_config({"model": chosen, "base_url": base_url, **({"provider": provider_id} if provider_id else {})})
+    if callable(gate) and chosen != prev_model:
+        gate("post", prev_model, chosen, requested=chosen)
     via = f" {SLATE}via {preset.name} ({base_url}){RST}" if preset is not None else f" {SLATE}({base_url}){RST}"
     print(f"\n  {TEAL}✓ Model:{RST} {BOLD}{WHITE}{chosen}{RST}{via}\n")
     return True
@@ -242,7 +258,7 @@ def handle_plan(agent: Any, arg: str) -> CommandResult:
     if agent.settings.mode != "plan":
         set_mode(agent, "plan")
     elif not a:
-        info("Plan mode is already on. '/plan off' to leave it.")
+        info("Plan mode is already on." + typed_only(" '/plan off' to leave it."))
     if a and a.lower() not in ("on", "mode", "enable"):
         agent.run_turn(a)
     return CommandResult(handled=True)
@@ -282,11 +298,19 @@ def handle_trace(agent: Any, arg: str) -> CommandResult:
     if a in ("last", "inspect"):
         from axon.commands.agent_cmds import handle_inspect
         return handle_inspect(agent, "")
+    levels = (("compact", "one line per tool + footer"), ("normal", "step timeline with args, results, permissions"),
+              ("detailed", "+ full tool input, result heads, prompt breakdown"), ("debug", "+ raw request and usage"))
+    if not a and is_tty():
+        from axon.ui.menus import choose_value
+        picked = choose_value("Trace level", [(lv, lv, d) for lv, d in levels], current=current_trace_level(agent))
+        if not picked:
+            info(f"Trace level unchanged: {current_trace_level(agent)}")
+            return CommandResult(handled=True)
+        a = picked
     if not a:
         cur = current_trace_level(agent)
         header("Trace level", cur)
-        for lv, d in (("compact", "one line per tool + footer"), ("normal", "step timeline with args, results, permissions"),
-                      ("detailed", "+ full tool input, result heads, prompt breakdown"), ("debug", "+ raw request and usage")):
+        for lv, d in levels:
             mark = f"{MINT}●{RST}" if lv == cur else " "
             print(f"    {mark} {WHITE}{lv:<9}{RST} {SLATE}{d}{RST}")
         print()

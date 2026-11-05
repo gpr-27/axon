@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from axon.commands.common import err, header, hint, kv, ok, section, usage
+from axon.commands.common import err, header, kv, ok, section, usage, typed_hint
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE
 
@@ -18,80 +18,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 
 KINDS = ("allow", "ask", "deny")
-TABS = ["Allow", "Ask", "Deny", "Directories"]
 _KIND_COLOR = {"allow": MINT, "ask": GOLD, "deny": ROSE}
-
-
-def _panel(agent: Any) -> CommandResult:
-    """Interactive rules panel: Tab switches Allow/Ask/Deny/Directories, Enter on "+ Add" adds,
-    d / Delete removes the selected entry. Rules are saved to .axon/settings.local.json."""
-    from axon.ui.picker import SelectItem, Selector
-    perms = agent.permissions
-    add_label = {"allow": "+ Add allow rule…", "ask": "+ Add ask rule…", "deny": "+ Add deny rule…", "dirs": "+ Add directory…"}
-
-    def kind_of(tab: int) -> str:
-        return ("allow", "ask", "deny", "dirs")[tab]
-
-    def items_for(tab: int) -> list[SelectItem]:
-        kind = kind_of(tab)
-        out = [SelectItem(label=add_label[kind], value=("add", kind, None))]
-        if kind == "dirs":
-            for d in (perms.working_dirs() if hasattr(perms, "working_dirs") else []):
-                out.append(SelectItem(label=str(d), value=("item", kind, str(d)), badge=f"{TEAL}▸{RST}"))
-            return out
-        for e in perms.list_rules():
-            if e.kind == kind:
-                out.append(SelectItem(label=str(e.rule), value=("item", kind, str(e.rule)), hint=e.source,
-                                      badge=f"{_KIND_COLOR[kind]}●{RST}"))
-        return out
-
-    def on_key(sel: Any, key: str) -> bool:
-        cur = sel.current()
-        if cur is None:
-            return False
-        action, kind, spec = cur.value
-        if key == "enter" and action == "add":
-            text = sel.prompt_line("Directory: " if kind == "dirs" else f"{kind} rule (e.g. Bash(npm test:*)): ")
-            if text:
-                try:
-                    if kind == "dirs":
-                        from axon.commands.workspace_cmds import _resolve_dir, add_working_dir
-                        p = _resolve_dir(agent, text)
-                        if p is None:
-                            sel.flash(f"Not a directory: {text}", ROSE)
-                            return True
-                        add_working_dir(agent, p, save=True)
-                        sel.flash(f"Added {p}")
-                    else:
-                        rule = perms.add_rule(kind, text)
-                        sel.flash(f"Added {kind} {rule}")
-                except Exception as e:  # invalid rule syntax
-                    sel.flash(f"Could not add: {e}", ROSE)
-                sel.set_items(items_for(sel.tab_index))
-            return True
-        if key in ("d", "delete", "backspace", "x") and action == "item":
-            if sel.confirm(f"Remove {spec}?"):
-                if kind == "dirs":
-                    from axon.commands.workspace_cmds import handle_add_dir
-                    import contextlib
-                    import io
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        handle_add_dir(agent, f"remove {spec}")
-                    sel.flash(f"Removed {spec}")
-                else:
-                    where = perms.remove_rule(kind, spec)
-                    sel.flash(f"Removed from {', '.join(where)}" if where else "Not removable (built-in config)",
-                              MINT if where else ROSE)
-                sel.set_items(items_for(sel.tab_index), keep_index=False)
-            return True
-        if key == "enter":
-            return True  # Enter on a rule does nothing (d removes it)
-        return False
-
-    Selector(title="Permissions", subtitle=f"mode {agent.settings.mode} · saved to {perms.local_settings_path()}",
-             tabs=TABS, items_for_tab=items_for, on_key=on_key,
-             footer="Tab switch · Enter add · d remove · Esc close").run()
-    return CommandResult(handled=True)
 
 
 @command("permissions", category="Model & Modes", description="Manage allow / ask / deny rules and working directories",
@@ -105,7 +32,9 @@ def handle_permissions(agent: Any, arg: str) -> CommandResult:
     if not sub:
         from axon.commands.common import is_tty
         if is_tty() and hasattr(perms, "list_rules"):
-            return _panel(agent)
+            from axon.commands.permissions_menu import permissions_menu
+            permissions_menu(agent)
+            return CommandResult(handled=True)
 
     if sub in ("allow", "deny", "add", "ask"):
         kind = "allow" if sub in ("allow", "add") else sub
@@ -173,6 +102,6 @@ def handle_permissions(agent: Any, arg: str) -> CommandResult:
     print(f"    {SLATE}catastrophic shell commands (rm -rf /, mkfs, dd to devices, fork bombs){RST}")
     print(f"    {SLATE}paths outside the workspace always ask (except bypass mode){RST}")
     print()
-    hint("    /permissions allow|ask|deny <rule> · remove <kind> <rule> · /add-dir <path> · /help permissions")
+    typed_hint("    /permissions allow|ask|deny <rule> · remove <kind> <rule> · /add-dir <path> · /help permissions")
     print()
     return CommandResult(handled=True)

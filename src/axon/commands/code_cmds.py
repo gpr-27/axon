@@ -11,6 +11,7 @@ from typing import Any
 
 from axon.commands.common import (
     err, git, header, info, is_tty, ok, one_shot, run_cmd, usage, ws_of,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE
@@ -72,6 +73,10 @@ def _diff_viewer(agent: Any, args: list[str]) -> CommandResult:
     """Interactive diff: Up/Down choose a file, Enter shows its diff, a attaches it to the next prompt."""
     from axon.ui.picker import SelectItem, Selector
     ws = ws_of(agent)
+    code, why = git(ws, "rev-parse", "--git-dir")
+    if code != 0:
+        err(why.strip() or "Not a git repository.")   # the text mode says the same; not "Working tree clean."
+        return CommandResult(handled=True)
     files = changed_files(ws, args)
     if not files:
         ok("Working tree clean.")
@@ -119,7 +124,7 @@ def handle_diff(agent: Any, arg: str) -> CommandResult:
     if m:
         text = _checkpoint_diff(agent, int(m.group(1)))
         if not text:
-            info(f"No checkpoint T{m.group(1)} with changes. /rewind list shows checkpoints.")
+            info(f"No checkpoint T{m.group(1)} with changes.{typed_only(' /rewind list shows checkpoints.')}")
         else:
             _print_diff(text)
         return CommandResult(handled=True)
@@ -303,7 +308,7 @@ def handle_test(agent: Any, arg: str) -> CommandResult:
     if proc.returncode == 0:
         print(f"\n  {MINT}{BOLD}✓ Tests passed{RST}\n")
     else:
-        print(f"\n  {ROSE}{BOLD}✗ Tests failed (exit {proc.returncode}){RST}  {SLATE}ask the agent to fix them, or /review{RST}\n")
+        print(f"\n  {ROSE}{BOLD}✗ Tests failed (exit {proc.returncode}){RST}  {SLATE}ask the agent to fix them{typed_only(', or /review')}{RST}\n")
     return CommandResult(handled=True)
 
 
@@ -415,14 +420,35 @@ def _recorded_outputs(agent: Any) -> list[dict[str, Any]]:
         return []
 
 
+def _output_menu(agent: Any, rows: list[Any]) -> bool:
+    """Pick a stored tool output to view in full. False when there is nothing to pick from."""
+    from axon.ui.menus import choose_value
+    options = [(f"#{n} {name}", n, f"{tgt[:50]} · {count} lines") for n, name, tgt, count in rows]
+    if not options:
+        for r in _recorded_outputs(agent)[-40:]:
+            count = len(str(r["content"]).splitlines())
+            options.append((f"#{r['n']} {r['name']}", r["n"], f"{str(r['target'])[:50]} · {count} lines"))
+    if not options:
+        return False
+    options.reverse()  # newest first
+    while True:
+        n = choose_value("Tool outputs", options, subtitle="Enter shows one in full")
+        if n is None:
+            return True
+        handle_output(agent, str(n))
+
+
 @command("output", category=CAT, description="Full output of a tool call (/output 7), the last one, or a workspace file",
          aliases=("expand", "view", "more"), usage="/output [n | list | path] [pager]\n/output list saved   tool outputs recorded in this session (also after a resume)")
 def handle_output(agent: Any, arg: str) -> CommandResult:
     from axon.ui.render import get_last_tool_output, get_tool_output, highlight_code, list_tool_outputs
+    if not arg.strip() and is_tty() and _output_menu(agent, list_tool_outputs()):
+        return CommandResult(handled=True)
     words = arg.split()
     use_pager = "pager" in words
     target = " ".join(w for w in words if w != "pager").strip()
     out, title = "", "Last tool output"
+    shown_no = 0          # the tool call whose output is shown (its explainer block is printed above it)
     if target in ("list", "ls", "saved", "list saved"):
         rows = list_tool_outputs() if target in ("list", "ls") else []
         if not rows:
@@ -453,6 +479,7 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
             return CommandResult(handled=True)
         name, tgt, out = item
         title = f"#{target.lstrip('#')} {name} {tgt}".strip()
+        shown_no = int(target.lstrip("#"))
         if not out:
             info("That tool call produced no output.")
             return CommandResult(handled=True)
@@ -472,6 +499,7 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
         title = target
     elif not out:
         out = get_last_tool_output() if list_tool_outputs() else ""
+        shown_no = list_tool_outputs()[-1][0] if out else 0
         if not out:
             saved = _recorded_outputs(agent)
             if saved:
@@ -486,6 +514,13 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
         pydoc.pager("\n".join(f"{i:5d}  {ln}" for i, ln in enumerate(lines, 1)))
         return CommandResult(handled=True)
     header(title, f"{len(lines)} lines · {len(out):,} chars · /transcript (Ctrl+F) expands any tool call")
+    if shown_no:
+        from axon.ui.render import tool_output_details
+        details = tool_output_details(shown_no, max(40, shutil.get_terminal_size((100, 24)).columns - 8))
+        for row in details:          # who chose it, why, the exact call, where the result went
+            print(f"  {row}")
+        if details:
+            print(f"  {SLATE}exact result sent to the model ({len(lines)} lines){RST}")
     for i, ln in enumerate(lines, 1):
         print(f"  {DARK_SLATE}{i:5d} │{RST} {highlight_code(ln)}")
     print()
@@ -573,12 +608,11 @@ def handle_queue(agent: Any, arg: str) -> CommandResult:
         return CommandResult(handled=True)
     sub, _, rest = a.partition(" ")
     sub_l = sub.lower()
-    if sub_l in ("drop", "rm", "remove", "delete") and rest.strip():
-        try:
-            item_id = int(rest.strip().lstrip("#"))
-        except ValueError:
-            usage("/queue drop <id>")
-            return CommandResult(handled=True)
+    if sub_l in ("drop", "rm", "remove", "delete") and not rest.strip():
+        usage("/queue drop <id>")      # not a prompt of its own: it would queue the word "drop"
+        return CommandResult(handled=True)
+    if sub_l in ("drop", "rm", "remove", "delete") and rest.strip().lstrip("#").isdecimal():
+        item_id = int(rest.strip().lstrip("#"))
         if q.remove(item_id):
             ok(f"Removed #{item_id}")
         else:

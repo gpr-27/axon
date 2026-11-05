@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from axon.commands.common import (
-    confirm, err, estimate_tokens, header, hint, info, is_tty, ok, reprint_banner, usage, ws_of,
+    confirm, err, estimate_tokens, header, info, is_tty, ok, reprint_banner, usage, ws_of,
+    typed_hint,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, LBLUE, MINT, ROSE, RST, SLATE, TEAL, WHITE
@@ -52,7 +54,7 @@ def handle_clear(agent: Any, arg: str) -> CommandResult:
     reprint_banner(agent)
     print(f"  {MINT}⚡ New session:{RST} {BOLD}{WHITE}{new_id}{RST}")
     if had_messages:
-        print(f"  {SLATE}/resume {old_id} (previous session{', ' + title if title else ''}){RST}")
+        print(f"  {SLATE}{typed_only('/resume ')}{old_id} (previous session{', ' + title if title else ''}){RST}")
     print()
     return CommandResult(handled=True)
 
@@ -110,6 +112,9 @@ def handle_sessions(agent: Any, arg: str) -> CommandResult:
     elif sub == "clear":
         if confirm("Delete ALL saved sessions of this workspace?", default=not is_tty()):
             handle_session_delete(agent.session, "--all")
+    elif is_tty():
+        from axon.commands.browse_menus import sessions_menu
+        sessions_menu(agent)
     else:
         handle_sessions_list(agent.session)
     return CommandResult(handled=True)
@@ -160,6 +165,69 @@ def handle_rename(agent: Any, arg: str) -> CommandResult:
     if callable(mark):
         mark(title)
     ok(f"Renamed session to {BOLD}{title}{RST}")
+    return CommandResult(handled=True)
+
+
+def _same_title(title: str, first_prompt: str) -> bool:
+    """True when *title* is just the first words of the prompt (what Axon used before AI titles)."""
+    from axon.agent.loop import heuristic_title
+    guess = heuristic_title(first_prompt).rstrip("…").strip().lower()
+    return bool(guess) and title.strip().lower().startswith(guess[:40])
+
+
+def auto_named_sessions(agent: Any) -> list[tuple[Any, Any]]:
+    """(meta, summary) of past chats still named after their first words: not renamed by you, no AI title."""
+    from axon.session.store import _scan
+    found = []
+    for meta in agent.session.list_recent():
+        summary = _scan(meta.path, agent.session.model)
+        if not summary.first_prompt:
+            continue
+        if summary.custom_title and not _same_title(summary.custom_title, summary.first_prompt):
+            continue
+        found.append((meta, summary))
+    return found
+
+
+def _ai_title_for(agent: Any, summary: Any) -> str:
+    from axon.commands.common import one_shot
+    text = f"User asked: {summary.first_prompt[:600]}"
+    if summary.first_assistant:
+        text += f"\n\nAssistant answered: {summary.first_assistant[:300]}"
+    reply = one_shot(agent, "Name this coding chat in 3-6 words, Title Case, saying what it was about. "
+                            "Reply with the title only: no quotes, no punctuation at the end.",
+                     text, max_tokens=30, source="title")
+    return " ".join(reply.strip().strip("\"'. ").split())[:64]
+
+
+@command("retitle", category=CAT, description="Give past chats short AI-written titles",
+         usage="/retitle [all]   (no argument: this chat; all: every past chat still named after its first words)")
+def handle_retitle(agent: Any, arg: str) -> CommandResult:
+    if arg.strip().lower() != "all":
+        return handle_rename(agent, "")
+    todo = auto_named_sessions(agent)
+    if not todo:
+        info("Every past chat already has a title you or the AI chose.")
+        return CommandResult(handled=True)
+    print(f"\n  {SLATE}Writing titles for {len(todo)} chats with {agent.settings.model}: one short call each (Esc stops).{RST}\n")
+    done = 0
+    try:
+        for meta, summary in todo:
+            try:
+                title = _ai_title_for(agent, summary)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"  {ROSE}✗{RST} {SLATE}{meta.session_id[-8:]}: {e}{RST}")
+                continue
+            if not title:
+                continue
+            agent.session.rename_session(title, session_id=meta.session_id)
+            done += 1
+            print(f"  {MINT}✓{RST} {SLATE}{meta.first_prompt[:28]:<28}{RST} {WHITE}→ {title}{RST}")
+    except KeyboardInterrupt:
+        print(f"\n  {GOLD}Stopped.{RST}")
+    ok(f"Titled {done} of {len(todo)} chats")
     return CommandResult(handled=True)
 
 
@@ -342,7 +410,7 @@ def _print_points(points: list[RewindPoint]) -> None:
         when = datetime.fromtimestamp(p.ts).strftime("%H:%M:%S") if p.ts else "--:--:--"
         files = f"{p.files_changed} file(s)" if p.files_changed else "no edits"
         print(f"    {CYAN}{p.index:>3}{RST}  {SLATE}{when}{RST}  {WHITE}{' '.join(p.prompt.split())[:60]}{RST}  {DARK_SLATE}{files}{RST}")
-    hint("    /rewind to <n> [code_and_conversation|conversation|code|summarize_from_here]")
+    typed_hint("    /rewind to <n> [code_and_conversation|conversation|code|summarize_from_here]")
     print()
 
 
@@ -408,7 +476,7 @@ def handle_rewind(agent: Any, arg: str) -> CommandResult:
             names = ", ".join(sorted(p.name for p in s.files))[:70]
             label = f" {DARK_SLATE}{s.label}{RST}" if getattr(s, "label", "") else ""
             print(f"    {CYAN}{i:>2}{RST}  {SLATE}{when}{RST}  {WHITE}{len(s.files)} file(s){RST}  {SLATE}{names}{RST}{label}")
-        hint("    /rewind <n> undoes the newest n snapshots")
+        typed_hint("    /rewind <n> undoes the newest n snapshots")
         print()
         return CommandResult(handled=True)
     try:
@@ -539,7 +607,7 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
         if copy_to_clipboard(payload):
             ok(f"Copied {len(agent.conversation.messages)} messages ({len(payload):,} chars, {fmt}) to the clipboard")
         else:
-            err("No clipboard utility available (pbcopy, clip, xclip, wl-copy). Use /export <path>.")
+            err("No clipboard utility available (pbcopy, clip, xclip, wl-copy)." + typed_only(" Use /export <path>."))
         return CommandResult(handled=True)
     if fname:
         out_path = Path(fname).expanduser()
@@ -547,7 +615,7 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
             out_path = ws_of(agent) / out_path
     else:
         from axon import storage
-        out_path = storage.project_subdir(ws_of(agent), "exports") / f"{agent.session.active_session_id}.{fmt}"
+        out_path = storage.session_subdir(ws_of(agent), agent.session.active_session_id, "exports") / f"{agent.session.active_session_id}.{fmt}"
     if out_path.exists() and not confirm(f"{out_path} exists. Overwrite?", default=False):
         info("Export cancelled.")
         return CommandResult(handled=True)

@@ -13,6 +13,7 @@ from typing import Any
 from axon.storage import axon_home as _axon_home
 from axon.commands.common import (
     err, estimate_tokens, fmt_tokens, fmt_usd, git, header, hint, info, kv, ok, one_shot, update_global_config, update_settings, usage, ws_of,
+    typed_only,
 )
 from axon.commands.registry import CommandResult, command, render_help
 from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, WHITE, term_height, term_width
@@ -20,9 +21,27 @@ from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, 
 CAT = "System"
 
 
-@command("help", category=CAT, description="List commands, or details for one command", usage="/help [command]")
+@command("help", category=CAT, description="Browse every command with the arrow keys (or list them as text)",
+         usage="/help [command]")
 def handle_help(agent: Any, arg: str) -> CommandResult:
+    from axon.commands.common import is_tty
+    if not arg.strip() and is_tty():
+        from axon.commands.browse_menus import navigator
+        navigator(agent)
+        return CommandResult(handled=True)
     render_help(agent, arg)
+    return CommandResult(handled=True)
+
+
+@command("menu", category="Getting started", description="Walk through every command with the arrow keys",
+         aliases=("commands",), usage="/menu")
+def handle_menu(agent: Any, arg: str) -> CommandResult:
+    from axon.commands.common import is_tty
+    if is_tty():
+        from axon.commands.browse_menus import navigator
+        navigator(agent)
+    else:
+        render_help(agent, "")
     return CommandResult(handled=True)
 
 
@@ -122,6 +141,15 @@ def handle_status(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
+@command("storage", category=CAT, description="Show everything Axon stores in ~/.axon, with sizes and leftovers")
+def handle_storage(agent: Any, arg: str = "") -> CommandResult:
+    from axon.storage import render_storage_tree
+    print()
+    print(render_storage_tree())
+    print()
+    return CommandResult(handled=True)
+
+
 @command("doctor", category=CAT, description="Diagnose installation, keys, tools and environment",
          usage="/doctor                 installation, keys, tools, terminal\n/doctor prompt-audit    conflicting, duplicated or stale instructions across AXON.md, rules, skills, agents")
 def handle_doctor(agent: Any, arg: str) -> CommandResult:
@@ -197,6 +225,7 @@ def _panel_keys(agent: Any) -> list[tuple[str, str, Any, str]]:
         ("theme", "Theme", [n for n, _ in THEMES], "theme"),
         ("vim_mode", "Vim mode", "bool", "editorMode"),
         ("suggestions", "Prompt suggestions", "bool", "promptSuggestionEnabled"),
+        ("prompt_suggestions", "Next-prompt ghost text", "bool", "promptSuggestions"),
         ("tips", "Usage tips", "bool", "tips"),
         ("tips_llm", "Model-written tips", "bool", "tipsLlm"),
     ]
@@ -248,6 +277,9 @@ def set_config_value(agent: Any, key: str, raw: Any, persist: bool = True) -> st
         elif key == "vim_mode":
             from axon.commands.prefs_cmds import handle_vim
             handle_vim(agent, "on" if value else "off")
+        elif key == "prompt_suggestions":
+            from axon.commands.prefs_cmds import handle_suggestions
+            handle_suggestions(agent, "on" if value else "off")
         elif key == "output_style":
             from axon.commands.prefs_cmds import handle_output_style
             handle_output_style(agent, value)
@@ -422,7 +454,7 @@ def handle_autocompact(agent: Any, arg: str) -> CommandResult:
         window = 200_000
     if not a:
         pct_now = float(agent.settings.compact_at)
-        kv("Auto-compact at", f"{int(pct_now * 100)}% of the context limit (~{fmt_tokens(int(pct_now * window))} of {fmt_tokens(window)} tokens; /context limit changes the size)")
+        kv("Auto-compact at", f"{int(pct_now * 100)}% of the context limit (~{fmt_tokens(int(pct_now * window))} of {fmt_tokens(window)} tokens{typed_only('; /context limit changes the size')})")
         print()
         return CommandResult(handled=True)
     try:
@@ -510,12 +542,15 @@ def handle_notify(agent: Any, arg: str) -> CommandResult:
         configure(agent.settings)
         ok(f"Finished turns notify only after running {secs:g}s or longer")
         return CommandResult(handled=True)
-    if sub == "test" or (sub and sub not in NOTIFY_MODES):
-        msg = " ".join(words[1:] if sub == "test" else words).strip() or "Axon notifications work."
+    if sub == "test":      # only "test" sends one; any other word is a mistake, not a message
+        msg = " ".join(words[1:]).strip() or "Axon notifications work."
         if send_desktop_notification("Axon", msg):
             ok(f"Notification sent: {msg}")
         else:
             info("Desktop notifications are not available here.")
+        return CommandResult(handled=True)
+    if sub:
+        usage("/notify [important|all|off|after <seconds>|test [message]]")
         return CommandResult(handled=True)
     mode = getattr(s, "notifications", "important")
     after = float(getattr(s, "notify_after_seconds", 30.0))
@@ -529,15 +564,19 @@ def handle_notify(agent: Any, arg: str) -> CommandResult:
     }.get(mode, [])
     for r in rows:
         print(f"    {SLATE}·{RST} {WHITE}{r}{RST}")
-    print(f"\n  {SLATE}Only while you are in another app. /notify important|all|off · /notify after <seconds> · /notify test{RST}\n")
+    print(f"\n  {SLATE}Only while you are in another app.{typed_only(' /notify important|all|off · /notify after <seconds> · /notify test')}{RST}\n")
     return CommandResult(handled=True)
 
 
 @command("statusbar", category=CAT, description="Show the live status bar, or toggle it", usage="/statusbar [toggle]")
 def handle_statusbar(agent: Any, arg: str) -> CommandResult:
     from axon.ui.statusbar import StatusBar
-    if arg.strip().lower() in ("toggle", "on", "off"):
-        ok(f"Status bar {'enabled' if StatusBar.toggle() else 'disabled'}")
+    word = arg.strip().lower()
+    if word in ("toggle", "on", "off"):
+        now = StatusBar.toggle()
+        if word != "toggle" and now != (word == "on"):
+            now = StatusBar.toggle()      # "/statusbar off" on a bar that is already off keeps it off
+        ok(f"Status bar {'enabled' if now else 'disabled'}")
     else:
         StatusBar.print_live_status(agent)
     return CommandResult(handled=True)
@@ -576,9 +615,10 @@ def handle_bug(agent: Any, arg: str) -> CommandResult:
     root = _axon_home() / "bug-reports"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"bug-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    from axon.session.activity import redact_text
+    path.write_text(redact_text("\n".join(lines) + "\n"), encoding="utf-8")   # tool output and errors can quote keys
     ok(f"Bug report saved to {WHITE}{path}{RST}")
-    hint("    It contains no API keys or conversation text; attach it to an issue for the project.")
+    hint("    Keys and tokens are masked, but it quotes the start of your last prompt and tool names: read it before you attach it to an issue.")
     print()
     return CommandResult(handled=True)
 
