@@ -162,6 +162,17 @@ PROVIDER_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "qwen-3-32b": _oai(0.40, 0.80),
         "gpt-oss-120b": _oai(0.35, 0.75),
     },
+    "bizneuro": {       # $ per million tokens (input, output)
+        "gpt-6-astra": _oai(10, 50), "claude-opus-5-5": _oai(4, 20), "grok-4.6-2": _oai(3, 15),
+        "gemini-3.1-pro-preview": _oai(2, 12), "gpt-5.6-terra": _oai(2, 12), "claude-sonnet-5-5": _oai(2, 10),
+        "gpt-6.1-sol": _oai(2, 10), "grok-4.7": _oai(2, 6), "claude-haiku-4-5": _oai(1, 5),
+        "zai-org/glm-5.2-maas": _oai(1.4, 4.4), "Kimi-K2.6": _oai(0.95, 4), "Kimi-K2.7-Code": _oai(0.95, 4),
+        "deepseek-v4-pro": _oai(1.32, 3.96), "gemini-3.8-flash": _oai(0.75, 3.75), "zai-org/glm-5-maas": _oai(1, 3.2),
+        "Kimi-K2.5": _oai(0.6, 2.75), "gemini-3.5-flash-lite": _oai(0.3, 2.5), "kimi-k2-thinking": _oai(0.6, 2.5),
+        "gpt-5-mini": _oai(0.25, 2), "DeepSeek-V4.1-Flash": _oai(0.3, 1.2), "openai/gpt-oss-120b": _oai(0.15, 0.59),
+        "gpt-oss-120b": _oai(0.15, 0.59), "gpt-6-luna": _oai(0.1, 0.5), "gemma-4-26b": _oai(0.13, 0.4),
+        "gpt-oss-20b": _oai(0.07, 0.18),
+    },
 }
 
 # Gateways that resell first-party models under the vendor's own ids at list price.

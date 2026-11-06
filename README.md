@@ -9,12 +9,12 @@ See every step: every LLM call, tool, token, cache hit and cent.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-5ed2c8.svg)](docs/windows.md)
-[![Version](https://img.shields.io/badge/version-0.29.0-b4a0ff.svg)](src/axon/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.29.1-b4a0ff.svg)](src/axon/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-reference-86de8c.svg)](docs/)
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-123 slash commands · 22 built-in tools · 15 provider presets
+123 slash commands · 22 built-in tools · 16 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -172,9 +172,9 @@ axon --version
 **Install a specific version:**
 
 ```bash
-uv tool install axon-terminal==0.29.0
-pipx install axon-terminal==0.29.0
-pip install axon-terminal==0.29.0
+uv tool install axon-terminal==0.29.1
+pipx install axon-terminal==0.29.1
+pip install axon-terminal==0.29.1
 ```
 
 ## Set up a model
@@ -404,6 +404,7 @@ and key follow the model you select. Keys are read from the environment, then fr
 | `together` | Together AI | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
 | `fireworks` | Fireworks AI | `https://api.fireworks.ai/inference/v1` | `FIREWORKS_API_KEY` | `accounts/fireworks/models/qwen3-coder-480b-a35b-instruct` |
 | `cerebras` | Cerebras | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEY` | `qwen-3-coder-480b` |
+| `bizneuro` | BizNeuro | `https://stg-bizneuro-ai-1084382769362.asia-south1.run.app/v1` | `BZN_API_KEY` | `gpt-oss-120b` |
 | `azure` | Azure OpenAI | `https://YOUR-RESOURCE.openai.azure.com` | `AZURE_OPENAI_API_KEY` | `gpt-4o` |
 <!-- END GENERATED: providers -->
 

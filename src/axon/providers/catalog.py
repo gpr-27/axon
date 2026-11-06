@@ -322,6 +322,24 @@ PROVIDER_PRESETS: list[ProviderPreset] = [
         docs_url="https://inference-docs.cerebras.ai",
     ),
     ProviderPreset(
+        id="bizneuro",
+        name="BizNeuro",
+        description="BizNeuro (RouteNeuro) gateway · Claude, GPT, Gemini, Grok, Kimi, GLM, DeepSeek (set BZN_API_KEY)",
+        category="Custom",
+        base_url="https://stg-bizneuro-ai-1084382769362.asia-south1.run.app/v1",
+        default_model="gpt-oss-120b",
+        models=[
+            "gpt-oss-120b", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5", "gpt-6-astra", "gpt-6.1-sol",
+            "gpt-6-luna", "gpt-5.6-terra", "gpt-5-mini", "gemini-3.1-pro-preview", "gemini-3.8-flash",
+            "gemini-3.5-flash-lite", "grok-4.6-2", "grok-4.7", "Kimi-K2.6", "Kimi-K2.7-Code", "Kimi-K2.5",
+            "kimi-k2-thinking", "zai-org/glm-5.2-maas", "zai-org/glm-5-maas", "deepseek-v4-pro",
+            "DeepSeek-V4.1-Flash", "openai/gpt-oss-120b", "gpt-oss-20b", "gemma-4-26b",
+        ],
+        env_vars=("BZN_API_KEY",),
+        namespaced_models=True,
+        native_tools=False,      # the gateway drops the `tools` field: tools go into the prompt (providers/prompt_tools.py)
+    ),
+    ProviderPreset(
         id="azure",
         name="Azure OpenAI",
         description="Your Azure OpenAI deployment (set AZURE_OPENAI_ENDPOINT; model = deployment name)",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.29.1
+
+BizNeuro as a built-in provider
+- `/provider` lists BizNeuro (RouteNeuro gateway) with 25 models and their prices. Tools go through the prompt, because the
+  gateway drops the `tools` field. Set `BZN_API_KEY` (or use `/keys`) to sign in.
+
 ## 0.29.0
 
 Smaller prompts, live status, next-prompt suggestions and calmer input
