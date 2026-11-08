@@ -172,9 +172,9 @@ axon --version
 **Install a specific version:**
 
 ```bash
-uv tool install axon-terminal==0.29.1
-pipx install axon-terminal==0.29.1
-pip install axon-terminal==0.29.1
+uv tool install axon-terminal==0.30.0
+pipx install axon-terminal==0.30.0
+pip install axon-terminal==0.30.0
 ```
 
 ## Set up a model

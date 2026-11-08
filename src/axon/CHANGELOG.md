@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-Work in progress; not a release yet.
+## 0.30.0
+
 - Interface languages: English, Telugu and Hindi in Settings > Appearance, saved in the browser, with English fallback. The app
   frame is translated first (about 70% of the frame's strings by the coverage script, about 40% of all page strings); code, paths,
   tool output and model replies are not. "Reply in this language" (`replyLanguage`, off by default) adds one line to the system prompt.
