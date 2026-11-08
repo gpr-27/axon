@@ -1064,6 +1064,10 @@ class Agent:
             # stream blocked in a socket read so it does (Esc / Ctrl+C take effect immediately).
             self._cancel_provider_stream(t.ident)
             return n == 1
+        # Only when a turn really runs on the main thread. In the web app the main thread is the server, so a Stop
+        # that lands just after a turn ended must do nothing rather than interrupt it and shut the app down.
+        if not getattr(self, "_turn_on_main", False):
+            return False
         import _thread
         _thread.interrupt_main()
         self._cancel_provider_stream(threading.main_thread().ident)
@@ -1562,6 +1566,16 @@ class Agent:
     # ── main loop ───────────────────────────────────────────────────
     def run_turn(self, user_input: str) -> TurnResult:
         """Run the ReAct loop until the model stops, a limit is hit, or the user interrupts."""
+        on_main = threading.current_thread() is threading.main_thread()
+        if on_main:
+            self._turn_on_main = True           # cancel_current_turn may interrupt the main thread only now
+        try:
+            return self._traced_turn(user_input)
+        finally:
+            if on_main:
+                self._turn_on_main = False
+
+    def _traced_turn(self, user_input: str) -> TurnResult:
         self._turn_counter += 1
         if not self.is_subagent:
             self.suggestions.clear()               # last turn's guess is stale now

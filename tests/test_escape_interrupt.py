@@ -338,3 +338,21 @@ def test_interrupted_tool_turn_prints_the_stopped_summary(workspace: Path, monke
     assert len(footers) == 1
     assert footers[0]["stop_reason"] == "interrupted" and footers[0]["llm_calls"] == 1
     agent.conversation.validate()
+
+
+def test_a_stop_with_no_turn_running_never_interrupts_the_main_thread(monkeypatch, tmp_path):
+    """In the web app the main thread is the server: a Stop just after a turn ended must not shut it down."""
+    import _thread
+
+    from axon.agent.loop import Agent
+    hits = []
+    monkeypatch.setattr(_thread, "interrupt_main", lambda *a: hits.append(1))
+    fake = SimpleNamespace(_turn_thread=None, provider=None, _cancel_provider_stream=lambda ident: None)
+    assert Agent.cancel_current_turn(fake) is False and hits == []
+    ended = threading.Thread(target=lambda: None)
+    ended.start()
+    ended.join()
+    fake._turn_thread = ended
+    assert Agent.cancel_current_turn(fake) is False and hits == []
+    fake._turn_on_main = True
+    assert Agent.cancel_current_turn(fake) is True and hits == [1]
