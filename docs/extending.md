@@ -176,8 +176,13 @@ a project server is recorded in the same state file, so the shared `.mcp.json` i
 | `anthropic/maxResultSizeChars` (tool `_meta`) | a tool's own threshold, up to 500,000 characters, replacing both |
 | `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` | cap for tool descriptions and server instructions (default 4,096 upfront, 16,384 behind ToolSearch) |
 
+A local (stdio) server that is only slow, and misses the start-up limit, is retried twice in the background
+(after 2 s with twice the limit, then after 5 s with four times, at most 120 s) and its tools appear when it
+answers. A local server that crashes is restarted up to three times (1, 2, 4 s); after more than three
+crashes in two minutes it is left `failed` with a message, and `/mcp reconnect <name>` tries again.
+
 With `automation` turned on ([Marketplace](marketplace.md#automation)) the first connection also retries
-after 2, 5 and 15 seconds, local (stdio) servers are reconnected too, startup waits only `startup_wait`
+after 2, 5 and 15 seconds, startup waits only `startup_wait`
 seconds for servers (the rest connect in the background and register their tools when ready), and a
 server that fails `auto_disable_after` connection rounds in a row is switched off with a notice. The
 failure count lives in `~/.axon/state/mcp-health.json`.
@@ -284,11 +289,18 @@ and `httpHookAllowedEnvVars` restrict HTTP hooks.
 `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`,
 `Notification`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `Stop`, `StopFailure`,
 `InstructionsLoaded`, `CwdChanged`, `DirectoryAdded`, `WorktreeCreate` (`--worktree`), `PreCompact`,
-`PostCompact`, `PreModelSwitch`, `PostModelSwitch` (`/model`) and `SessionEnd`. `WorktreeRemove`,
-`Setup`, `MessageDisplay`, `TeammateIdle`, `ConfigChange`, `FileChanged`, `Elicitation` and
-`ElicitationResult` are accepted in configuration (Claude Code settings load unchanged) and the manager
-interprets their output (`displayContent`, `action`/`content`, `watchPaths`), but Axon has no agent teams,
-file watcher, `--init-only` flag or MCP elicitation UI that would fire them. `/hooks events` lists all
+`PostCompact`, `PreModelSwitch`, `PostModelSwitch` (`/model`) and `SessionEnd`. These also fire:
+
+| Event | When it fires |
+|---|---|
+| `Setup` (`trigger: "init"`) | once per folder, the first time Axon starts in it, just before that session's `SessionStart` hooks (marker: `~/.axon/state/setup-done.json`). There is no `--init-only` / `--maintenance` flag. |
+| `FileChanged` | the matcher lists literal file names (`.envrc\|.env`, relative to the working directory). They are compared by modification time when a prompt is submitted, after each tool and at session start; `file_name`, `file_path` and `event` (`add`, `change`, `unlink`) are in the payload. There is no background watcher, so a change is seen at the next of those moments. |
+| `ConfigChange` | before Axon writes a settings or MCP file (`enabledPlugins`, skill overrides, `/mcp add` ...). `source` is `user_settings`, `project_settings`, `local_settings` or `mcp_config`. Exit 2 blocks the write. Edits you make by hand in an editor are not seen. |
+| `Elicitation` / `ElicitationResult` | around an MCP server's request for input (interactive sessions only). `Elicitation` may answer by itself (`action`, `content`) or block, which declines without a dialog; `ElicitationResult` sees the answer and may change it. |
+
+`WorktreeRemove`, `MessageDisplay` and `TeammateIdle` are accepted in configuration (Claude Code settings
+load unchanged) and the manager interprets their output (`displayContent`, `watchPaths`), but Axon has no
+agent teams and the terminal renderer does not call the hook, so they never fire. `/hooks events` lists all
 events, which ones take a matcher and which can block.
 
 **Matcher.** `*`, empty or omitted matches everything. A value made only of letters, digits, `_`, `-`,
@@ -358,8 +370,37 @@ line of stdout and replaces git for `axon --worktree`.
 re-reads the files. Each run also appears in the timeline (`› hook PostToolUse ran (1 command)`) together
 with its decision. Working examples are in [`examples/hooks/`](../examples/hooks).
 
+### Folder trust
+
+Hooks, plugins and MCP servers that come with a folder run programs, so Axon asks before it starts any of
+them from a folder you have not trusted. In a terminal, the first time you open a folder that contains
+project hooks (`<ws>/.claude|.axon/settings[.local].json`, `<ws>/.axon/config.toml`), hooks or MCP servers of
+a project plugin (`<ws>/.axon/plugins`), or servers in `<ws>/.axon/mcp.json`, Axon lists exactly what would
+run, in full, and asks yes or no. If you say no, none of it loads, Axon works as usual and says so in one
+line; `/trust yes` reviews and allows it later. A folder with nothing executable gets no prompt. Your own
+`~/.axon` configuration is never gated, and `<ws>/.mcp.json` keeps its own per-server approval prompt.
+
+The answer is stored in `~/.axon/trusted-folders.json` together with a hash of the listed commands. If the
+list changes (a `git pull` adds or edits a hook), the folder is untrusted again and you are asked about the
+new list. Installing a plugin into the project yourself, after reviewing what it runs, keeps a trusted
+(or executable-free) folder trusted.
+
+```text
+/trust                 this folder: what would run, trusted or not
+/trust yes             list it and trust it
+/trust revoke [path]   stop trusting this folder (or another one)
+/trust list            every trusted folder
+```
+
+**Non-interactive runs** (`axon -p`, the SDK, scripts) do not ask: running Axon non-interactively in a
+repository is an explicit choice, so project hooks, plugins and servers load as they always did. To refuse
+them there, set `{"trust": {"requireForNonInteractive": true}}` in `~/.axon/settings.json` (or
+`AXON_TRUST_REQUIRE=1`). Then a folder is used non-interactively only after you trusted it from a terminal
+(or `/trust yes`), and `-p` prints a one-line notice when something was held back. A repository cannot set
+this key for you: only your own settings file is read.
+
 Not implemented (Claude Code features outside the terminal CLI or without an Axon counterpart):
-managed-policy settings (`allowManagedHooksOnly`), the workspace-trust gate, `defer` round trips,
+managed-policy settings (`allowManagedHooksOnly`), `defer` round trips,
 `classifierContext` (no auto-mode classifier), PermissionDenied `retry`, background-session worktrees and
 `${user_config.*}` plugin options.
 
@@ -400,6 +441,15 @@ All frontmatter keys are optional; booleans accept `true/false/yes/no/on/off/1/0
 
 Frontmatter is only read when `---` is the very first line of the file. A skill folder can hold
 supporting files (`reference.md`, `scripts/…`) that `SKILL.md` links to; the model reads them on demand.
+
+Skills installed from the marketplace or by `/skills install` arrive as the whole folder (`SKILL.md`,
+`scripts/`, `references/`, `assets/`), downloaded as one GitHub tarball. Every path must stay inside the
+folder, a symlink that points outside it rejects the skill, and the download is capped at 300 files, 2 MB
+per file and 8 MB in all. The install lists the files first and flags executable scripts; Axon never runs
+them by itself (the skill's instructions may ask the model to, and each run goes through your permission
+prompts). The commit and a hash of the files are recorded in `.axon-source.json`; `/marketplace update <id>`
+shows what changed (added, removed and edited files, a diff of `SKILL.md`, a warning about edits you made
+yourself) and asks before replacing anything.
 
 ### Body: arguments, variables, shell
 
@@ -652,7 +702,8 @@ A marketplace is a folder (or git repo, or hosted JSON) with `.claude-plugin/mar
 Add it from `owner/repo[#ref]`, a git URL (`https://…`, `git@host:path`, optional `#ref`), a path starting
 with `./` or `/`, or an `https://…/marketplace.json` URL. Entry `source` is a path relative to the
 marketplace root, `{"source": "github", "repo"}`, `{"source": "git-subdir", "url", "path"}` or
-`{"source": "url", "url"}` (`ref`/`sha` pin a version); `archive`, `npm` and `command` sources are not
+`{"source": "url", "url"}` (`ref` picks a branch or tag; `sha` pins one commit, which does not have to be the
+branch tip: Axon fetches that commit and checks that HEAD is exactly it); `archive`, `npm` and `command` sources are not
 supported. `strict` entries add `commands`/`agents`/`skills`/`outputStyles` to the plugin's own manifest, and
 an entry without a `plugin.json` is the manifest. The reserved Anthropic marketplace names are refused.
 
@@ -675,6 +726,13 @@ local); marketplace installs record their origin in `.axon-install.json`. The `/
 based (there is no tabbed panel), updates are manual (`/plugin marketplace update` then
 `/plugin update`), and there is no auto-update.
 
+**Integrity.** An install records the commit it came from and a hash of its files in `.axon-install.json`.
+Before a marketplace plugin is installed or enabled through `/marketplace`, Axon lists every hook command
+and MCP server it would run; an update shows the changed files, the hook / MCP commands that now run or no
+longer run, and a warning if you edited the installed files, then asks. The automatic update
+(`automation.auto_update`) skips any plugin or skill update that changes a hook, an MCP server or an
+executable script and leaves it for `/marketplace update`.
+
 ## Memory and rules
 
 `AXON.md` files hold project instructions. Their load order is described in the
@@ -691,6 +749,31 @@ API handlers must validate input with pydantic models.
 A path-scoped rule loads the first time a tool touches a matching file. `@path` imports work in
 every memory file, up to 4 levels deep. Claude Code's user-level `~/.claude/CLAUDE.md` and
 `~/.claude/rules/**/*.md` are loaded alongside `~/.axon/AXON.md` and `~/.axon/rules/`.
+
+### Saved memory
+
+Saved memories live in three scopes. Each is a folder of one `<slug>.md` file per memory plus a
+`MEMORY.md` index of one-line pointers. The first 200 lines / 25 KB of every index load into the
+prompt; the model reads a file when its pointer is relevant.
+
+| Scope | Folder | Use |
+|---|---|---|
+| `global` | `~/.axon/memory/` | preferences for every project (always loaded) |
+| `project` | `~/.axon/projects/<key>/memory/` | private notes for this project; where the model saves |
+| `repo` | `<workspace>/.axon/memory/` | notes kept in the repo (shared if you commit them); the default of `/memory add` and `#note` |
+
+A memory file starts with `name`, `description` (one line), `type` (`user`, `feedback`, `project` or
+`reference`), `scope`, `created` and `updated`. Writes are atomic. Before a memory is overwritten,
+deleted, moved or re-indexed its previous text goes to `~/.axon/memory-trash/` (global) or
+`~/.axon/projects/<key>/memory-trash/<scope>/`, and `/memory restore` brings it back. Text that looks
+like an API key or token is redacted before it is saved, and Axon says so.
+
+`/memory` browses by scope and type (view, edit in `$EDITOR`, move, delete); `/memory doctor` reports
+orphans, broken links, duplicates, an over-long index, memories not updated in 90 days and memories
+that name a file that no longer exists; `/memory reindex` rebuilds the indexes; `/memory why` shows
+which instruction and memory files were loaded and why; `/memory export` and `/memory import` move a
+scope as one JSON file (import shows a preview and asks before anything is added). Old-format memory
+files (`title`/`category`) keep working and are upgraded by `/memory reindex`.
 
 ## Project templates
 

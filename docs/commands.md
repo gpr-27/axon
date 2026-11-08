@@ -24,7 +24,7 @@ Every menu entry runs the same handler as the typed command (`/cost calls` and t
 The tables below are generated from the command registry by `scripts/gen_docs.py`.
 
 <!-- BEGIN GENERATED: commands-reference -->
-123 built-in commands in 13 groups.
+139 built-in commands in 13 groups.
 
 Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Modes](#model--modes) · [Code & Review](#code--review) · [Agents, Skills & Tools](#agents-skills--tools) · [Memory & Project](#memory--project) · [System](#system) · [Code](#code) · [Getting started](#getting-started) · [Git](#git) · [Insight](#insight) · [Integrations](#integrations) · [Solve](#solve)
 
@@ -38,7 +38,8 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/delete` |  | Delete a saved session (picker, id, or --all) |
 | `/exit` | `/quit` | Save the session and quit |
 | `/export` |  | Export the conversation (Markdown, JSON, text) to a file or the clipboard |
-| `/history` | `/timeline` | List the messages in the conversation |
+| `/files` | `/attachments` | Files, images and documents you gave this session, and where each is saved |
+| `/history` |  | List the messages in the conversation |
 | `/library` | `/saved` | Everything saved: sessions, subagent runs, skills, agents, memory, hooks, plans |
 | `/loop` | `/repeat` | Repeat a prompt N times or on an interval |
 | `/project` | `/where` | Current project: name, path, data folder, sessions, journal, memory |
@@ -48,9 +49,11 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/retitle` |  | Give past chats short AI-written titles |
 | `/retry` |  | Retry the last turn that failed with a provider error |
 | `/rewind` | `/undo` `/checkpoint` | Restore code and/or conversation to an earlier prompt |
+| `/search` |  | Full-text search of this project's session transcripts (/find searches file names) |
 | `/sessions` | `/session` | List saved sessions with tokens and cost |
 | `/star` | `/fav` | Toggle the favourite star on this session |
 | `/tag` |  | Tag the current session (use '-' to clear) |
+| `/workbench` | `/panel` | One screen: environment, context, usage, connectors, changes, tasks, plan |
 
 <details><summary><code>/activity</code> usage</summary>
 
@@ -181,6 +184,15 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 </details>
 
+<details><summary><code>/search</code> usage</summary>
+
+```text
+/search <text>          this project
+/search --all <text>    every project
+```
+
+</details>
+
 <details><summary><code>/sessions</code> usage</summary>
 
 ```text
@@ -199,6 +211,17 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 </details>
 
+<details><summary><code>/workbench</code> usage</summary>
+
+```text
+/workbench          one screen: environment, context, usage, connectors, changes, background tasks, plan and todos
+                   keys e c u k g b p jump to a part, Enter opens it in detail, r refreshes, Esc closes
+/workbench --plain print it as text (also what you get without a terminal)
+/workbench hint on|off   show a short /workbench pointer in the status line (off by default)
+```
+
+</details>
+
 ## Context & Cost
 
 | Command | Aliases | Description |
@@ -206,11 +229,20 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/autocompact` |  | Set the auto-compact threshold (percent or tokens) |
 | `/compact` |  | Summarise older turns to free context (optional focus) |
 | `/context` | `/tokens` | Context usage by category; --why explains each block; limit sets the window size |
-| `/cost` | `/usage` `/ledger` | Cost by source and model, cache savings, $/turn |
-| `/faq` | `/faqs` | AgentRouter FAQ and error troubleshooting |
+| `/cost` | `/ledger` | Cost by source and model, cache savings, $/turn |
+| `/ctxdiff` |  | What entered and left the prompt between two model calls, and why the cache missed |
+| `/ctxmap` |  | What fills the context window now, and what could be dropped |
+| `/faq` | `/faqs` | Help for the current provider; AgentRouter's FAQ with /faq agentrouter |
 | `/payload` | `/breakdown` `/input` | Inspect the exact prompt sent to the model |
+| `/pin` |  | Keep a tool result in context in full (never trimmed or compacted away) |
 | `/pricing` | `/prices` | Per-model token prices (per 1M tokens) |
 | `/recap` |  | Short summary of the session so far (one LLM call) |
+| `/receipts` |  | Claims in the last answer (tests pass, no other callers...) matched to the tool calls behind them |
+| `/timeline` |  | Steps of a turn as a bar chart: time, tokens, cost, cache-miss cause |
+| `/trail` |  | Decision trail of a tool call: why, what allowed it, result, what came next |
+| `/unpin` |  | Release pinned tool results |
+| `/usage` | `/limits` | One screen: status, config, usage and limits, stats, context |
+| `/whatif` |  | Reprice this session's tokens at other models' prices, with and without caching |
 | `/window` |  | Set the sliding context window in turns (0 = unlimited) |
 
 <details><summary><code>/autocompact</code> usage</summary>
@@ -227,6 +259,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /compact [instructions for the summary]
+/compact --last   what the last compaction replaced, with its summary
 ```
 
 </details>
@@ -253,10 +286,27 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 </details>
 
+<details><summary><code>/ctxdiff</code> usage</summary>
+
+```text
+/ctxdiff [n]   compare model call n with call n-1 (default: the last two calls)
+```
+
+</details>
+
+<details><summary><code>/ctxmap</code> usage</summary>
+
+```text
+/ctxmap              items by size with share, and what can be dropped
+/ctxmap drop <id>     drop a tool result from context (full text stays on disk)
+```
+
+</details>
+
 <details><summary><code>/faq</code> usage</summary>
 
 ```text
-/faq [402|400|401|sensitive|backup|credit|gpt6|pricing]
+/faq [agentrouter | 402|400|401|sensitive|backup|credit|gpt6|pricing]
 ```
 
 </details>
@@ -271,10 +321,62 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 </details>
 
+<details><summary><code>/pin</code> usage</summary>
+
+```text
+/pin                 list the pins and their token total
+/pin <path|id>        pin the result of a file the model read, or a tool-result id
+```
+
+</details>
+
 <details><summary><code>/pricing</code> usage</summary>
 
 ```text
 /pricing [model filter]
+```
+
+</details>
+
+<details><summary><code>/timeline</code> usage</summary>
+
+```text
+/timeline [turn]   default: the last turn
+```
+
+</details>
+
+<details><summary><code>/trail</code> usage</summary>
+
+```text
+/trail [n]   tool call number n of this session (default: the last one)
+```
+
+</details>
+
+<details><summary><code>/unpin</code> usage</summary>
+
+```text
+/unpin               release every pin
+/unpin <path|id>      release one
+```
+
+</details>
+
+<details><summary><code>/usage</code> usage</summary>
+
+```text
+/usage            tabbed screen (←/→ switch tabs, Esc closes); plain text without a terminal
+/usage status|config|usage|stats|context   open on one tab
+/usage --plain   print every tab as text
+```
+
+</details>
+
+<details><summary><code>/whatif</code> usage</summary>
+
+```text
+/whatif [model]   price the recorded tokens at a model (or a name prefix such as gpt-5); /whatif all lists every priced model
 ```
 
 </details>
@@ -439,6 +541,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/test` | `/tests` | Detect and run the project's test suite |
 | `/todos` | `/todo` | Show the agent's task checklist |
 | `/transcript` | `/tr` `/scrollback` | Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+F) |
+| `/worktree` | `/wt` `/worktrees` | Git worktrees: list with changes, switch, create, remove |
 
 <details><summary><code>/btw</code> usage</summary>
 
@@ -462,7 +565,9 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/diff</code> usage</summary>
 
 ```text
-/diff            working tree vs HEAD
+/diff            working tree vs HEAD (terminal: files, inline diffs; 1-4 switch compare target)
+/diff staged|commit|branch <name>   open on another compare target
+/diff list       the changed files as text
 /diff staged     staged changes
 /diff T<n>       file edits made since checkpoint n (see /rewind list)
 ```
@@ -502,6 +607,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /review [low|medium|high|max] [--fix] [--comment] [--max-findings N|all] [focus | file | PR number]
+/review hunks [accept <id|all> | reject <id>]   edits made this session, hunk by hunk
 ```
 
 </details>
@@ -538,6 +644,17 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/worktree</code> usage</summary>
+
+```text
+/worktree                 worktrees with branch and change counts (terminal: pick one to switch)
+/worktree new <name>      create one on branch axon/<name> from HEAD
+/worktree switch <name>   move this session into a worktree (same as /cd <path>)
+/worktree remove <name>   remove one (refuses one with uncommitted changes, the main one and the current one)
+```
+
+</details>
+
 ## Agents, Skills & Tools
 
 | Command | Aliases | Description |
@@ -562,6 +679,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/tasks` | `/bashes` `/jobs` | Background shells, background turns and subagent tasks |
 | `/tell` | `/msg` | Send a message to a running subagent; it reads it before its next step |
 | `/tools` | `/tool` | Tools the model can use and their permission |
+| `/trust` |  | Review and allow project hooks, plugins and MCP servers for this folder |
 
 <details><summary><code>/agents</code> usage</summary>
 
@@ -722,6 +840,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/trust</code> usage</summary>
+
+```text
+/trust · /trust yes · /trust revoke [path] · /trust list
+```
+
+</details>
+
 ## Memory & Project
 
 | Command | Aliases | Description |
@@ -731,7 +857,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/import` |  | Import rules and MCP servers from Cursor, Gemini CLI or Codex |
 | `/init` |  | Create AXON.md from a repo analysis (no overwrite) |
 | `/learn` | `/remember` | Save a memory (same as /memory add) |
-| `/memory` | `/mem` | Instruction files (AXON.md …) and saved memories |
+| `/memory` | `/mem` | Browse, search and manage memory: global, project and repo scopes |
 | `/optimize` | `/enhance` | Rewrite a rough request into a precise agent prompt |
 | `/prompt` | `/prompts` `/template` `/templates` | Prompt library: templates with {placeholders} |
 
@@ -785,11 +911,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/memory</code> usage</summary>
 
 ```text
-/memory                       list instruction files and saved memories
-/memory add [--global] <text>  save a memory (LLM-distilled)
-/memory edit <user|project|local|n|id> [new text]
-/memory view <n|id>            /memory remove <n|id>
-/memory search <text>          /memory clear
+/memory [--scope global|project|repo] [--type user|feedback|project|reference]   browse
+/memory add [--global|--project|--repo] <text>   save (LLM-distilled; default --repo = .axon/memory)
+/memory view|edit|remove <n|id|scope:id>   edit <user|project|local> opens the AXON.md file
+/memory move <n|id> <global|project|repo>   /memory search <text>   /memory clear [scope]
+/memory restore [n|name]       list or bring back deleted/overwritten versions
+/memory reindex [scope]        rebuild MEMORY.md from the files   /memory doctor   health + stale
+/memory why                    what was loaded into this session, with tokens
+/memory export <scope> [file]  /memory import <file> [--scope S] [--yes]
 #<text>                        quick note (no LLM)
 ```
 
@@ -829,6 +958,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/notify` |  | Desktop notifications: when they fire (important/all/off), or send a test |
 | `/output-style` | `/output-styles` `/style` | Choose how answers are written (default, explanatory, learning, concise, custom) |
 | `/release-notes` | `/changelog` `/whats-new` | What's new in this and earlier Axon versions |
+| `/sandbox` |  | Run Bash under an OS sandbox (writes confined to the workspace) |
 | `/settings` | `/preferences` `/prefs` `/options` | All settings in one place: model, keys, endpoint, permissions, display, cost, data |
 | `/status` |  | Version, model, mode, trace, session, cost, storage |
 | `/statusbar` |  | Show the live status bar, or toggle it |
@@ -836,7 +966,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/storage` |  | Show everything Axon stores in ~/.axon, with sizes and leftovers |
 | `/suggestions` |  | Show a guess of your next message as ghost text in the empty prompt (Tab accepts it) |
 | `/terminal-setup` |  | Set up Shift+Enter for newlines in your terminal |
-| `/theme` |  | Colour theme: auto \| dark \| light \| high-contrast \| mono |
+| `/theme` |  | Colour theme: auto \| axon \| axon-light \| dark \| light \| high-contrast \| mono |
 | `/vim` |  | Toggle vim key bindings in the prompt editor |
 
 <details><summary><code>/bug</code> usage</summary>
@@ -916,6 +1046,14 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 
+<details><summary><code>/sandbox</code> usage</summary>
+
+```text
+/sandbox [on|off|status]   (setting sandbox.enabled; sandbox.allowNetwork lets commands use the network)
+```
+
+</details>
+
 <details><summary><code>/settings</code> usage</summary>
 
 ```text
@@ -964,7 +1102,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/theme</code> usage</summary>
 
 ```text
-/theme [auto|dark|light|high-contrast|mono]
+/theme [auto|axon|axon-light|dark|light|high-contrast|mono]
 ```
 
 </details>
@@ -1115,7 +1253,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 | Command | Aliases | Description |
 |---|---|---|
+| `/open` | `/dash` `/web` | Open the Axon app in your browser (chat, files, shell, commands, usage) |
 | `/serve` |  | Show how to run the local Axon HTTP/SSE API (axon serve) |
+
+<details><summary><code>/open</code> usage</summary>
+
+```text
+/open [port] [--no-open] | /open stop
+```
+
+</details>
 
 <details><summary><code>/serve</code> usage</summary>
 
@@ -1184,6 +1331,76 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 </details>
 <!-- END GENERATED: commands-reference -->
+
+## Notes on specific commands
+
+The reference above is generated from the code. These notes cover behaviour it does not spell out.
+
+**Insight commands** work from data Axon already recorded in the session; a number that was not recorded is left out.
+- `/trail [n]` shows one tool call: why it was chosen, what allowed it, its result and what came next.
+- `/timeline [turn]` draws the steps of a turn as a bar chart of time, tokens and cost, with the cause of a
+  cache miss. It replaced `/timeline` as an alias of `/history`; `/history` itself remains and lists the messages.
+- `/ctxmap` lists what fills the context window (estimates). `/ctxmap drop <id>` replaces a tool result in the
+  live conversation with a short stub and saves the full text under the session's `dropped/` folder. **A drop
+  does not survive `/resume`**: the stub is not written to the transcript, so a resumed session reloads the
+  original result. Pinned results cannot be dropped.
+- `/pin <path|id>` keeps a tool result in context in full, so it is never trimmed or compacted away;
+  `/unpin` releases it. Pins are saved in the transcript and come back on resume.
+- `/ctxdiff [n]` compares model call n with the call before it: what entered and left the prompt, and why the cache missed.
+- `/whatif [model]` reprices the session's recorded tokens at another model's prices, with and without caching;
+  `/whatif all` lists every priced model. Prices of models with no known price are not guessed.
+- `/receipts` matches claims in the last answer (tests pass, lint is clean, no other callers, files edited) to the
+  tool calls of that turn. It is a pattern match: it shows a matching call ran, not that the claim is true.
+- `/compact --last` shows what the last compaction replaced, with its summary.
+- `/search <text>` searches the transcripts of this project (`--all`: every project); `/find` searches file names.
+  Encrypted transcripts are skipped and listed.
+- `/review hunks` lists the edits Axon made this session hunk by hunk, against each file's content before its
+  first edit. `accept <id|all>` marks hunks as reviewed; `reject <id>` reverts that one hunk and refuses if the file
+  changed since the list was printed.
+
+**Tools** (the table in the README lists them all). Notes on some of them:
+- `Read` reads text with line paging. For PDFs, `pages` takes a range such as `"3"`, `"2-5"` or `"4-"` (at most 20
+  pages per call); ranges need `pdftotext` (poppler) or the optional `pypdf` package, otherwise only a basic text
+  extraction is available for short PDFs. Notebooks (`.ipynb`) are read as cells with outputs. Images (png, jpg,
+  gif, webp) up to 5 MB are attached to the result when the provider accepts images in tool results; otherwise
+  the model gets the size and any text found by OCR.
+- `Monitor` waits for a background shell (`Bash` with `run_in_background`) to print a line matching a regex or to
+  exit, for up to `timeout_s` (default 60, at most 600), instead of polling `BashOutput`.
+- `Git` runs a fixed list of git subcommands in the workspace. Read-only ones (`status`, `diff`, `log`, `blame`,
+  `show`, `rev-parse`, `ls-files`, and `branch`, `tag`, `remote` when they only list) run without a prompt;
+  changing ones (`commit`, `checkout`, `reset`, `push`, ...) ask. Flags that can run helper programs or write files are
+  refused; use `Bash` for anything else.
+- `LSP` asks a language server found on `PATH` (pyright, typescript-language-server, gopls, rust-analyzer, clangd)
+  for `diagnostics`, `definition`, `references` or `hover`. With `lsp_diagnostics_after_edit` (default on), new
+  language-server errors are appended to `Edit`, `Write` and `MultiEdit` results. Without a server, the tool
+  says which one to install.
+- `CheckpointList` lists this session's file-edit checkpoints, newest first. `CheckpointUndo` (asks first)
+  restores the files changed in the newest `steps` checkpoints (files the model created are deleted) and overwrites
+  later changes to them, including yours. Only edits made by `Write`, `Edit`, `MultiEdit` and patches have checkpoints.
+- `EnterPlanMode` switches to read-only plan mode for a risky task; the model then presents its plan with
+  `ExitPlanMode`, and nothing is edited or run until you approve.
+
+**Files.** Files dropped into the prompt are copied into the session at drop time; `/files` (alias `/attachments`)
+lists them with the saved paths. See [architecture](architecture.md#large-input-and-attachments).
+
+**Safety.** `/sandbox [on|off|status]` runs Bash under an OS sandbox. The always-on shell guard reads command text
+only and cannot see what a script does, so the sandbox is the stronger control; see
+[architecture](architecture.md#shell-guard-and-the-sandbox). `/trust` reviews project hooks, plugins and MCP servers
+for the current folder; `axon -p` and the SDK keep running them unless `trust.requireForNonInteractive` is set, see
+[folder trust](extending.md#folder-trust).
+
+**Memory.** `/memory` works on three scopes: `global` (all projects), `project` (this project, private, under
+`~/.axon/projects/<key>/memory`) and `repo` (`<workspace>/.axon/memory`, shared if you commit it; the default for `add`).
+A replaced or deleted memory goes to a trash folder first, which is what `restore` reads. Subcommands: `add`, `view`,
+`edit`, `remove`, `move <n|id> <scope>`, `search`, `clear [scope]`, `restore` (list or bring back deleted or
+overwritten versions), `reindex` (rebuild `MEMORY.md` from the files), `doctor` (health and stale entries),
+`why` (what was loaded into this session, with tokens), `export <scope> [file]` and `import <file>`.
+
+**Theme.** `/theme` takes `auto`, `axon`, `axon-light`, `dark`, `light`, `high-contrast` or `mono`. `axon` and
+`axon-light` are the Axon palettes for dark and light terminals; `auto` picks between them from the terminal
+background, and `dark` and `light` are the older palettes.
+
+**Browser app.** `/open` (aliases `/dash`, `/web`) starts the local app; see [app.md](app.md).
 
 ## Input shortcuts
 

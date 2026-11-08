@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+Work in progress; not a release yet.
+- Web app (`axon open`): a real local app with chat, files, a real terminal, sessions, usage, memory and settings.
+  Each turn shows steps, tools, status, time and cost on an aligned timeline; live, reload and stored turns draw alike.
+- Web app panels: Progress with the context breakdown and usage, Changes (`main → working tree`), Terminal, Browser and
+  Files, stackable and resizable. Worktrees, connectors and a Create PR button that asks first.
+- Web app controls: drag files, folders and images into chat, paste images, delete and restore chats, usage per project
+  with CSV export, budgets, command result cards, and an Appearance tab with a serif response font.
+- Streaming: replies render incrementally with paced text, follow only at the bottom, and resume after a reconnect.
+- Terminal: `/diff` is a working-tree screen; `/worktree`, `/context` legend, `/mcp servers` and `/workbench`.
+- Files: Read and the app share one reader for Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, notebooks, SQLite,
+  archives and binaries. `@file` mentions give readable text, and credential files are refused.
+- Git tool: takes a repository folder through `path` or `-C`; permission checks see the same folder.
+- Large input: a message above `large_input_tokens` (default automatic: a quarter of the context window, at most
+  100,000 tokens; below 0 sends everything) is saved to the session's `pastes/` folder and sent as its start and end
+  plus the path. The prompt shows the size of a paste, a cost notice appears for input of 20,000 tokens or more, and a
+  request a provider refuses as too large is shrunk and retried.
+- Attachments: files dropped into the prompt are copied into the session at drop time and shown as `[File #N: name]`;
+  `/files` (alias `/attachments`) lists them. Credential and system files are refused.
+- Session lease: a session open in another live process asks whether to fork on resume; `-p` warns and continues.
+- Titles: written by the session's own model and refreshed on turn 3 and then every `title_refresh_turns` turns (default 5,
+  0 never). A session you resume keeps its title.
+- Themes `axon` and `axon-light` (`/theme auto` follows the terminal background).
+- `/sandbox on|off|status` runs Bash under an OS sandbox (macOS `sandbox-exec`, Linux `bwrap`): writes stay in the
+  workspace, credential stores are unreadable, no network unless `sandbox.allowNetwork`. The shell guard still reads
+  command text only; the sandbox is the stronger control.
+- Folder trust: `/trust` reviews project hooks, plugins and MCP servers before they run from a new folder. `-p` and the SDK keep
+  loading them unless `trust.requireForNonInteractive` is set.
+- `/memory` has global, project and repo scopes and `move`, `restore`, `reindex`, `doctor`, `why`, `export` and `import`.
+- New tools: `Monitor`, `Git`, `LSP` (and appended language-server errors after edits), `CheckpointList`,
+  `CheckpointUndo`, `EnterPlanMode`. `Read` takes `pages` for PDFs and attaches images when the provider accepts them.
+- New commands: `/review hunks`, `/trail`, `/timeline`, `/ctxmap` (a drop does not survive `/resume`), `/search`,
+  `/ctxdiff`, `/whatif`, `/pin` and `/unpin`, `/receipts`, `/compact --last`, `/usage` as one tabbed screen.
+  `/timeline` is no longer an alias of `/history`.
+- Marketplace: list and search sort (`--sort`) and show update and per-turn token cost for skills; skills install as
+  whole folders with a file list and update with a diff; your own plugin and skill sources
+  (`/marketplace add <git url | owner/repo | path>`, `sources`, `refresh`); catalog entries pinned to commits.
+- Browser app (in development, not finished): `axon open` or `/open` serves a local app on 127.0.0.1 with chat, files,
+  shell, terminal, usage and settings. The Terminal tab is a full shell on the computer. Assets are built in; nothing is
+  loaded from the network. See docs/app.md.
+
 ## 0.29.1
 
 BizNeuro as a built-in provider

@@ -24,18 +24,39 @@ create a skill or plugin, and `q` to leave.
 Without a terminal (scripts, `axon -p`, CI) every command is non-interactive and prints plain text.
 
 ```text
-/marketplace list [connectors|skills|plugins] [--installed|--discover] [--free] [--category C] [--json]
-/marketplace search <words> [--tab skills]
+/marketplace list [connectors|skills|plugins] [--installed|--discover] [--free] [--category C]
+                  [--sort name|category|installed|tokens|updates] [--json]
+/marketplace search <words> [--tab skills] [--category C] [--sort ...]
 /marketplace info <id>
 /marketplace categories [tab]
 /marketplace install <id> [--scope user|project|local] [--env NAME=VALUE] [--keep] [--no-check] [--timeout 20]
 /marketplace remove <id>          /marketplace enable <id>          /marketplace disable <id>
-/marketplace add <https://url | command args> --name <name> [--transport http|sse]
+/marketplace add <https://url | command args> --name <name> [--transport http|sse]     a connector
+/marketplace add <git url | owner/repo | path> [--marketplace]     your own marketplace (plugins and/or skills)
+/marketplace sources · refresh [name] · remove-source <name>
+/marketplace updates · update <id> [--yes]
 /marketplace create-skill [--name N --description D --trigger T --instructions TEXT --script FILE]
 /marketplace create-plugin <name> [--scope user|project]
 ```
 
 If an id exists in more than one tab, add `--tab connectors|skills|plugins`.
+
+Each card shows whether the entry is installed (`✓`), whether the catalog pins a different version than the
+one you have (`update available`) and, for skills, `~N tokens/turn`: the listing line the model sees in every
+prompt while the skill is installed, counted the way `/skill-doctor` counts it (the body is only read when
+the skill is used). `--sort tokens` puts the cheapest first, `--sort updates` the ones with updates,
+`--sort installed` what you already have. Installing a skill lists its files first (executable scripts
+flagged) and asks; updating shows the changes and asks (`--yes` skips the question in a script).
+
+### Your own marketplaces
+
+`/marketplace add <git url | owner/repo | path>` adds a source for good (state: `~/.axon/plugins/marketplaces.json`).
+It can be a plugin marketplace (`.claude-plugin/marketplace.json`, the same as `/plugin marketplace add`) or
+just a folder or repository of skills (`SKILL.md` folders, directly or under `skills/`); a skills-only source
+needs no marketplace file. Its plugins and skills appear in `list` and `search` under the category
+`Custom` (or the category the marketplace gives), install like the built-in ones, and are never marked
+verified. `/marketplace refresh` pulls changes. A URL that starts with `http(s)://` and is not a repository
+or a `.json` file is still taken as an MCP connector; add `--marketplace` or `--connector` to decide.
 
 The commands that control what you already installed are listed under [Controlling what is
 installed](#controlling-what-is-installed); the automatic behaviour is under [Automation](#automation).
@@ -210,6 +231,16 @@ The catalog is three JSON files in `src/axon/marketplace/data/`: `connectors.jso
 `plugins.json`. `axon.marketplace.catalog` loads them and rejects missing fields, duplicate ids and
 non-https URLs. Axon shows only the number of entries it really has; there is no made-up total.
 
+**Skills** come from Anthropic's public skills repository (`anthropics/skills`, 19 skills), plus `create-skill`, Axon's own skill creator (20 entries). **Plugins** come
+from Anthropic's official plugins marketplace (`anthropics/claude-plugins-official`): its own plugins plus
+a selection of partner plugins that the marketplace lists. Every skill and plugin entry is pinned to the full
+commit sha it was checked at (`sha`, or `source.sha` for plugins); a plugin id that would clash with a connector
+(`github`, `slack` ...) is listed as `<id>-plugin`. `verified` means exactly one thing: the entry comes from
+that official Anthropic marketplace or skills repository. Nothing else earns it, and marketplaces you add
+yourself never have it. Entries were checked with status-only requests (the pinned commit and folder exist);
+nothing was downloaded or run to check them. To add one, copy its `source` and `sha` from the official
+`marketplace.json`, and confirm that the commit and path exist.
+
 A connector entry has: `id`, `name`, `publisher`, `description`, `category`, `transport`
 (`http`, `sse` or `stdio`), `url` or `command` plus `args`, `auth` (`none`, `oauth` or `api_key`),
 `env_vars` (name, help, required), `headers` (templates such as `Bearer ${NAME}`), `docs_url`,
@@ -226,8 +257,7 @@ Some OAuth servers do not accept automatic client registration, so signing in ne
 each one has its own endpoint and tools) and to `slack` (needs a Slack app that is directory-published or
 internal, plus workspace admin approval). Each entry's `free_note` says what is needed.
 
-Skills in the catalog are downloaded with the existing GitHub importer, which fetches only `SKILL.md`.
-Catalog plugins come from the plugin list of the public `anthropics/claude-code` repository and are
-fetched from their git source into the plugins folder.
+Skills in the catalog are downloaded as a whole folder (see "Skills installed from the marketplace" in
+[extending.md](extending.md)). Catalog plugins are fetched from their git source, at the pinned commit, into the plugins folder.
 
 To add your own entry, add an object to the right JSON file and run `pytest tests/test_marketplace_catalog.py`.

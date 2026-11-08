@@ -14,7 +14,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-123 slash commands · 22 built-in tools · 16 provider presets
+139 slash commands · 28 built-in tools · 16 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -377,9 +377,10 @@ is not used; Axon's model comes from `/model`.
 | **Cost you can audit** | Per-call pricing including cache reads and writes, `/cost` by source and model, cache hit rate and savings, a cache-miss explanation, budget guards, and an HTML usage report. |
 | **Any model** | Anthropic, OpenAI, OpenRouter, Gemini, DeepSeek, xAI, Groq, Mistral, Together, Fireworks, Cerebras, Azure, AgentRouter, plus local Ollama and LM Studio. Fallback chains handle 429, 5xx and overload errors. |
 | **Claude Code compatible** | Reads `CLAUDE.md`, `.claude/settings.json`, `.claude/commands`, `.claude/agents`, `.claude/skills` and `.mcp.json`, and uses the same hook protocol, so an existing setup works as-is. |
-| **Safe by construction** | Allow, ask and deny rules, plan mode, a workspace path jail, hard-blocked catastrophic commands, file checkpoints and `/rewind`. A project file can never redirect your API key to another host. |
+| **Safe by construction** | Allow, ask and deny rules, plan mode, a workspace path jail, hard-blocked catastrophic commands, file checkpoints and `/rewind`. An optional OS sandbox for Bash (`/sandbox`) and folder trust for project hooks, plugins and MCP servers (`/trust`). A project file can never redirect your API key to another host. |
 | **Extensible** | MCP (stdio, HTTP, SSE), lifecycle hooks, skills, custom slash commands, subagents, plugins and output styles. |
 | **Native on Windows** | Works in PowerShell 7, Windows PowerShell 5.1 and cmd, as well as Git Bash, WSL, macOS and Linux shells. See [docs/windows.md](docs/windows.md). |
+| **Browser app (in development)** | `axon open` or `/open` serves a local web app (chat, files, shell, usage) on `127.0.0.1` only. Not finished; see [docs/app.md](docs/app.md), including a warning about its Terminal tab. |
 | **Scriptable** | Print mode with `text`, `json` and `stream-json` output, a Python SDK, and `axon serve`, a local HTTP/SSE API. |
 
 ## Providers
@@ -439,22 +440,22 @@ Related commands:
 ## Commands
 
 <!-- BEGIN GENERATED: commands-overview -->
-123 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
+139 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
 
 | Group | Commands |
 |---|---|
-| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retitle` `/retry` `/rewind` `/sessions` `/star` `/tag` |
-| **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/faq` `/payload` `/pricing` `/recap` `/window` |
+| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/files` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retitle` `/retry` `/rewind` `/search` `/sessions` `/star` `/tag` `/workbench` |
+| **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/ctxdiff` `/ctxmap` `/faq` `/payload` `/pin` `/pricing` `/recap` `/receipts` `/timeline` `/trail` `/unpin` `/usage` `/whatif` `/window` |
 | **Model & Modes** | `/effort` `/endpoint` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
-| **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` |
-| **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/list-agents` `/main` `/marketplace` `/mcp` `/plugin` `/reload-plugins` `/reload-skills` `/skill-doctor` `/skills` `/stop` `/subagents` `/subtask` `/tasks` `/tell` `/tools` |
+| **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` `/worktree` |
+| **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/list-agents` `/main` `/marketplace` `/mcp` `/plugin` `/reload-plugins` `/reload-skills` `/skill-doctor` `/skills` `/stop` `/subagents` `/subtask` `/tasks` `/tell` `/tools` `/trust` |
 | **Memory & Project** | `/add-dir` `/cd` `/import` `/init` `/learn` `/memory` `/optimize` `/prompt` |
-| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/settings` `/status` `/statusbar` `/statusline` `/storage` `/suggestions` `/terminal-setup` `/theme` `/vim` |
+| **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/sandbox` `/settings` `/status` `/statusbar` `/statusline` `/storage` `/suggestions` `/terminal-setup` `/theme` `/vim` |
 | **Code** | `/index` `/map` |
 | **Getting started** | `/menu` `/new` `/next` `/setup` `/tips` |
 | **Git** | `/changes` `/commit` `/git` `/pr` |
 | **Insight** | `/budget` `/insights` `/report` `/stats` |
-| **Integrations** | `/serve` |
+| **Integrations** | `/open` `/serve` |
 | **Solve** | `/autofix` `/fix` `/plan-resume` `/plan-run` `/plans` `/verify` |
 <!-- END GENERATED: commands-overview -->
 
@@ -481,11 +482,17 @@ Subcommands run outside the REPL: `axon setup`, `axon doctor`, `axon mcp …`, `
 | `Bash` | ask | Run a shell command and return its combined stdout/stderr and exit code. |
 | `BashOutput` | allow | Read new output from a background shell started with Bash(run_in_background=true) since the last read, plus its status. |
 | `KillShell` | allow | Stop a background shell (and all of its child processes) by shell_id. |
+| `Monitor` | allow | Wait for a background shell (Bash run_in_background) to print output matching `pattern` (regex) or to exit, up to timeout_s (default 60, max 600). |
+| `Git` | ask | Run git in the workspace. |
+| `LSP` | allow | Code intelligence from a language server on PATH (pyright, typescript-language-server, gopls, rust-analyzer, clangd). |
+| `CheckpointList` | allow | List the file-edit checkpoints of this session, newest first (1 = most recent turn's edits), with the files each one changed. |
+| `CheckpointUndo` | ask | Undo your own file edits: restore the files changed in the newest `steps` checkpoints to their earlier content (files you created are deleted). |
 | `TodoWrite` | allow | Create/update the visible task list for multi-step work (3+ steps, or when the user gives several tasks). |
 | `WebFetch` | ask | Fetch a URL (http/https) and return its content as readable text: HTML is converted to markdown-like text (headings, lists, code blocks, links), JSON is pretty-printed. |
 | `WebSearch` | ask | Search the web for current information: documentation, error messages, release notes, library versions. |
 | `Task` | allow | Delegate a task to a subagent with its own isolated context and returns only its final report (also known as the Agent tool). |
 | `SendMessage` | allow | Send a message to another agent in this session. |
+| `EnterPlanMode` | allow | Switch to read-only 'plan' mode for a non-trivial or risky task: explore, then present the plan with ExitPlanMode. |
 | `ExitPlanMode` | ask | Propose a concrete plan and exit 'plan' mode. |
 | `Skill` | allow | Load the full instructions of a skill listed under 'Available Skills' in the system prompt. |
 | `AskUserQuestion` | allow | Ask the user 1-4 multiple-choice questions in the terminal when a decision genuinely needs their input (ambiguous requirements, choosing between approaches). |
@@ -578,7 +585,9 @@ broader one:
 6. **Saved items**: `# note`, `/learn` and `/memory add`
 
 `@path` imports are followed up to 4 levels deep. `/init` writes an `AXON.md` from an analysis of
-the repository, and `/memory` lists everything that was loaded.
+the repository. `/memory` browses saved memories by scope (global, project, repo) and has `add`, `view`,
+`edit`, `remove`, `move`, `search`, `restore`, `reindex`, `doctor`, `why` (what was loaded this session, with
+tokens), `export` and `import`; see [docs/commands.md](docs/commands.md).
 
 ## Settings
 
@@ -790,6 +799,7 @@ axon/
 | [docs/configuration.md](docs/configuration.md) | Every setting, file location and precedence rule |
 | [docs/commands.md](docs/commands.md) | Every slash command and CLI flag |
 | [docs/extending.md](docs/extending.md) | Formats for hooks, skills, commands, agents, plugins, MCP and output styles |
+| [docs/app.md](docs/app.md) | The browser app: how to start it and its security model (in development) |
 | [docs/marketplace.md](docs/marketplace.md) | Browsing and installing connectors, skills and plugins; the catalog format |
 | [docs/windows.md](docs/windows.md) | PowerShell and cmd specifics, shells, troubleshooting |
 | [docs/testing.md](docs/testing.md) | Running and writing tests |

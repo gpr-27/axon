@@ -95,6 +95,52 @@ The loop enforces five invariants, which are documented in `agent/loop.py` and c
 9. acceptEdits mode and a file edit: **allow**
 10. Otherwise, the tool's default permission
 
+### Shell guard and the sandbox
+
+Two separate controls cover the `Bash` tool.
+
+**The shell guard** (`permissions/engine.py`) is part of permission evaluation and always on. It reads the
+command text only. It denies commands that are irrecoverably destructive (recursive removal of a root or home
+directory, `mkfs`, `dd` onto a raw device, a fork bomb, a decoded payload piped into a shell) and commands
+whose arguments, redirections, globs, `cd` targets, shell variables, nested shells or recursive reads reach a
+credential store (`~/.ssh`, `~/.aws`, `~/.axon/.env` and similar). Because it parses text, it cannot see what a
+program does at run time: `python3 -c "open(...)"` or a script that reads a credential file is not caught.
+
+**The sandbox** (`/sandbox on`, setting `sandbox.enabled`; `permissions/sandbox.py`) is the stronger control:
+the operating system enforces it for every Bash command and every process the command starts. Reads work
+anywhere except credential stores; writes are allowed only in the workspace, the added directories and the
+temp directory; the network is blocked unless `sandbox.allowNetwork` is true. It uses `sandbox-exec` on macOS
+and `bwrap` (bubblewrap) on Linux; other systems have no backend. If it is on and no backend works, Bash
+commands are refused instead of running unsandboxed. It does not cover the `Read`, `Write` and `Edit` tools or
+MCP servers (those run inside Axon; the permission rules and protected-path checks apply to them), hooks, or
+web tools. `/sandbox status` prints exactly what is and is not enforced on this machine.
+
+### Large input and attachments
+
+`agent/large_input.py` keeps one huge message from filling the window. A message above the limit
+(`large_input_tokens`, see [configuration](configuration.md#large-input-large_input_tokens)) is saved to the
+session's `pastes/` folder and the model gets its start and end plus the path. In the prompt, a long paste
+collapses into a `[Pasted text #N]` chip; when the chips and your text together are too large, each oversized
+chip is shrunk separately so the text typed between them is sent in full.
+
+`agent/attachments.py` handles files dropped into the prompt. The file is copied to the session's
+`attachments/` folder at the moment of the drop (a drop often names a temporary file), the prompt shows a
+`[File #N: name]` chip, and on submit the chip becomes a line giving the saved path, which the model reads
+with its file tools. Images go through `agent/images.py` instead. Credential and system files are refused,
+and a file over 2 GB is not copied: it is referenced where it is. `attachments/index.jsonl` lists everything
+kept, and `/files` (alias `/attachments`) prints it with the saved paths. A drop is recognised from a
+bracketed paste, or, in terminals without one, from a burst of keys that is nothing but existing file paths
+outside the workspace.
+
+### Session lease
+
+A process that opens a session writes `writer.lease` (pid, host, owner, start time) in the session folder.
+A lease whose process has ended counts as free, so a crash never locks a session; a lease from another
+machine (a shared folder) cannot be checked and is assumed live. When you resume a session that another live
+process holds, an interactive terminal asks whether to fork into a new session (recommended), continue
+anyway, or quit; `-p` and scripts print a warning and continue. A read-only folder never blocks a session.
+The lease keeps two writers from interleaving one history; it is not a security control.
+
 ### Providers
 
 `providers/registry.py` resolves a model name to a preset in `catalog.py`. This covers explicit

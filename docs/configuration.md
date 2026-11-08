@@ -197,8 +197,12 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `max_history_turns` | `AXON_MAX_HISTORY_TURNS` | – | `0` |
 | `session_cost_ceiling` | `AXON_SESSION_COST_CEILING` | – | `50.00` |
 | `compact_at` | `AXON_COMPACT_AT` | `compactAt` | `0.75` |
+| `large_input_tokens` | `AXON_LARGE_INPUT_TOKENS` | `largeInputTokens` | `0` |
 | `parallel_tools` | `AXON_PARALLEL_TOOLS` | `parallelTools` | `6` |
 | `bash_timeout_s` | `AXON_BASH_TIMEOUT_S` | – | `180` |
+| `sandbox_enabled` | `AXON_SANDBOX_ENABLED` | – | `false` |
+| `sandbox_allow_network` | `AXON_SANDBOX_ALLOW_NETWORK` | – | `false` |
+| `lsp_diagnostics_after_edit` | `AXON_LSP_DIAGNOSTICS_AFTER_EDIT` | – | `true` |
 | `tool_output_cap` | `AXON_TOOL_OUTPUT_CAP` | – | `150000` |
 | `permissions` | `AXON_PERMISSIONS` | `permissions` | `empty` |
 | `hooks` | `AXON_HOOKS` | `hooks` | `empty` |
@@ -229,6 +233,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `suggestions` | `AXON_SUGGESTIONS` | `promptSuggestionEnabled` | `true` |
 | `tips` | `AXON_TIPS` | `spinnerTipsEnabled` | `true` |
 | `tips_llm` | `AXON_TIPS_LLM` | `tipsLlm` | `true` |
+| `workbench_hint` | `AXON_WORKBENCH_HINT` | `workbenchHint` | `false` |
 | `live_status` | `AXON_LIVE_STATUS` | `liveStatus` | `true` |
 | `tips_refresh_turns` | `AXON_TIPS_REFRESH_TURNS` | `tipsRefreshTurns` | `5` |
 | `context_limit` | `AXON_CONTEXT_LIMIT` | `contextLimit` | `0` |
@@ -240,6 +245,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `tips_refresh_minutes` | `AXON_TIPS_REFRESH_MINUTES` | `tipsRefreshMinutes` | `15.0` |
 | `auto_title` | `AXON_AUTO_TITLE` | `autoTitle` | `true` |
 | `title_llm` | `AXON_TITLE_LLM` | `titleLlm` | `true` |
+| `title_refresh_turns` | `AXON_TITLE_REFRESH_TURNS` | `titleRefreshTurns` | `5` |
 | `prompt_suggestions` | `AXON_PROMPT_SUGGESTIONS` | `promptSuggestions` | `true` |
 | `respond_to_bash_commands` | `AXON_RESPOND_TO_BASH_COMMANDS` | `respondToBashCommands` | `true` |
 | `disable_all_hooks` | `AXON_DISABLE_ALL_HOOKS` | `disableAllHooks` | `false` |
@@ -263,6 +269,41 @@ Cost: a few hundred input tokens (at most about 700: your last message, the answ
 messages are trimmed) and ~15 output tokens per turn on the small model, recorded in the
 usage ledger with the source `suggest`. Nothing is generated for interrupted or failed turns, slash
 commands, subagents, `-p` print mode or when the output is not a terminal.
+
+### Large input (`large_input_tokens`)
+
+A single message that is too large to send whole is saved in full to `pastes/` in the session folder. The
+model receives its start and end, a note saying how many lines were left out, and the saved path; it reads the
+rest with `Read` or `Grep`. The text you typed around a pasted block always reaches the model. The limit is:
+
+| `large_input_tokens` | Limit |
+|---|---|
+| `0` (default) | Automatic: a quarter of the model's context window, at most 100,000 tokens |
+| above `0` | That many tokens |
+| below `0` | No limit: everything is sent |
+
+Sizes are estimates (about 3.7 characters per token, more tokens for non-ASCII text). The prompt shows the
+size of a paste when it collapses into a chip, and says when only the start and end will be sent. Before the
+request goes out, Axon prints what was saved and what it costs; input of 20,000 tokens or more gets that
+notice even when it is sent whole. The same shrinking is applied to oversized messages in a resumed session,
+and when a provider refuses a request as too large (HTTP 413 or a "context length" error) Axon shrinks the
+oversized messages and old tool results, compacts, and retries up to twice.
+
+### Session titles (`auto_title`, `title_refresh_turns`)
+
+A new session is named by a short call on the session's model (the one you are using, followed when you switch
+model or provider), after a quick title from the first words. `title_llm = false` skips the model and keeps the
+first-words title. An automatic title is rewritten on turn 3 and then every `title_refresh_turns` turns (default
+`5`; `0` never) from the recent messages and the latest answer; the old title is kept if it still fits. A title
+you set with `/rename` is never rewritten, and slash commands do not count as turns. A session you resume keeps
+its title: resuming marks an existing title as set, so refreshes only apply to sessions started in the running process. `/retitle` renames the current chat and
+`/retitle all` the past ones still named after their first words.
+
+### Bash sandbox (`sandbox.enabled`, `sandbox.allowNetwork`)
+
+Off by default. `/sandbox on` runs every Bash command under the operating system's sandbox. See
+[the architecture notes](architecture.md#shell-guard-and-the-sandbox) for what it does and does not cover.
+`settings.json` form: `{"sandbox": {"enabled": true, "allowNetwork": false}}`.
 
 ### Automation
 

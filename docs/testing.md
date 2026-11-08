@@ -55,6 +55,30 @@ def test_print_mode_answers(axon_env):
 - Every file in `examples/` is parsed by the real loaders in `tests/test_feature_scaffold.py`. If
   you add an example, also list it in `examples/README.md`.
 
+## Provider matrix
+
+`tests/e2e/test_e2e_c_matrix.py` runs every preset in `PROVIDER_PRESETS` (`providers/catalog.py`) through the
+real provider classes against a local fake server (`ExtFakeLLM`; no real provider is contacted). Most tests
+are parametrized over the preset list, so a new preset is covered by streaming text and usage, a tool call
+with parallel tools, model listing, retries on HTTP 429 and 529, and auth-error mapping without a retry
+(Azure is left out of model listing; the cache-write test runs for Anthropic-format presets only). Presets
+whose endpoint takes tools through the prompt skip the native tool-call test, since their tools are plain
+text; a separate test covers that path for BizNeuro. The Responses-API wire format has its own tests in the same file.
+To run only this file: `python -m pytest -q tests/e2e/test_e2e_c_matrix.py`.
+
+## Extension-system tests
+
+`tests/test_ext_*.py` cover folder trust, skill folder downloads, plugin pins and integrity, hook events,
+MCP recovery and the marketplace catalog. They use local fixtures only: in-memory tarballs, local git
+repositories, a stub stdio MCP server; no network, no real model. Run them with:
+
+```bash
+.venv/bin/python -m pytest tests/test_ext_*.py tests/e2e/test_e2e_b_mcp.py tests/e2e/test_e2e_a_hooks.py -q
+```
+
+Do not run the whole suite for a change to the extension system; it is slow. The catalog entries themselves
+(their pinned commits) are checked by hand with status-only requests when they are added.
+
 ## Docs and lint checks
 
 ```bash
