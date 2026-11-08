@@ -1,0 +1,972 @@
+"""Client script, part 2: the live chat view (event-driven agent turns, approvals, composer, rail, subagents)."""
+
+JS_CHAT = r"""
+// ---------- chat ----------
+const EXPLAIN = {
+  Bash: 'Runs a shell command on this computer, in the project folder.', Write: 'Creates a file or overwrites it completely.',
+  Edit: 'Changes part of an existing file.', MultiEdit: 'Makes several changes to one file.', NotebookEdit: 'Changes a notebook cell.',
+  WebFetch: 'Downloads a web page and reads it.', WebSearch: 'Searches the web.', Task: 'Starts a subagent that works on its own.',
+  ExitPlanMode: 'Approves the plan, so the agent may start editing files and running commands.', KillShell: 'Stops a background shell.',
+};
+function toolSummary(name, inp) {
+  for (const k of ['file_path', 'path', 'command', 'pattern', 'query', 'url', 'description', 'prompt', 'plan']) {
+    const v = inp && inp[k]; if (typeof v === 'string' && v.trim()) return v.replace(/\s+/g, ' ').slice(0, 110);
+  }
+  return '';
+}
+function lineDiff(a, b) {
+  const A = a.split('\n'), B = b.split('\n'); const n = A.length, m = B.length;
+  if (n * m > 400000) return A.map(x => '-' + x).concat(B.map(x => '+' + x));
+  const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) { if (A[i] === B[j]) { out.push(' ' + A[i]); i++; j++; } else if (L[i + 1][j] >= L[i][j + 1]) out.push('-' + A[i++]); else out.push('+' + B[j++]); }
+  while (i < n) out.push('-' + A[i++]); while (j < m) out.push('+' + B[j++]);
+  return out;
+}
+function diffEl(lines, header) {
+  const pre = h('pre', { class: 'diff nolink' });
+  if (header) pre.append(h('span', { class: 'hdr' }, header));
+  const shown = lines.length > 1500 ? lines.slice(0, 1500) : lines;
+  for (const ln of shown) pre.append(h('span', { class: ln[0] === '+' ? 'add' : ln[0] === '-' ? 'del' : ln.startsWith('@@') ? 'hunk' : 'ctx' }, ln || ' '));
+  if (lines.length > shown.length) pre.append(h('span', { class: 'ctx' }, '... ' + (lines.length - shown.length) + ' more lines'));
+  return pre;
+}
+function pagedPre(text, cls) {
+  const wrap = h('div', { class: 'paged' }); const pre = h('pre', { class: cls || 'out' }); wrap.append(pre);
+  let shown = 0; const step = 200000;
+  const more = h('button', { class: 'more', type: 'button' }, '');
+  const fill = (n) => { pre.append(document.createTextNode(text.slice(shown, shown + n))); shown = Math.min(text.length, shown + n); more.hidden = shown >= text.length; more.textContent = 'Show more (' + (text.length - shown).toLocaleString() + ' characters left)'; if (shown >= text.length) more.remove(); };
+  more.addEventListener('click', () => { fill(step); linkifyPaths(pre); });
+  fill(20000); if (shown < text.length) wrap.append(h('div', { class: 'clipped' }, h('span', null, text.split('\n').length.toLocaleString() + ' lines, ' + text.length.toLocaleString() + ' characters.'), more));
+  return wrap;
+}
+function inputBlock(name, inp) {
+  if (typeof inp.old_string === 'string' && typeof inp.new_string === 'string') return diffEl(lineDiff(inp.old_string, inp.new_string), '--- ' + (inp.file_path || inp.path || 'file'));
+  if (name === 'Bash' && typeof inp.command === 'string') return pagedPre(inp.command, 'out');
+  if (name === 'Write' && typeof inp.content === 'string') return h('div', null, h('div', { class: 'lbl' }, inp.file_path || inp.path || 'file'), pagedPre(inp.content, 'out'));
+  const lines = Object.entries(inp || {}).map(([k, v]) => k + ': ' + (typeof v === 'string' ? v : JSON.stringify(v)));
+  return pagedPre(lines.join('\n') || '(no input)', 'out');
+}
+function changesBlock(changes) {
+  const box = h('div', { class: 'changes' });
+  for (const c of changes) {
+    const head = h('summary', null, h('span', { class: 'tn' }, c.kind), h('span', { class: 'ta' }, c.path), h('span', { class: 'ts' }, (c.added != null ? '+' + c.added : '') + ' ' + (c.removed != null ? '-' + c.removed : '')));
+    const d = h('details', { class: 'tool' }, head);
+    if (c.new != null || c.old != null) d.append(diffEl(lineDiff(c.old || '', c.new || ''), c.path));
+    else d.append(h('p', { class: 'muted' }, 'No text diff was recorded for this change.'));
+    box.append(d);
+  }
+  return box;
+}
+function turnError(msg) {
+  const box = errorBox(msg);
+  if (/401|403|unauthori[sz]ed|invalid[ _-]*(api)?[ _-]*key|incorrect api key|authentication|forbidden|api key|no api key/i.test(msg)) box.append(' ', h('a', { class: 'btn', href: '#/settings/providers' }, 'Check the provider and key'));
+  return box;
+}
+function notice(text, cls, detail) {
+  const n = h('div', { class: 'notice ' + (cls || '') }, text);
+  if (detail) { const d = h('details', null, h('summary', null, 'Details')); d.append(pagedPre(detail, 'out')); n.append(d); }
+  return n;
+}
+
+// The Progress panel follows the active tab: a tab that finishes loading in the background must not take it over.
+function claimRail(C, tab) {
+  if (!UI.chat || !UI.active || UI.active === tab) { UI.chat = C; return true; }
+  return false;
+}
+// A turn bar that still spins although nothing is running (a turn replayed from the record, or whose end the page never saw).
+function settleSpinners(C, busy) {
+  if (!C.feed) return;
+  if (!busy && C.cur && Date.now() - (C.lastEv || 0) < 3000) return;   // events are still arriving: the state read may be a moment behind
+  const live = C.cur && C.cur.art;
+  for (const art of C.feed.querySelectorAll('.entry.a')) {
+    if (art === live && busy) continue;
+    const sp = art.querySelector('.turnbar .spin'); if (!sp) continue;
+    sp.remove(); const tl = art.querySelector('.turnbar .tl'); if (tl) tl.textContent = 'ended';
+    if (typeof art.querySelectorAll === 'function') {
+      art.querySelectorAll('.mk.run, .mk.wait').forEach(m => setMk(m, 'stop'));
+      art.querySelectorAll('[data-t0]').forEach(e => { e.removeAttribute('data-t0'); e.textContent = ''; });
+      art.querySelectorAll('.approve').forEach(a => a.remove());
+      const hd = art.querySelector('.turnbar .tel'); if (hd) hd.textContent = '';
+    }
+  }
+  if (!busy && C.cur) C.cur = null;
+}
+
+async function viewChat(sid) {
+  const C = { sid: sid || '', st: null, es: null, seq: 0, cur: null, steps: [], subs: [], chips: {}, closed: false, lastIdx: -1, first: 0,
+    cmds: null, runtime: false, meta: null, atBottom: true, hist: [], hpos: -1, files: [], shellMode: false };
+  return shell('chat', async (main, tab) => {
+    C.tab = tab; tab.C = C;
+    onLeave(() => { C.closed = true; if (C.es) C.es.close(); });
+    const feed = h('div', { class: 'feed t-' + state.trace, id: 'feed-' + (sid || 'new') });
+    C.feed = feed;
+    followWire(C, feed);
+    const head = h('div', { class: 'chat-head' });
+    C.head = head;
+    const composerEl = buildComposer(C);
+    main.append(h('div', { class: 'chat' }, head, h('div', { class: 'chat-main' }, feed, composerEl)));
+    await loadHistory(C);
+    await refreshState(C);
+    if (claimRail(C, tab)) setStatus(C.st);
+    drawHead(C); drawRail(C);
+    if (C.meta && C.meta.title) setTabTitle(tab, C.meta.title.slice(0, 26));
+    if (!C.feed.children.length) feed.append(emptyChat(C));
+    feed.scrollTop = feed.scrollHeight;
+    const poll = setInterval(() => { if (!C.closed && C.runtime && !document.hidden) refreshState(C, true); }, 4000);
+    onLeave(() => clearInterval(poll));
+  }, { wide: true, persist: true, key: 'chat:' + (sid || 'new'), hash: '#/chat' + (sid ? '/' + encodeURIComponent(sid) : ''), title: sid ? 'Chat' : 'New chat' });
+}
+
+function emptyChat(C) {
+  const ws = state.ws || {};
+  return h('div', { class: 'empty-chat' }, h('h2', null, 'Ask Axon about ' + (ws.name || 'this project')),
+    h('p', null, 'Axon works in ', h('b', null, ws.workspace || ''), '. It can read and change files here and run commands, asking you first.'),
+    h('div', { class: 'hints' }, h('div', null, h('span', { class: 'kbd' }, '/'), ' commands  ', h('span', { class: 'kbd' }, '@'), ' files  ', h('span', { class: 'kbd' }, '!'), ' shell command'),
+      h('div', null, 'Drop or paste files and images into the box. A large paste becomes an attachment.'),
+      h('div', null, 'Type while Axon works to steer it; ', h('span', { class: 'kbd' }, 'Stop'), ' interrupts the turn.')));
+}
+
+async function loadHistory(C) {
+  if (!C.sid) return;
+  let log = null;
+  try { const r = await api('/api/session/' + encodeURIComponent(C.sid) + '/events?limit=20000'); if (r.events && r.events.length) log = r; } catch (e) { /* no record yet */ }
+  try {
+    const page = await api('/api/session/' + encodeURIComponent(C.sid) + '?limit=30' + (log ? '&before_ts=' + log.first_ts : ''));
+    C.meta = page.meta; C.first = page.first;
+    const frag = document.createDocumentFragment();
+    if (page.has_before) frag.append(h('button', { class: 'btn earlier', onclick: async (e) => {
+      const p = await api('/api/session/' + encodeURIComponent(C.sid) + '?limit=30&before=' + C.first + (log ? '&before_ts=' + log.first_ts : ''));
+      const f = document.createDocumentFragment(); historyNodes(p.entries, C).forEach(x => f.append(x)); e.target.after(f); C.first = p.first; e.target.hidden = !p.has_before; } }, 'Load earlier messages'));
+    historyNodes(page.entries, C).forEach(x => frag.append(x));
+    C.feed.append(frag);
+    if (page.entries.length) C.lastIdx = page.entries[page.entries.length - 1].i;
+    wireHistory(C);
+  } catch (e) { if (!/not found/i.test(e.message)) C.feed.append(errorBox(e.message)); }
+  if (log) replayLog(C, log.events);
+  // transcript entries written after the log (a turn the page did not see): fill the gap so nothing is missing
+  if (log) { try { const t = await api('/api/session/' + encodeURIComponent(C.sid) + '?limit=1'); C.lastIdx = t.total - 1; } catch (e) { /* ignore */ } }
+}
+function replayLog(C, events) {
+  C.replaying = true;
+  try {
+    for (const rec of events) {
+      C.replayTs = Math.max(C.replayTs || 0, rec.ts || 0);
+      const d = Object.assign({}, rec.data, { type: rec.type, ts: rec.ts, seq: rec.seq, parent: rec.parent });
+      for (const k of Object.keys(d)) { const v = d[k]; if (v && typeof v === 'object' && v.$blob) { d[k] = v.head; d['blob_' + k] = { id: v.$blob, len: v.len }; } }
+      try { applyEvent(C, d); } catch (e) { console.warn('replay', rec.type, e); }
+    }
+  } finally {
+    C.replaying = false; if (C.cur && C.cur.running) { for (const ap of Object.values(C.aps || {})) { if (ap.row && ap.row.dataset.state === 'wait') { try { buildApproval(C, ap.ev, ap.row); } catch (e) { /* the page shows it after the next state read */ } } } } else C.cur = null; C.steps = [];
+  }
+}
+function historyEntry(e) {
+  const art = h('article', { class: 'entry ' + (e.kind === 'user' ? 'u' : e.kind === 'assistant' ? 'a' : 'n'), 'data-i': e.i, html: String(e.html || '').replace(/\[Response interrupted by user\]/g, 'Stopped') });
+  decorate(art);
+  return art;
+}
+// A stored turn is the saved model calls of one turn. They are turned back into the events the live view receives and
+// drawn by the very same code (applyEvent), so a stored turn and a live one cannot look different.
+function storedEvents(entries) {
+  const S = { synthetic: true }; const evs = [Object.assign({ type: 'turn_start' }, S)];
+  let calls = 0, nTools = 0, cost = 0, costOk = true, dur = 0, durOk = true, stop = '';
+  for (const e of entries) {
+    const d = e.data; if (!d) continue; const u = d.usage || {}; calls++;
+    evs.push(Object.assign({ type: 'llm_call_start', iteration: calls, model: d.model, tokens_in: u.input || 0, entry: e.i }, S));
+    if (d.thinking) evs.push(Object.assign({ type: 'thinking_delta', text: d.thinking }, S));
+    if (d.text) evs.push(Object.assign({ type: 'text_delta', text: d.text, clipped: d.text_total > d.text.length ? { total: d.text_total } : null }, S));
+    const tl = d.tools || [];
+    if (tl.length > 1) evs.push(Object.assign({ type: 'tool_batch', count: tl.length, tools: [] }, S));
+    tl.forEach((t, n) => {
+      const id = t.id || ('stored-' + e.i + '-' + n); nTools++;
+      evs.push(Object.assign({ type: 'tool_use', id, name: t.name, input: t.input || {}, rationale: '' }, S));
+      if (t.permission) evs.push(Object.assign({ type: 'permission', id, tool: t.name }, t.permission, S));
+      if (t.result != null) {
+        evs.push(Object.assign({ type: 'tool_result', tool_use_id: id, name: t.name, content: t.result, is_error: !!t.is_error, changes: [],
+          more: t.result_total > t.result.length ? { entry: e.i, field: 't' + n + '.out', total: t.result_total } : null }, S));
+        if (t.duration != null) evs.push(Object.assign({ type: 'tool_timing', id, name: t.name, duration_s: t.duration }, S));
+      }
+      if (t.duration != null) dur += t.duration; else if (t.result != null) durOk = false;
+    });
+    if (d.cost != null) cost += d.cost; else costOk = false;
+    if (d.duration != null) dur += d.duration; else durOk = false;
+    stop = d.stop || (tl.length ? 'tool_use' : 'end_turn');
+    evs.push(Object.assign({ type: 'llm_call_end', iteration: calls, model: d.model, usage: { input_tokens: u.input || 0, output_tokens: u.output || 0, cache_read_tokens: u.cache_read || 0 },
+      cost: d.cost, duration_s: d.duration, stop_reason: d.stop || (tl.length ? 'tool_use' : 'end_turn') }, S));
+  }
+  evs.push(Object.assign({ type: 'turn_end', stop_reason: stop === 'tool_use' ? 'end_turn' : stop, cost_usd: costOk ? cost : null, duration_s: durOk ? dur : null, iterations: calls, tool_calls: nTools }, S));
+  return evs;
+}
+function storedTurn(grp, C) {
+  const F = { sid: C ? C.sid : '', feed: h('div'), replaying: true, steps: [], uses: {}, touched: {}, cur: null, stored: true };
+  for (const ev of storedEvents(grp)) { try { applyEvent(F, ev); } catch (x) { console.warn('stored turn', ev.type, x); } }
+  const art = F.feed.querySelector('article.entry.a'); if (!art) return h('div');
+  art.dataset.i = grp[0].i; art.classList.remove('replayed'); art.classList.add('stored');
+  return art;
+}
+// Pages of the saved transcript -> DOM nodes: consecutive model calls form one turn.
+function historyNodes(entries, C) {
+  const out = []; let grp = [];
+  const flush = () => { if (grp.length) { out.push(storedTurn(grp, C)); grp = []; } };
+  for (const e of entries) { if (e.kind === 'assistant' && e.data) grp.push(e); else { flush(); out.push(historyEntry(e)); } }
+  flush(); return out;
+}
+function wireHistory(C) {
+  if (C.wired) return; C.wired = true;
+  C.feed.addEventListener('click', async (ev) => {
+    const b = ev.target.closest('button.more[data-entry]'); if (!b) return;
+    b.disabled = true;
+    try {
+      const off = Number(b.dataset.offset);
+      const r = await api('/api/session/' + encodeURIComponent(C.sid) + '/text?entry=' + b.dataset.entry + '&field=' + encodeURIComponent(b.dataset.field) + '&offset=' + off + '&limit=400000');
+      const wrap = b.closest('.clip'); let pre = wrap.querySelector('pre.plain-full');
+      if (!pre) { pre = h('pre', { class: 'out plain-full' }); wrap.querySelector('.cbody').replaceChildren(pre); }
+      pre.append(document.createTextNode(r.text)); b.dataset.offset = r.next;
+      if (r.done) b.parentElement.remove(); else { b.disabled = false; b.textContent = 'Show more (' + (r.total - r.next).toLocaleString() + ' characters left)'; }
+    } catch (e) { b.disabled = false; toast(e.message); }
+  });
+}
+
+async function refreshState(C, quiet) {
+  try {
+    const st = await api('/api/chat/state?session=' + encodeURIComponent(C.sid) + '&create=0');
+    if (st.none) { C.runtime = false; C.st = null; return; }
+    C.st = st; const first = !C.runtime;
+    C.runtime = true;
+    if (!C.sid) C.sid = st.session;
+    settleSpinners(C, !!st.busy);
+    if (first || !C.es) connectEvents(C, st);
+    if (!quiet) { drawHead(C); }
+    drawRail(C); drawHeadStatus(C); if (UI.chat === C || !UI.chat) { UI.chat = C; setStatus(st); }
+  } catch (e) { if (!quiet) toast(e.message); }
+}
+
+function connectEvents(C, st) {
+  if (C.closed) return;
+  if (C.es) C.es.close();
+  const since = st && st.busy ? 0 : (st ? st.seq : 0);
+  C.lastSeq = Math.max(C.lastSeq || 0, since);        // the newest event applied: a reconnect resumes after it, never replays it
+  const es = new EventSource('/api/events?session=' + encodeURIComponent(C.sid) + '&since=' + C.lastSeq);
+  C.es = es;
+  es.onmessage = (m) => {
+    const id = Number(m.lastEventId) || 0; if (id && id <= C.lastSeq) return;
+    if (id) C.lastSeq = id;
+    try { applyEvent(C, JSON.parse(m.data)); } catch (e) { console.warn('bad event', e); }
+  };
+  es.addEventListener('gap', () => { refreshState(C); tailHistory(C); });
+  es.onerror = async () => {
+    if (C.closed) return;
+    if (es.readyState === 2 && C.es === es) setTimeout(() => { if (!C.closed && C.es === es) connectEvents(C, C.st || { busy: false, seq: C.lastSeq }); }, 1500);   // the browser gave up: resume from the last event id
+    C.offline = true; C.offlineSince = C.offlineSince || Date.now(); drawHeadStatus(C);
+    try { const r = await fetch('/api/info', { credentials: 'same-origin' }); if (r.status === 401) authLost(); } catch (e) { /* server down: the pill says so */ }
+  };
+  es.onopen = () => { if (C.offline) { C.offline = false; C.offlineSince = 0; drawHeadStatus(C); refreshState(C, true); } };   // missed events arrive by id; only a 'gap' reloads history
+}
+
+function drawHeadStatus(C) {
+  const el = C.head && C.head.querySelector('.chat-status'); if (!el) return;
+  const st = C.st || {};
+  el.replaceChildren();
+  if (C.offline) {
+    const long = Date.now() - (C.offlineSince || Date.now()) > 15000;
+    el.append(h('span', { class: 'pill' }, long ? 'Connection lost' : h('span', null, h('span', { class: 'spin' }), ' reconnecting'),
+      h('button', { class: 'mini', style: 'margin-left:8px', onclick: () => { C.offline = false; C.offlineSince = 0; connectEvents(C, C.st || { busy: false, seq: 0 }); refreshState(C); } }, 'Retry now'),
+      h('button', { class: 'mini', onclick: () => location.reload() }, 'Reload page')));
+    setTimeout(() => { if (C.offline) drawHeadStatus(C); }, 5000);
+  }
+  else if (st.busy) el.append(h('span', { class: 'pill' }, h('span', { class: 'spin' }), 'working'));
+  if (st.external) el.append(h('span', { class: 'pill', title: 'Events from the terminal session this page is attached to' }, 'terminal session'));
+  const stop = C.head.querySelector('.stop-btn'); if (stop) stop.hidden = !st.busy;
+  C.head.classList.add('slim'); C.head.classList.toggle('idle', !st.busy && !C.offline && !st.external);
+  if (UI.chat === C) setStatus(st);
+}
+
+function drawHead(C) {
+  // No header strip any more: the title and its menu live in the top bar (wbTitleMenu). What stays here shows only while it matters.
+  const st = C.st || {};
+  C.head.replaceChildren(h('span', { class: 'chat-status', style: 'display:contents' }), h('span', { class: 'sp', style: 'flex:1' }),
+    h('button', { class: 'btn danger stop-btn', hidden: !st.busy, disabled: !!C.stopping, onclick: () => stopTurn(C) }, C.stopping ? 'Stopping' : 'Stop'));
+  drawHeadStatus(C);
+  if (UI.chat === C) wbTitleSync();
+  if (C.meta && C.meta.held_by) lockNote(C);
+}
+function lockNote(C) {
+  if (document.getElementById('lock-note')) return;
+  const hb = C.meta.held_by;
+  const note = h('div', { class: 'lock-note', id: 'lock-note' }, h('b', null, 'Read-only. '),
+    'This session is open in another terminal (' + (hb.owner || 'terminal') + ', pid ' + hb.pid + ', started ' + age(hb.started) + '). The page never writes to a session someone else holds. ',
+    h('button', { class: 'btn primary', onclick: async () => { try { const st = await api('/api/chat/fork', { session: C.sid }); location.hash = '#/chat/' + encodeURIComponent(st.session); } catch (e) { toast(e.message); } } }, 'Fork into a new session'));
+  C.feed.before(note); C.locked = true;
+  const ta = document.getElementById('msg'); if (ta) { ta.disabled = true; ta.placeholder = 'Read-only: held by another terminal'; }
+}
+async function runCmd(C, line) {
+  const r = await api('/api/commands/run', { session: C.sid, line });
+  if (r.state) { C.st = r.state; C.runtime = true; if (!C.sid) C.sid = r.state.session; if (!C.es) connectEvents(C, r.state); drawHead(C); drawRail(C); }
+  return r;
+}
+function modelPicker(C) {
+  const sel = h('select', { 'aria-label': 'Model', onchange: async () => {
+    if (sel.value === '__providers') { sel.value = sel.dataset.cur || ''; location.hash = '#/settings/providers'; return; }
+    try { await runCmd(C, '/model ' + sel.value); sel.dataset.cur = sel.value; toast('Model: ' + sel.value); } catch (e) { toast(e.message); }
+  } });
+  const cur = (C.st && C.st.model) || '';
+  sel.dataset.cur = cur;
+  sel.append(h('option', { value: cur }, cur || 'model...'));
+  // Only the provider in use is listed; every other provider sits behind one link, so the list stays short.
+  Promise.all([api('/api/models?session=' + encodeURIComponent(C.sid)), api('/api/providers').catch(() => null)]).then(([d, pv]) => {
+    const cm = d.current || cur; sel.dataset.cur = cm;
+    const opt = (m) => h('option', { value: m, selected: m === cm }, m);
+    const active = pv && (pv.providers || []).find(p => p.active);
+    const names = active && (active.models || []).length ? [...new Set([cm, ...active.models].filter(Boolean))] : [cm].filter(Boolean);
+    const kids = [];
+    if (active && names.length) kids.push(h('optgroup', { label: active.name }, ...names.map(opt))); else kids.push(...names.map(opt));
+    kids.push(h('option', { value: '__providers' }, 'Set up another provider...'));
+    sel.replaceChildren(...kids);
+  }).catch(() => { });
+  return h('span', { class: 'pill' }, 'model ', sel);
+}
+function modePicker(C) {
+  const cur = (C.st && C.st.mode) || 'default';
+  const labels = { default: 'Ask before edits and commands', acceptEdits: 'Allow file edits, ask for commands', plan: 'Plan only (read-only)', bypass: 'Run everything without asking' };
+  const sel = h('select', { 'aria-label': 'Permission mode', title: 'What the agent may do without asking', onchange: async () => { try { await runCmd(C, '/mode ' + sel.value); toast('Mode: ' + labels[sel.value]); } catch (e) { toast(e.message); } } },
+    Object.entries(labels).map(([v, l]) => h('option', { value: v, selected: v === cur }, l)));
+  return h('span', { class: 'pill' }, 'mode ', sel);
+}
+function tracePicker(C) {
+  const sel = h('select', { 'aria-label': 'Trace detail', title: 'How much of each step to show', onchange: () => { state.trace = sel.value; lsSet('axon-trace', sel.value); C.feed.className = 'feed t-' + sel.value; } },
+    [['compact', 'Compact'], ['normal', 'Normal'], ['detailed', 'Detailed'], ['debug', 'Debug (raw events)']].map(([v, l]) => h('option', { value: v, selected: v === state.trace }, l)));
+  return h('span', { class: 'pill' }, 'trace ', sel);
+}
+async function newChat(C) {
+  try { const st = await api('/api/chat/new', {}); location.hash = '#/chat/' + encodeURIComponent(st.session); if (C.closed === false && location.hash === '#/chat/' + encodeURIComponent(st.session)) route(); } catch (e) { toast(e.message); }
+}
+// Stop interrupts the turn only. Messages waiting in the queue are taken out of it first, so the server does not start
+// them by itself; they wait in the "Waiting" list above the box, with Send now and Remove.
+async function stopTurn(C, opts) {
+  const keep = opts && opts.keep;
+  C.stopping = true; drawHead(C);
+  try {
+    for (const q of ((C.st && C.st.queue) || [])) {
+      if (keep != null && q.id === keep) continue;
+      try { const r = await api('/api/chat/queue/remove', { session: C.sid, id: q.id }); if (r && r.ok === false) continue; (C.held = C.held || []).push({ id: q.id, text: (C.qtext && C.qtext[q.id]) || q.text, steer: !!q.steer }); } catch (e) { /* it already started */ }
+    }
+    drawHeld(C);
+    await api('/api/chat/stop', { session: C.sid });
+  } catch (e) { C.stopping = false; drawHead(C); toast(e.message); }
+}
+function drawHeld(C) {
+  const box = C.heldEl; if (!box) return;
+  const list = C.held || [];
+  box.hidden = !list.length;
+  box.replaceChildren(...(list.length ? [h('div', { class: 'lbl' }, 'Waiting (not sent). The turn was stopped, so these did not run.')] : []), ...list.map(m => h('div', { class: 'held' }, h('span', { class: 't', title: m.text }, m.text),
+    h('button', { class: 'mini', type: 'button', onclick: async () => { C.held = C.held.filter(x => x !== m); drawHeld(C); try { await api('/api/chat/send', { session: C.sid, text: m.text, steer: false }); refreshState(C, true); } catch (e) { C.held.push(m); drawHeld(C); toast(e.message); } } }, 'Send now'),
+    h('button', { class: 'mini', type: 'button', onclick: () => { C.held = C.held.filter(x => x !== m); drawHeld(C); } }, 'Remove'))));
+}
+
+// ----- live events: a turn is one header, then steps (one per model call) with rows, then the answer -----
+function stick(C) { followStick(C); }
+// Times: every number on a row comes from an event (server clock). Nothing known -> nothing shown.
+function nowS(C) { return Date.now() / 1000 - (C.skew || 0); }
+function evT(C, ev) { if (ev.synthetic) return null; return typeof ev.ts === 'number' ? ev.ts : (C.replaying ? null : nowS(C)); }
+const MK_TITLE = { run: 'Running', ok: 'Done', bad: 'Failed', wait: 'Waiting for your permission', stop: 'Stopped' };
+function setMk(m, state) { m.className = 'mk ' + state; m.dataset.s = state; m.title = MK_TITLE[state] || ''; m.replaceChildren(); if (state === 'run') m.append(h('span', { class: 'spin' })); }
+function mkEl(state) { const m = h('span', { class: 'mk' }); setMk(m, state); return m; }
+function startTick(C) {
+  if (C.tickId) return;
+  C.tickId = setInterval(() => { if (C.closed) { clearInterval(C.tickId); C.tickId = 0; return; } tickAll(C); }, 250);
+}
+function tickAll(C) {
+  const now = nowS(C); let any = false;
+  for (const el of C.feed.querySelectorAll('[data-t0]')) {
+    any = true; if (el.dataset.paused) continue;
+    el.textContent = axDur(Math.max(0, now - (+el.dataset.t0) - (+el.dataset.sub || 0)));
+  }
+  const cur = C.cur;
+  if (cur && cur.running && cur.t0 != null) { any = true; cur.el.textContent = axDur(Math.max(0, (cur.waitStart || now) - cur.t0 - cur.waited)); }
+  if (!any && !C.cur) { clearInterval(C.tickId); C.tickId = 0; }
+}
+function headMeta(cur, done) {
+  const m = cur.meta; m.replaceChildren(); const bits = [];
+  if (!done) { if (cur.stepText) bits.push(cur.stepText); if (cur.cost) bits.push(usd(cur.cost)); }
+  else { if (cur.nSteps) bits.push(axPlural(cur.nSteps, 'step')); if (cur.nTools) bits.push(axPlural(cur.nTools, 'tool')); if (cur.costKnown !== false && (cur.cost || cur.nSteps)) bits.push(usd(cur.cost)); if (cur.endNote) bits.push(cur.endNote); }
+  bits.forEach((b, i) => m.append(h('span', { class: 'mi' }, b)));
+  if (cur.nFail) m.append(h('span', { class: 'mi bad' }, cur.nFail + ' failed'));
+}
+function toggleSteps(art) {
+  const sh = art.querySelector('.tsteps'); const shown = sh && getComputedStyle(sh).display !== 'none';
+  art.dataset.steps = shown ? 'closed' : 'open'; const b = art.querySelector('.thead'); if (b) b.setAttribute('aria-expanded', String(!shown));
+}
+function ensureTurn(C, ts) {
+  if (C.cur) return C.cur;
+  C.feed.querySelector('.empty-chat')?.remove();
+  const art = h('article', { class: 'entry a ' + (C.replaying ? 'replayed' : 'live fresh') });
+  const mk = mkEl('run'), title = h('span', { class: 'tl' }, 'Working'), el = h('span', { class: 'tel' }), meta = h('span', { class: 'tmeta' });
+  const head = h('button', { type: 'button', class: 'turnbar thead', 'aria-expanded': 'true', title: 'Show or hide the steps of this turn', onclick: () => toggleSteps(art) }, mk, title, el, meta, h('span', { class: 'chev', 'aria-hidden': 'true' }));
+  const steps = h('div', { class: 'tsteps' }), answer = h('div', { class: 'tanswer' });
+  art.append(h('div', { class: 'who' }, 'axon'), head, steps, answer);
+  C.feed.append(art);
+  const t0 = ts != null ? ts : (C.replaying ? null : nowS(C));
+  C.cur = { art, head, mk, title, el, meta, body: steps, answer, t0, prose: null, proseText: '', think: null, thinkText: '', tools: {}, step: null, group: null,
+    nSteps: 0, n: 0, nTools: 0, nFail: 0, cost: 0, waited: 0, waitStart: 0, stepText: '', running: true };
+  headMeta(C.cur, false); startTick(C);
+  return C.cur;
+}
+function hostOf(C) { const cur = ensureTurn(C); return cur.step ? cur.step.body : cur.body; }
+function userEntry(C, text, chars) {
+  C.feed.querySelector('.empty-chat')?.remove();
+  const md = h('div', { class: 'md' }); md.append(pagedPre(text, 'out'));
+  const art = h('article', { class: 'entry u ' + (C.replaying ? 'replayed' : 'fresh') }, h('div', { class: 'who' }, 'you'), md);
+  C.feed.append(art); decorate(art); stick(C);
+}
+function raw(C, ev) { if (!C.cur) return; hostOf(C).append(h('details', { class: 'rawev' }, h('summary', null, ev.type), h('pre', { class: 'out nolink' }, JSON.stringify(ev, null, 1).slice(0, 6000)))); }
+
+// ----- steps -----
+function newStep(C, cur, ev, ts) {
+  const n = ev.iteration || cur.nSteps + 1;
+  const mk = mkEl('run'), time = h('span', { class: 'stime' }), cost = h('span', { class: 'scost' }), sub = h('span', { class: 'ssub' });
+  const hd = h('div', { class: 'shead' }, mk, h('span', { class: 'stitle' }, 'Step ' + n), sub, time, cost);
+  const detail = h('div', { class: 'sdetail dtl' }), body = h('div', { class: 'sbody' });
+  const el = h('section', { class: 'step', 'data-n': n }, hd, detail, body);
+  if (ev.entry != null) el.dataset.i = ev.entry;
+  cur.body.append(el);
+  if (ts != null) time.dataset.t0 = ts;
+  const st = { n, el, hd, mk, time, cost, sub, detail, body, t0: ts, ended: false, expect: false, open: 0, tools: 0, modelDur: null, standalone: [], groups: [], bad: false, waiting: 0 };
+  detail.append(h('span', null, ev.model || ''), h('span', null, tok(ev.tokens_in || 0) + ' tokens in'));
+  cur.step = st; cur.nSteps++; cur.n = cur.nSteps; cur.stepText = 'Step ' + n + ': thinking'; cur.group = null; headMeta(cur, false);
+  return st;
+}
+function groupTotal(g) {
+  const ts = g.cards.map(c => c.axT).filter(Boolean); if (ts.length < g.cards.length || !ts.length) return null;
+  if (ts.every(t => t.par)) { const s = Math.min(...ts.map(t => t.s)), e = Math.max(...ts.map(t => t.e)); return Math.max(0, e - s); }
+  return ts.reduce((a, t) => a + t.d, 0);
+}
+function stepToolTime(st) {
+  let sum = 0;
+  for (const c of st.standalone) if (c.axT) sum += c.axT.d;
+  for (const g of st.groups) { const v = groupTotal(g); if (v != null) sum += v; }
+  return sum;
+}
+function updateStepTime(st) {
+  if (st.waiting) return;
+  if (!st.ended || st.open > 0) return;
+  delete st.time.dataset.t0; st.time.removeAttribute('data-sub');
+  st.time.textContent = st.modelDur == null ? '' : axDur(st.modelDur + stepToolTime(st));
+}
+function maybeFinishStep(cur, st) {
+  if (!st || !st.ended || st.open > 0 || (st.expect && st.tools === 0)) return;
+  setMk(st.mk, st.bad ? 'bad' : 'ok'); updateStepTime(st);
+  if (cur.step === st && !st.tools) cur.stepText = '';
+}
+function groupHead(g) {
+  const ts = g.cards.map(c => c.axT).filter(Boolean); const all = ts.length === g.n;
+  const par = all && ts.every(t => t.par), seq = all && ts.every(t => t.par === false);
+  g.title.textContent = !g.finished ? g.n + ' tools running together' : par ? g.n + ' tools ran together' : seq ? g.n + ' tools ran one after another' : g.n + ' tools';
+  const v = g.finished ? groupTotal(g) : null;
+  if (g.finished) { delete g.time.dataset.t0; g.time.textContent = v == null ? '' : axDur(v); }
+}
+
+// ----- prose: the last text of a turn is the answer; text before a tool call is narration inside its step -----
+function flushProse(cur) { if (cur.live && cur.prose) { liveFlush(null, cur); return; } if (cur.mdTimer) { clearTimeout(cur.mdTimer); cur.mdTimer = 0; } if (cur.prose && cur.proseText.length <= 300000) cur.prose.innerHTML = mdLite(cur.proseText); }
+function moveProse(cur) {
+  if (!cur.prose) return;
+  flushProse(cur); const p = cur.prose; p.classList.remove('stream'); p.classList.add('narr');
+  (cur.step ? cur.step.body : cur.body).append(p); decorate(p); cur.prose = null; cur.proseText = '';
+}
+// ----- thinking -----
+function thinkStart(C, cur, ts) {
+  const pre = h('pre', { class: 'out nolink' }); const mk = mkEl('run');
+  const sum = h('summary', { class: 'xrow' }, mk, h('span', { class: 'ta think-t' }, 'Thinking'), h('span', { class: 'td' }));
+  if (ts != null) sum.querySelector('.td').dataset.t0 = ts;
+  const d = h('details', { class: 'tool think', open: true }, sum, h('div', { class: 'tdet' }, pre));
+  if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts);
+  cur.step.body.append(d);
+  cur.think = d; cur.thinkPre = pre; cur.thinkMk = mk; cur.thinkT0 = ts; cur.thinkText = '';
+  cur.stepText = 'Step ' + cur.step.n + ': thinking'; headMeta(cur, false);
+}
+function finishThink(C, cur, ts) {
+  if (!cur || !cur.think) return;
+  const d = cur.think; const dsec = ts != null && cur.thinkT0 != null ? ts - cur.thinkT0 : null;
+  const td = d.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = '';
+  d.querySelector('.think-t').textContent = dsec != null && dsec >= 0.1 ? 'Thought for ' + axDur(dsec) : 'Thought';
+  setMk(cur.thinkMk, 'ok'); d.open = false; cur.think = null;
+}
+
+function applyEvent(C, ev) {
+  const t = ev.type; const ts = evT(C, ev);
+  if (!C.replaying && C.replayTs && typeof ev.ts === 'number' && ev.ts <= C.replayTs) return;   // already drawn from the record
+  if (!C.replaying) { C.lastEv = Date.now(); if (C.skew == null && typeof ev.ts === 'number') C.skew = Date.now() / 1000 - ev.ts; }
+  if (typeof axOnEvent === 'function') axOnEvent(C, ev);
+  if (C.cur && C.cur.live && t !== 'text_delta' && t !== 'thinking_delta') liveFlush(C, C.cur);   // show every word before the next card, the end or Stop
+  if (state.trace === 'debug' && C.cur && !['text_delta', 'thinking_delta'].includes(t)) raw(C, ev);
+  switch (t) {
+    case 'user': userEntry(C, ev.text, ev.chars); C.cur = null; C.steps = []; drawRail(C); break;
+    case 'turn_start': ensureTurn(C, ts); break;
+    case 'llm_call_start': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); newStep(C, cur, ev, ts); break; }
+    case 'thinking_delta': { const cur = ensureTurn(C, ts);
+      if (!cur.think) thinkStart(C, cur, ts);
+      cur.thinkText += ev.text; cur.thinkPre.textContent = cur.thinkText.slice(-30000); stick(C); break; }
+    case 'text_delta': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts);
+      if (!cur.prose) { cur.proseText = ''; cur.live = null; cur.mdst = null; cur.prose = h('div', { class: 'md stream' }); cur.answer.append(cur.prose); }
+      cur.proseText += ev.text;
+      liveText(C, cur);
+      if (ev.clipped) cur.answer.append(h('div', { class: 'muted' }, 'Showing the first ' + ev.text.length.toLocaleString() + ' of ' + ev.clipped.total.toLocaleString() + ' characters.'));
+      break; }
+    case 'tool_use': (C.uses = C.uses || {})[ev.id] = ev; toolStart(C, ev, ts); break;
+    case 'tool_result': trackTouched(C, ev); toolDone(C, ev, ts); break;
+    case 'tool_timing': toolTiming(C, ev); break;
+    case 'permission': { const cur = C.cur; const card = cur && cur.tools[ev.id]; if (card) permInfo(card, ev); break; }
+    case 'approval_request': approvalCard(C, ev, ts); break;
+    case 'approval_resolved': approvalDone(C, ev, ts); break;
+    case 'question_request': if (C.replaying) { hostOf(C).append(notice('Asked: ' + ev.question)); break; } questionCard(C, ev); break;
+    case 'question_resolved': document.getElementById('q-' + ev.id)?.replaceWith(notice('Answered: ' + (ev.labels ? ev.labels.join(', ') : 'skipped'), 'ok')); break;
+    case 'llm_call_end': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); const u = ev.usage || {};
+      const st = cur.step || newStep(C, cur, { iteration: ev.iteration, model: ev.model }, ts);
+      st.ended = true; st.expect = ev.stop_reason === 'tool_use'; st.modelDur = ev.duration_s != null ? ev.duration_s : null;
+      cur.cost += ev.cost || 0;
+      if (ev.cost) st.cost.textContent = usd(ev.cost);
+      st.detail.append(h('span', null, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out'), u.cache_read_tokens ? h('span', null, tok(u.cache_read_tokens) + ' cached') : null, ev.stop_reason ? h('span', null, 'stop: ' + ev.stop_reason) : null);
+      st.hd.title = [ev.model || st.detail.firstChild.textContent, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out tokens', u.cache_read_tokens ? tok(u.cache_read_tokens) + ' cached' : ''].filter(Boolean).join(' · ');
+      if (ev.outcome && ev.outcome !== 'ok') { st.bad = true; st.detail.append(h('span', { class: 'bad' }, ev.outcome)); st.sub.textContent = ev.outcome; st.sub.classList.add('bad'); }
+      const sd = Object.assign({ n: ev.iteration, model: ev.model, tin: u.input_tokens || 0 }, { dur: ev.duration_s || 0, cost: ev.cost || 0, tout: u.output_tokens || 0, cread: u.cache_read_tokens || 0, stop: ev.stop_reason, miss: ev.cache_miss_cause || '', detail: ev.cache_miss_detail || '' });
+      C.steps.push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
+    case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } if (C.cur && C.cur.step && ev.miss) C.cur.step.detail.append(h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : ''))); break; }
+    case 'subagent': subagentEvent(C, ev); break;
+    case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
+    case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;
+    case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), 'warn')); break;
+    case 'retry': hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + ev.delay_s + 's: ' + ev.error, 'warn')); break;
+    case 'steer': hostOf(C).append(notice('Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
+    case 'queued': if (C.replaying) break; C.feed.append(notice((ev.steer ? 'Sent into the running turn: ' : 'Queued for after the turn: ') + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
+    case 'memory_loaded': hostOf(C).append(h('div', { class: 'steprow dtl' }, h('span', null, 'memory loaded'), h('span', null, ev.path), h('span', null, ev.reason))); break;
+    case 'hook': hostOf(C).append(h('div', { class: 'steprow dtl' }, h('span', null, 'hook ' + ev.event), h('span', null, ev.ran + ' ran'), ev.blocked ? h('span', { class: 'bad' }, 'blocked') : null, ev.message ? h('span', null, ev.message) : null)); break;
+    case 'tool_rationale': break;
+    case 'tool_batch': if (ev.count > 1) { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts); toolGroup(C, cur, ev, ts); } break;
+    case 'llm_request': if (C.cur && C.cur.step) C.cur.step.detail.append(h('span', null, 'context ' + tok(ev.conversation_tokens || 0) + ' + system ' + tok(ev.system_tokens || 0) + ' + tools ' + tok(ev.tool_schema_tokens || 0) + ' · effort ' + ev.effort + ' · ' + ev.tool_count + ' tools')); break;
+    case 'turn_end': finishTurn(C, ev, ts); break;
+    case 'interrupted': if (C.cur) hostOf(C).append(notice('Stopped', '')); finishTurn(C, null, ts); break;
+    case 'error': (C.cur ? C.cur.answer : C.feed).append(turnError(ev.message)); finishTurn(C, null, ts, 'error'); break;
+    case 'idle': if (!C.replaying) refreshState(C, true); break;
+    case 'stop_requested': break;
+    case 'note': C.feed.append(notice(ev.message)); break;
+    case 'shell_command': { const cur = ensureTurn(C, ts); const card = mkTool('Shell', { command: ev.command }); const failed = !!(ev.refused || ev.code);
+      card.querySelector('.ta').textContent = '$ ' + ev.command; card.axPanes.in.append(inputBlock('Bash', { command: ev.command })); setToolState(card, failed ? 'bad' : 'ok');
+      const chips = card.querySelector('.chips'); if (ev.refused) chips.append(h('span', { class: 'chip2 del' }, 'refused')); else if (ev.code) chips.append(h('span', { class: 'chip2 del' }, 'exit ' + ev.code));
+      card.querySelector('.td').textContent = ev.refused ? '' : axDur(ev.duration);
+      const out = ev.refused ? h('div', { class: 'refused' }, ev.refused) : pagedPre(ev.output || '(no output)', 'out'); card.axPanes.out.replaceChildren(out); card.axText = ev.output || '';
+      card.axPanes.why.append(h('p', { class: 'why' }, 'You ran this yourself from the message box.'));
+      hostOf(C).append(card); decorate(card); if (failed) cur.nFail++; headMeta(cur, false); break; }
+    default: if (C.cur) hostOf(C).append(h('details', { class: 'rawev dtl' }, h('summary', null, 'event: ' + t), h('pre', { class: 'out nolink' }, JSON.stringify(ev, null, 1).slice(0, 4000))));
+  }
+  if (!C.replaying && ['tool_result', 'llm_call_end', 'compaction'].includes(t)) refreshState(C, true);
+  if (!C.replaying) stick(C);
+}
+
+// What Axon itself changed in this chat, from its own tool calls: it does not depend on the folder being a git repository.
+const EDIT_NAMES = ['Write', 'Edit', 'MultiEdit', 'Patch', 'NotebookEdit', 'Notebook'];
+function relPath(p) { const ws = (state.ws || {}).workspace || ''; p = String(p || ''); return ws && p.startsWith(ws + '/') ? p.slice(ws.length + 1) : p; }
+function trackTouched(C, ev) {
+  if (ev.is_error) return;
+  const T = C.touched = C.touched || {}; const use = (C.uses || {})[ev.tool_use_id];
+  const code = (k) => /creat|new|add/i.test(k || '') ? 'A' : /delet|remov/i.test(k || '') ? 'D' : 'M';
+  if (ev.changes && ev.changes.length) { for (const c of ev.changes) if (c.path) { const p = relPath(c.path); T[p] = T[p] === 'A' && code(c.kind) === 'M' ? 'A' : code(c.kind); } return; }
+  if (use && EDIT_NAMES.includes(use.name)) { const inp = use.input || {}; const p0 = inp.file_path || inp.path || inp.notebook_path; if (p0) { const p = relPath(p0); T[p] = T[p] || (use.name === 'Write' ? 'A' : 'M'); } }
+}
+// ----- tool rows: marker | name | one plain sentence | chips | duration; Input / Output / Why open underneath -----
+function setToolState(card, state) { card.dataset.state = state; setMk(card.axMk, state); card.classList.toggle('err', state === 'bad'); }
+function selectTab(card, k) {
+  card.axTab = k;
+  card.querySelectorAll('.tab2').forEach(b => b.setAttribute('aria-selected', String(b.dataset.k === k)));
+  for (const [kk, p] of Object.entries(card.axPanes)) p.hidden = kk !== k;
+}
+async function copyTab(card, btn) {
+  const text = ({ in: card.axInText, out: card.axText, why: card.axWhyText })[card.axTab || 'out'] || '';
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) { const ta = h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand('copy'); } catch (x) { /* blocked */ } ta.remove(); }
+  btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+}
+function mkTool(name, input) {
+  const mk = mkEl('run');
+  const sum = h('summary', { class: 'xrow' }, mk, h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
+  const panes = { in: h('div', { class: 'tpane p-in', hidden: true }), out: h('div', { class: 'tpane p-out', hidden: true }, h('span', { class: 'muted' }, 'Waiting for the result...')), why: h('div', { class: 'tpane p-why', hidden: true }) };
+  const card = h('details', { class: 'tool live-tool', 'data-state': 'run' }, sum);
+  const bar = h('div', { class: 'tabs2', role: 'tablist' });
+  for (const [k, l] of [['in', 'Input'], ['out', 'Output'], ['why', 'Why']]) bar.append(h('button', { type: 'button', role: 'tab', class: 'tab2', 'data-k': k, 'aria-selected': 'false', onclick: () => selectTab(card, k) }, l));
+  bar.append(h('button', { type: 'button', class: 'copy', title: 'Copy what this tab shows', onclick: (e) => copyTab(card, e.currentTarget) }, 'Copy'));
+  card.append(h('div', { class: 'tdet' }, bar, panes.in, panes.out, panes.why));
+  card.addEventListener('toggle', () => { if (card.open && !card.axTab) selectTab(card, card.dataset.state === 'run' || card.dataset.state === 'wait' ? 'in' : 'out'); });
+  card.axMk = mk; card.axPanes = panes; card.axName = name; card.axIn = input || {}; card.axInText = '';
+  return card;
+}
+function inputText(name, inp) { return name === 'Bash' && typeof inp.command === 'string' ? inp.command : JSON.stringify(inp || {}, null, 2); }
+function toolGroup(C, cur, ev, ts) {
+  const title = h('span', { class: 'ptitle' }, ev.count + ' tools running together'), time = h('span', { class: 'ptime' });
+  if (ts != null) time.dataset.t0 = ts;
+  const rows = h('div', { class: 'prows' });
+  const el = h('div', { class: 'pgroup' }, h('div', { class: 'phead' }, h('span', { class: 'mk' }), title, time), rows);
+  cur.step.body.append(el);
+  const g = { el, rows, title, time, n: ev.count, added: 0, done: 0, cards: [], finished: false };
+  cur.step.groups.push(g); cur.group = g; return g;
+}
+const RUNNING_WORD = (name, inp) => { let s = ''; try { s = axRunning(name, inp); } catch (e) { s = ''; } return s; };
+function toolStart(C, ev, ts) {
+  const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur);
+  if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts);
+  const st = cur.step, inp = ev.input || {};
+  const card = mkTool(ev.name, inp);
+  card.querySelector('.ta').textContent = RUNNING_WORD(ev.name, inp) || toolSummary(ev.name, inp);
+  card.querySelector('.ta').title = toolSummary(ev.name, inp);
+  card.axPanes.in.append(inputBlock(ev.name, inp)); card.axInText = inputText(ev.name, inp);
+  const why = card.axPanes.why;
+  why.append(h('p', { class: 'why' }, ev.rationale || 'The model gave no reason before this call.'), h('p', { class: 'perm muted' }));
+  if (ev.parse_error) why.append(h('div', { class: 'bad' }, ev.parse_error));
+  card.axWhyText = ev.rationale || '';
+  const g = cur.group && cur.group.added < cur.group.n ? cur.group : null;
+  (g ? g.rows : st.body).append(card);
+  if (g) { g.added++; g.cards.push(card); card.axGroup = g; } else st.standalone.push(card);
+  cur.tools[ev.id] = card; card.axStep = st; card.axT0 = ts; card.axId = ev.id;
+  if (ts != null) card.querySelector('.td').dataset.t0 = ts;
+  st.open++; st.tools++; cur.nTools++;
+  cur.stepText = 'Step ' + st.n + ': ' + (RUNNING_WORD(ev.name, inp) || ev.name).slice(0, 60); headMeta(cur, false);
+  st.sub.textContent = axPlural(st.tools, 'tool');
+  decorate(card);
+  if (ev.name === 'Task') { card.dataset.task = '1'; card.axPanes.why.append(h('div', { class: 'next' }, h('a', { href: '#/agents/' + encodeURIComponent(C.sid), class: 'plink' }, 'View subagents'))); }
+}
+function permNote(card, text, bad) { const n = card.querySelector('.pnote'); n.hidden = !text; n.textContent = text || ''; n.classList.toggle('bad', !!bad); }
+const CHOICE_NOTE = { once: 'You allowed this once', always: 'You allowed this for the session', rule: 'You allowed this and saved a rule', deny: 'You denied this' };
+const PERM_SRC = { rule: 'a saved rule', mode: 'the current mode', hook: 'a hook', user: 'you', invariant: 'a built-in safety rule', 'no-approver': 'no approver available', delegation: 'delegation' };
+function permInfo(card, ev) {
+  const src = PERM_SRC[ev.source] || ev.source || '';
+  const line = (ev.outcome === 'deny' ? 'Denied' : 'Allowed') + (src ? ' because ' + src : '') + (ev.reason ? ': ' + ev.reason : '') + (ev.approval ? ' (you chose: ' + ev.approval + ')' : '');
+  const p = card.axPanes.why.querySelector('.perm'); if (p) p.textContent = line;
+  card.axWhyText = (card.axWhyText ? card.axWhyText + '\n' : '') + line;
+  if (ev.outcome === 'deny') { card.classList.add('denied'); setToolState(card, 'bad'); permNote(card, ev.source === 'user' ? CHOICE_NOTE.deny : 'Blocked' + (src ? ' by ' + src : '') + (ev.reason ? ': ' + ev.reason : ''), true); }
+  else if (ev.source === 'user') permNote(card, CHOICE_NOTE[ev.approval] || 'You allowed this');
+}
+function toolTiming(C, ev) {
+  const cur = C.cur; const card = cur && cur.tools[ev.id || ev.tool_use_id]; if (!card) return;
+  let s = ev.started_at, e = ev.ended_at, d = ev.duration_s;
+  if (d == null) return;
+  // The clock includes the time the tool waited for your permission; the work itself began when you answered.
+  if (card.axApproved != null && e != null) { s = Math.max(s != null ? s : 0, card.axApproved); d = Math.max(0, e - s); }
+  card.axT = { s: s != null ? s : 0, e: e != null ? e : (s || 0) + d, d, par: ev.parallel === undefined ? undefined : !!ev.parallel };
+  const td = card.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = axDur(d);
+  const st = card.axStep; if (st) updateStepTime(st);
+  const g = card.axGroup; if (g && g.finished) groupHead(g);
+}
+function toolDone(C, ev, ts) {
+  const cur = C.cur; const card = cur && cur.tools[ev.tool_use_id]; if (!card) return;
+  const failed = !!ev.is_error;
+  setToolState(card, failed ? 'bad' : 'ok'); card.classList.toggle('denied', card.classList.contains('denied'));
+  const td = card.querySelector('.td'); td.removeAttribute('data-t0'); if (!card.axT) td.textContent = '';
+  const o = card.axPanes.out; o.replaceChildren();
+  let text = ev.content || '';
+  if (ev.blob_content) text += '\n[showing the start; the full output (' + ev.blob_content.len.toLocaleString() + ' characters) is kept in the session record]';
+  if (ev.truncated_from) text += '\n[showing the first ' + text.length.toLocaleString() + ' of ' + ev.truncated_from.toLocaleString() + ' characters; the full output is in the transcript]';
+  card.axText = text;
+  o.append(/^(@@ -|diff --git |--- \S)/m.test(text.slice(0, 4000)) ? diffEl(text.split('\n')) : pagedPre(text || '(no output)', 'out'));
+  if (ev.more) o.append(h('div', { class: 'clipped' }, h('span', null, 'Showing the first ' + text.length.toLocaleString() + ' of ' + ev.more.total.toLocaleString() + ' characters. '),
+    h('button', { class: 'more', type: 'button', onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { let off = 0, all = ''; for (;;) { const r = await api('/api/session/' + encodeURIComponent(C.sid) + '/text?entry=' + ev.more.entry + '&field=' + encodeURIComponent(ev.more.field) + '&offset=' + off + '&limit=400000'); all += r.text; off = r.next; if (r.done) break; } card.axText = all; o.replaceChildren(pagedPre(all, 'out')); decorate(o); } catch (x) { b.disabled = false; toast(x.message); } } }, 'Show all')));
+  if (ev.changes && ev.changes.length) o.append(changesBlock(ev.changes));
+  if (typeof axCard === 'function') { try { axCard(card, ev, text); } catch (e) { console.warn('card', e); } }
+  decorate(card);
+  if (card.axTab) selectTab(card, card.axTab);
+  const st = card.axStep, g = card.axGroup;
+  if (failed) { cur.nFail++; }
+  if (st) { st.open--; st.hp = false; maybeFinishStep(cur, st); }
+  if (g) { g.done++; if (g.done >= g.n) { g.finished = true; groupHead(g); } }
+  if (cur.step === st && st && st.open === 0) cur.stepText = 'Step ' + st.n + ': thinking';
+  headMeta(cur, false);
+  if (!C.replaying && (ev.name === 'TodoWrite' || ev.name === 'Task')) refreshState(C, true);
+}
+
+// The exact allow rule "Always allow" saves (mirrors PermissionEngine.narrow_rule_for).
+function narrowRule(tool, a) {
+  a = a || {};
+  if (tool === 'Bash') {
+    const cmd = String(a.command || '').split(/\s+/).filter(Boolean).join(' ');
+    if (cmd && !/[;&|`$<>\n]/.test(cmd) && !/["']/.test(cmd)) {
+      const argv = cmd.split(' '); const w = [argv[0]];
+      if (argv.length > 1 && !argv[1].startsWith('-') && !argv[1].includes('/') && !argv[1].includes('\\') && !argv[1].includes('.')) w.push(argv[1]);
+      return 'Bash(' + w.join(' ') + ':*)';
+    }
+    return 'Bash(' + cmd + ')';
+  }
+  if (tool === 'Git') { const sub = String(a.subcommand || '').trim(); return sub ? 'Git(' + sub + ':*)' : 'Git'; }
+  if (tool === 'WebFetch' || tool === 'Http') { let host = ''; try { host = new URL(String(a.url || '')).hostname; } catch (e) { /* none */ } return host ? tool + '(domain:' + host + ')' : tool; }
+  const path = a.path || a.file_path || a.notebook_path;
+  if (path && EDIT_NAMES.includes(tool)) return 'Edit(' + relPath(path) + ')';
+  if (path && ['Read', 'Ls', 'Glob', 'Grep'].includes(tool)) return 'Read(' + relPath(path) + ')';
+  return tool + ' (every call)';
+}
+// Permission: a request waits on its own tool row (pending ones stay prominent); the decision becomes a small note on that row.
+function waitingRow(cur, tool) { return Object.values(cur.tools).reverse().find(c => c.axName === tool && c.axWaitAt == null && c.dataset.state === 'run'); }
+function approvalCard(C, ev, ts) {
+  const cur = ensureTurn(C, ts);
+  const row = waitingRow(cur, ev.tool);
+  (C.aps = C.aps || {})[ev.id] = { row: row || null, ev, ts };
+  if (row) {
+    row.axWaitAt = ts != null ? ts : 0; setToolState(row, 'wait'); row.classList.add('hp');
+    const td = row.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = '';
+    const st = row.axStep; if (st) { st.waiting++; st.hp = true; st.el.classList.add('hp'); st.time.dataset.paused = '1'; }
+  }
+  cur.waitStart = ts != null ? ts : 0; cur.title.textContent = 'Waiting for you';
+  if (!C.replaying) buildApproval(C, ev, row);
+}
+function buildApproval(C, ev, row) {
+  const cur = ensureTurn(C);
+  const a = ev.args || {};
+  const body = [];
+  if (ev.tool === 'ExitPlanMode' && a.plan) { const pm = h('div', { class: 'md' }); pm.append(pagedPre(String(a.plan), 'out')); body.push(h('div', { class: 'lbl' }, 'Plan'), pm); }
+  else body.push(pagedPre(ev.input, 'out'));
+  const card = h('div', { class: 'approve', id: 'ap-' + ev.id, role: 'alertdialog', 'aria-label': 'Permission needed' },
+    h('h4', null, 'Axon wants to use ', h('code', null, ev.tool)), h('div', { class: 'why' }, (EXPLAIN[ev.tool] || 'This tool is not covered by your current permission rules.') + (ev.reason ? ' ' + ev.reason : '')), ...body);
+  const decide = async (choice) => { card.querySelectorAll('button').forEach(b => b.disabled = true); try { await api('/api/chat/approval', { session: C.sid, id: ev.id, choice }); } catch (e) { toast(e.message); card.querySelectorAll('button').forEach(b => b.disabled = false); } };
+  card.append(h('div', { class: 'acts' },
+    h('button', { class: 'btn primary', onclick: () => decide('once') }, ev.tool === 'ExitPlanMode' ? 'Approve plan' : 'Allow once'),
+    ev.tool === 'ExitPlanMode' ? null : h('button', { class: 'btn', title: 'Allow this tool for the rest of this session', onclick: () => decide('always') }, 'Always this session'),
+    ev.tool === 'ExitPlanMode' ? null : h('button', { class: 'btn', title: 'Saves this allow rule in the project file .axon/settings.local.json, so matching calls run without asking: ' + narrowRule(ev.tool, a), onclick: () => decide('rule') }, 'Always allow ' + narrowRule(ev.tool, a)),
+    h('button', { class: 'btn danger', onclick: () => decide('deny') }, 'Deny')));
+  if (row) row.after(card); else hostOf(C).append(card);
+  decorate(card); card.scrollIntoView({ block: 'nearest' });
+}
+function approvalDone(C, ev, ts) {
+  const cur = C.cur; const ap = C.aps && C.aps[ev.id]; const row = ap && ap.row;
+  document.getElementById('ap-' + ev.id)?.remove();
+  if (cur && cur.waitStart && ts != null) { cur.waited += Math.max(0, ts - cur.waitStart); }
+  if (cur) { cur.waitStart = 0; if (cur.running) cur.title.textContent = 'Working'; }
+  if (!row) { if (!ap) (cur ? hostOf(C) : C.feed).append(notice((ev.choice === 'deny' ? 'Denied ' : 'Allowed ') + ev.tool + ' (' + ev.choice + ')', ev.choice === 'deny' ? 'bad' : 'ok')); return; }
+  row.classList.remove('hp'); row.axApproved = ts;
+  const st = row.axStep; if (st) { st.waiting = Math.max(0, st.waiting - 1); if (!st.waiting) { st.hp = false; st.el.classList.remove('hp'); delete st.time.dataset.paused; if (ts != null && ap.ts != null) st.time.dataset.sub = String((+st.time.dataset.sub || 0) + Math.max(0, ts - ap.ts)); } }
+  permNote(row, CHOICE_NOTE[ev.choice] || 'You answered', ev.choice === 'deny');
+  if (ev.choice === 'deny') { row.classList.add('denied'); setToolState(row, 'bad'); }
+  else { setToolState(row, 'run'); if (ts != null) row.querySelector('.td').dataset.t0 = ts; }
+}
+function questionCard(C, ev) {
+  const cur = ensureTurn(C); const picked = new Set();
+  const opts = (ev.options || []).map((o, i) => { const inp = h('input', { type: ev.multi ? 'checkbox' : 'radio', name: 'q' + ev.id, onchange: () => { if (!ev.multi) picked.clear(); inp.checked ? picked.add(o.label) : picked.delete(o.label); } }); return h('label', null, inp, h('span', null, h('b', null, o.label), o.description ? h('div', { class: 'muted' }, o.description) : null)); });
+  const send = async (labels) => { try { await api('/api/chat/answer', { session: C.sid, id: ev.id, labels }); } catch (e) { toast(e.message); } };
+  const card = h('div', { class: 'approve question', id: 'q-' + ev.id }, h('h4', null, (ev.header ? ev.header + ': ' : '') + ev.question), ...opts,
+    h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => send([...picked]) }, 'Answer'), h('button', { class: 'btn', onclick: () => send(null) }, 'Skip')));
+  hostOf(C).append(card);
+}
+
+function subagentEvent(C, ev) {
+  const cur = C.cur; if (C.replaying) { (cur ? cur.body : C.feed).append(notice((ev.phase === 'start' ? 'Subagent started: ' : 'Subagent ' + ev.status + ': ') + ev.agent_type + ' ' + ev.title)); return; }
+  const line = (ev.phase === 'start' ? 'Subagent started: ' : 'Subagent ' + ev.status + ': ') + ev.agent_type + ' · ' + ev.title + (ev.phase === 'end' ? ' · ' + usd(ev.cost) + ' · ' + tok((ev.input_tokens || 0) + (ev.output_tokens || 0)) + ' tokens · ' + dur(ev.duration_s) : '');
+  const n = notice('', ev.status === 'error' ? 'bad' : '');
+  n.append(h('a', { class: 'plink', href: '#/agents/' + encodeURIComponent(C.sid) }, line));
+  (cur ? cur.body : C.feed).append(n);
+  refreshSubs(C);
+}
+async function refreshSubs(C) {
+  if (!C.sid) return;
+  try { const d = await api('/api/subagents?session=' + encodeURIComponent(C.sid)); C.subs = d.subagents; C.subNotes = d.notes; drawRail(C); } catch (e) { /* none yet */ }
+}
+async function tailHistory(C, adopt) {
+  if (!C.sid) return;
+  try {
+    const p = await api('/api/session/' + encodeURIComponent(C.sid) + '?after=' + C.lastIdx + '&limit=200');
+    if (p.entries.length) { C.meta = p.meta; if (adopt) { C.lastIdx = p.entries[p.entries.length - 1].i; } else { historyNodes(p.entries, C).forEach(n => C.feed.append(n)); C.lastIdx = p.entries[p.entries.length - 1].i; } }
+    return p.entries.length;
+  } catch (e) { return 0; }
+}
+async function finishTurn(C, ev, ts, how) {
+  const cur = C.cur;
+  if (cur) {
+    finishThink(C, cur, ts); flushProse(cur);
+    cur.running = false; cur.stepText = ''; cur.waitStart = 0;
+    const secs = ev && ev.duration_s != null ? Math.max(0, ev.duration_s - cur.waited) : (ts != null && cur.t0 != null ? Math.max(0, ts - cur.t0 - cur.waited) : null);
+    if (ev) { cur.cost = ev.cost_usd != null ? ev.cost_usd : cur.cost; cur.costKnown = ev.cost_usd != null || cur.cost > 0; }
+    const word = ev ? turnWord(ev.stop_reason) : '';
+    cur.endNote = ev && !['Done'].includes(word) && !ev.is_error ? word : '';
+    cur.title.textContent = ev && !ev.is_error ? (secs != null ? 'Worked for ' + axDur(secs) : 'Worked') : (how === 'error' || (ev && ev.is_error) ? 'Failed' : 'Stopped') + (secs != null ? ' after ' + axDur(secs) : '');
+    cur.el.textContent = ''; cur.el.removeAttribute('data-t0');
+    setMk(cur.mk, ev && !ev.is_error ? 'ok' : 'bad');
+    cur.art.querySelectorAll('[data-t0]').forEach(e => { e.removeAttribute('data-t0'); e.textContent = ''; });
+    cur.art.querySelectorAll('.step .mk.run, .step .mk.wait, .tool .mk.run, .tool .mk.wait').forEach(m => setMk(m, 'stop'));
+    cur.art.querySelectorAll('.approve').forEach(a => a.remove());
+    cur.art.querySelectorAll('.hp').forEach(a => a.classList.remove('hp'));
+    cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/ running together$/, ' tools').replace(/^(\d+) tools tools$/, '$1 tools'); });
+    headMeta(cur, true);
+    cur.art.dataset.done = '1';
+    if (ev && ev.is_error) cur.answer.append(turnError(ev.result || ev.error || 'The turn failed.'));
+  }
+  C.cur = null;
+  settleSpinners(C, false);
+  if (C.replaying) return;
+  if (C.stopping) { C.stopping = false; drawHead(C); }
+  refreshState(C, true); refreshSubs(C);
+  GIT_CACHE.t = 0; if (typeof treeReload === 'function' && TREE.cache['']) treeReload();
+  // The turn is already drawn by the same code that draws a stored one: keep it, and only move the stored position forward.
+  if (ev && C.sid) await tailHistory(C, true);
+  stick(C);
+}
+
+// ----- right panel (live progress) -----
+let GIT_CACHE = { t: 0, files: {} };
+async function gitFiles() { if (Date.now() - GIT_CACHE.t > 6000) { GIT_CACHE.t = Date.now(); try { GIT_CACHE.files = (await api('/api/git/status')).files; renderRightSoon(); } catch (e) { /* no git */ } } return GIT_CACHE.files; }
+let rrT = 0; function renderRightSoon() { clearTimeout(rrT); rrT = setTimeout(renderRight, 150); }
+// The Progress panel is built by wbRail (dash_js_workbench.py): Environment, Context, Usage, Plan, Connectors and Changes.
+function drawRail(C) {
+  if (UI.chat !== C) return;
+  wbRail(C);
+  gitFiles();
+  if (!C.subLoaded && C.sid) { C.subLoaded = true; refreshSubs(C); }
+}
+
+// ----- composer -----
+function buildComposer(C) {
+  const ta = h('textarea', { id: 'msg', rows: 2, placeholder: 'Message Axon   (/ commands, @ files, ! shell, drop files here)', 'aria-label': 'Message' });
+  const chips = h('div', { class: 'chips' });
+  const pop = h('div', { class: 'pop', hidden: true });
+  const send = h('button', { class: 'btn primary', id: 'send-btn', type: 'button' }, 'Send');
+  const queueBtn = h('button', { class: 'btn', type: 'button', hidden: true, title: 'Wait until the current turn ends, then send' }, 'Send after this turn');
+  const sendNow = h('button', { class: 'btn', type: 'button', hidden: true, title: 'Stop the current turn and send this message now' }, 'Stop and send now');
+  const status = h('span', { class: 'muted', id: 'cstatus' }, 'Enter sends · Shift+Enter for a new line');
+  const banner = h('div', { class: 'notice warn provider-banner', hidden: true });
+  const heldEl = h('div', { class: 'heldbox', hidden: true });
+  const root = h('div', { class: 'composer' }, banner, heldEl, chips, h('div', { class: 'box' }, pop, ta), h('div', { class: 'cbar' }, wbPlus(C, ta), status, h('span', { class: 'sp' }), queueBtn, sendNow, wbMic(C, ta), send));
+  if (typeof axGhost === 'function') axGhost(C, ta);
+  C.heldEl = heldEl; C.ta = ta; C.pop = pop; C.chipsEl = chips; C.sendBtn = send;
+  const checkReady = async () => {
+    try {
+      const r = await api('/api/provider/ready?session=' + encodeURIComponent(C.sid)); banner.hidden = r.ready;
+      if (!r.ready) banner.replaceChildren(h('b', null, 'Chat is not set up yet. '), r.reason + ' ', h('a', { class: 'btn primary', href: '#/settings/providers' }, 'Open Providers'));
+    } catch (e) { /* the status pill shows connection problems */ }
+  };
+  C.checkReady = checkReady; checkReady();
+  const rdy = setInterval(() => { if (!C.closed && !document.hidden) checkReady(); }, 6000); onLeave(() => clearInterval(rdy));
+  const histKey = 'axon-prompts';
+  try { C.hist = JSON.parse(lsGet(histKey) || '[]'); } catch (e) { C.hist = []; }
+  const auto = () => { ta.style.height = 'auto'; ta.style.height = Math.min(260, ta.scrollHeight + 2) + 'px'; };
+  const redrawChips = () => {
+    chips.replaceChildren();
+    for (const [chip, meta] of Object.entries(C.chips)) {
+      if (!ta.value.includes(chip)) { delete C.chips[chip]; continue; }
+      chips.append(axChipEl(chip, meta, () => { ta.value = ta.value.replace(chip, '').replace(/ {2,}/g, ' '); delete C.chips[chip]; redrawChips(); }));
+    }
+  };
+  const addChip = (meta) => { const sep = ta.value && !/\s$/.test(ta.value) ? ' ' : ''; ta.value += sep + meta.chip + ' '; C.chips[meta.chip] = meta; redrawChips(); auto(); ta.focus(); };
+  async function upload(file) {
+    const tag = h('span', { class: 'chip' }, h('span', { class: 'spin' }), file.name); chips.append(tag);
+    try {
+      if (file.size > 64 * 1024 * 1024) throw new Error(file.name + ' is over 64 MB; reference it by path instead');
+      const r = await fetch('/api/attach?name=' + encodeURIComponent(file.name || 'pasted') + '&session=' + encodeURIComponent(C.sid), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || 'upload failed');
+      tag.remove(); addChip(j);
+    } catch (e) { tag.remove(); toast(e.message); }
+  }
+  async function pasteText(text) {
+    const tag = h('span', { class: 'chip txt' }, h('span', { class: 'spin' }), 'saving pasted text (' + text.split('\n').length.toLocaleString() + ' lines)'); chips.append(tag);
+    try { const j = await api('/api/attach/text', { text }); tag.remove(); addChip(j); toast('Pasted text kept as an attachment: ~' + tok(j.tokens) + ' tokens' + (j.limit_tokens && j.tokens > j.limit_tokens ? '. Axon will send its start and end and read the rest from the saved file.' : '.')); }
+    catch (e) { tag.remove(); toast(e.message); }
+  }
+  ta.addEventListener('paste', (e) => {
+    const cd = e.clipboardData; if (!cd) return;
+    const files = axClipboardFiles(cd);
+    if (files.length) { e.preventDefault(); files.forEach(C.uploadFile); return; }
+    const text = cd.getData('text'); if (text && (text.length > 20000 || text.split('\n').length > 200)) { e.preventDefault(); pasteText(text); }
+  });
+  axComposerDrop(C, { addChip, upload, chips, ta });     // dropping is handled once for the whole chat view (dash_js_files.py)
+
+  // popups: / commands and @ files
+  let items = [], sel = 0, mode = '';
+  const closePop = () => { pop.hidden = true; items = []; mode = ''; };
+  const showPop = (list, kind) => { items = list; sel = 0; mode = kind; pop.replaceChildren(...cmdPopNodes(list, accept)); pop.hidden = !list.length; };
+  const accept = (i) => {
+    const it = items[i]; if (!it) return;
+    const v = ta.value, pos = ta.selectionStart;
+    if (mode === 'cmd') { ta.value = it.value + ' ' + v.slice(pos).replace(/^\S*/, '').trimStart(); }
+    else { const before = v.slice(0, pos).replace(/@[^\s]*$/, '@' + it.value + ' '); ta.value = before + v.slice(pos); }
+    closePop(); auto(); ta.focus();
+  };
+  async function suggest() {
+    const v = ta.value, pos = ta.selectionStart;
+    C.shellMode = v.startsWith('!'); ta.classList.toggle('shellmode', C.shellMode);
+    if (C.shellMode) { status.textContent = 'Shell mode: runs the command in the project folder, then Axon sees the output.'; closePop(); return; }
+    status.textContent = 'Enter sends · Shift+Enter for a new line';
+    const first = v.split('\n')[0];
+    if (/^\/\S*$/.test(first) && pos <= first.length) {
+      if (!C.cmds) { try { C.cmds = (await api('/api/commands?session=' + encodeURIComponent(C.sid))).commands; } catch (e) { C.cmds = []; } }
+      const q = first.toLowerCase();
+      showPop(cmdSuggest(C.cmds, first, C.hist), 'cmd'); return;       // fuzzy, grouped, recent first (dash_js_cmdcards.py)
+    }
+    const m = v.slice(0, pos).match(/@([^\s@]*)$/);
+    if (m) {
+      const q = m[1]; clearTimeout(C.ft);
+      C.ft = setTimeout(async () => { try { const d = await api('/api/files/search?q=' + encodeURIComponent(q)); showPop(d.files.slice(0, 12).map(f => ({ label: f.split('/').pop(), value: f, hint: f })), 'file'); } catch (e) { closePop(); } }, 120);
+      return;
+    }
+    closePop();
+  }
+  ta.addEventListener('input', () => { auto(); suggest(); });
+  ta.addEventListener('keydown', (e) => {
+    if (!pop.hidden && items.length) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; cmdPopSelect(pop, sel); return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && mode === 'file')) { e.preventDefault(); accept(sel); return; }
+      if (e.key === 'Enter' && !e.shiftKey && mode === 'cmd' && ta.value.trim() !== items[sel].value) { e.preventDefault(); accept(sel); return; }
+      if (e.key === 'Escape') { closePop(); return; }
+    }
+    if (e.key === 'ArrowUp' && !ta.value && C.hist.length) { e.preventDefault(); C.hpos = Math.min(C.hist.length - 1, C.hpos + 1); ta.value = C.hist[C.hist.length - 1 - C.hpos]; auto(); return; }
+    if (e.key === 'ArrowDown' && C.hpos >= 0) { e.preventDefault(); C.hpos--; ta.value = C.hpos >= 0 ? C.hist[C.hist.length - 1 - C.hpos] : ''; auto(); return; }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(true); }
+  });
+  async function go(steer) {
+    const text = ta.value.trim(); if (!text || C.locked) return;
+    C.hist.push(text); C.hist = C.hist.slice(-80); lsSet(histKey, JSON.stringify(C.hist)); C.hpos = -1;
+    if (text.startsWith('!') && text.length > 1) { ta.value = ''; auto(); closePop(); return shellFromChat(C, text.slice(1).trim()); }
+    ta.value = ''; auto(); closePop(); redrawChips();
+    send.disabled = true;
+    try {
+      const r = await api('/api/chat/send', { session: C.sid, text, steer, cards: true });
+      if (r.session && !C.sid) { C.sid = r.session; }
+      if (r.queued) { (C.qtext = C.qtext || {})[r.id] = text; C.lastQueued = r.id; }
+      if (r.command) { commandResultCard(C, text, r); if (r.state) { C.st = r.state; C.runtime = true; if (!C.es) connectEvents(C, r.state); drawHead(C); drawRail(C); } }
+      else {
+        if (!C.runtime) { C.runtime = true; await refreshState(C); if (!C.es) connectEvents(C, { busy: true, seq: 0 }); }
+        if (r.session && (!location.hash || location.hash === '#/chat' || location.hash === '#/chat/')) { history.replaceState(null, '', '#/chat/' + encodeURIComponent(r.session)); if (C.tab) C.tab.hash = '#/chat/' + encodeURIComponent(r.session); savePrefs(); }
+      }
+    } catch (e) {
+      ta.value = text; auto();
+      if (/another terminal|read-only/i.test(e.message)) { C.meta = Object.assign(C.meta || {}, { held_by: { pid: '?', owner: 'terminal', started: Date.now() / 1000 } }); lockNote(C); }
+      else if (e.status === 412) { checkReady(); C.feed.append(errorBox(e.message)); }
+      else if (e.status !== 401) C.feed.append(errorBox('Could not send this message: ' + e.message));
+      stick(C); toast(e.status === 412 ? 'Chat is not set up: open Providers' : e.message);
+    } finally { send.disabled = false; ta.focus(); }
+  }
+  send.addEventListener('click', () => go(true));
+  queueBtn.addEventListener('click', () => go(false));
+  sendNow.addEventListener('click', async () => { C.lastQueued = null; await go(false); await stopTurn(C, { keep: C.lastQueued }); });
+  const sync = setInterval(() => { const busy = !!(C.st && C.st.busy); queueBtn.hidden = !busy; sendNow.hidden = !busy; send.textContent = busy ? 'Add to this turn' : 'Send'; }, 400);
+  onLeave(() => clearInterval(sync));
+  setTimeout(() => { const pre = lsGet('axon-prefill'); if (pre) { lsSet('axon-prefill', ''); ta.value = pre; auto(); } ta.focus(); }, 50);
+  C.upload = upload;
+  return h('div', { class: 'composer-wrap' }, root, wbFooter(C));
+}
+function commandResultCard(C, line, r) {
+  if (r.open) { location.hash = r.open; return; }
+  if (cmdCardShow(C, line, r)) return;                // neat card (dash_js_cmdcards.py); falls through for pickers that need the terminal
+  const card = h('div', { class: 'cmd-card' }, h('div', { class: 'steprow' }, h('b', null, line), h('span', null, r.done ? (r.ms || 0) + ' ms' : 'still running...'), r.ok === false ? h('span', { class: 'bad' }, 'failed') : null));
+  if (r.message) card.append(notice(r.message, r.ok === false ? 'warn' : ''));
+  const out = h('div', { class: 'cmd-out', html: r.html || '' }); if (r.html) { card.append(out); termHint(card, r); }
+  C.feed.querySelector('.empty-chat')?.remove(); C.feed.append(card); decorate(card); stick(C);
+  if (!r.done) { const poll = setInterval(async () => { try { const j = await api('/api/command/job?id=' + r.id); if (j.done) { clearInterval(poll); out.innerHTML = j.html || ''; card.append(out); decorate(card); } } catch (e) { clearInterval(poll); } }, 1000); onLeave(() => clearInterval(poll)); }
+}
+async function shellFromChat(C, cmd) {
+  const card = h('div', { class: 'cmd-card' }, h('div', { class: 'steprow' }, h('b', { class: 'sh-cmd' }, '$ ' + cmd), h('span', { class: 'sh-state' }, 'running...')));
+  const out = h('pre', { class: 'cmd-out nolink', style: 'max-height:40vh' }); card.append(out);
+  C.feed.querySelector('.empty-chat')?.remove(); C.feed.append(card); stick(C);
+  let job; try { job = await api('/api/shell/run', { command: cmd }); } catch (e) { out.textContent = e.message; return; }
+  const plain = [];
+  const es = new EventSource('/api/shell/stream?id=' + job.id + '&since=0');
+  es.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === 'out') { const s = document.createElement('span'); s.innerHTML = ev.html; out.append(s); plain.push(s.textContent); stick(C); }
+    else if (ev.type === 'refused') { out.append(h('div', { class: 'refused' }, ev.message)); }
+    else if (ev.type === 'exit') { es.close(); card.querySelector('.sh-state').textContent = ev.refused ? 'not run' : 'exit ' + ev.code + ' · ' + dur(ev.duration || 0);
+      if (!ev.refused) { const text = 'I ran `' + cmd + '` (exit code ' + ev.code + '). Output:\n```\n' + plain.join('').slice(-20000) + '\n```'; api('/api/chat/send', { session: C.sid, text, steer: true }).then(r => { if (!C.runtime) refreshState(C); }).catch(() => { }); } }
+  };
+  es.onerror = () => es.close();
+}
+"""
