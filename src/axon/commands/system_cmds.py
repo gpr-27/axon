@@ -70,6 +70,14 @@ def _setting_sources(agent: Any) -> list[str]:
 @command("status", category=CAT, description="Version, model, mode, trace, session, cost, storage")
 def handle_status(agent: Any, arg: str) -> CommandResult:
     from axon.commands.model_cmds import current_trace_level
+    from axon.commands.common import width as _width
+    from axon.ui.theme import kv_lines, shorten_path
+
+    def kv(label: str, value: Any, label_w: int = 18, color: str = WHITE) -> None:
+        """Label column aligned; a long value (a path) wraps under itself instead of running off the row."""
+        for line in kv_lines(f"{SLATE}{label}{RST}", f"{color}{value}{RST}", _width() + 2, label_w=label_w, indent=4):
+            print(line)
+
     s = agent.settings
     header("Axon status", f"v{_version()}")
     kv("Model", f"{CYAN}{s.model}{RST} {SLATE}· effort {s.effort} · thinking {'on' if s.thinking else 'off'}{RST}")
@@ -126,7 +134,7 @@ def handle_status(agent: Any, arg: str) -> CommandResult:
         big = [(f.path, estimate_tokens(f.content)) for f in files if estimate_tokens(f.content) > 5000]
         kv("Memory files", f"{len(files)} loaded")
         for p, t in big:
-            print(f"    {GOLD}!{RST} {SLATE}{p} is ~{fmt_tokens(t)} tokens - consider trimming (sent every turn){RST}")
+            print(f"    {GOLD}!{RST} {SLATE}{shorten_path(str(p), max(20, _width() - 50))} is ~{fmt_tokens(t)} tokens - consider trimming (sent every turn){RST}")
     except Exception:
         pass
     try:

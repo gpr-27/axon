@@ -11,8 +11,9 @@ no terminal -> the plain text output. Kinds of commands:
   <seconds>" (which asks for the seconds). Choosing one runs the command's own handler with those words.
 * ``ACTION_MENU``: commands that are an action (/clear, /compact, /commit, ...). The menu says in one
   line what the command does and offers "Run it", the choices its arguments offer, and "Cancel".
-* ``REPORT_MENU``: commands that print a report (/status, /cost, ...). The report is printed, then a
-  "What next?" menu offers the related views and actions (``NEXT_STEPS``); Esc leaves.
+* ``REPORT_MENU``: commands that print a report (/status, /cost, ...). The report is printed, then one
+  dim "related: ..." footer line names the related views. The old "What next?" menu (``NEXT_STEPS``) is
+  still there behind ``AXON_NEXT_MENU=1`` / ``"nextMenu": true`` (``next_menu_enabled``).
 * ``NO_MENU``: commands where a menu would be absurd, each with the reason.
 
 Every choice runs the same handler as the typed command (``/cost calls`` and the menu's "Every API
@@ -37,7 +38,7 @@ OWN_MENU = {
     "provider": "provider picker", "release-notes": "version picker", "restore": "trash picker",
     "resume": "session picker", "rewind": "checkpoint menu", "sessions": "session switcher",
     "settings": "settings hub", "skills": "skill browser", "theme": "theme picker", "color": "colour picker",
-    "trace": "level picker", "transcript": "full-screen viewer", "copy": "code block picker",
+    "trace": "level picker", "usage": "tabbed usage screen", "transcript": "full-screen viewer", "copy": "code block picker",
     "new": "template picker", "tips": "tip list", "tools": "tool browser",
 }
 
@@ -46,11 +47,13 @@ VIEWERS = {"transcript"}
 
 USAGE_MENU = {
     "delete", "fast", "focus", "import", "init", "notify", "prompt", "statusbar", "statusline", "stop",
-    "suggestions", "terminal-setup", "thinking", "vim",
+    "suggestions", "terminal-setup", "thinking", "vim", "search",
 }
 
 # name -> what the command does, in one line (shown under the menu title)
 ACTION_MENU = {
+    "sandbox": "Turns the operating-system sandbox for shell commands on or off, or shows what it enforces.",
+    "trust": "Shows, grants or revokes trust for this folder's hooks, plugins and MCP servers.",
     "autofix": "Runs the project checks and fixes what fails, until they pass.",
     "branch": "Continues this conversation in a new branch session.",
     "btw": "Asks a quick side question that is not added to the conversation.",
@@ -82,6 +85,7 @@ ACTION_MENU = {
     "review": "Reviews the current changes for bugs.",
     "security-review": "Reviews the changes on this branch for security problems.",
     "serve": "Starts the local HTTP server.",
+    "open": "Opens the Axon app in the browser.",
     "setup": "Walks through provider, model and mode.",
     "simplify": "Simplifies the changed code and applies the fixes.",
     "skill-doctor": "Checks every skill file for problems.",
@@ -97,9 +101,9 @@ ACTION_MENU = {
 
 REPORT_MENU = {
     "activity", "add-dir", "autocompact", "budget", "changes", "context", "cost", "diff", "doctor", "env",
-    "faq", "git", "goal", "history", "insights", "keybindings", "library", "list-agents", "plan-resume",
-    "plans", "pricing", "project", "queue", "stats", "status", "storage", "subagents", "tasks", "todos",
-    "window",
+    "ctxdiff", "faq", "git", "goal", "history", "insights", "keybindings", "library", "list-agents", "plan-resume",
+    "pin", "plans", "pricing", "project", "receipts", "queue", "stats", "status", "storage", "subagents", "tasks", "todos",
+    "unpin", "whatif", "window", "files", "trail", "timeline", "ctxmap",
 }
 
 NO_MENU = {
@@ -146,11 +150,12 @@ OVERRIDES: dict[str, list[Choice]] = {
     "rename": [ch("Run it", hint="title generated from the conversation"), ch("Type a title…", ask="New title")],
     "retitle": [ch("This chat", hint="a title from the conversation"),
                 ch("All chats still named after their first words", "all", hint="one short model call each")],
-    "review": [ch("Run it"), ch("Low effort", "low"), ch("Medium effort", "medium"), ch("High effort", "high"),
+    "review": [ch("Run it"), ch("Review this session's edits hunk by hunk", "hunks"), ch("Low effort", "low"), ch("Medium effort", "medium"), ch("High effort", "high"),
                ch("Maximum effort", "max"), ch("Focus on something…", ask="What to focus on")],
     "security-review": [ch("Run it"), ch("Focus on something…", ask="What to focus on")],
     "simplify": [ch("Run it"), ch("Focus on something…", ask="What to focus on")],
     "serve": [ch("Run it", hint="default port"), ch("Choose a port…", ask="Port")],
+    "open": [ch("Open it", hint="in your browser"), ch("Print the link only", "--no-open"), ch("Stop it", "stop")],
     "tag": [ch("Tag this session…", ask="Tag"), ch("Remove the tag", "-")],
     "tell": [ch("Message a subagent…", ask="Subagent number, then the message")],
     "test": [ch("Run it"), ch("With extra arguments…", ask="Extra arguments")],
@@ -443,6 +448,12 @@ NEXT_STEPS: dict[str, list[Step]] = {
     "find": [step("Memory files", "/memory"), step("Map the project", "/map"), step("Index the project", "/index")],
     "copy": [step("Full transcript", "/transcript"), step("Export the conversation", "/export")],
     "release-notes": [step("Every version", "/release-notes all"), step("Status", "/status")],
+    "trail": [step("Detailed timeline of the turn", "/inspect"), step("Timeline chart", "/timeline"), step("Permissions", "/permissions")],
+    "timeline": [step("Detailed steps", "/inspect"), step("Decision trail of a tool call", "/trail"), step("Cost", "/cost")],
+    "ctxmap": [step("Context usage", "/context"), step("Compact the conversation", "/compact"), step("Pin a result", "/pin")],
+    "receipts": [step("Full transcript", "/transcript"), step("Changes made", "/changes"), step("Run the project checks", "/verify")],
+    "files": [step("Full transcript", "/transcript"), step("Where everything is kept", "/storage")],
+    "whatif": [step("Every priced model", "/whatif all"), step("Model prices", "/pricing"), step("Cost breakdown", "/cost")],
 }
 
 
@@ -486,8 +497,45 @@ def run_bare_in_terminal(agent: Any, command: Any) -> Any:
     before = menus_started()
     result = command.handler(agent, "")
     if command.name not in VIEWERS and menus_started() == before:
-        run_next_menu(agent, command)
+        if next_menu_enabled():
+            run_next_menu(agent, command)
+        else:
+            print_footer_hint(command)
     return result
+
+
+def next_menu_enabled() -> bool:
+    """The "What next?" menu after a report is off: one footer hint replaces it. Turn it back on with
+    ``AXON_NEXT_MENU=1`` or ``"nextMenu": true`` in ~/.axon/settings.json."""
+    import os
+    env = os.environ.get("AXON_NEXT_MENU", "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    try:
+        from axon.commands.common import read_settings_file, settings_file
+        data = read_settings_file(settings_file("user")) or {}
+        return bool(data.get("nextMenu", False))
+    except Exception:
+        return False
+
+
+def footer_hint(command: Any) -> str:
+    """One dim line naming the related views (no slashes: a hint is not a prompt to type)."""
+    names: list[str] = []
+    for st in next_steps(command):
+        word = st.line.split()[0].lstrip("/") if st.line.split() else ""
+        if word and word != command.name and word not in names:
+            names.append(word)
+    if "usage" not in names and command.name in {"cost", "stats", "status", "context", "budget", "window", "autocompact", "pricing"}:
+        names.insert(0, "usage")
+    return ("related: " + " · ".join(names[:5])) if names else ""
+
+
+def print_footer_hint(command: Any) -> None:
+    text = footer_hint(command)
+    if text:
+        from axon.ui.theme import DARK_SLATE, RST, term_width, truncate
+        print(truncate(f"  {DARK_SLATE}{text}{RST}", term_width() - 1) + "\n")
 
 
 def bare_menu_runner(command: Any) -> Any:

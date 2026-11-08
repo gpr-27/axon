@@ -301,6 +301,11 @@ def update_settings_file(updates: dict[str, Any], scope: str = "user", workspace
     data = read_settings_file(path)
     if data is None:
         return None
+    try:
+        from axon.hooks.manager import config_change
+        config_change(path)
+    except ValueError:      # a ConfigChange hook refused this write
+        return None
     for key, value in updates.items():
         parts = key.split(".")
         node = data

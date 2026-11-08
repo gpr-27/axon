@@ -52,3 +52,19 @@ def handle_marketplace(agent: Any, arg: str) -> CommandResult:
     outcome = run_command(split_words(arg), ws_of(agent), agent=agent)
     follow_in_session(agent, outcome)
     return CommandResult(handled=True, success=outcome.code == 0)
+
+
+@command("trust", category=CAT, description="Review and allow project hooks, plugins and MCP servers for this folder",
+         usage="/trust · /trust yes · /trust revoke [path] · /trust list")
+def handle_trust(agent: Any, arg: str) -> CommandResult:
+    """Folder trust (axon.hooks.trust): project hooks, plugins and MCP servers run only in a trusted folder."""
+    from axon.hooks import trust
+    ws = ws_of(agent)
+    if trust.run_command(arg, ws, ask=input):
+        hooks = getattr(agent, "hooks", None)
+        if hooks is not None:
+            try:
+                hooks.reload()
+            except Exception:  # noqa: BLE001 - the trust decision itself is saved
+                pass
+    return CommandResult(handled=True, success=True)

@@ -24,9 +24,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from axon.storage import axon_home as _axon_home
 from axon.commands import plugins as pl
 
 MAX_MARKETPLACE_BYTES = 5_000_000
+COMMIT_SIDECAR = "commit.txt"          # next to the fetched plugin (not inside it): the commit it came from
 RESERVED_MARKETPLACE_ERROR = "The name '{name}' is reserved for official Anthropic marketplaces"
 
 
@@ -89,26 +92,55 @@ def parse_source(text: str) -> dict[str, Any]:
         f"Could not interpret '{text}'. Use owner/repo, a git URL, an https://…/marketplace.json URL, or a path starting with ./ or /")
 
 
+def _run_git(git: str, args: list[str], cwd: Path | None = None, timeout: int = 180) -> subprocess.CompletedProcess:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+    return subprocess.run([git, *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+
+
+def head_sha(repo: Path) -> str:
+    """Full commit id of HEAD in ``repo`` ('' when it cannot be read)."""
+    git = shutil.which("git")
+    if not git:
+        return ""
+    proc = _run_git(git, ["-C", str(repo), "rev-parse", "HEAD"], timeout=30)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def git_clone(url: str, dest: Path, ref: str = "", sha: str = "") -> None:
+    """Clone ``url`` into ``dest``. With ``sha`` the result is that exact commit (verified against HEAD): a
+    shallow ``git fetch <sha>`` first, a full clone when the server refuses to serve a bare commit."""
     git = shutil.which("git")
     if not git:
         raise MarketplaceError("git is required for this marketplace or plugin source")
-    cmd = [git, "clone", "--depth", "1"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += ["--", url, str(dest)]
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
-                          stdin=subprocess.DEVNULL, env=env)
-    if proc.returncode != 0:
+    sha = sha.strip().lower()
+    if sha and not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        raise MarketplaceError(f"not a commit sha: {sha!r}")
+
+    def fail(message: str) -> None:
         shutil.rmtree(dest, ignore_errors=True)
-        raise MarketplaceError(f"git clone failed: {(proc.stderr or proc.stdout).strip()[:300]}")
+        raise MarketplaceError(message)
+
+    if sha and len(sha) == 40:
+        dest.mkdir(parents=True, exist_ok=True)
+        ok = all(_run_git(git, a, cwd=dest, timeout=180).returncode == 0 for a in (
+            ["init", "-q"], ["remote", "add", "origin", url], ["fetch", "-q", "--depth", "1", "origin", sha],
+            ["checkout", "-q", "FETCH_HEAD"]))
+        if ok and head_sha(dest) == sha:
+            return
+        shutil.rmtree(dest, ignore_errors=True)          # the server would not serve the bare commit
+    cmd = ["clone"] + ([] if sha else ["--depth", "1"])
+    if ref and not sha:
+        cmd += ["--branch", ref]
+    proc = _run_git(git, cmd + ["--", url, str(dest)])
+    if proc.returncode != 0:
+        fail(f"git clone failed: {(proc.stderr or proc.stdout).strip()[:300]}")
     if sha:
-        co = subprocess.run([git, "-C", str(dest), "checkout", "--quiet", sha], capture_output=True, text=True,
-                            timeout=60, stdin=subprocess.DEVNULL)
+        co = _run_git(git, ["-C", str(dest), "checkout", "--quiet", sha], timeout=60)
         if co.returncode != 0:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise MarketplaceError(f"could not check out {sha}: {co.stderr.strip()[:200]}")
+            fail(f"could not check out {sha}: {co.stderr.strip()[:200]}")
+        if not head_sha(dest).startswith(sha):
+            fail(f"checked out {head_sha(dest)[:12]} instead of {sha[:12]}")
 
 
 def _github_url(repo: str) -> str:
@@ -132,10 +164,34 @@ def marketplace_root_of(path: Path) -> Path:
     return path
 
 
+def find_skill_dirs(root: Path, limit: int = 200) -> list[Path]:
+    """Skill folders (holding a SKILL.md) of a source: the root itself, ``root/skills/*`` or ``root/*``."""
+    root = Path(root)
+    if root.is_file():
+        return []
+    if (root / "SKILL.md").is_file():
+        return [root]
+    found: list[Path] = []
+    for base in (root / "skills", root):
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.name.startswith(".") or d.name in ("node_modules", "__pycache__") or d.is_symlink() or not d.is_dir():
+                continue
+            if (d / "SKILL.md").is_file():
+                found.append(d)
+        if found:
+            break
+    return found[:limit]
+
+
 def read_marketplace(root: Path) -> dict[str, Any]:
     f = marketplace_file(root)
+    if f is None and find_skill_dirs(root):       # a skills-only source: no marketplace.json, just skill folders
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(root).name).strip("-") or "skills"
+        return {"name": slug, "owner": {"name": "local"}, "plugins": [], "skillsOnly": True}
     if f is None:
-        raise MarketplaceError(f"No .claude-plugin/marketplace.json in {root}")
+        raise MarketplaceError(f"No .claude-plugin/marketplace.json (and no skill folders with a SKILL.md) in {root}")
     try:
         if f.stat().st_size > MAX_MARKETPLACE_BYTES:
             raise MarketplaceError("marketplace.json is too large")
@@ -246,6 +302,11 @@ def add_marketplace(source: str) -> tuple[str, dict[str, Any]]:
             root = tmp_clone / "repo"
             data = read_marketplace(root)
         name = data.get("name")
+        if data.get("skillsOnly"):
+            base = (spec.get("repo", "").split("/")[-1] if spec["kind"] == "github"
+                    else re.sub(r"\.git$", "", (spec.get("url") or spec.get("path") or "").rstrip("/").split("/")[-1]))
+            base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-") or "skills"
+            name = base if base.endswith("skills") else base + "-skills"
         if not _valid_marketplace_name(name):
             raise MarketplaceError("marketplace.json has no valid 'name'")
         if name in pl.OFFICIAL_MARKETPLACES:
@@ -255,6 +316,8 @@ def add_marketplace(source: str) -> tuple[str, dict[str, Any]]:
             raise MarketplaceError("Invalid marketplace: " + "; ".join(errors[:3]))
         state = load_state()
         entry: dict[str, Any] = {**spec, "added": int(time.time())}
+        if data.get("skillsOnly"):
+            entry["skillsOnly"] = True
         dest = clone_root() / name
         if spec["kind"] in ("github", "git"):
             shutil.rmtree(dest, ignore_errors=True)
@@ -401,6 +464,7 @@ def materialize(marketplace: str, entry: dict[str, Any], workdir: Path) -> Path:
     if kind == "github":
         out = workdir / "plugin"
         git_clone(_github_url(str(src.get("repo"))), out, ref, sha)
+        (workdir / COMMIT_SIDECAR).write_text(head_sha(out), encoding="utf-8")
         shutil.rmtree(out / ".git", ignore_errors=True)
         return out
     if kind in ("url", "git-subdir"):
@@ -409,6 +473,7 @@ def materialize(marketplace: str, entry: dict[str, Any], workdir: Path) -> Path:
             url = _github_url(url)
         clone = workdir / "clone"
         git_clone(url, clone, ref, sha)
+        (workdir / COMMIT_SIDECAR).write_text(head_sha(clone), encoding="utf-8")
         if kind == "git-subdir":
             sub = str(src.get("path") or "")
             if ".." in Path(sub).parts:
@@ -428,6 +493,55 @@ def materialize(marketplace: str, entry: dict[str, Any], workdir: Path) -> Path:
     raise MarketplaceError(f"Plugin source type '{kind}' is not supported by Axon (use a path, github, git-subdir or url source)")
 
 
+# ─── integrity: what a plugin runs, what is installed, what an update changes ───
+
+_RECORD_ONLY = frozenset({pl.INSTALL_RECORD})
+
+
+def content_hash(plugin_dir: Path) -> str:
+    """Hash of every file of an installed plugin (the install record itself excluded)."""
+    from axon.skills import bundle
+    return bundle.hash_dir(plugin_dir, _RECORD_ONLY)
+
+
+def plugin_runs(plugin_dir: Path, workspace: Path, name: str = "") -> list[str]:
+    """Every hook command and MCP server a plugin folder would start, in full ("what enabling it runs")."""
+    from axon.hooks import trust
+    mp = pl._manifest_path(plugin_dir)
+    manifest = (pl._read_json_dict(mp) if mp else {}) or {}
+    plug = pl.Plugin(name=name or str(manifest.get("name") or plugin_dir.name), path=plugin_dir, scope="user",
+                     manifest=manifest)
+    try:
+        items = trust.hook_items(pl.plugin_hooks(plug, workspace), "hooks", "hook")
+        items += trust._mcp_items(pl.plugin_mcp_servers(plug, workspace), "mcp", "mcp")
+    except Exception:  # noqa: BLE001 - a broken manifest runs nothing
+        return []
+    return [i.line() for i in items]
+
+
+def interactive_review(lines: list[str], question: str = "Enable it?") -> bool:
+    """Show ``lines`` and ask, but only in a terminal; anywhere else the caller keeps its own behaviour."""
+    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
+        return True
+    print("\n".join(lines))
+    try:
+        return input(f"  {question} [y/N]: ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def install_review_lines(name: str, runs: list[str], commit: str) -> list[str]:
+    head = f"  Plugin {name}" + (f" at commit {commit[:10]}" if commit else "") + " would run:"
+    return [head] + ([f"    {r}" for r in runs] if runs else ["    (no hooks and no MCP servers; commands, agents and skills only)"])
+
+
+def read_commit(workdir: Path) -> str:
+    try:
+        return (workdir / COMMIT_SIDECAR).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def install_root(workspace: Path, scope: str) -> Path:
     return (pl._axon_home() / "plugins") if scope == "user" else (Path(workspace) / ".axon" / "plugins")
 
@@ -437,8 +551,11 @@ def split_id(spec: str) -> tuple[str, str | None]:
     return name, (market or None)
 
 
-def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0) -> tuple[pl.Plugin, list[str]]:
-    """Install ``name[@marketplace]``; returns (plugin, ids of dependencies installed too)."""
+def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0,
+            review: Any = interactive_review) -> tuple[pl.Plugin, list[str]]:
+    """Install ``name[@marketplace]``; returns (plugin, ids of dependencies installed too).
+    ``review(lines) -> bool`` sees what the plugin would run (hooks, MCP commands) before it is copied in and
+    enabled; the default asks in a terminal and says yes elsewhere. False aborts with nothing installed."""
     if scope not in ("user", "project", "local"):
         raise MarketplaceError("scope must be user, project or local")
     name, market = split_id(spec)
@@ -448,6 +565,8 @@ def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0) ->
     if dest.exists():
         raise MarketplaceError(f"Plugin '{name}' is already installed at {dest}")
     root.mkdir(parents=True, exist_ok=True)
+    from axon.hooks import trust
+    was_ok = scope != "user" and trust.status(workspace) in ("none", "trusted")
     work = Path(tempfile.mkdtemp(prefix="axon-plugin-"))
     try:
         src_root = materialize(market_name, entry, work)
@@ -455,6 +574,10 @@ def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0) ->
         hard = [e for e in errors if "path escapes" in e or "traversal" in e]
         if hard:
             raise MarketplaceError("Plugin rejected: " + hard[0])
+        commit = read_commit(work)
+        runs = plugin_runs(src_root, workspace, name)
+        if review is not None and not review(install_review_lines(f"{name}@{market_name}", runs, commit)):
+            raise MarketplaceError("installation cancelled; nothing was installed")
         _copy_plugin(src_root, dest)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -464,11 +587,13 @@ def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0) ->
     record = {
         "name": name, "marketplace": market_name, "scope": scope, "version": str(manifest.get("version") or entry.get("version") or ""),
         "source": entry.get("source"), "entry": {k: v for k, v in entry.items() if k != "source"},
-        "installed_at": int(time.time()),
+        "installed_at": int(time.time()), "commit": commit, "content_hash": content_hash(dest),
     }
     (dest / pl.INSTALL_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     plugin_id = f"{name}@{market_name}"
     pl.set_enabled_in_settings(workspace, plugin_id, True, scope)
+    if was_ok:                 # the user just reviewed this install: it does not make the folder untrusted
+        trust.trust(workspace)
     installed_deps: list[str] = []
     merged = pl.merge_marketplace_entry(manifest, record["entry"], mp is not None)
     if _depth < 5:
@@ -477,7 +602,7 @@ def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0) ->
             if any(p.name == dname for p in pl.load_plugins(workspace)):
                 continue
             try:
-                p2, more = install(f"{dname}@{dmarket}", workspace, scope, _depth + 1)
+                p2, more = install(f"{dname}@{dmarket}", workspace, scope, _depth + 1, review)
                 installed_deps += [p2.id] + more
             except MarketplaceError as e:
                 raise MarketplaceError(f"Installed {plugin_id}, but dependency {dname}@{dmarket} failed: {e}") from e
@@ -522,10 +647,24 @@ def uninstall(plugin: pl.Plugin, workspace: Path) -> None:
     shutil.rmtree(pl.plugin_data_dir(plugin), ignore_errors=True)
 
 
-def update_plugin(plugin: pl.Plugin, workspace: Path) -> bool:
-    """Re-fetch an installed marketplace plugin; True when the version / content was replaced."""
+@dataclass
+class UpdateReview:
+    """What an update would change, shown before anything is replaced."""
+    plugin: str
+    lines: list[str]
+    runs_changed: bool = False        # a hook or MCP command was added or edited
+    local_edits: bool = False         # the installed files differ from what was recorded at install
+    old_commit: str = ""
+    new_commit: str = ""
+
+
+def update_plugin(plugin: pl.Plugin, workspace: Path, review: Any = None) -> bool:
+    """Re-fetch an installed marketplace plugin; True when the version / content was replaced.
+    ``review(UpdateReview) -> bool`` is called with the file changes and the changed hook / MCP commands
+    before anything is replaced; False leaves the plugin untouched (returns False)."""
     if not plugin.marketplace:
         raise MarketplaceError(f"'{plugin.name}' was not installed from a marketplace")
+    from axon.skills import bundle as bundle_mod
     market = plugin.marketplace
     _, entry = find_plugin_entry(plugin.name, market)
     work = Path(tempfile.mkdtemp(prefix="axon-plugin-"))
@@ -534,18 +673,37 @@ def update_plugin(plugin: pl.Plugin, workspace: Path) -> bool:
         mp = pl._manifest_path(src_root)
         new_manifest = (pl._read_json_dict(mp) if mp else {}) or {}
         new_version = str(new_manifest.get("version") or entry.get("version") or "")
-        if new_version and new_version == plugin.version:
+        new_commit = read_commit(work)
+        old_files = bundle_mod.read_dir(plugin.path, _RECORD_ONLY)
+        new_files = bundle_mod.read_dir(src_root, _RECORD_ONLY)
+        same_content = bundle_mod.hash_files(old_files) == bundle_mod.hash_files(new_files)
+        if same_content or (new_version and new_version == plugin.version and not new_commit):
+            return False
+        recorded = str(plugin.record.get("content_hash") or "")
+        local_edits = bool(recorded) and bundle_mod.hash_files(old_files) != recorded
+        old_runs, new_runs = plugin_runs(plugin.path, workspace, plugin.name), plugin_runs(src_root, workspace, plugin.name)
+        runs_changed = sorted(old_runs) != sorted(new_runs)
+        info = UpdateReview(plugin.name, [], runs_changed, local_edits, str(plugin.record.get("commit") or ""), new_commit)
+        info.lines = ([f"  {plugin.id}: {plugin.version or '?'}@{info.old_commit[:10] or '?'} -> "
+                       f"{new_version or '?'}@{new_commit[:10] or '?'}"]
+                      + (["  WARNING: installed files were edited after install; updating overwrites them."] if local_edits else [])
+                      + bundle_mod.diff_summary(old_files, new_files)
+                      + ([f"    now runs: {r}" for r in new_runs if r not in old_runs]
+                         + [f"    no longer runs: {r}" for r in old_runs if r not in new_runs] if runs_changed else []))
+        if review is not None and not review(info):
             return False
         record = dict(plugin.record)
         record["version"] = new_version
         record["entry"] = {k: v for k, v in entry.items() if k != "source"}
         record["source"] = entry.get("source")
         record["updated_at"] = int(time.time())
+        record["commit"] = new_commit
         backup = plugin.path.with_name(plugin.path.name + ".old")
         shutil.rmtree(backup, ignore_errors=True)
         plugin.path.rename(backup)
         try:
             _copy_plugin(src_root, plugin.path)
+            record["content_hash"] = content_hash(plugin.path)
             (plugin.path / pl.INSTALL_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         except Exception:
             shutil.rmtree(plugin.path, ignore_errors=True)

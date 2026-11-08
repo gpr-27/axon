@@ -123,7 +123,11 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
     if callable(gate) and chosen != prev_model:
         gate("post", prev_model, chosen, requested=chosen)
     via = f" {SLATE}via {preset.name} ({base_url}){RST}" if preset is not None else f" {SLATE}({base_url}){RST}"
-    print(f"\n  {TEAL}✓ Model:{RST} {BOLD}{WHITE}{chosen}{RST}{via}\n")
+    print(f"\n  {TEAL}✓ Model:{RST} {BOLD}{WHITE}{chosen}{RST}{via}")
+    if preset is not None:
+        from axon.ui.provider_picker import print_endpoint_notice
+        print_endpoint_notice(preset)
+    print()
     return True
 
 

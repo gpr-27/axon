@@ -190,9 +190,11 @@ def handle_statusline(agent: Any, arg: str) -> CommandResult:
 # ─── /theme ────────────────────────────────────────────────────────────────
 
 THEMES: list[tuple[str, str]] = [
-    ("auto", "follow the terminal background"),
-    ("dark", "for dark terminals"),
-    ("light", "for light terminals"),
+    ("auto", "Axon theme, following the terminal background"),
+    ("axon", "Axon theme for dark terminals"),
+    ("axon-light", "Axon theme for light terminals"),
+    ("dark", "classic palette for dark terminals"),
+    ("light", "classic palette for light terminals"),
     ("high-contrast", "maximum contrast, colour-blind friendly"),
     ("mono", "no colours"),
 ]
@@ -211,8 +213,8 @@ def apply_theme(name: str) -> bool:
         return False
 
 
-@command("theme", category=CAT_SYS, description="Colour theme: auto | dark | light | high-contrast | mono",
-         usage="/theme [auto|dark|light|high-contrast|mono]")
+@command("theme", category=CAT_SYS, description="Colour theme: auto | axon | axon-light | dark | light | high-contrast | mono",
+         usage="/theme [auto|axon|axon-light|dark|light|high-contrast|mono]")
 def handle_theme(agent: Any, arg: str) -> CommandResult:
     names = [n for n, _ in THEMES]
     current = str(getattr(agent.settings, "theme", "auto") or "auto")
@@ -303,17 +305,20 @@ def handle_suggestions(agent: Any, arg: str) -> CommandResult:
 
 # ─── /color ────────────────────────────────────────────────────────────────
 
-PROMPT_COLORS: dict[str, str] = {
-    "default": "", "red": "\033[38;5;203m", "orange": "\033[38;5;215m", "yellow": "\033[38;5;221m",
-    "green": "\033[38;5;114m", "cyan": "\033[38;5;80m", "blue": "\033[38;5;75m", "purple": "\033[38;5;141m",
-    "pink": "\033[38;5;211m", "gray": "\033[38;5;245m",
-}
+def prompt_colors() -> dict[str, str]:
+    """name -> SGR code for the active theme (the light theme gets darker ones: 221 and 215 are faint on white)."""
+    from axon.ui.theme import prompt_color_sgr
+    return {"default": "", **{n: prompt_color_sgr(n) for n in PROMPT_COLOR_NAMES}}
+
+
+PROMPT_COLOR_NAMES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "gray")
 
 
 @command("color", category=CAT_SYS, description="Colour of the prompt bar for this session",
          aliases=("colour",), usage="/color [default|red|orange|yellow|green|cyan|blue|purple|pink|gray]")
 def handle_color(agent: Any, arg: str) -> CommandResult:
     name = arg.strip().lower().replace("grey", "gray")
+    PROMPT_COLORS = prompt_colors()
     current = getattr(agent, "prompt_color", "default") or "default"
     if not name:
         name = _choose("Prompt colour", [(n, "") for n in PROMPT_COLORS], current) or ""

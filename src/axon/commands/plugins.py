@@ -141,6 +141,8 @@ def _update_settings_json(path: Path, mutate: Any) -> None:
     mutate(data)
     if not data and not path.exists():
         return      # nothing to record: do not create an empty settings file
+    from axon.hooks.manager import config_change
+    config_change(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 

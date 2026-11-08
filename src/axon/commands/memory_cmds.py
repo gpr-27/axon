@@ -15,36 +15,39 @@ from axon.commands.common import (
     typed_only,
 )
 from axon.commands.registry import CommandResult, command
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, RST, SLATE, TEAL, WHITE
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE
 
 CAT = "Memory & Project"
 
 
-def _store(agent: Any) -> Any:
-    from axon.agent.memory import MemoryStore
-    return MemoryStore(ws_of(agent))
+
+# ─── memory helpers ─────────────────────────────────────────────────────────
+
+SCOPE_TITLE = {"global": "Global memory", "project": "Project memory (private)", "repo": "Repo memory (shared)"}
+SCOPE_COLOR = {"global": GOLD, "project": TEAL, "repo": CYAN}
 
 
-def _item_path(store: Any, item: Any) -> Path:
-    base = store.global_memory_dir if item.scope == "global" else store.project_memory_dir
-    return Path(base) / f"{item.id}.md"
+def _mf() -> Any:
+    from axon.features import memory_files
+    return memory_files
 
 
-def _find_item(items: list[Any], key: str) -> Any:
-    key = key.strip()
-    if key.isdigit():
-        i = int(key) - 1
-        return items[i] if 0 <= i < len(items) else None
-    k = key.lower().removesuffix(".md")
-    for it in items:
-        if it.id.lower() == k or it.title.lower() == k:
-            return it
-    matches = [it for it in items if it.id.lower().startswith(k)]
-    return matches[0] if len(matches) == 1 else None
+def _short(p: Any) -> str:
+    s = str(p)
+    home = str(Path.home())
+    return "~" + s[len(home):] if s.startswith(home + os.sep) else s
+
+
+def _age(updated: str) -> str:
+    from datetime import date
+    d = _mf()._parse_date(updated)
+    if d is None:
+        return ""
+    n = (date.today() - d).days
+    return "today" if n <= 0 else f"{n}d ago" if n < 60 else f"{n // 30}mo ago"
 
 
 def _instruction_files(ws: Path) -> list[tuple[str, Path]]:
-    Path.home()
     out = [("user", _axon_home() / "AXON.md"), ("project", ws / "AXON.md"), ("local", ws / "AXON.local.md")]
     for name in ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".axon/AXON.md"):
         p = ws / name
@@ -56,9 +59,30 @@ def _instruction_files(ws: Path) -> list[tuple[str, Path]]:
     return out
 
 
+def _store(agent: Any) -> Any:
+    from axon.agent.memory import MemoryStore
+    return MemoryStore(ws_of(agent))
+
+
+def _scope_flag(rest: str, default: str = "repo") -> tuple[str, str]:
+    """Strip a leading ``--global/--user/--project/--private/--repo`` flag (flags only: "global state" is text)."""
+    flags = {"--global": "global", "--user": "global", "--project": "project", "--private": "project",
+             "--repo": "repo", "--shared": "repo"}
+    head, _, tail = rest.partition(" ")
+    if head in flags:
+        return flags[head], tail.strip()
+    return default, rest
+
+
+def _say_redaction(labels: list[str]) -> None:
+    if labels:
+        info(f"Redacted {', '.join(labels)} before saving: secrets are never stored in memory.")
+
+
 def add_memory(agent: Any, text: str, scope: str, distill: bool) -> None:
     store = _store(agent)
     item = None
+    # scope: "global" | "project" (the repo's .axon/memory, the long-standing default) | "auto" (private per-project)
     if distill and getattr(agent, "provider", None) is not None:
         try:
             from axon.agent.memory import distill_and_learn
@@ -72,9 +96,21 @@ def add_memory(agent: Any, text: str, scope: str, distill: bool) -> None:
             item = None
     if item is None:
         item = store.add(text, scope=scope) if hasattr(store, "add") else store.learn(text, scope=scope)
-    where = "~/.axon/memory" if item.scope == "global" else ".axon/memory"
-    badge = f"{GOLD}[user]{RST}" if item.scope == "global" else f"{TEAL}[project]{RST}"
+    mf = _mf()
+    msc = {"global": "global", "auto": "project"}.get(item.scope, "repo")
+    where = _short(mf.scope_dir(ws_of(agent), msc))
+    badge = {"global": f"{GOLD}[user]{RST}", "auto": f"{CYAN}[private]{RST}"}.get(item.scope, f"{TEAL}[project]{RST}")
     ok(f"Remembered {badge} {BOLD}{item.title}{RST} {SLATE}→ {where}/{item.id}.md{RST}")
+    _say_redaction(list(getattr(item, "redaction", []) or []))
+    _reload(agent)
+
+
+def _reload(agent: Any) -> None:
+    if hasattr(agent, "reload_memory"):
+        try:
+            agent.reload_memory()
+        except Exception:
+            pass
 
 
 def quick_memory(agent: Any, text: str) -> Any:
@@ -93,118 +129,21 @@ def quick_memory(agent: Any, text: str) -> Any:
     return CommandResult(handled=True)
 
 
-MEMORY_USAGE = """/memory                       list instruction files and saved memories
-/memory add [--global] <text>  save a memory (LLM-distilled)
-/memory edit <user|project|local|n|id> [new text]
-/memory view <n|id>            /memory remove <n|id>
-/memory search <text>          /memory clear
+MEMORY_USAGE = """/memory [--scope global|project|repo] [--type user|feedback|project|reference]   browse
+/memory add [--global|--project|--repo] <text>   save (LLM-distilled; default --repo = .axon/memory)
+/memory view|edit|remove <n|id|scope:id>   edit <user|project|local> opens the AXON.md file
+/memory move <n|id> <global|project|repo>   /memory search <text>   /memory clear [scope]
+/memory restore [n|name]       list or bring back deleted/overwritten versions
+/memory reindex [scope]        rebuild MEMORY.md from the files   /memory doctor   health + stale
+/memory why                    what was loaded into this session, with tokens
+/memory export <scope> [file]  /memory import <file> [--scope S] [--yes]
 #<text>                        quick note (no LLM)"""
 
 
-@command("memory", category=CAT, description="Instruction files (AXON.md …) and saved memories",
-         aliases=("mem",), usage=MEMORY_USAGE)
-def handle_memory(agent: Any, arg: str) -> CommandResult:
+def _listing(agent: Any, items: list[Any]) -> None:
     ws = ws_of(agent)
-    store = _store(agent)
-    items = store.list_all()
-    a = arg.strip()
-    sub, _, rest = a.partition(" ")
-    sub = sub.lower()
-    rest = rest.strip()
-
-    if sub in ("add", "learn", "+"):
-        scope = "project"
-        for pfx in ("--global ", "--user "):   # flags only: "/memory add global state is bad" is a memory about global state
-            if rest.startswith(pfx) or rest == pfx.strip():
-                scope, rest = "global", rest[len(pfx):].strip()
-        if not rest:
-            usage("/memory add [--global] <text>")
-            return CommandResult(handled=True)
-        add_memory(agent, rest, scope, distill=True)
-        return CommandResult(handled=True)
-
-    if sub in ("remove", "delete", "rm", "del", "forget"):
-        it = _find_item(items, rest) if rest else None
-        if it is None:
-            err(f"No memory matching '{rest}'. /memory lists them with numbers.")
-            return CommandResult(handled=True)
-        if store.delete(it.id):
-            ok(f"Deleted memory {BOLD}{it.title}{RST} {SLATE}({it.id}){RST}")
-        else:
-            err(f"Could not delete {it.id}")
-        return CommandResult(handled=True)
-
-    if sub in ("view", "show", "read", "cat"):
-        it = _find_item(items, rest) if rest else None
-        if it is None:
-            err(f"No memory matching '{rest}'.")
-            return CommandResult(handled=True)
-        header(it.title, f"{it.scope} · {it.category} · {_item_path(store, it)}")
-        for ln in it.content.splitlines():
-            print(f"    {WHITE}{ln}{RST}")
-        print()
-        return CommandResult(handled=True)
-
-    if sub in ("edit", "open"):
-        target, _, new_text = rest.partition(" ")
-        files: dict[str, Path] = {}
-        for label, fp in _instruction_files(ws):  # first file per label: "project" is AXON.md, not CLAUDE.md
-            if label in ("user", "project", "local"):
-                files.setdefault(label, fp)
-        if target in files or not target:
-            p = files.get(target or "project")
-            if p is None:
-                return CommandResult(handled=True)
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(f"# {'User' if target == 'user' else ws.name} instructions\n\n", encoding="utf-8")
-                if target == "local":
-                    _gitignore_add(ws, "AXON.local.md")
-            if is_tty():
-                open_in_editor(p)
-            else:
-                info(f"Edit {p} in your editor.")
-            return CommandResult(handled=True)
-        it = _find_item(items, target)
-        if it is None:
-            err(f"No memory or file '{target}'. Use user, project, local, a number or an id.")
-            return CommandResult(handled=True)
-        path = _item_path(store, it)
-        if new_text.strip():
-            _replace_body(path, new_text.strip())
-            ok(f"Updated memory {BOLD}{it.title}{RST}")
-        elif is_tty():
-            open_in_editor(path)
-        else:
-            usage("/memory edit <n|id> <new text>")
-        return CommandResult(handled=True)
-
-    if sub in ("search", "find", "grep"):
-        hits = store.search(rest) if rest else []
-        header("Memory search", f"'{rest}' · {len(hits)} hit(s)")
-        for it in hits:
-            print(f"    {CYAN}{it.id}{RST} {WHITE}{it.title}{RST} {SLATE}({it.scope}){RST}")
-        print()
-        return CommandResult(handled=True)
-
-    if sub == "clear":
-        n = sum(1 for it in items if it.scope == "project")
-        if n and confirm(f"Delete all {n} project memories?", default=not is_tty()):
-            store.clear()
-            ok(f"Cleared {n} project memories")
-        else:
-            info("Nothing cleared.")
-        return CommandResult(handled=True)
-
-    if sub:
-        usage(MEMORY_USAGE)
-        return CommandResult(handled=True)
-
-    if is_tty():
-        memory_picker(agent, items)   # Esc just closes it: the list is the picker
-        return CommandResult(handled=True)
-
-    header("Memory", "loaded into every prompt")
+    mf = _mf()
+    header("Memory", "loaded into every prompt (indexes) · files on disk")
     section("Instruction files")
     for label, p in _instruction_files(ws):
         if p.exists():
@@ -215,19 +154,432 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
             print(f"    {MINT}●{RST} {SLATE}{label:<8}{RST} {WHITE}{p}{RST} {DARK_SLATE}~{fmt_tokens(size)} tok{RST}")
         else:
             print(f"    {DARK_SLATE}○ {label:<8} {p}  (not created{typed_only(' · /memory edit ' + label)}){RST}")
-    for title, scope, color in (("Project memories (.axon/memory)", "project", TEAL), ("User memories (~/.axon/memory)", "global", GOLD)):
-        rows = [(i, it) for i, it in enumerate(items, 1) if it.scope == scope]
-        if rows:
-            section(f"{title} · {len(rows)}", color)
-            for i, it in rows:
-                body = " ".join(it.content.split())
-                print(f"    {CYAN}{i:>2}{RST} {WHITE}{it.title}{RST} {SLATE}{body[:60]}{'…' if len(body) > 60 else ''}{RST}")
+    for scope in mf.SCOPES:
+        d = mf.scope_dir(ws, scope) if scope != "project" else (mf._project_dir_nocreate(ws) or Path("."))
+        rows = [(i, m) for i, m in enumerate(items, 1) if m.scope == scope]
+        idx = d / mf.INDEX
+        state = f"index {len(mf.index_pointers(idx))} pointer(s)" if idx.is_file() else "no index yet"
+        section(f"{SCOPE_TITLE[scope]} · {len(rows)}  {DARK_SLATE}{_short(d)}/  ({state}){RST}", SCOPE_COLOR[scope])
+        for i, m in rows:
+            desc = "" if m.description.lower().startswith(m.name.lower()[:30]) else mf.one_line(m.description, 60)
+            print(f"    {CYAN}{i:>2}{RST} {DARK_SLATE}{m.type:<9}{RST} {WHITE}{m.name}{RST} {SLATE}{desc}{RST}"
+                  f" {DARK_SLATE}{_age(m.updated)}{RST}")
+            print(f"       {DARK_SLATE}{_short(m.path)}{RST}")
     if not items:
         print(f"\n    {SLATE}No saved memories. Type {WHITE}#<note>{SLATE} to remember something.{RST}")
+    trash = mf.list_trash(ws)
+    if trash:
+        print(f"\n    {DARK_SLATE}{len(trash)} older/deleted version(s) kept{typed_only(' · /memory restore')}{RST}")
     print()
-    typed_hint("    /memory add · edit · view · remove · search · clear   (/help memory)")
+    typed_hint("    /memory add · view · edit · remove · move · search · restore · reindex · doctor · why · export · import")
     print()
-    return CommandResult(handled=True)
+
+
+def _resolve(ws: Path, key: str, items: list[Any]) -> Any:
+    m = _mf().find_memory(ws, key, items) if key else None
+    if m is None:
+        err(f"No memory matching '{key}'. /memory lists them with numbers." if key else "Name a memory: /memory <cmd> <n|id|scope:id>.")
+    return m
+
+
+def _view(m: Any) -> None:
+    header(m.name, f"{m.scope} · {m.type} · updated {m.updated} · {m.path}")
+    if m.description:
+        print(f"    {SLATE}{m.description}{RST}\n")
+    for ln in m.body.splitlines():
+        print(f"    {WHITE}{ln}{RST}")
+    print()
+
+
+def _after_editor(agent: Any, m: Any) -> None:
+    """Back from $EDITOR: keep the index pointer current and redact a secret that was typed in."""
+    ws = ws_of(agent)
+    mf = _mf()
+    cur = mf.parse_memory(m.path, m.scope)
+    if cur is None:
+        return
+    if mf.scan_secrets(m.path.read_text(encoding="utf-8", errors="replace")):
+        res = mf.replace_body(ws, cur, mf.redact(cur.body))
+        warn_labels = res.redacted or mf.scan_secrets(cur.body)
+        info(f"Redacted {', '.join(warn_labels) or 'a secret'} from {_short(m.path)}; the version you saved is kept: /memory restore")
+        cur = mf.parse_memory(m.path, m.scope) or cur
+    mf.upsert_index(ws, m.scope, cur.name, cur.file, cur.description)
+    _reload(agent)
+
+
+def _do_remove(agent: Any, m: Any, assume_yes: bool = False) -> bool:
+    mf = _mf()
+    if not assume_yes and not confirm(f"Delete '{m.name}' ({m.scope})? A copy is kept: /memory restore", default=not is_tty()):
+        info("Not deleted.")
+        return False
+    backup = mf.delete_memory(ws_of(agent), m)
+    ok(f"Deleted memory {BOLD}{m.name}{RST} {SLATE}({m.scope}:{m.id}){RST}" + (f" {DARK_SLATE}kept at {_short(backup)}{RST}" if backup else ""))
+    _reload(agent)
+    return True
+
+
+def _do_move(agent: Any, m: Any, dest: str) -> bool:
+    mf = _mf()
+    try:
+        res = mf.move_memory(ws_of(agent), m, dest)
+    except (ValueError, OSError) as e:
+        err(str(e))
+        return False
+    ok(f"Moved {BOLD}{m.name}{RST} {SLATE}{m.scope} → {mf.norm_scope(dest)}: {_short(res.path)}{RST}")
+    if mf.norm_scope(dest) == "repo":
+        info("The repo scope lives in the workspace's .axon/memory: anything you commit there is shared.")
+    for n in res.notes():
+        info(n)
+    _reload(agent)
+    return True
+
+
+def _search(agent: Any, q: str) -> None:
+    ws = ws_of(agent)
+    mf = _mf()
+    ql = q.lower()
+    hits = [m for m in mf.list_memories(ws) if ql in f"{m.name}\n{m.description}\n{m.body}\n{m.type}".lower()]
+    files = []
+    for label, p in _instruction_files(ws):
+        try:
+            if p.is_file():
+                for n, ln in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                    if ql in ln.lower():
+                        files.append((label, p, n, ln.strip()))
+                        break
+        except OSError:
+            continue
+    header("Memory search", f"'{q}' · {len(hits) + len(files)} hit(s) across global, project, repo and instruction files")
+    for m in hits:
+        print(f"    {CYAN}{m.id}{RST} {WHITE}{m.name}{RST} {SLATE}({m.scope} · {m.type}){RST}")
+        print(f"       {DARK_SLATE}{_short(m.path)}{RST}")
+    for label, p, n, ln in files:
+        print(f"    {GOLD}{label}{RST} {WHITE}{_short(p)}:{n}{RST} {SLATE}{mf.one_line(ln, 70)}{RST}")
+    print()
+
+
+def _restore_cmd(agent: Any, rest: str) -> None:
+    ws = ws_of(agent)
+    mf = _mf()
+    entries = mf.list_trash(ws)
+    if not rest:
+        header("Memory trash", "every overwritten or deleted version is kept; nothing is purged automatically")
+        if not entries:
+            print(f"    {SLATE}Nothing to restore.{RST}\n")
+            return
+        for i, e in enumerate(entries[:40], 1):
+            print(f"    {CYAN}{i:>2}{RST} {WHITE}{e.original}{RST} {SLATE}{e.scope} · {e.kind} · {e.when}{RST}")
+            print(f"       {DARK_SLATE}{_short(e.path)}{RST}")
+        typed_hint("    /memory restore <n|name>   (the newest copy of a name wins)")
+        print()
+        return
+    res = mf.restore(ws, rest)
+    if res is None:
+        err(f"Nothing in the trash matches '{rest}'. /memory restore lists it.")
+        return
+    path, backup = res
+    ok(f"Restored {_short(path)}" + (f" {SLATE}(the version it replaced is kept at {_short(backup)}){RST}" if backup else ""))
+    _reload(agent)
+
+
+def _reindex_cmd(agent: Any, rest: str) -> None:
+    ws = ws_of(agent)
+    mf = _mf()
+    scopes = [mf.norm_scope(rest)] if rest else list(mf.SCOPES)
+    for scope in scopes:
+        rep = mf.reindex(ws, scope)
+        d = rep["dir"]
+        if not Path(d).is_dir():
+            continue
+        bits = []
+        if rep["migrated"]:
+            bits.append(f"upgraded {len(rep['migrated'])} file(s) to the standard frontmatter")
+        if rep["added"]:
+            bits.append(f"added {len(rep['added'])} pointer(s)")
+        if rep["removed"]:
+            bits.append(f"dropped {len(rep['removed'])} broken pointer(s)")
+        ok(f"{SCOPE_TITLE[scope]}: {', '.join(bits) if bits else 'index already up to date'} {SLATE}({_short(Path(d) / mf.INDEX)}){RST}")
+        if rep["warning"]:
+            info(rep["warning"].removeprefix("Error: "))
+    _reload(agent)
+
+
+def _doctor(agent: Any) -> None:
+    ws = ws_of(agent)
+    mf = _mf()
+    findings = mf.doctor(ws)
+    header("Memory doctor", f"{len(mf.list_memories(ws))} memories in global, project and repo scopes")
+    if not findings:
+        ok("All memory indexes match their files; nothing stale.")
+        print()
+        return
+    order = {"error": 0, "warn": 1, "info": 2}
+    mark = {"error": f"{ROSE}✗{RST}", "warn": f"{GOLD}!{RST}", "info": f"{DARK_SLATE}·{RST}"}
+    titles = {"orphan": "Not in the index", "broken-link": "Broken index links", "duplicate-pointer": "Duplicate pointers",
+              "index-size": "Index size", "legacy-format": "Old format", "bad-type": "Bad type", "duplicate-name": "Duplicate names",
+              "duplicate-content": "Duplicate content", "secret": "Possible secrets", "stale": f"Not updated in {mf.STALE_DAYS}+ days",
+              "missing-path": "Names a file that no longer exists"}
+    seen: list[str] = []
+    for f in sorted(findings, key=lambda f: (order[f.level], f.code)):
+        if f.code not in seen:
+            seen.append(f.code)
+            section(titles.get(f.code, f.code))
+        print(f"    {mark[f.level]} {SLATE}{f.scope:<7}{RST} {WHITE}{f.message}{RST}")
+        if f.path:
+            print(f"       {DARK_SLATE}{_short(f.path)}{RST}")
+    print(f"\n    {SLATE}{sum(1 for f in findings if f.level == 'error')} error(s), "
+          f"{sum(1 for f in findings if f.level == 'warn')} warning(s), {sum(1 for f in findings if f.level == 'info')} note(s).{RST}")
+    typed_hint("    /memory reindex fixes the index problems; /memory edit|move|remove handle the rest.")
+    print()
+
+
+def _why(agent: Any) -> None:
+    from axon.agent.memory import MemoryLoader
+    ws = ws_of(agent)
+    mf = _mf()
+    loader = getattr(agent, "memory", None)
+    if not hasattr(loader, "loaded") or not isinstance(getattr(loader, "loaded", None), list):
+        loader = MemoryLoader(ws, auto_memory=bool(getattr(getattr(agent, "settings", None), "auto_memory", True)))
+        loader.load_startup()
+    rep = mf.why_report(loader, ws)
+    header("Why these were loaded", f"{len(rep['loaded'])} file(s) · ~{fmt_tokens(rep['tokens'])} tokens in the system prompt")
+    section("Loaded")
+    for r in rep["loaded"]:
+        pad = "  " * r["depth"]
+        print(f"    {MINT}●{RST} {pad}{WHITE}{_short(r['path'])}{RST} {DARK_SLATE}~{fmt_tokens(r['tokens'])} tok{RST}")
+        print(f"      {pad}{SLATE}{r['why']}{RST}")
+    if not rep["loaded"]:
+        print(f"    {SLATE}Nothing loaded.{RST}")
+    if rep["waiting"]:
+        section("Waiting for a matching file")
+        for r in rep["waiting"]:
+            print(f"    {GOLD}◌{RST} {WHITE}{_short(r['path'])}{RST}\n      {SLATE}{r['why']}{RST}")
+    if rep["skipped"]:
+        section("Skipped")
+        for r in rep["skipped"]:
+            print(f"    {DARK_SLATE}○ {_short(r['path'])}{RST}\n      {SLATE}{r['why']}{RST}")
+    for w in rep["warnings"]:
+        print(f"    {GOLD}!{RST} {SLATE}{w}{RST}")
+    print(f"\n    {DARK_SLATE}{rep['note']}{RST}\n")
+
+
+def _export_cmd(agent: Any, rest: str) -> None:
+    mf = _mf()
+    scope, _, dest = rest.partition(" ")
+    if not scope:
+        usage("/memory export <global|project|repo> [file]")
+        return
+    try:
+        path, n, redacted = mf.export_scope(ws_of(agent), scope, Path(dest.strip()) if dest.strip() else None)
+    except ValueError as e:
+        err(str(e))
+        return
+    ok(f"Exported {n} memor{'y' if n == 1 else 'ies'} from {mf.norm_scope(scope)} → {path}")
+    if redacted:
+        info(f"Secrets were redacted in: {', '.join(redacted)}")
+
+
+def _import_cmd(agent: Any, rest: str) -> None:
+    mf = _mf()
+    toks = rest.split()
+    yes = "--yes" in toks or "-y" in toks
+    scope = "repo"
+    args = []
+    it = iter(toks)
+    for t in it:
+        if t in ("--yes", "-y"):
+            continue
+        if t == "--scope":
+            scope = next(it, scope)
+            continue
+        args.append(t)
+    if not args:
+        usage("/memory import <file> [--scope global|project|repo] [--yes]")
+        return
+    ws = ws_of(agent)
+    try:
+        items, problems = mf.read_import(ws, Path(" ".join(args)), scope)
+        scope = mf.norm_scope(scope)
+    except ValueError as e:
+        err(str(e))
+        return
+    header("Import preview", f"{len(items)} memor{'y' if len(items) == 1 else 'ies'} → {SCOPE_TITLE[scope]} · {_short(mf.scope_dir(ws, scope))}")
+    for i in items:
+        flag = {"new": "new", "same": "identical, skipped", "exists": f"name taken, saved as {i.file}"}[i.status]
+        print(f"    {CYAN}•{RST} {WHITE}{i.name}{RST} {SLATE}{i.type} · {flag}{RST}")
+        print(f"       {DARK_SLATE}{mf.one_line(i.description, 90)}{RST}")
+        if i.redacted:
+            print(f"       {GOLD}redacted: {', '.join(i.redacted)}{RST}")
+    for p in problems:
+        info(p)
+    todo = [i for i in items if i.status != "same"]
+    if not todo:
+        info("Nothing new to import.")
+        return
+    info("Imported text is treated as data. Once added, the index lines are loaded into the model's context like your own memories.")
+    if not (yes or confirm(f"Add {len(todo)} memor{'y' if len(todo) == 1 else 'ies'} to the {scope} scope?", default=False)):
+        info("Nothing imported." + typed_only("  Re-run with --yes to confirm."))
+        return
+    results = mf.apply_import(ws, scope, todo)
+    ok(f"Imported {len(results)} memor{'y' if len(results) == 1 else 'ies'} into {_short(mf.scope_dir(ws, scope))}")
+    _reload(agent)
+
+
+@command("memory", category=CAT, description="Browse, search and manage memory: global, project and repo scopes",
+         aliases=("mem",), usage=MEMORY_USAGE)
+def handle_memory(agent: Any, arg: str) -> CommandResult:
+    ws = ws_of(agent)
+    mf = _mf()
+    a = arg.strip()
+    sub, _, rest = a.partition(" ")
+    sub = sub.lower()
+    rest = rest.strip()
+    done = CommandResult(handled=True)
+
+    if sub in ("add", "learn", "+"):
+        scope, rest = _scope_flag(rest, "repo")
+        if not rest:
+            usage("/memory add [--global|--project|--repo] <text>")
+            return done
+        add_memory(agent, rest, {"global": "global", "project": "auto", "repo": "project"}[scope], distill=True)
+        return done
+
+    if sub in ("remove", "delete", "rm", "del", "forget"):
+        yes = False
+        if rest.endswith((" --yes", " -y")) or rest in ("--yes", "-y"):
+            yes, rest = True, rest.rsplit(" ", 1)[0] if " " in rest else ""
+        m = _resolve(ws, rest, mf.list_memories(ws))
+        if m is not None:
+            _do_remove(agent, m, assume_yes=yes)
+        return done
+
+    if sub in ("view", "show", "read", "cat"):
+        m = _resolve(ws, rest, mf.list_memories(ws))
+        if m is not None:
+            _view(m)
+        return done
+
+    if sub in ("edit", "open"):
+        target, _, new_text = rest.partition(" ")
+        files: dict[str, Path] = {}
+        for label, fp in _instruction_files(ws):  # first file per label: "project" is AXON.md, not CLAUDE.md
+            if label in ("user", "project", "local"):
+                files.setdefault(label, fp)
+        if target in files or not target:
+            p = files.get(target or "project")
+            if p is None:
+                return done
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"# {'User' if target == 'user' else ws.name} instructions\n\n", encoding="utf-8")
+                if target == "local":
+                    _gitignore_add(ws, "AXON.local.md")
+            if is_tty():
+                open_in_editor(p)
+            else:
+                info(f"Edit {p} in your editor.")
+            return done
+        m = mf.find_memory(ws, target)
+        if m is None:
+            err(f"No memory or file '{target}'. Use user, project, local, a number or an id.")
+            return done
+        if new_text.strip():
+            res = mf.replace_body(ws, m, new_text.strip())
+            ok(f"Updated memory {BOLD}{m.name}{RST} {SLATE}{_short(res.path)}{RST}")
+            for n in res.notes():
+                info(n)
+            _reload(agent)
+        elif is_tty():
+            mf.trash_copy(ws, m.scope, m.path, "replaced")   # the editor writes in place: keep what it started from
+            open_in_editor(m.path)
+            _after_editor(agent, m)
+        else:
+            info(f"Edit {m.path} in your editor, or: /memory edit {target} <new text>")
+        return done
+
+    if sub in ("search", "find", "grep"):
+        _search(agent, rest) if rest else usage("/memory search <text>")
+        return done
+
+    if sub in ("move", "mv"):
+        key, _, dest = rest.rpartition(" ")
+        try:
+            dest = mf.norm_scope(dest)
+        except ValueError:
+            usage("/memory move <n|id> <global|project|repo>")
+            return done
+        m = _resolve(ws, key.strip(), mf.list_memories(ws))
+        if m is not None:
+            _do_move(agent, m, dest)
+        return done
+
+    if sub in ("restore", "undelete", "trash"):
+        _restore_cmd(agent, rest)
+        return done
+
+    if sub in ("reindex", "index", "rebuild"):
+        try:
+            _reindex_cmd(agent, rest)
+        except ValueError as e:
+            err(str(e))
+        return done
+
+    if sub in ("doctor", "check", "health"):
+        _doctor(agent)
+        return done
+
+    if sub in ("why", "loaded"):
+        _why(agent)
+        return done
+
+    if sub == "export":
+        _export_cmd(agent, rest)
+        return done
+
+    if sub == "import":
+        _import_cmd(agent, rest)
+        return done
+
+    if sub == "clear":
+        try:
+            scope = mf.norm_scope(rest) if rest else "repo"
+        except ValueError as e:
+            err(str(e))
+            return done
+        mems = mf.list_memories(ws, [scope])
+        if mems and confirm(f"Delete all {len(mems)} {scope} memories? (copies are kept: /memory restore)", default=not is_tty()):
+            for m in mems:
+                mf.delete_memory(ws, m)
+            ok(f"Cleared {len(mems)} {scope} memories")
+            _reload(agent)
+        else:
+            info("Nothing cleared.")
+        return done
+
+    flags: dict[str, str] = {}
+    if sub in ("list", "ls", "") or sub.startswith("--"):
+        toks = (a if sub.startswith("--") else rest).split()
+        for i, t in enumerate(toks):
+            if t in ("--scope", "--type") and i + 1 < len(toks):
+                flags[t[2:]] = toks[i + 1]
+        if sub.startswith("--") and not flags:
+            usage(MEMORY_USAGE)
+            return done
+    elif sub:
+        usage(MEMORY_USAGE)
+        return done
+
+    try:
+        scopes = [mf.norm_scope(flags["scope"])] if flags.get("scope") else None
+    except ValueError as e:
+        err(str(e))
+        return done
+    items = mf.list_memories(ws, scopes, flags.get("type", ""))
+    if is_tty() and not flags:
+        memory_picker(agent, items)   # Esc just closes it: the list is the picker
+        return done
+    _listing(agent, items if flags else mf.list_memories(ws))
+    return done
 
 
 def _ensure_instruction_file(ws: Path, label: str, p: Path) -> None:
@@ -239,59 +591,114 @@ def _ensure_instruction_file(ws: Path, label: str, p: Path) -> None:
         _gitignore_add(ws, "AXON.local.md")
 
 
-def memory_picker(agent: Any, items: list[Any]) -> bool:
-    """Interactive memory editor: choose an instruction file or saved memory and open it in $EDITOR
-    (axon.platform.editor_command). Also toggles auto memory and opens its folder. False when cancelled."""
-    from axon.ui.picker import SelectItem, Selector
+def browser_entries(agent: Any, items: list[Any]) -> list[Any]:
+    """Rows of the interactive browser: memories grouped by scope (type and age on each row), then actions."""
+    from axon.ui.picker import SelectItem
     ws = ws_of(agent)
-    store = _store(agent)
-    entries: list[SelectItem] = []
+    mf = _mf()
+    entries: list[Any] = []
+    for scope in mf.SCOPES:
+        d = mf.scope_dir(ws, scope) if scope != "project" else (mf._project_dir_nocreate(ws) or Path("."))
+        group = f"{SCOPE_TITLE[scope]}  {_short(d)}/"
+        rows = [m for m in items if m.scope == scope]
+        for m in rows:
+            entries.append(SelectItem(label=f"{m.type:<9} {m.name[:56]}", value=("mem", m), group=group,
+                                      hint=f"{_age(m.updated)} · {m.file}",
+                                      search=f"{m.description} {m.body[:300]} {scope} {m.type}"))
+        if not rows:
+            entries.append(SelectItem(label="(empty)", value=("none", None), group=group))
     for label, p in _instruction_files(ws):
-        entries.append(SelectItem(label=f"{label:<8} {p}", value=("file", label, p), group="Instruction files",
+        entries.append(SelectItem(label=f"{label:<8} {_short(p)}", value=("file", label, p), group="Instruction files (AXON.md …)",
                                   hint="" if p.exists() else "create", badge=f"{MINT}●{RST}" if p.exists() else "○"))
-    for it in items:
-        entries.append(SelectItem(label=it.title[:60], value=("mem", it.scope, _item_path(store, it)),
-                                  group="Saved memories", hint=it.scope, search=it.content[:200]))
-    entries.append(SelectItem(label="Remember something new…", value=("add", "", None), group="Add a memory",
-                              hint="saved for this project"))
-    auto = bool(getattr(agent.settings, "auto_memory", True))
-    entries.append(SelectItem(label=f"Auto memory: {'on' if auto else 'off'}", value=("toggle", "", None),
-                              group="Auto memory", hint="Enter toggles"))
+    tools = [("add", "Remember something new…", "save to a scope"), ("why", "Why was each file loaded?", "tokens and reasons"),
+             ("doctor", "Doctor: index health, stale, broken paths", ""), ("reindex", "Rebuild MEMORY.md indexes", "fixes orphans"),
+             ("restore", "Restore a deleted or overwritten version", "")]
+    for key, label, hint_ in tools:
+        entries.append(SelectItem(label=label, value=("cmd", key), group="Tools", hint=hint_))
+    auto = bool(getattr(getattr(agent, "settings", None), "auto_memory", True))
+    entries.append(SelectItem(label=f"Auto memory: {'on' if auto else 'off'}", value=("toggle",), group="Auto memory", hint="Enter toggles"))
     try:
-        from axon import storage
-        mdir = storage.memory_dir(ws)
-        entries.append(SelectItem(label=f"Open auto-memory folder {mdir}", value=("dir", "", mdir), group="Auto memory"))
+        entries.append(SelectItem(label=f"Open project memory folder {_short(mf.scope_dir(ws, 'project'))}", value=("dir", mf.scope_dir(ws, "project")),
+                                  group="Auto memory"))
     except Exception:
         pass
-    chosen = Selector(entries, title="Memory", subtitle="Enter opens in your editor", filterable=True, max_visible=14).run()
-    if chosen is None:
-        return False
-    kind, label, path = chosen.value
-    if kind == "add":
-        from axon.ui.menus import ask_text
-        text = ask_text("What should Axon remember?")
-        if text:
-            handle_memory(agent, f"add {text}")
-        return True
-    if kind == "toggle":
-        from axon.commands.common import update_settings, update_settings_file
-        update_settings(agent, auto_memory=not auto)
-        saved = update_settings_file({"autoMemoryEnabled": not auto})
-        ok(f"Auto memory {'on' if not auto else 'off'}" + (f" {SLATE}(saved to {saved}){RST}" if saved else ""))
-        return True
-    if kind == "file":
-        _ensure_instruction_file(ws, label, path)
-    if kind == "dir":
-        _open_folder(Path(path))
-        return True
-    open_in_editor(Path(path))
-    if hasattr(agent, "reload_memory"):
-        try:
-            agent.reload_memory()
-        except Exception:
-            pass
-    ok(f"Saved {path}")
-    return True
+    return entries
+
+
+def memory_picker(agent: Any, items: list[Any]) -> bool:
+    """Interactive memory browser: pick a memory or instruction file, then view / edit in $EDITOR / move / delete.
+    Loops until Esc. False when closed without doing anything."""
+    from axon.ui.picker import Selector
+    ws = ws_of(agent)
+    mf = _mf()
+    acted = False
+    while True:
+        items = mf.list_memories(ws)
+        chosen = Selector(browser_entries(agent, items), title="Memory",
+                          subtitle="by scope · type to filter · Enter opens", filterable=True, max_visible=14).run()
+        if chosen is None:
+            return acted
+        kind = chosen.value[0]
+        acted = True
+        if kind == "none":
+            continue
+        if kind == "mem":
+            _memory_actions(agent, chosen.value[1])
+        elif kind == "file":
+            _, label, path = chosen.value
+            _ensure_instruction_file(ws, label, path)
+            open_in_editor(Path(path))
+            _reload(agent)
+            ok(f"Saved {path}")
+        elif kind == "cmd":
+            key = chosen.value[1]
+            if key == "add":
+                from axon.ui.menus import ask_text
+                text = ask_text("What should Axon remember?")
+                if text:
+                    pick = Selector([_sel("repo", "This project, in the repo (.axon/memory)"), _sel("project", "This project, private (~/.axon/projects/…)"),
+                                     _sel("global", "All projects (~/.axon/memory)")], title="Save to which scope?").run()
+                    if pick is not None:
+                        handle_memory(agent, f"add --{pick.value} {text}")
+            else:
+                handle_memory(agent, key)
+        elif kind == "toggle":
+            from axon.commands.common import update_settings, update_settings_file
+            auto = bool(getattr(agent.settings, "auto_memory", True))
+            update_settings(agent, auto_memory=not auto)
+            saved = update_settings_file({"autoMemoryEnabled": not auto})
+            ok(f"Auto memory {'on' if not auto else 'off'}" + (f" {SLATE}(saved to {saved}){RST}" if saved else ""))
+        elif kind == "dir":
+            _open_folder(Path(chosen.value[1]))
+
+
+def _sel(value: str, label: str) -> Any:
+    from axon.ui.picker import SelectItem
+    return SelectItem(label=label, value=value)
+
+
+def _memory_actions(agent: Any, m: Any) -> None:
+    from axon.ui.picker import SelectItem, Selector
+    mf = _mf()
+    others = [s for s in mf.SCOPES if s != m.scope]
+    acts = [SelectItem(label="View", value="view", hint=_short(m.path)), SelectItem(label="Edit in $EDITOR", value="edit"),
+            *[SelectItem(label=f"Move to {s}", value=f"move:{s}") for s in others],
+            SelectItem(label="Delete (a copy is kept)", value="delete"), SelectItem(label="Back", value="back")]
+    pick = Selector(acts, title=m.name, subtitle=f"{m.scope} · {m.type} · {_short(m.path)}").run()
+    if pick is None or pick.value == "back":
+        return
+    v = pick.value
+    if v == "view":
+        _view(m)
+        input("  (Enter to go back) ") if is_tty() else None
+    elif v == "edit":
+        mf.trash_copy(ws_of(agent), m.scope, m.path, "replaced")
+        open_in_editor(m.path)
+        _after_editor(agent, m)
+    elif v.startswith("move:"):
+        _do_move(agent, m, v.split(":", 1)[1])
+    elif v == "delete":
+        _do_remove(agent, m)
 
 
 def _open_folder(path: Path) -> None:
@@ -308,17 +715,6 @@ def _open_folder(path: Path) -> None:
         info(f"Opened {path}")
     except (OSError, AttributeError):
         info(f"Auto-memory folder: {path}")
-
-
-def _replace_body(path: Path, text: str) -> None:
-    from axon.session.store import atomic_write_text
-    raw = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    head = ""
-    if raw.startswith("---"):
-        end = raw.find("\n---", 3)
-        if end != -1:
-            head = raw[: end + 4] + "\n\n"
-    atomic_write_text(path, f"{head}{text}\n")
 
 
 def _gitignore_add(ws: Path, entry: str) -> None:

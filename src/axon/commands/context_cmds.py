@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from decimal import Decimal
 from typing import Any
 
 from axon.commands.common import (
-    bar, err, estimate_tokens, fmt_tokens, fmt_usd, header, info, kv, ok, record_usage, section,
+    err, estimate_tokens, fmt_tokens, fmt_usd, header, info, kv, ok, record_usage, section,
     table, update_settings, usage, width,
     typed_hint,
 )
@@ -227,65 +226,13 @@ def handle_context(agent: Any, arg: str) -> CommandResult:
         return _context_why(agent)
     if a.split(maxsplit=1)[:1] in (["limit"], ["size"], ["window"]):
         return handle_context_limit(agent, a.split(maxsplit=1)[1] if " " in a else "")
-    blocks = _system_blocks(agent)
-    parts: Counter[str] = Counter()
-    for b in blocks:
-        txt = str(b.get("text", ""))
-        parts[_block_kind(txt)] += estimate_tokens(txt)
-    schemas = _tool_schemas(agent)
-    tool_tok = estimate_tokens(json.dumps(schemas, separators=(",", ":"))) if schemas else 0
-    msgs = list(agent.conversation.messages)
-    msg_tok = sum(estimate_tokens(m.get("content", "")) for m in msgs)
-    total = sum(parts.values()) + tool_tok + msg_tok
-    window, threshold, reserve = _budget(agent)
-    pct = total / window if window else 0.0
-
-    from axon.providers.registry import get_context_window
-    model_max = get_context_window(agent.settings.model)
-    limit_note = (f" (limit; model max {fmt_tokens(model_max)} · /context limit to change)"
-                  if window < model_max else "")
-    header("Context usage", f"{agent.settings.model} · window {fmt_tokens(window)}{limit_note}")
-    rows = [
-        ("System prompt", parts["system"] + parts["agents"], TEAL, f"{sum(1 for b in blocks if _block_kind(str(b.get('text',''))) in ('system','agents'))} blocks"),
-        ("Memory files", parts["memory"], LBLUE, "AXON.md / AGENTS.md / CLAUDE.md + saved memories"),
-        ("Skills list", parts["skills"], CYAN, f"{len(getattr(getattr(agent, 'skills', None), 'skills', {}) or {})} skills"),
-        ("Tool schemas", tool_tok, PURPLE, f"{len(schemas)} tools"),
-        ("Messages", msg_tok, GOLD, f"{len(msgs)} messages"),
-    ]
-    print()
-    legend = [f"{WHITE}{BOLD}{fmt_tokens(total)}{RST}{SLATE} / {fmt_tokens(window)} tokens ({pct * 100:.1f}%){RST}", ""]
-    legend += [f"{color}{_cell_glyph()}{RST} {label}: {WHITE}{fmt_tokens(tok)}{RST} {SLATE}({tok / window * 100 if window else 0:.1f}%){RST}"
-               for label, tok, color, _ in rows]
-    buffer_tok = max(0, window - threshold)
-    legend.append(f"{DARK_SLATE}{_cell_glyph(free=True)}{RST} Free: {SLATE}{fmt_tokens(max(0, window - total - buffer_tok))}{RST}")
-    if buffer_tok:
-        legend.append(f"{DIM}{_cell_glyph(buffer=True)}{RST} Auto-compact buffer: {SLATE}{fmt_tokens(buffer_tok)}{RST}")
-    for line in context_grid([(tok, color) for _, tok, color, _ in rows], window, threshold, legend):
-        print(line)
-    print()
-    for label, tok, color, note in rows:
-        frac = tok / total if total else 0
-        print(f"    {color}■{RST} {label:<14} {WHITE}{fmt_tokens(tok):>8}{RST}  {bar(frac, 12, color)} {SLATE}{frac * 100:>3.0f}%{RST}  {DARK_SLATE}{note}{RST}")
-    free = max(0, window - total)
-    print(f"    {DARK_SLATE}□{RST} {'Free':<14} {SLATE}{fmt_tokens(free):>8}{RST}")
-    print()
-    compact_pct = int(round(threshold / window * 100)) if window else 0
-    kv("Auto-compact at", f"{fmt_tokens(threshold)} ({compact_pct}% of window)")
-    if reserve:
-        kv("Reply reserve", f"{fmt_tokens(reserve)} (usable for the prompt: {fmt_tokens(window - reserve)})")
-    turns = getattr(agent.settings, "max_history_turns", 0) or 0
-    kv("Sliding window", f"{turns} turns" if turns else "unlimited")
-    last = getattr(getattr(agent, "ledger", None), "last_usage", None)
-    if last is not None and getattr(last, "input", 0):
-        kv("Last API call", f"{last.input:,} input tokens (billed; estimate above is ~{fmt_tokens(total)})")
-    if a in ("all", "--all", "tools"):
-        section("Tool schemas")
-        sized = sorted(((_schema_name(sc), estimate_tokens(json.dumps(sc))) for sc in schemas), key=lambda x: -x[1])
-        for name, tok in sized:
-            print(f"    {WHITE}{name:<28}{RST} {SLATE}{fmt_tokens(tok):>7}{RST}")
-        print()
-    typed_hint("    /context --why explains each block · /payload shows the exact prompt · /compact [focus]")
-    print()
+    from axon.commands import workbench_cmds as wb
+    expand = wb.context_request(a)
+    if expand is None:
+        err(f"Unknown view '{a}'. /context [mcp|skills|memory|agents|messages|all] · --why · limit")
+        return CommandResult(handled=True, success=False)
+    print_width = max(40, min(100, width() + 2))
+    wb.print_context(agent, expand, print_width)
     return CommandResult(handled=True)
 
 
@@ -446,8 +393,12 @@ def _safe_cut_fallback(messages: list[dict[str, Any]], keep: int = 4) -> int:
 
 
 @command("compact", category=CAT, description="Summarise older turns to free context (optional focus)",
-         usage="/compact [instructions for the summary]")
+         usage="/compact [instructions for the summary]\n/compact --last   what the last compaction replaced, with its summary")
 def handle_compact(agent: Any, arg: str) -> CommandResult:
+    if arg.strip() == "--last":
+        from axon.features.insights import show_last_compaction
+        show_last_compaction(agent)
+        return CommandResult(handled=True)
     conv = agent.conversation
     before_n = len(conv.messages)
     if before_n <= 2:
@@ -483,6 +434,8 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
             conv.messages = [{"role": "user", "content": note}, {"role": "assistant", "content": "Understood."}] + conv.messages[cut:]
     after_n = len(conv.messages)
     after_tok = sum(estimate_tokens(m.get("content", "")) for m in conv.messages)
+    if isinstance(getattr(ctx, "last_receipt", None), dict) and after_n != before_n:
+        ctx.last_receipt["trigger"] = "manual"
     if after_n >= before_n and after_tok >= before_tok:
         info("Nothing to compact yet (the conversation is a single turn).")
         return CommandResult(handled=True)
@@ -570,8 +523,26 @@ def _is_ledger(obj: Any) -> bool:
     return isinstance(getattr(obj, "entries", None), list)
 
 
+@command("usage", category=CAT, description="One screen: status, config, usage and limits, stats, context",
+         aliases=("limits",),
+         usage="/usage            tabbed screen (←/→ switch tabs, Esc closes); plain text without a terminal\n/usage status|config|usage|stats|context   open on one tab\n/usage --plain   print every tab as text")
+def handle_usage(agent: Any, arg: str) -> CommandResult:
+    from axon.commands.common import is_tty
+    from axon.commands.usage_screen import TABS, plain_text, run_usage_screen
+    a = arg.strip().lower()
+    tab = next((t for t in TABS if t.lower() == a), "")
+    if a and not tab and a not in ("--plain", "plain", "text"):
+        err(f"Unknown tab '{a}'. Choose: {', '.join(t.lower() for t in TABS)}, or --plain.")
+        return CommandResult(handled=True, success=False)
+    if is_tty() and a not in ("--plain", "plain", "text"):
+        run_usage_screen(agent, tab)
+        return CommandResult(handled=True)
+    print(plain_text(agent, width=min(100, max(40, width() + 2)), tabs=[tab] if tab else None))
+    return CommandResult(handled=True)
+
+
 @command("cost", category=CAT, description="Cost by source and model, cache savings, $/turn",
-         aliases=("usage", "ledger", "stats"), usage="/cost            session breakdown\n/cost calls      every API call\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
+         aliases=("ledger", "stats"), usage="/cost            session breakdown\n/cost calls      every API call\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
 def handle_cost(agent: Any, arg: str) -> CommandResult:
     a = arg.strip().lower()
     if a in ("--all", "all", "lifetime", "global"):   # the usage log does not need this session's ledger
@@ -800,10 +771,50 @@ _FAQ_KEYS = {
 }
 
 
-@command("faq", category=CAT, description="AgentRouter FAQ and error troubleshooting", aliases=("faqs",),
-         usage="/faq [402|400|401|sensitive|backup|credit|gpt6|pricing]")
+def _generic_faq(agent: Any) -> list[str]:
+    """Troubleshooting that holds for any provider, headed with the one in use."""
+    st = getattr(agent, "settings", None)
+    name = str(getattr(st, "provider", "") or "") or "your provider"
+    model = str(getattr(st, "model", "") or "")
+    def card(color: str, title: str, body: list[str]) -> str:
+        out = [f"  {color}{BOLD}╭── {title}{RST}"]
+        out += [f"  {color}│{RST} {ln}" for ln in body]
+        out.append(f"  {color}╰{'─' * 76}{RST}")
+        return "\n".join(out)
+    return [
+        card(CYAN, f"Using {name}" + (f" · {model}" if model else ""), [
+            f"{WHITE}Switch:{RST} {CYAN}/provider{RST} for the provider, {CYAN}/model{RST} for the model, {CYAN}/keys{RST} for the key.",
+            f"{WHITE}Check:{RST} {CYAN}/doctor{RST} tests the connection; {CYAN}/status{RST} shows what is in use.",
+        ]),
+        card(GOLD, "401 / 403: key rejected", [
+            f"{WHITE}Cause:{RST} the key is missing, expired, or belongs to a different provider.",
+            f"{WHITE}Fix:{RST} {CYAN}/keys{RST} to enter it again, then {CYAN}/doctor{RST} to test.",
+        ]),
+        card(ROSE, "402 / 429: out of credit or rate limited", [
+            f"{WHITE}Cause:{RST} the account has no credit left, or you are sending too fast.",
+            f"{WHITE}Fix:{RST} top up with the provider, wait a minute, or pick another model with {CYAN}/model{RST}.",
+        ]),
+        card(PURPLE, "400: request rejected", [
+            f"{WHITE}Cause:{RST} the model refused the request (too long, unsupported option, or filtered text).",
+            f"{WHITE}Fix:{RST} {CYAN}/compact{RST} or {CYAN}/clear{RST} to shorten the conversation, then retry.",
+        ]),
+    ]
+
+
+@command("faq", category=CAT, description="Help for the current provider; AgentRouter's FAQ with /faq agentrouter", aliases=("faqs",),
+         usage="/faq [agentrouter | 402|400|401|sensitive|backup|credit|gpt6|pricing]")
 def handle_faq(agent: Any, arg: str) -> CommandResult:
     topic = arg.strip().lower()
+    from axon.providers.transport import is_agentrouter
+    on_router = is_agentrouter(getattr(getattr(agent, "settings", None), "base_url", ""))
+    if not on_router and topic in ("", "help"):
+        print(f"\n  {CYAN}{BOLD}Frequently asked questions{RST}\n")
+        for text in _generic_faq(agent):
+            print(text)
+            print()
+        typed_hint("  AgentRouter's own FAQ: /faq agentrouter")
+        print()
+        return CommandResult(handled=True)
     cards = _faq_cards()
     print(f"\n  {CYAN}{BOLD}AgentRouter Frequently Asked Questions (FAQ){RST}\n")
     if topic in _FAQ_KEYS:

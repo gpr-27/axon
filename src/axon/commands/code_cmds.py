@@ -14,7 +14,7 @@ from axon.commands.common import (
     typed_only,
 )
 from axon.commands.registry import CommandResult, command
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, MINT, ROSE, RST, SLATE, TEAL, WHITE, term_width
 
 CAT = "Code & Review"
 
@@ -116,7 +116,7 @@ def _diff_viewer(agent: Any, args: list[str]) -> CommandResult:
 
 
 @command("diff", category=CAT, description="Uncommitted changes, or edits since checkpoint T<n>",
-         aliases=("changes",), usage="/diff            working tree vs HEAD\n/diff staged     staged changes\n/diff T<n>       file edits made since checkpoint n (see /rewind list)")
+         aliases=("changes",), usage="/diff            working tree vs HEAD (terminal: files, inline diffs; 1-4 switch compare target)\n/diff staged|commit|branch <name>   open on another compare target\n/diff list       the changed files as text\n/diff staged     staged changes\n/diff T<n>       file edits made since checkpoint n (see /rewind list)")
 def handle_diff(agent: Any, arg: str) -> CommandResult:
     a = arg.strip()
     ws = ws_of(agent)
@@ -128,9 +128,21 @@ def handle_diff(agent: Any, arg: str) -> CommandResult:
         else:
             _print_diff(text)
         return CommandResult(handled=True)
+    from axon.commands import workbench_cmds as wb
+    words = a.lower().split()
+    if words[:1] in (["list"], ["files"], ["summary"]):          # the file list as text, in any mode
+        target = wb.diff_target(" ".join(words[1:]))
+        wb.print_changes(agent, *(target or ("working", "")), width=min(100, max(48, term_width() - 4)))
+        return CommandResult(handled=True)
+    target = wb.diff_target(a)
+    if is_tty() and target is not None:
+        git_ok, why = git(ws, "rev-parse", "--git-dir")
+        if git_ok != 0:
+            err(why.strip() or "Not a git repository.")
+            return CommandResult(handled=True)
+        wb.run_changes_screen(agent, *target)
+        return CommandResult(handled=True)
     args = ["diff", "--cached"] if a.lower() in ("staged", "cached", "--cached") else ["diff"]
-    if is_tty() and a.lower() in ("", "staged", "cached", "--cached"):
-        return _diff_viewer(agent, args)
     code, stat = git(ws, *args, "--stat")
     if code != 0:
         err(stat.strip() or "Not a git repository.")
@@ -226,8 +238,12 @@ def build_review_prompt(arg: str, base_prompt: str = _DEFAULT_REVIEW) -> tuple[s
 
 @command("review", category=CAT, description="Code review of the current changes (or a focus area)",
          aliases=("code-review",),
-         usage="/review [low|medium|high|max] [--fix] [--comment] [--max-findings N|all] [focus | file | PR number]")
+         usage="/review [low|medium|high|max] [--fix] [--comment] [--max-findings N|all] [focus | file | PR number]\n/review hunks [accept <id|all> | reject <id>]   edits made this session, hunk by hunk")
 def handle_review(agent: Any, arg: str) -> CommandResult:
+    head, _, rest = arg.strip().partition(" ")
+    if head.lower() == "hunks":
+        from axon.commands.backend_cmds import review_hunks
+        return review_hunks(agent, rest)
     mgr = getattr(agent, "skills", None)
     base = _DEFAULT_REVIEW
     try:

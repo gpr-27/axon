@@ -231,6 +231,23 @@ def handle_retitle(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
+@command("files", category=CAT, description="Files, images and documents you gave this session, and where each is saved",
+         aliases=("attachments",), usage="/files")
+def handle_files(agent: Any, arg: str) -> CommandResult:
+    from axon.agent.attachments import list_session_attachments
+    rows = list_session_attachments()
+    if not rows:
+        info("Nothing attached yet. Drag a file or image into the prompt; Axon saves a copy here at once.")
+        return CommandResult(handled=True)
+    print()
+    for row in rows:
+        size = f"{int(row.get('size') or 0) / 1024:.1f} KB"
+        print(f"  {WHITE}{row.get('name', '')}{RST} {SLATE}{row.get('kind', '')} · {size}{RST}")
+        print(f"    {SLATE}{row.get('stored', '')}{RST}")
+    print()
+    return CommandResult(handled=True)
+
+
 @command("tag", category=CAT, description="Tag the current session (use '-' to clear)", usage="/tag <name> | /tag -")
 def handle_tag(agent: Any, arg: str) -> CommandResult:
     if not arg.strip():
@@ -671,7 +688,7 @@ def _history_all(agent: Any, session_id: str = "") -> CommandResult:
     return CommandResult(handled=True)
 
 
-@command("history", category=CAT, description="List the messages in the conversation", aliases=("timeline",),
+@command("history", category=CAT, description="List the messages in the conversation",
          usage="/history [window]\n/history all [session-id]   every record of the transcript, rewound and compacted messages included")
 def handle_history(agent: Any, arg: str, window_only: bool = False) -> CommandResult:
     parts = arg.strip().split()

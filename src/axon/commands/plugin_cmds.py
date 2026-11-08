@@ -259,6 +259,9 @@ def _toggle(agent: Any, ws: Path, installed: list[pl.Plugin], enable: bool, rest
             names = " ".join(d.name for d in deps)
             return err(f"{p.name} is needed by {', '.join(d.name for d in deps)}. Disable those first" + (typed_only(f": /plugin disable {names}") or "."))
     else:
+        runs = mk.plugin_runs(Path(p.path), ws, p.name)
+        if runs:
+            typed_hint(f"    {p.name} will run: " + "; ".join(runs))
         for dn, _ in mk._normalize_deps(p.manifest.get("dependencies"), p.marketplace):
             dep = _find(installed, dn)
             if dep is None:
