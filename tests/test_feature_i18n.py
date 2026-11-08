@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -197,8 +198,8 @@ def _engine_run(tmp_path, lang):
     harness.write_text(ENGINE_HARNESS, encoding="utf-8")
     cats = {c: _load(c) for c in i18n_data.CODES}
     (tmp_path / "cats.json").write_text(json.dumps(cats, ensure_ascii=False), encoding="utf-8")
-    env = {"CATS_FILE": str(tmp_path / "cats.json"), "ENGINE": str(engine), "LANG_ID": lang, "CANCEL": cats[lang]["common.cancel"], "PATH": str(Path(NODE).parent)}
-    r = subprocess.run([NODE, str(harness)], capture_output=True, text=True, env=env, timeout=30)
+    env = {"CATS_FILE": str(tmp_path / "cats.json"), "ENGINE": str(engine), "LANG_ID": lang, "CANCEL": cats[lang]["common.cancel"]}
+    r = subprocess.run([NODE, str(harness)], capture_output=True, text=True, encoding="utf-8", env={**os.environ, **env}, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout.strip().splitlines()[-1])
 
@@ -228,7 +229,7 @@ def test_a_missing_translation_falls_back_to_english(tmp_path):
     harness = tmp_path / "h.js"
     harness.write_text(ENGINE_HARNESS.split("(async")[0] + "(async () => { await new Promise(r => setTimeout(r, 30)); console.log(JSON.stringify({ v: I.t('a.b', {n: 2}), x: I.tr('Hello 5') })); })();", encoding="utf-8")
     cats_file = tmp_path / "cats.json"; cats_file.write_text(json.dumps({"te": {}}), encoding="utf-8")
-    r = subprocess.run([NODE, str(harness)], capture_output=True, text=True, env={"CATS_FILE": str(cats_file), "ENGINE": str(engine), "LANG_ID": "te", "PATH": str(Path(NODE).parent)}, timeout=30)
+    r = subprocess.run([NODE, str(harness)], capture_output=True, text=True, encoding="utf-8", env={**os.environ, "CATS_FILE": str(cats_file), "ENGINE": str(engine), "LANG_ID": "te"}, timeout=30)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout.strip().splitlines()[-1]) == {"v": "Hello 2", "x": "Hello 5"}
 
