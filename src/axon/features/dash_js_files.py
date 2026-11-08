@@ -114,34 +114,6 @@ function treeNode(r) {
   return node;
 }
 async function treeReload() { TREE.cache = {}; TREE.trunc = {}; await treeLoad(''); for (const p of [...TREE.open]) { if (!TREE.cache[p]) await treeLoad(p); } TREE.rows = treeFlatten(); treePaint(); }
-async function mountTree(body) {
-  const ws = state.ws || {};
-  const head = h('div', { class: 'fhead' }, h('div', { class: 'cur' }, ws.name || 'Project'), h('div', { class: 'full' }, ws.workspace || ''),
-    h('div', { class: 'formrow', style: 'margin:0' }, h('button', { class: 'btn', onclick: () => folderChooser() }, 'Change folder'), h('button', { class: 'btn', title: 'Reload the tree', onclick: () => treeReload() }, 'Reload'),
-      h('label', { class: 'muted', style: 'font-size:12px;display:flex;gap:4px;align-items:center' }, h('input', { type: 'checkbox', checked: TREE.ignored, onchange: (e) => { TREE.ignored = e.target.checked; treeReload(); } }), 'ignored files')));
-  const vp = h('div', { class: 'vlist' }); const inner = h('div', { class: 'vinner' }); const win = h('div', { class: 'vwin' }); inner.append(win); vp.append(inner);
-  Object.assign(TREE, { vp, win, inner });
-  body.append(head, vp);
-  vp.addEventListener('scroll', () => requestAnimationFrame(treePaint));
-  new ResizeObserver(() => treePaint()).observe(vp);
-  if (!TREE.cache['']) await treeLoad('');
-  TREE.rows = treeFlatten(); treePaint();
-}
-function mountSearch(body) {
-  const q = h('input', { type: 'search', class: 'search', placeholder: 'Search file names or text', 'aria-label': 'Search the project' });
-  const mode = h('select', { 'aria-label': 'Search in' }, h('option', { value: 'names' }, 'File names'), h('option', { value: 'text' }, 'File contents'));
-  const res = h('div', { class: 'sres' });
-  const run = async () => {
-    const v = q.value.trim(); res.replaceChildren(); if (v.length < (mode.value === 'text' ? 2 : 1)) return;
-    res.append(h('p', { class: 'muted', style: 'padding:6px 14px' }, 'Searching...'));
-    try {
-      if (mode.value === 'names') { const d = await api('/api/files/search?q=' + encodeURIComponent(v)); res.replaceChildren(...d.files.map(f => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(f), draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([f])), h('b', null, f.split('/').pop()), h('span', { class: 'muted' }, f))), d.files.length ? '' : h('p', { class: 'muted', style: 'padding:6px 14px' }, 'No file matches.')); }
-      else { const d = await api('/api/files/grep?q=' + encodeURIComponent(v)); res.replaceChildren(h('p', { class: 'muted', style: 'padding:4px 14px;font-size:12px' }, d.matches.length + ' matches in ' + d.files + ' files searched' + (d.partial ? ' (stopped early; refine the search)' : '') + (d.skipped_large ? '; ' + d.skipped_large + ' file' + (d.skipped_large === 1 ? '' : 's') + ' over 1.5 MB not searched' : '')), ...d.matches.map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path) + '?line=' + m.line, draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text)))); }
-    } catch (e) { res.replaceChildren(errorBox(e.message)); }
-  };
-  let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 200); }); mode.addEventListener('change', run);
-  body.append(h('div', { class: 'fhead' }, q, h('div', { class: 'formrow', style: 'margin:6px 0 0' }, mode)), res); setTimeout(() => q.focus(), 30);
-}
 
 // ----- a file in its own tab -----
 const PS = 1000;                       // lines per page; a 100,000-line file is never in the page at once
@@ -158,7 +130,6 @@ function parseDelim(text, delim, maxRows) {
   }
   if (cur || row.length) { row.push(cur); rows.push(row); } return rows;
 }
-const parseCsv = (text, maxRows) => parseDelim(text, ',', maxRows);
 
 // A small clickable preview of a file, for chat attachments and anywhere else a file is mentioned. Click opens the viewer.
 function fileThumb(path, opts) {
@@ -441,7 +412,8 @@ function axChipEl(chip, meta, onRemove) {
   const size = meta.tokens ? '~' + tok(meta.tokens) + ' tokens' : kind === 'folder' ? (meta.entries != null ? meta.entries + (meta.more ? '+' : '') + ' items' : 'folder') : meta.size != null ? fmtBytes(meta.size) : '';
   const open = kind !== 'folder' && (meta.path || thumb) ? h('button', { class: 'copen', type: 'button', title: 'Open ' + name, onclick: () => { if (meta.path) location.hash = '#/files/' + encodeURIComponent(meta.path); else window.open(thumb, '_blank', 'noopener'); } }, 'Open') : null;
   return h('span', { class: 'chip rich ' + (kind === 'image' ? 'img' : kind === 'text' ? 'txt' : ''), title: chip },
-    lead, h('span', { class: 'cname' }, h('b', null, name), h('span', null, size)), open,
+    lead, h('span', { class: 'cname' }, h('b', null, name), h('span', null, size),
+      meta.secrets && meta.secrets.length ? h('span', { class: 'cwarn', role: 'note' }, 'May hold a secret: ' + meta.secrets.slice(0, 2).join(', ') + '. Remove it with the x.') : null), open,
     h('button', { type: 'button', title: 'Remove', 'aria-label': 'Remove ' + name, onclick: onRemove }, '×'));
 }
 function axClipboardFiles(cd) {

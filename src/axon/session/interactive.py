@@ -249,6 +249,25 @@ def handle_resume(agent: Agent, session_id: str = "") -> None:
     render_restored_conversation(agent.conversation, chosen, ledger=agent.ledger, path=session_file(agent, chosen))
 
 
+def _assistant_text_and_tools(content: Any, tool_calls: Any = None) -> tuple[str, list[dict[str, Any]]]:
+    """The readable text and tool calls of an assistant message, so a branched chat shows the same replies as the original."""
+    if isinstance(content, str):
+        return content, []
+    texts: list[str] = []
+    uses: list[dict[str, Any]] = []
+    for b in content or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "text" and isinstance(b.get("text"), str):
+            texts.append(b["text"])
+        elif b.get("type") == "tool_use":
+            uses.append({"id": b.get("id"), "name": b.get("name"), "input": b.get("input") or {}})
+    for tc in tool_calls or []:
+        if isinstance(tc, dict) and isinstance(tc.get("function"), dict):
+            uses.append({"id": tc.get("id"), "name": tc["function"].get("name"), "input": {}})
+    return "".join(texts), uses
+
+
 def handle_branch(agent: Agent, name: str = "") -> None:
     """Fork the current conversation into a new session (the original is untouched)."""
     store = agent.session
@@ -277,7 +296,8 @@ def handle_branch(agent: Agent, name: str = "") -> None:
         elif role == "user":
             store.append("user_message", {"role": "user", "content": m.get("content", "")})
         elif role == "assistant":
-            store.append("assistant_turn", {"native": dict(m), "text": "", "tool_uses": [], "usage": None})
+            text, uses = _assistant_text_and_tools(content, m.get("tool_calls"))
+            store.append("assistant_turn", {"native": dict(m), "text": text, "tool_uses": uses, "usage": None})
         elif role == "tool":
             store.append("tool_results", [dict(m)])
     if clean:

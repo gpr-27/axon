@@ -254,7 +254,7 @@ def test_powershell_command_is_encoded_with_utf8_prelude() -> None:
     assert isinstance(argv, list) and "-EncodedCommand" in argv
     script = base64.b64decode(argv[argv.index("-EncodedCommand") + 1]).decode("utf-16-le")
     assert "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8" in script
-    assert script.endswith('Write-Output "hi \'there\'"')
+    assert script.endswith('Write-Output "hi \'there\'"' + plat.PS_EXIT_CODE_SUFFIX)   # then the program's own exit code is passed on
 
 
 def test_cmd_command_line_sets_utf8_codepage() -> None:

@@ -696,6 +696,10 @@ def _budget_row(rt: Any) -> dict[str, Any]:
 
 def budgets(srv: "DashServer") -> dict[str, Any]:
     rows = []
+    try:
+        fresh = srv.index.refs("all", True)        # a rename changes the title, so do not read the cached copy
+    except Exception:
+        fresh = {}
     for rt in srv.all_runtimes():
         try:
             row = _budget_row(rt)
@@ -703,7 +707,8 @@ def budgets(srv: "DashServer") -> dict[str, Any]:
             continue
         title = ""
         try:
-            title = _clean_title(srv.index.lookup(rt.session_id).meta.first_prompt)
+            ref = fresh.get(rt.session_id) or srv.index.lookup(rt.session_id)
+            title = _clean_title(ref.meta.first_prompt)
         except Exception:
             pass
         row["title"] = title or "New chat"

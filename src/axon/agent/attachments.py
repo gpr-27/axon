@@ -218,6 +218,19 @@ def looks_like_typed_drop(text: str, workspace: Path | str) -> bool:
         return False
 
 
+def secret_labels(data: bytes | str | Path) -> list[str]:
+    """What kind of secret a text file's body looks like it holds (the patterns Axon uses for memory files and
+    redaction); empty for binary files, big files and clean ones. Reads at most 256 KB; changes nothing."""
+    try:
+        raw = Path(data).read_bytes()[:256 * 1024] if isinstance(data, Path) else (data.encode("utf-8", "replace") if isinstance(data, str) else data[:256 * 1024])
+        if b"\x00" in raw[:4096]:
+            return []
+        from axon.features.memory_files import scan_secrets
+        return scan_secrets(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return []
+
+
 def ingest_drop(text: str) -> tuple[str, str] | None:
     """(text for the prompt, notice) when *text* is a file drop; None when it is ordinary pasted text."""
     from axon.agent.images import IMAGE_EXTENSIONS, ingest_image_file
@@ -235,6 +248,10 @@ def ingest_drop(text: str) -> tuple[str, str] | None:
                 continue
             att = ingest_file(path)
             chips.append(att.chip)
+            labels = secret_labels(path)
+            if labels:
+                notes.append(f"{att.name} looks like it holds a secret ({', '.join(labels[:3])}). It is sent to the model if "
+                             f"the model reads it. Delete {att.chip} from the line to leave it out.")
             if att.by_reference:
                 notes.append(f"{att.name} is too large to keep a copy; Axon will read it where it is.")
         except ProtectedFile:

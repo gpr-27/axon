@@ -152,6 +152,9 @@ def list_dir(ws: Path, extra: list[Path], rel: str, show_ignored: bool = False) 
     git = git_info(ws)["files"]
     entries: list[dict[str, Any]] = []
     truncated = False
+    ws_root = ws.resolve()
+    inside = target == ws_root or ws_root in target.parents
+    rel_dir = "" if target == ws_root else (rel_to(ws, target) if inside else "")   # resolved once, not once per entry
     try:
         with os.scandir(target) as it:
             for n, e in enumerate(it):
@@ -176,7 +179,7 @@ def list_dir(ws: Path, extra: list[Path], rel: str, show_ignored: bool = False) 
                         size = e.stat(follow_symlinks=False).st_size
                     except OSError:
                         pass
-                relp = rel_to(ws, path)
+                relp = (f"{rel_dir}/{name}" if rel_dir else name) if inside else rel_to(ws, path)
                 if is_dir:
                     pref = relp + "/"
                     code = next((c for k, c in git.items() if k.startswith(pref)), "")

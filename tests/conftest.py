@@ -104,3 +104,36 @@ def other_live_pid():
     finally:
         child.kill()
         child.wait()
+
+
+_FIXTURE_KEY_PREFIXES = ("sk-test-", "test-", "mock-", "AIzaSy_test_")
+
+
+def _is_fixture_key(key: str) -> bool:
+    return bool(key) and (key.startswith(_FIXTURE_KEY_PREFIXES) or key.endswith("-test"))
+
+
+@pytest.fixture(autouse=True)
+def _fixture_keys_need_no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keys such as ``sk-test-1`` are test data. The shipped key check has no bypass for them (a real user key
+    could start the same way); here the check's own HTTP client answers 200 for them, so no test reaches the network."""
+    from axon.providers import keystore, verifier
+
+    class _Http:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def post(self, url, *args, headers=None, **kwargs):
+            h = {k.lower(): str(v) for k, v in (headers or {}).items()}
+            key = h.get("x-api-key") or h.get("api-key") or h.get("authorization", "").removeprefix("Bearer ").strip()
+            if _is_fixture_key(key):
+                return self._real.Response(200, json={}, request=self._real.Request("POST", url))
+            return self._real.post(url, *args, headers=headers, **kwargs)
+
+    monkeypatch.setattr(verifier, "httpx", _Http(verifier.httpx))
+    real_count = keystore.count_models
+    monkeypatch.setattr(keystore, "count_models",
+                        lambda preset, key, *a, **k: None if _is_fixture_key(key or "") else real_count(preset, key, *a, **k))

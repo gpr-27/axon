@@ -58,7 +58,11 @@ def handle_permissions(agent: Any, arg: str) -> CommandResult:
         if k not in KINDS or not spec.strip():
             usage("/permissions session <allow|ask|deny> <rule>")
             return CommandResult(handled=True)
-        rule = perms.add_session_rule(k, spec.strip())
+        try:
+            rule = perms.add_session_rule(k, spec.strip())
+        except ValueError as e:
+            err(str(e))
+            return CommandResult(handled=True)
         ok(f"Session {k} rule {BOLD}{rule}{RST} (not saved)")
         return CommandResult(handled=True)
 

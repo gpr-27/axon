@@ -356,7 +356,7 @@ axReadFolder(root).then(r => console.log(JSON.stringify({ n: r.names.length, tru
 
 def test_search_rows_the_viewer_button_the_menu_and_the_keyboard_way():
     files = APP_JS
-    assert files.count("axDragProps([") >= 4 and "draggable: 'true'" in files            # names and contents results, in the old search tab code and in the Files panel (the left tabs are gone)
+    assert files.count("axDragProps([") >= 2 and "draggable: 'true'" in files            # names and contents results in the Files panel (mountSearch, the old left search tab, was dead code and is removed)
     assert "onclick: () => axAddToChat([f.path])" in files and "'Add to chat'" in files  # viewer toolbar
     for label in ("'Open'", "'Copy path'", "IS_MAC ? 'Reveal in Finder'"):
         assert label in files

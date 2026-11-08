@@ -112,6 +112,12 @@ async function viewChat(sid) {
     if (claimRail(C, tab)) setStatus(C.st);
     drawHead(C); drawRail(C);
     if (C.meta && C.meta.title) setTabTitle(tab, C.meta.title.slice(0, 26));
+    if (C.missing && !C.runtime && !C.feed.children.length) {
+      // a saved tab for a chat that was deleted: say so instead of opening an empty chat that would start a new one
+      composerEl.hidden = true;
+      feed.append(h('div', { class: 'empty-chat', 'data-missing': '1' }, h('h2', null, 'Chat not found'), h('p', { class: 'muted' }, 'This chat was deleted or never saved. Close this tab, or start a new chat.'),
+        h('div', { class: 'formrow' }, h('button', { class: 'btn primary', type: 'button', onclick: () => newChat(C) }, 'New chat'), h('button', { class: 'btn', type: 'button', onclick: () => closeTab(tab) }, 'Close tab'))));
+    }
     if (!C.feed.children.length) feed.append(emptyChat(C));
     feed.scrollTop = feed.scrollHeight;
     const poll = setInterval(() => { if (!C.closed && C.runtime && !document.hidden) refreshState(C, true); }, 4000);
@@ -143,7 +149,7 @@ async function loadHistory(C) {
     C.feed.append(frag);
     if (page.entries.length) C.lastIdx = page.entries[page.entries.length - 1].i;
     wireHistory(C);
-  } catch (e) { if (!/not found/i.test(e.message)) C.feed.append(errorBox(e.message)); }
+  } catch (e) { if (/not found/i.test(e.message)) C.missing = true; else C.feed.append(errorBox(e.message)); }
   if (log) replayLog(C, log.events);
   // transcript entries written after the log (a turn the page did not see): fill the gap so nothing is missing
   if (log) { try { const t = await api('/api/session/' + encodeURIComponent(C.sid) + '?limit=1'); C.lastIdx = t.total - 1; } catch (e) { /* ignore */ } }
@@ -228,6 +234,8 @@ function wireHistory(C) {
   });
 }
 
+const MAX_STREAMS = 4;
+function openStreamCount(except) { return (UI.tabs || []).filter(t => t.C && t.C !== except && t.C.es && t.C.es.readyState !== 2).length; }
 async function refreshState(C, quiet) {
   try {
     const st = await api('/api/chat/state?session=' + encodeURIComponent(C.sid) + '&create=0');
@@ -239,7 +247,11 @@ async function refreshState(C, quiet) {
     // A browser keeps about six connections per site, and every open stream takes one: with a handful of chat tabs open,
     // every other request (even Send) waits forever. A tab that is hidden and idle lets its stream go; it is picked up
     // again when the tab is shown or starts working (this poll runs every few seconds).
-    if (!st.busy && C.feed && C.feed.isConnected && C.feed.offsetParent === null) { if (C.es) { C.es.close(); C.es = null; } }
+    const hiddenTab = !!(C.feed && C.feed.isConnected && C.feed.offsetParent === null);
+    if (!st.busy && hiddenTab) { if (C.es) { C.es.close(); C.es = null; } }
+    // Several chats working at once: a hidden one past the fourth stream lets go too, so two connections stay free for Send and Stop.
+    // It picks up again from its last event number when it is shown or when a stream frees up (this poll runs every few seconds).
+    else if (hiddenTab && openStreamCount(C) >= MAX_STREAMS) { if (C.es) { C.es.close(); C.es = null; } }
     else if (first || !C.es) connectEvents(C, st);
     if (!quiet) { drawHead(C); }
     drawRail(C); drawHeadStatus(C); if (UI.chat === C || !UI.chat) { UI.chat = C; setStatus(st); }
@@ -249,7 +261,10 @@ async function refreshState(C, quiet) {
 function connectEvents(C, st) {
   if (C.closed) return;
   if (C.es) C.es.close();
-  const since = st && st.busy ? 0 : (st ? st.seq : 0);
+  // The first connection starts from now (history was loaded from the transcript). A later one, after the stream was let go of,
+  // resumes after the last event this page applied, so a turn that ended in the meantime is not skipped.
+  const since = C.streamed ? (C.lastSeq || 0) : (st && st.busy ? 0 : (st ? st.seq : 0));
+  C.streamed = true;
   C.lastSeq = Math.max(C.lastSeq || 0, since);        // the newest event applied: a reconnect resumes after it, never replays it
   const es = new EventSource('/api/events?session=' + encodeURIComponent(C.sid) + '&since=' + C.lastSeq);
   C.es = es;
@@ -338,7 +353,7 @@ function modelPicker(C) {
 function modePicker(C) {
   const cur = (C.st && C.st.mode) || 'default';
   const labels = { default: 'Ask before edits and commands', acceptEdits: 'Allow file edits, ask for commands', plan: 'Plan only (read-only)', bypass: 'Run everything without asking' };
-  const sel = h('select', { 'aria-label': 'Permission mode', title: 'What the agent may do without asking', onchange: async () => { try { await runCmd(C, '/mode ' + sel.value); toast('Mode: ' + labels[sel.value]); } catch (e) { toast(e.message); } } },
+  const sel = h('select', { 'aria-label': 'Permission mode', title: 'What the agent may do without asking', onchange: async () => { try { if (!(await confirmBypass(C, sel.value))) { sel.value = (C.st && C.st.mode) || 'default'; return; } await runCmd(C, '/mode ' + sel.value); toast('Mode: ' + labels[sel.value]); } catch (e) { toast(e.message); } } },
     Object.entries(labels).map(([v, l]) => h('option', { value: v, selected: v === cur }, l)));
   return h('span', { class: 'pill' }, 'mode ', sel);
 }
@@ -890,7 +905,7 @@ function buildComposer(C) {
       chips.append(axChipEl(chip, meta, () => { ta.value = ta.value.replace(chip, '').replace(/ {2,}/g, ' '); delete C.chips[chip]; redrawChips(); }));
     }
   };
-  const addChip = (meta) => { const sep = ta.value && !/\s$/.test(ta.value) ? ' ' : ''; ta.value += sep + meta.chip + ' '; C.chips[meta.chip] = meta; redrawChips(); auto(); ta.focus(); };
+  const addChip = (meta) => { const sep = ta.value && !/\s$/.test(ta.value) ? ' ' : ''; ta.value += sep + meta.chip + ' '; C.chips[meta.chip] = meta; redrawChips(); auto(); ta.focus(); if (meta.secrets && meta.secrets.length) toast((meta.name || meta.chip) + ' looks like it holds a secret (' + meta.secrets.slice(0, 3).join(', ') + '). It will be sent to the model unless you remove it with the x on its chip.'); };
   async function upload(file) {
     const tag = h('span', { class: 'chip' }, h('span', { class: 'spin' }), file.name); chips.append(tag);
     try {

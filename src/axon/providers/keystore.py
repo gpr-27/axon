@@ -40,7 +40,6 @@ SOURCE_LABELS = {
 }
 SCOPES = ("user", "project")
 _INVALID = {"", "none", "null", "local", "skip", "sk-placeholder", "your_api_key_here", "your-api-key-here", "replace_me"}
-_TEST_KEY_PREFIXES = ("sk-test-", "test-", "mock-", "AIzaSy_test_")
 
 
 # ─── Masking / validity ────────────────────────────────────────────────────
@@ -365,14 +364,8 @@ def verify_fn(preset: Any, key: str, base_url: str | None = None, model: str | N
     return verify_api_key(preset, key, base_url=base_url, model=model)
 
 
-def _is_fixture_key(key: str) -> bool:
-    return key.startswith(_TEST_KEY_PREFIXES) or key.endswith("-test")
-
-
 def count_models(preset: ProviderPreset | None, key: str, base_url: str | None = None, timeout: float = 6.0) -> int | None:
     """Number of models the endpoint lists for this key (None when unknown / unsupported)."""
-    if _is_fixture_key(key):
-        return None
     try:
         import httpx
         from axon.providers.catalog import effective_base_url

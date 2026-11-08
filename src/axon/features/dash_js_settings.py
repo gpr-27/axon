@@ -71,7 +71,7 @@ async function preferencesTab(body) {
   const rows = d.settings.filter(s => s.key !== 'model');
   const res = h('div');
   body.append(h('div', { class: 'card' }, ...rows.map(s => {
-    const save = async (v) => { try { const r = await api('/api/settings/set', { session: UI.chat ? UI.chat.sid : '', key: s.key, value: v }); toast((s.label) + ' saved'); res.replaceChildren(notice(r.message || 'Saved', 'ok')); if (s.key === 'mode' || s.key === 'trace_level' || s.key === 'effort') refreshStatusSoon();
+    const save = async (v) => { try { if (s.key === 'mode' && !(await confirmBypass(UI.chat, v))) { ctl.value = String(s.value); return; } const r = await api('/api/settings/set', { session: UI.chat ? UI.chat.sid : '', key: s.key, value: v }); toast((s.label) + ' saved'); res.replaceChildren(notice(r.message || 'Saved', 'ok')); if (s.key === 'mode' || s.key === 'trace_level' || s.key === 'effort') refreshStatusSoon();
       if (s.key === 'trace_level' && ['compact', 'normal', 'detailed', 'debug'].includes(v)) { state.trace = v; lsSet('axon-trace', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); if (typeof drawStatus === 'function') drawStatus(); } } catch (e) { res.replaceChildren(notice(e.message, 'bad')); } };
     let ctl;
     if (s.type === 'bool') ctl = h('input', { type: 'checkbox', checked: !!s.value, onchange: (e) => save(e.target.checked), 'aria-label': s.label });

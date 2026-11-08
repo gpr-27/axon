@@ -82,7 +82,8 @@ def test_timed_out_worktree_add_leaves_no_directory_behind(repo: Path, monkeypat
     created: list[Path] = []
 
     def run(cmd, *args, **kwargs):
-        if list(cmd[:3]) == ["git", "worktree", "add"]:
+        # git may carry leading "-c key=value" options (core.longpaths on Windows): match the subcommand anywhere.
+        if cmd[0] == "git" and "worktree" in cmd and "add" in cmd:
             target = Path(cmd[-2])
             target.mkdir(parents=True)
             created.append(target)

@@ -1277,6 +1277,10 @@ class DashServer(ThreadingHTTPServer):
         why = is_protected_path(p)
         if why:
             raise DashError(f"refused: {why}", 403)
+        from axon.permissions.paths import too_broad_for_workspace
+        broad = too_broad_for_workspace(p)
+        if broad:
+            raise DashError(broad, 400)
         with self.lock:
             busy = [r for r in self.rts.values() if r.busy]
             if busy:
@@ -1957,6 +1961,12 @@ def make_server(port: int = DEFAULT_PORT, workspace: Path | str | None = None, a
     if host not in ("127.0.0.1", "::1") or not is_loopback(host):
         raise ValueError(f"the dashboard only listens on loopback, not {host!r}")
     ws = Path(workspace) if workspace else (getattr(getattr(agent, "settings", None), "workspace", None) or Path.cwd())
+    # The first page load asks for several things at once; if two request threads were the first to import the tools
+    # package together, one failed with a KeyError (a 500 on /api/tree). Import it here, once, before any thread runs.
+    try:
+        import axon.tools._files  # noqa: F401
+    except Exception:
+        pass
     return DashServer(port, Path(ws), agent, token)
 
 

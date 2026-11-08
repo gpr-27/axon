@@ -82,19 +82,53 @@ class Lease:
 
 
 @contextlib.contextmanager
+def _create_lock(folder: Path, wait: float = 15.0, stale_after: float = 10.0) -> Iterator[None]:
+    """A mutex made of a file created with O_EXCL, which is atomic on every platform (msvcrt.locking is not reliable
+    for this: it gives up after ten tries and a region past the end of an empty file). A lock file older than
+    ``stale_after`` seconds belongs to a process that died inside the lock and is removed."""
+    path = folder / (LOCK_FILE + ".d")
+    deadline = time.time() + wait
+    held = False
+    while True:
+        try:
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            held = True
+            break
+        except (FileExistsError, PermissionError):      # Windows reports a file that is being deleted as PermissionError
+            try:
+                if time.time() - path.stat().st_mtime > stale_after:
+                    path.unlink()
+                    continue
+            except OSError:
+                pass
+        except OSError:
+            break                                       # a read-only folder: the exclusive create below still decides
+        if time.time() > deadline:
+            break
+        time.sleep(0.01)
+    try:
+        yield
+    finally:
+        if held:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
 def _exclusive(folder: Path) -> Iterator[None]:
     """Only one process at a time decides who takes a free or stale lease. Without this, six processes that all saw
     the same dead holder each removed the lease another had just written, and several believed they held it."""
+    if sys.platform == "win32":
+        with _create_lock(folder):
+            yield
+        return
     fh = None
     try:
+        import fcntl
         fh = open(folder / LOCK_FILE, "a+")
-        if sys.platform == "win32":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh, fcntl.LOCK_EX)
+        fcntl.flock(fh, fcntl.LOCK_EX)
     except (OSError, ImportError):
         pass          # a read-only folder or a platform without locks: fall back to the exclusive create below
     try:

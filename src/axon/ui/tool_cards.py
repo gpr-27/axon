@@ -140,12 +140,20 @@ def name_column_width(names: list[str], width: int = 100) -> int:
 
 def tidy_paths(text: str, workspace: str = "") -> str:
     """*text* with the workspace folder cut off the front of paths and the home folder written as ~."""
+    # A path may be written with either separator (models often write C:/proj/src on Windows), so try both spellings.
+    def cut(text: str, folder: str, replacement: str) -> str:
+        for spelled in dict.fromkeys((folder, folder.replace("\\", "/"), folder.replace("/", "\\"))):
+            for sep in ("/", "\\"):
+                text = text.replace(spelled + sep, replacement + sep if replacement == "~" else "")
+            text = text.replace(spelled, replacement)
+        return text
+
     root = (workspace or os.getcwd()).rstrip("/\\")
     if root and len(root) > 1:
-        text = text.replace(root + os.sep, "").replace(root, ".")
+        text = cut(text, root, ".")
     home = os.path.expanduser("~").rstrip("/\\")
     if home and len(home) > 1:
-        text = text.replace(home + os.sep, "~" + os.sep).replace(home, "~")
+        text = cut(text, home, "~")
     return text
 
 

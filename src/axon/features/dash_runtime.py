@@ -1180,8 +1180,12 @@ class Attachments:
                 raise DashError(f'{Path(name or "file").name[:80]} is a credential or system file, so Axon does not attach it', 403) from None
             except OSError as e:
                 raise DashError(f"could not save the file: {e.strerror or e}", 500) from None
-            return {"kind": "file", "chip": a.chip.replace(tmp.name, safe), "name": safe, "size": len(data),
-                    "stored": a.stored_path.name}
+            res = {"kind": "file", "chip": a.chip.replace(tmp.name, safe), "name": safe, "size": len(data),
+                   "stored": a.stored_path.name}
+            labels = att.secret_labels(data)
+            if labels:
+                res["secrets"] = labels
+            return res
         finally:
             try:
                 tmp.unlink()

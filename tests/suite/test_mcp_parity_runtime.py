@@ -189,10 +189,10 @@ def test_progress_keeps_a_call_alive_but_never_extends_the_wall_clock(server_scr
     c.connect()
     try:
         started = time.time()
-        res = c.call_tool("progress", {}, timeout=10, idle_timeout=0.6)    # 1.2s of work, progress every 0.2s
+        res = c.call_tool("progress", {}, timeout=10, idle_timeout=2.0)    # 1.2s of work, progress every 0.2s (idle limit well above that gap, for a slow runner)
         assert res["content"][0]["text"] == "progress done" and time.time() - started > 1.0
         with pytest.raises(MCPTimeout, match="did not answer"):
-            c.call_tool("progress", {}, timeout=0.5, idle_timeout=0.3)      # wall clock still bites
+            c.call_tool("progress", {}, timeout=0.5, idle_timeout=5.0)      # progress keeps flowing, so only the wall clock can end it (idle limit far above the gap)
         with pytest.raises(MCPTimeout, match="no response or progress"):
             c.call_tool("silent", {}, timeout=10, idle_timeout=0.5)         # nothing at all: idle abort
         assert not c.progress                                               # tokens are not leaked

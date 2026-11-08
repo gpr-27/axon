@@ -88,7 +88,7 @@ async function viewAgent(subSid) {
     const m = page.meta; C.first = page.first;
     const facts = h('div', { class: 'sub' }); const controls = h('div', { class: 'controls' }); const panels = h('div'); const live = h('div');
     const earlier = h('button', { class: 'btn earlier', hidden: !page.has_before, onclick: async () => { const p = await api('/api/session/' + encodeURIComponent(subSid) + '?limit=40&before=' + C.first); const f = document.createDocumentFragment(); historyNodes(p.entries, C).forEach(x => f.append(x)); earlier.after(f); C.first = p.first; earlier.hidden = !p.has_before; } }, 'Load earlier messages');
-    main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Subagent ' + num + ': ' + m.title), facts), controls), panels, live, earlier, feed, h('p', { class: 'muted', id: 'agent-note' }));
+    main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Subagent ' + num + ': ' + ((D && D.subagent && D.subagent.title) || m.title)), facts), controls), panels, live, earlier, feed, h('p', { class: 'muted', id: 'agent-note' }));
     historyNodes(page.entries, C).forEach(x => feed.append(x)); if (page.entries.length) C.lastIdx = page.entries[page.entries.length - 1].i;
     wireHistory(C);
     const stepBox = h('div'); let stepsShown = new Set();

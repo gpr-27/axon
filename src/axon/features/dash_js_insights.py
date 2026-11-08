@@ -72,11 +72,18 @@ async function viewInsights(rest) {
         body.append(h('p', null, 'This session used ', h('b', null, tok(d.input)), ' input and ', h('b', null, tok(d.output)), ' output tokens over ' + d.calls + ' calls' + (d.actual_known ? ' and cost ' : '') + (d.actual_known ? usd(d.actual) : '') + '. What the same tokens would cost on other models:'),
           table([{ label: 'Model', key: 'model' }, { label: 'With cache', cls: 'r', fmt: r => r.priced ? usd(r.with_cache) : 'no price' }, { label: 'Without cache', cls: 'r', fmt: r => r.priced ? usd(r.without_cache) : '' }, { label: 'Against actual', cls: 'r', fmt: r => r.priced && r.vs_actual_pct != null ? (r.vs_actual_pct > 0 ? '+' : '') + r.vs_actual_pct + '%' : '' }, { label: '', fmt: r => r.used ? 'used here' : '' }], d.rows));
       } else if (tab === 'ctxdiff') {
-        body.append(d.ok ? h('pre', { class: 'out' }, (d.lines || []).join('\n')) : notice(d.message || 'Nothing to compare yet: it needs two model calls.', 'warn'));
+        body.append(d.ok && (d.lines || []).length ? h('pre', { class: 'out' }, d.lines.join('\n')) : notice(d.message || 'Nothing to compare yet: it needs two model calls.', d.ok ? 'info' : 'warn'));
       } else if (tab === 'receipts') {
         body.append(!d.answer_found ? h('p', { class: 'muted' }, 'No finished answer to check yet.') : (d.claims.length ? table([{ label: 'Claim in the last answer', cls: 't', key: 'claim' }, { label: 'Supported', fmt: r => r.supported ? h('span', { class: 'good' }, 'yes') : h('span', { class: 'bad' }, 'no') }, { label: 'Behind it', cls: 't', key: 'call' }, { label: 'Note', cls: 't', key: 'note' }], d.claims) : h('p', { class: 'muted' }, 'The last answer made no claims that can be checked against a tool call.')), h('p', { class: 'muted' }, 'A heuristic: it matches claims about files and commands to the tool calls of that turn.'));
       } else if (tab === 'compaction') {
-        body.append(d.receipt ? kvTable(d.receipt) : h('p', { class: 'muted' }, 'This conversation has not been compacted.'));
+        if (!d.receipt) body.append(h('p', { class: 'muted' }, 'This conversation has not been compacted.'));
+        else {
+          const r = d.receipt; const rep = Array.isArray(r.replaced) ? r.replaced : [];
+          body.append(kvTable({ 'When': r.t ? new Date(r.t * 1000).toLocaleString() : '', 'Started by': r.trigger === 'manual' ? 'you (/compact)' : (r.trigger === 'auto' ? 'automatic compaction' : (r.trigger || '')),
+            'Messages': r.messages_before + ' to ' + r.messages_after, 'Tokens (estimated)': (r.tokens_before || 0).toLocaleString() + ' to ' + (r.tokens_after || 0).toLocaleString() }));
+          if (r.summary) body.append(h('h3', null, 'Summary kept in place of the old messages'), h('pre', { class: 'out' }, String(r.summary)));
+          if (rep.length) body.append(h('h3', null, 'Messages that were replaced (' + rep.length + ')'), table([{ label: '#', key: 'index' }, { label: 'What', cls: 't', key: 'label' }, { label: 'Tokens', key: 'tokens' }], rep));
+        }
       }
     } catch (e) { body.append(h('div', { class: 'notice warn' }, e.message)); }
   }, { key: 'insights:' + tab, hash: '#/insights/' + tab, title: 'Insights' });

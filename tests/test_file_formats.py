@@ -685,7 +685,10 @@ def test_mention_of_plain_text_is_unchanged(tmp_path):
 def test_toml_falls_back_to_tomli_on_python_310(ctx, workspace, monkeypatch):
     """Python 3.10 has no tomllib; the tomli backport must be used instead of reporting the file as invalid."""
     import sys
-    import tomllib as real
+    try:
+        import tomllib as real           # 3.11+
+    except ModuleNotFoundError:
+        import tomli as real             # 3.10: the declared dependency (pyproject: tomli; python_version < '3.11')
     monkeypatch.setitem(sys.modules, "tomllib", None)      # `import tomllib` now raises ModuleNotFoundError
     monkeypatch.setitem(sys.modules, "tomli", real)        # what the backport provides
     (workspace / "a.toml").write_text('[tool]\nname = "x"\n')

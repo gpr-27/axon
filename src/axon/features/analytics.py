@@ -410,13 +410,13 @@ def load_traces(since: float | None = None, project: str | None = None, until: f
     return out
 
 
-def _transcript_info(project: str, session: str) -> tuple[str, int]:
-    """(first user prompt, number of user messages) from a session transcript."""
+def _transcript_info(project: str, session: str) -> tuple[str, int, str]:
+    """(renamed title or first user prompt, number of user messages, renamed title) from a session transcript."""
     path = _projects_root() / project / "sessions" / session / storage.SESSION_FILE
     if not path.is_file():
         path = _projects_root() / project / "sessions" / f"{session}.jsonl"  # flat layout
     if not path.is_file():
-        return "", 0
+        return "", 0, ""
     try:
         from axon.session.store import iter_records
         records: Iterable[dict[str, Any]] = iter_records(path)
@@ -435,7 +435,7 @@ def _transcript_info(project: str, session: str) -> tuple[str, int]:
                 renamed = str(data.get("title") or "")
     except Exception:
         pass
-    return renamed or title, n
+    return renamed or title, n, renamed
 
 
 # ─── Aggregation ───────────────────────────────────────────────────────────
@@ -573,10 +573,9 @@ def collect(period: Period, project: str | None = None, scope: str = "", today: 
     for s in srows[:200]:
         s.turns = trace_turns.get(s.id, 0)
         title = titles.get(s.id, "")
-        if not title or not s.turns:
-            t_title, n_user = _transcript_info(s.project, s.id)
-            title = title or t_title
-            s.turns = s.turns or n_user
+        t_title, n_user, renamed = _transcript_info(s.project, s.id)     # a rename wins over the first prompt
+        title = renamed or title or t_title
+        s.turns = s.turns or n_user
         s.title = _clean(title, 120)
 
     if project:

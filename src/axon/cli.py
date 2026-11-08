@@ -880,9 +880,26 @@ def expand_agent_mentions(line: str, workspace: Path) -> str:
     return f"{out}\n\n[The user @-mentioned a subagent: delegate the relevant work to it with the Task tool ({note}).]"
 
 
-def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000) -> str:
+def _warn_secret_in_mention(name: str, labels: list[str]) -> bool:
+    """Terminal: say that a mentioned file holds what looks like a secret, and let the person leave it out.
+    Never blocks: Enter (or a non-interactive run) sends it as written. True = keep the file in the message."""
+    from axon.ui.theme import GOLD, RST, SLATE, WHITE
+    what = ", ".join(labels[:3])
+    print(f"  {GOLD}Warning:{RST} {WHITE}{name}{RST} {SLATE}looks like it holds a secret ({what}). Its text will be sent to the model.{RST}")
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return True
+        answer = input(f"  {SLATE}Send it anyway? [Y/n] {RST}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return True
+    return answer not in ("n", "no")
+
+
+def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000, warn_secrets: Any = None) -> str:
     """Inline `@path` mentions: files as fenced context, directories as a listing, and
-    `@server:uri` MCP resources. Files over 256 KB are skipped; AXON_DISABLE_FILE_MENTIONS=1 disables it."""
+    `@server:uri` MCP resources. Files over 256 KB are skipped; AXON_DISABLE_FILE_MENTIONS=1 disables it.
+    *warn_secrets*, when given, is called as ``warn_secrets(name, labels)`` for a file whose text looks like it holds
+    a secret; it returns False to leave that file out. The text is never changed."""
     if "@" not in line or line.startswith("/"):
         return line
     if os.environ.get("AXON_DISABLE_FILE_MENTIONS", "").strip().lower() in ("1", "true", "yes"):
@@ -904,6 +921,12 @@ def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000) -> str
             if is_protected_path(p) or is_secret_file(p.name):
                 line = line.replace(f"@{m}", f"[{m}: protected file, not sent to the model]")
                 continue
+            from axon.agent.images import MODEL_IMAGE_EXTENSIONS
+            if p.suffix.lower() in MODEL_IMAGE_EXTENSIONS and not re.search(r"[\s\]]", str(p.resolve())):
+                # A picture goes to the model as a picture, the same as a dragged one: name it by its full path (the
+                # folder this process runs in is not always the workspace) and the turn turns it into one image block.
+                line = line.replace(f"@{m}", f"[Image: {p.resolve()}]")
+                continue
             from axon.tools.file_formats import detect_kind, extract
             if detect_kind(p) not in ("text", "csv", "json", "jsonl", "yaml", "toml", "xml", "html", "svg", "log"):
                 text = extract(p, limit=2000).text      # Word, Excel, PDF, images, binaries: readable text, never bytes
@@ -913,6 +936,12 @@ def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000) -> str
                 text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        if warn_secrets is not None:
+            from axon.features.memory_files import scan_secrets
+            labels = scan_secrets(text)
+            if labels and not warn_secrets(m, labels):
+                line = line.replace(f"@{m}", f"[{m}: left out at your request]")
+                continue
         note = ""
         if len(text) > limit:
             text, note = text[:limit], f"\n[... truncated at {limit:,} characters ...]"
@@ -1035,7 +1064,8 @@ def _stop_loops(agent: Any) -> None:
 
 def _print_turn(agent: Any, prompt: str, fmt: str, renderer: Any = None) -> int:
     _journal("prompt", {"text": prompt, "source": "print", "format": fmt}, agent=agent)
-    prompt = expand_file_mentions(expand_agent_mentions(prompt, agent.settings.workspace), agent.settings.workspace)
+    prompt = expand_file_mentions(expand_agent_mentions(prompt, agent.settings.workspace), agent.settings.workspace,
+                                  warn_secrets=_warn_secret_in_mention)
     t0 = time.time()
     try:
         result = agent.run_turn(prompt)
@@ -1380,7 +1410,8 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
             line, follow_ups = parts[0], parts[1:]
 
     _journal("prompt", {"text": line, "source": "queue" if from_queue else "typed"}, agent=agent)
-    line = expand_file_mentions(expand_agent_mentions(line, agent.settings.workspace), agent.settings.workspace)
+    line = expand_file_mentions(expand_agent_mentions(line, agent.settings.workspace), agent.settings.workspace,
+                                warn_secrets=_warn_secret_in_mention)
 
     if follow_ups:
         for extra in follow_ups:

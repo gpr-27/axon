@@ -433,6 +433,8 @@ class Agent:
         self._turn_counter = 0
         self._approval_lock = threading.Lock()
         self._partial_results: list[ToolResultBlock | None] = []
+        self._last_cut_usage = Usage()
+        self._cut_usage = Usage()       # tokens the provider reported before a stream was cut (still billed to the person)
         self._current_turn_prompt = ""
         # Set when the last turn ended on a provider error: {"prompt": str, "resume": bool}. /retry uses it.
         self.last_failed_turn: dict[str, Any] | None = None
@@ -1733,8 +1735,17 @@ class Agent:
         """Ledger, usage log, LLMCallEnd and cache status for one finished model call. Returns (cost, model)."""
         cost = 0.0
         call_model = (getattr(turn, "model", None) if turn is not None else None) or self.settings.model
+        cut = Usage()
         if turn is not None:
             cost = _as_float(record_usage(self.ledger, call_model, turn.usage, source="main" if not self.is_subagent else self.agent_name))
+        elif outcome == "error":
+            cut = getattr(self, "_cut_usage", None) or Usage()
+            self._cut_usage = Usage()
+            if cut.input or cut.output or cut.cache_read or cut.cache_write:
+                cost = _as_float(record_usage(self.ledger, call_model, cut, source="main" if not self.is_subagent else self.agent_name))
+            else:
+                cut = Usage()
+        self._last_cut_usage = cut
         t0, t1 = self._last_call_window
         cache_status = None
         if turn is not None and fingerprint is not None:
@@ -1743,10 +1754,12 @@ class Agent:
         self._annotate_manifest(cost, cache_status, call_model, turn)
         if turn is not None:
             self._log_usage(call_model, turn.usage, cost, self.agent_name if self.is_subagent else "main", t1 - t0)
+        elif cut != Usage():
+            self._log_usage(call_model, cut, cost, self.agent_name if self.is_subagent else "main", t1 - t0)
         self._emit(LLMCallEnd(
             iteration=iteration,
             model=call_model,
-            usage=turn.usage if turn is not None else Usage(),
+            usage=turn.usage if turn is not None else cut,
             cost=cost,
             duration_s=max(0.0, t1 - t0),
             stop_reason=turn.stop_reason if turn is not None else "error",
@@ -1756,7 +1769,7 @@ class Agent:
             text_chars=len(turn.text) if turn is not None else 0,
             outcome=outcome,
             error=str(err) if err else "",
-            cost_breakdown=cost_breakdown(call_model, turn.usage) if turn is not None else {},
+            cost_breakdown=cost_breakdown(call_model, turn.usage if turn is not None else cut) if (turn is not None or cut != Usage()) else {},
             cache_miss_cause=cache_status.cause if cache_status is not None else "",
             cache_miss_detail=self._cache_detail(call_model, turn, cache_status),
             context_used=context_tokens,
@@ -2011,6 +2024,7 @@ class Agent:
             if turn is not None:
                 total_usage = total_usage + turn.usage
             cost, call_model = self._record_call(turn, outcome, err, iterations, fingerprint, context_tokens)
+            total_usage = total_usage + self._last_cut_usage
             t0, t1 = self._last_call_window
 
             if outcome == "error" and overflow_retries < MAX_OVERFLOW_RETRIES and large_input.is_context_overflow(err):
@@ -2424,6 +2438,12 @@ class Agent:
                         return AssistantTurn(blocks=[TextBlock(text=INTERRUPTED_NOTE)]), "interrupted", None
                     continue
                 self._last_call_window = (started, time.time())
+                self._cut_usage = Usage()
+                try:       # a stream cut part-way was still processed (and billed) by the provider: keep what it reported
+                    with lock:
+                        self._cut_usage = self.provider.finalize().usage
+                except BaseException:
+                    pass
                 return None, "error", e
 
     def _should_retry(self, exc: BaseException) -> bool:

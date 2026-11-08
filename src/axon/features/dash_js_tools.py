@@ -191,7 +191,7 @@ function quickForms(out) {
   const btn = (label, fn, cls) => h('button', { class: 'btn ' + (cls || ''), onclick: fn }, label);
   return [
     card('Model', h('div', { class: 'formrow' }, modelSel, btn('Switch', () => show('/model ' + modelSel.value), 'primary'))),
-    card('Permission mode', h('div', { class: 'formrow' }, modeSel, btn('Apply', () => show('/mode ' + modeSel.value)))),
+    card('Permission mode', h('div', { class: 'formrow' }, modeSel, btn('Apply', async () => { if (await confirmBypass(UI.chat, modeSel.value)) show('/mode ' + modeSel.value); }))),
     card('Free up context', h('div', { class: 'formrow' }, focus, btn('Compact', () => show(('/compact ' + focus.value).trim())))),
     card('Start over', h('div', { class: 'formrow' }, btn('Clear conversation', () => confirm('Start a fresh session? The old one stays in Sessions.') && show('/clear')), btn('Show prompts to rewind to', () => show('/rewind points')))),
     card('Rewind', h('div', { class: 'formrow' }, rn, rmode, btn('Rewind', () => rn.value.trim() && confirm('Rewind to prompt ' + rn.value + '?') && show('/rewind to ' + rn.value.trim() + ' ' + rmode.value), 'danger'))),
@@ -274,7 +274,7 @@ function cycleMode() {
   if (!sel) {   // the composer footer has a mode button instead of a select
     const C = UI.chat; if (!C || !C.foot || !UI.active || UI.active.route !== 'chat' || typeof WB_MODES === 'undefined') return false;
     const i = WB_MODES.findIndex(m => m[0] === ((C.st && C.st.mode) || 'default')), nx = WB_MODES[(i + 1) % WB_MODES.length];
-    runCmd(C, '/mode ' + nx[0]).then(() => toast('Mode: ' + nx[1])).catch((e) => toast(e.message)); return true;
+    confirmBypass(C, nx[0]).then((go) => go && runCmd(C, '/mode ' + nx[0]).then(() => toast('Mode: ' + nx[1]))).catch((e) => toast(e.message)); return true;
   }
   if (sel.disabled) return false;
   const opts = [...sel.options].filter(o => !o.disabled); if (opts.length < 2) return false;

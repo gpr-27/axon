@@ -141,6 +141,8 @@ class IgnoreMatcher:
         self._by_dir[d] = rules
 
     def ignored(self, path: Path, is_dir: bool) -> bool:
+        if not any(self._by_dir.values()):
+            return False             # no ignore file loaded anywhere: nothing can match
         result = False
         # Evaluate from the outermost directory inward so deeper rules win.
         try:

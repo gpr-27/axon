@@ -306,10 +306,21 @@ while (pos < text.length) {
   const t0 = process.hrtime.bigint(); liveDraw(cur, cur.proseText, false);
   if (pos > 190000) ms.push(Number(process.hrtime.bigint() - t0) / 1e6);
 }
-ms.sort((a, b) => a - b); console.log(ms[Math.floor(ms.length / 2)]);
+ms.sort((a, b) => a - b);
+// How fast this machine is: the best of five runs of a fixed plain-JS workload, so a slow CI runner gets a
+// proportionally longer budget while the limit stays 8 ms on the development machine (it takes 1.8 ms there).
+let calib = 1e9;
+for (let k = 0; k < 5; k++) {
+  const c0 = process.hrtime.bigint();
+  for (let r = 0; r < 40; r++) '- list item with [link](https://x.y) text\n'.repeat(500).replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>').split('\n');
+  calib = Math.min(calib, Number(process.hrtime.bigint() - c0) / 1e6);
+}
+console.log(ms[Math.floor(ms.length / 2)], calib);
 """)
-    print(f"\n200k with no blank line (worst case), median: {float(out):.2f} ms/frame")
-    assert float(out) < 8
+    frame, calib = (float(x) for x in out.split())
+    budget = 8 * max(1.0, calib / 1.8)
+    print(f"\n200k with no blank line (worst case), median: {frame:.2f} ms/frame, budget {budget:.1f} ms (machine factor {calib / 1.8:.2f})")
+    assert frame < budget       # a slow runner scales the limit; text that costs more per frame as it grows is still far over it
 
 
 # ─── terminal ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -381,10 +392,14 @@ def test_unchanged_frame_is_not_rewritten(live_spinner):
     sp.start("Thinking")
     time.sleep(0.2)
     fake.writes.clear()
+    t0 = time.perf_counter()
     for _ in range(10):
         sp.nudge()
         time.sleep(0.01)
-    assert len(fake.writes) <= 3                      # the glyph/clock may tick, but a nudge alone redraws nothing
+    elapsed = time.perf_counter() - t0
+    # The glyph/clock may tick once per spinner interval (0.05 s) however slow the machine's sleeps are; a nudge
+    # alone redraws nothing, so ten nudges would otherwise have written ten times.
+    assert len(fake.writes) <= int(elapsed / 0.05) + 2 and len(fake.writes) < 10
 
 
 def test_synchronized_output_wraps_whole_frames_only_when_supported(monkeypatch, live_spinner):

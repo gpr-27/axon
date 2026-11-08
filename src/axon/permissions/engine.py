@@ -36,7 +36,7 @@ from typing import Any, Literal
 from axon.storage import axon_home as _axon_home
 from axon.config import Mode, Settings
 from axon.permissions.paths import additional_dirs, is_protected_path, is_within, outside_allowlist
-from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, git_call, parse_rule, redirect_targets, split_shell_commands,
+from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, git_call, parse_rule, validate_rule_spec, redirect_targets, split_shell_commands,
                                     strip_wrappers, tool_paths)
 
 DecisionOutcome = Literal["allow", "ask", "deny"]
@@ -404,6 +404,9 @@ class PermissionEngine:
                 return Decision("deny", f"Access to protected credential location '{cred}' is blocked.")
         paths = tool_paths(name, args, keep_prefixed=True)
         for p in paths:
+            if "\x00" in str(p):
+                return Decision("deny", "The path contains a NUL character (a zero byte), which a file name cannot hold. "
+                                        "Send the path again without it.")
             why = is_protected_path(p, ws)
             if why:
                 return Decision("deny", f"Access to {why} is blocked.")
@@ -507,7 +510,7 @@ class PermissionEngine:
 
     # ── rule management ──
     def add_session_rule(self, kind: RuleKind, spec: str) -> Rule:
-        rule = parse_rule(spec)
+        rule = parse_rule(validate_rule_spec(spec))
         self.session_rules.append(RuleEntry(kind, rule, "session"))
         return rule
 
@@ -524,7 +527,7 @@ class PermissionEngine:
 
     def add_rule(self, kind: RuleKind, spec: str, project_dir: Path | None = None) -> Rule:
         """Persist a rule into <ws>/.axon/settings.local.json and activate it."""
-        rule = parse_rule(spec)
+        rule = parse_rule(validate_rule_spec(spec))
         spec_s = str(rule)
         path = self.local_settings_path(project_dir)
         from axon.session.store import read_json_object_strict

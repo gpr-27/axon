@@ -398,7 +398,7 @@ def compact_image_paths(text: str) -> tuple[str, list[ImageAttachment]]:
 
     # 1. Match [Image: <path>] or [Image #N]
     bracket_re = re.compile(r"\[Image:\s*([^\s\]]+)\]", re.IGNORECASE)
-    for match in bracket_re.findall(text):
+    for match in dict.fromkeys(bracket_re.findall(text)):      # one picture named twice is one attachment
         att = ingest_image_file(match)
         if att:
             attachments.append(att)

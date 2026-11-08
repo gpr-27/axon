@@ -38,7 +38,8 @@ def test_verify_api_key_placeholder_rejection():
 
 
 def test_verify_api_key_mock_test_key():
-    # Known test keys bypass network
+    # Reason changed: the shipped code no longer skips the request for fixture-looking keys; the suite-wide
+    # fixture in tests/conftest.py answers them offline, so this still asserts the call path returns OK.
     ok, msg = verify_api_key("gemini", "AIzaSy_test_12345")
     assert ok is True
     assert msg == "OK"

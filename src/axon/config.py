@@ -670,6 +670,17 @@ def _resolve_api_key(settings: Settings, interactive: bool = True) -> Settings:
             return settings.model_copy(update={"api_key": SecretStr("local")})
         return settings
 
+    if _configured_preset(settings) is None:
+        # A custom endpoint has its own key name, tied to its host: it wins over AXON_API_KEY (AgentRouter's slot).
+        try:
+            from axon.providers.catalog import custom_key_var, find_api_key
+            own = find_api_key([custom_key_var(settings.base_url)])
+        except Exception:
+            own = None
+        if own and own not in INVALID_KEY_PLACEHOLDERS and own != val:
+            if not val or val in INVALID_KEY_PLACEHOLDERS or val == os.environ.get("AXON_API_KEY", "").strip():
+                return settings.model_copy(update={"api_key": SecretStr(own)})
+
     if val and val not in INVALID_KEY_PLACEHOLDERS:
         return settings
 

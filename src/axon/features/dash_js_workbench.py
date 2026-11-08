@@ -195,7 +195,7 @@ function wbTitleSync() {
   const b = document.getElementById('chat-title'); if (!b) return;
   const t = UI.active; const C = UI.chat;
   const isChat = !!(t && t.route === 'chat' && C);
-  if (isChat && C.meta && C.meta.title && t.title !== C.meta.title.slice(0, 26)) { t.title = C.meta.title.slice(0, 26); drawTabs(); }   // the tab carries the chat's name
+  if (isChat && C.tab === t && C.meta && C.meta.title && t.title !== C.meta.title.slice(0, 26)) { t.title = C.meta.title.slice(0, 26); drawTabs(); }   // the tab carries the chat's name
   b.hidden = !isChat; b.disabled = !isChat; b.title = 'Chat options: rename, fork, share, delete'; b.setAttribute('aria-label', 'Chat options');
   b.replaceChildren(h('span', { class: 'ct-t' }, 'Chat options'), wbIco('chevd'));
 }
@@ -208,7 +208,7 @@ function wbTitleMenu(anchor) {
     '-', { label: 'Rename…', disabled: !sid, run: () => wbRename(C) },
     { label: 'Fork into a new chat', disabled: !sid, run: async () => { try { toast('Forking this chat…'); const st = await api('/api/chat/fork', { session: sid }); location.hash = '#/chat/' + encodeURIComponent(st.session); } catch (e) { toast(e.message); } } },
     { label: 'Share…', disabled: !(C.meta && C.meta.share !== false && sid), run: () => shareModal({ kind: 'session', id: sid }) },
-    '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace', v); C.feed.className = 'feed t-' + v; document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
+    '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); drawStatus(); document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
     '-', { label: can ? (notifyOn ? 'Notifications: on (turn off)' : 'Notify me when a turn finishes') : 'Notifications unavailable here', disabled: !can, title: 'A desktop notification when a turn ends or Axon needs permission while this tab is in the background',
       run: async () => { if (notifyOn) { lsSet('axon-notify', '0'); toast('Notifications off'); return; } try { const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission(); if (p === 'granted') { lsSet('axon-notify', '1'); toast('You will be told when a turn finishes or Axon needs you.'); } else toast('The browser did not allow notifications.'); } catch (e) { toast(e.message); } } },
     '-', { label: 'Delete this chat…', cls: 'danger', disabled: !sid, run: () => wbDelete(C) }]);
@@ -310,7 +310,7 @@ function wbFiles(P) {
   let tm = 0;
   const grep = async () => {
     const q = input.value.trim().slice(1).trim(); if (q.length < 2) { showRes([]); return; }
-    try { const d = await api('/api/files/grep?q=' + encodeURIComponent(q)); showRes(d.matches.length ? d.matches.slice(0, 200).map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path), draggable: 'true', title: m.path + ':' + m.line + '  (drag into the chat to attach the file)' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text))) : [h('p', { class: 'muted fp-note' }, 'Nothing found.')]); } catch (er) { toast(er.message); }
+    try { const d = await api('/api/files/grep?q=' + encodeURIComponent(q)); showRes(d.matches.length ? d.matches.slice(0, 200).map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path), draggable: 'true', title: m.path + ':' + m.line + '  (drag into the chat to attach the file)' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text))).concat(d.skipped_large ? [h('p', { class: 'muted fp-note' }, d.skipped_large + ' large file' + (d.skipped_large === 1 ? ' was' : 's were') + ' not searched.')] : []) : [h('p', { class: 'muted fp-note' }, d.skipped_large ? 'Nothing found. ' + d.skipped_large + ' large file' + (d.skipped_large === 1 ? ' was' : 's were') + ' not searched.' : 'Nothing found.')]); } catch (er) { toast(er.message); }
   };
   input.addEventListener('input', () => { clearTimeout(tm); const v = input.value; showRes([]); if (v.trim().startsWith('?')) { tm = setTimeout(grep, 350); return; } TREE.filter = v; TREE.rows = treeFlatten(); treePaint(); });
   input.addEventListener('keydown', async (e) => { const v = input.value.trim(); if (e.key !== 'Enter' || v.startsWith('?') || !v) return; try { const d = await api('/api/files/search?q=' + encodeURIComponent(v)); showRes(d.files.length ? d.files.slice(0, 200).map(hit) : [h('p', { class: 'muted fp-note' }, 'No file matches.')]); } catch (er) { toast(er.message); } });
@@ -675,8 +675,26 @@ function wbFooter(C) {
   });
   effort.addEventListener('click', () => { const cur = (C.st && C.st.effort) || ''; wbMenu(effort, [{ head: 'Effort' }, ...[['reflex', 'Low'], ['balanced', 'Medium'], ['synapse', 'High'], ['quantum', 'Highest']].map(([v, l]) => ({ label: l, on: effortWord(cur).startsWith(l), run: async () => { try { await runCmd(C, '/effort ' + v); toast('Effort: ' + l); } catch (e) { toast(e.message); } } }))], { up: true }); });
   mode.addEventListener('click', () => { const cur = (C.st && C.st.mode) || 'default';
-    wbMenu(mode, [{ head: 'Permission mode' }, ...WB_MODES.map(([v, w, d]) => ({ label: w, hint: d, on: v === cur, cls: 'mode-' + v, run: async () => { try { await runCmd(C, '/mode ' + v); toast('Mode: ' + w); } catch (e) { toast(e.message); } } }))], { up: true }); });
+    wbMenu(mode, [{ head: 'Permission mode' }, ...WB_MODES.map(([v, w, d]) => ({ label: w, hint: d, on: v === cur, cls: 'mode-' + v, run: async () => { try { if (!(await confirmBypass(C, v))) return; await runCmd(C, '/mode ' + v); toast('Mode: ' + w); } catch (e) { toast(e.message); } } }))], { up: true }); });
   return root;
+}
+// Choosing "Runs without asking" takes one confirmation per chat; every other mode switches at once.
+const BYPASS_OK = new Set();
+function confirmBypass(C, mode) {
+  const key = (C && C.sid) || 'new-chat';
+  if (mode !== 'bypass' || BYPASS_OK.has(key) || ((C && C.st && C.st.mode) || 'default') === 'bypass') return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const scrim = h('div', { class: 'scrim', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Run without asking' });
+    const done = (yes) => { scrim.remove(); if (yes) BYPASS_OK.add(key); resolve(yes); };
+    const no = h('button', { class: 'btn primary', type: 'button', onclick: () => done(false) }, 'Keep asking first');
+    const yes = h('button', { class: 'btn', type: 'button', onclick: () => done(true) }, 'Run without asking in this chat');
+    scrim.addEventListener('click', (e) => { if (e.target === scrim) done(false); });
+    scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape') done(false); });
+    scrim.append(h('div', { class: 'modal' }, h('h3', null, 'Run without asking?'),
+      h('p', { style: 'color:var(--bad)' }, 'Axon will edit files and run commands in this chat without asking you first. Rules that deny a command still apply.'),
+      h('div', { class: 'acts' }, no, yes)));
+    document.body.append(scrim); no.focus();
+  });
 }
 const WB_MODES = [['default', 'Asks first', 'Ask before edits and commands'], ['acceptEdits', 'Edits allowed', 'Allow file edits, ask for commands'], ['plan', 'Plan only', 'Read-only, writes a plan'], ['bypass', 'Runs without asking', 'No approval prompts']];
 function wbFooterDraw(C) {

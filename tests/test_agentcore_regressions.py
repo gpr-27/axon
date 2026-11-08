@@ -92,8 +92,10 @@ def test_cut_stream_is_reported_not_returned_as_the_final_answer(tmp_path, wire:
         home.mkdir()
         ws.mkdir()
         repo = Path(__file__).resolve().parents[1]
-        env = {k: os.environ[k] for k in ("PATH", "TMPDIR", "LANG") if k in os.environ}
-        env.update({"HOME": str(home), "AXON_HOME": str(home / ".axon"), "AXON_BASE_URL": f"http://127.0.0.1:{srv.server_address[1]}",
+        # Windows needs SYSTEMROOT (sockets, DLLs), COMSPEC and PATHEXT (the shell) or Python cannot start or connect.
+        env = {k: os.environ[k] for k in ("PATH", "TMPDIR", "LANG", "SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+               if k in os.environ}
+        env.update({"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home), "LOCALAPPDATA": str(home), "AXON_HOME": str(home / ".axon"), "AXON_BASE_URL": f"http://127.0.0.1:{srv.server_address[1]}",
                     "AXON_API_KEY": "sk-test", "AXON_MODEL": "claude-sonnet-4-6" if wire == "anthropic" else "gpt-4o",
                     "AXON_OFFLINE": "1", "AXON_NO_UPDATE_CHECK": "1", "AXON_TITLE_LLM": "0", "AXON_TIPS_LLM": "0",
                     "AXON_PROMPT_SUGGESTIONS": "0", "AXON_NO_NOTIFY": "1", "PYTHONPATH": str(repo / "src"), "NO_COLOR": "1"})

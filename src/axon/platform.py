@@ -739,7 +739,9 @@ def _looks_like_paste(text: str) -> bool:
     """
     if len(text) < 2 or "\x1b" in text or not ("\r" in text or "\n" in text):
         return False
-    body = text.rstrip("\r\n")
+    # Enter pressed before and after a typed line (Enter, text, Enter read in one chunk while Axon was busy) is
+    # still typed input: only a line break *between* text counts, so leading and trailing ones are ignored.
+    body = text.strip("\r\n")
     if not body.strip():
         return False
     return "\r" in body or "\n" in body or len(text) >= _PASTE_MIN_CHARS
@@ -1218,6 +1220,11 @@ _PS_PRELUDE = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
                "$ProgressPreference='SilentlyContinue';")
 
 
+# PowerShell ends a -Command / -EncodedCommand run with exit code 1 whenever the last command failed, whatever the
+# program's own code was (exit 3 became 1). Handing the native program's code on keeps "exited with code 3" true.
+PS_EXIT_CODE_SUFFIX = "\nif (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }"
+
+
 def powershell_encoded(script: str) -> str:
     return base64.b64encode((_PS_PRELUDE + "\n" + script).encode("utf-16-le")).decode("ascii")
 
@@ -1244,7 +1251,8 @@ def shell_command_argv(command: str, info: ShellInfo | None = None) -> list[str]
         argv = [info.path, "-NoLogo", "-NoProfile", "-NonInteractive"]
         if IS_WINDOWS:
             argv += ["-ExecutionPolicy", "Bypass"]
-        return argv + ["-EncodedCommand", powershell_encoded(ps_call_operator(command))]
+        # -OutputFormat Text: with -EncodedCommand PowerShell otherwise writes its error stream as "#< CLIXML" markup.
+        return argv + ["-OutputFormat", "Text", "-EncodedCommand", powershell_encoded(ps_call_operator(command) + PS_EXIT_CODE_SUFFIX)]
     if info.kind == "cmd":
         one_line = " & ".join(line for line in command.splitlines() if line.strip()) or command
         return f'"{info.path}" /d /s /c "chcp 65001>nul & {one_line}"'

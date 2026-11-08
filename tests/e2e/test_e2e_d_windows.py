@@ -374,7 +374,7 @@ def test_powershell_encoded_command_round_trip(monkeypatch: pytest.MonkeyPatch, 
     decoded = _decode_encoded(argv)
     assert decoded.startswith("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;")
     assert "$ProgressPreference='SilentlyContinue'" in decoded
-    assert decoded.endswith("\n" + script)
+    assert decoded.endswith("\n" + script + sim.plat.PS_EXIT_CODE_SUFFIX)
 
 
 def test_powershell_encoded_is_ascii_base64(monkeypatch: pytest.MonkeyPatch) -> None:

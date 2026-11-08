@@ -55,8 +55,10 @@ The server is meant for you alone on your own machine.
   network connection and loads nothing from a CDN or font host.
 - **Untrusted text.** Transcript text is escaped before any HTML is built, and secrets are redacted from
   what the server sends. Session ids are looked up in an index, never joined into a path.
-- **Replies do not auto-approve.** A reply sent from the page runs in `default`, `plan` or `acceptEdits` mode
-  (bypass is never offered), and each tool approval is shown in the page. Approvals time out after 5 minutes.
+- **Replies do not auto-approve unless you say so.** A reply sent from the page runs in `default`, `plan` or
+  `acceptEdits` mode, and each tool approval is shown in the page. Approvals time out after 5 minutes. The mode
+  menu also offers "Runs without asking" (bypass), shown in red. Choosing it asks for one confirmation per
+  chat; deny rules and the always-protected locations still apply.
 - **Sharing.** The only action that sends data off the machine is the optional secret gist export, which
   uploads the previewed file after a confirmation click.
 

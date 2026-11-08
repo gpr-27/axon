@@ -204,6 +204,11 @@ def handle_cd(agent: Any, arg: str) -> CommandResult:
     if why:
         err(f"Refusing to move into {p}: {why}.")
         return _done()
+    from axon.permissions.paths import too_broad_for_workspace
+    broad = too_broad_for_workspace(p)
+    if broad:
+        err(broad)
+        return _done()
     old = ws_of(agent)
     if str(p) == str(old):
         info(f"Already in {p}")

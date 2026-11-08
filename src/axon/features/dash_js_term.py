@@ -1,6 +1,16 @@
 """Client script: a compact VT100/xterm screen-grid emulator and the Terminal tab (real PTY on this computer)."""
 
 JS_TERM = r"""
+// Keys leave one request at a time, in order: the server handles requests in parallel, so one request per key could swap them.
+function termSender(post) {
+  let pending = ''; let busy = false;
+  const pump = async () => {
+    if (busy) return; busy = true;
+    while (pending) { const data = pending; pending = ''; try { await post(data); } catch (e) { /* the stream shows a closed terminal */ } }
+    busy = false;
+  };
+  return (data) => { pending += data; pump(); };
+}
 function curTheme() { const t = document.documentElement.getAttribute('data-theme'); return t || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
 // ---------- terminal emulator ----------
 const ANSI16 = ['var(--muted)', 'var(--bad)', 'var(--ok)', 'var(--warn)', 'var(--info)', 'var(--accent)', 'var(--primary)', 'var(--ink2)',
@@ -197,7 +207,7 @@ function termView(host, tid, opts) {
   if (opts.bar) host.append(bar, screen); else host.append(screen);
   const probe = h('span', { class: 'tprobe' }, 'M'.repeat(10)); screen.append(probe);
   const vt = new VT(100, 30, (s) => send(s)); T.vt = vt; let dirtyAll = true;
-  const send = (data) => fetch('/api/term/input', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: tid, data }) }).catch(() => { });
+  const send = termSender((data) => fetch('/api/term/input', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: tid, data }) }));
   let rz; const fit = () => {
     const r = probe.getBoundingClientRect(); const cw = r.width / 10, ch = r.height || 18; const box = screen.getBoundingClientRect(); if (box.width < 60 || box.height < 30) return;
     const cols = Math.max(20, Math.floor((box.width - 16) / cw)), rows = Math.max(5, Math.floor((box.height - 8) / ch));

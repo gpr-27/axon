@@ -247,8 +247,11 @@ def apply_choice(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
             raise DashError("A custom endpoint needs a URL that starts with http:// or https://", 400)
         if not model:
             raise DashError("Enter the model name this endpoint serves.", 400)
+        from axon.providers.catalog import custom_key_var
+        kvar = custom_key_var(base)
+        _migrate_custom_key(srv, base, kvar)
         preset = ProviderPreset(id="custom", name="Custom endpoint", description="Any OpenAI-compatible endpoint", category="Custom",
-                                base_url=base.rstrip("/"), default_model=model, models=[model], env_var="AXON_API_KEY",
+                                base_url=base.rstrip("/"), default_model=model, models=[model], env_var=kvar, env_vars=(kvar,),
                                 requires_key=bool(key) or not _is_local(base))
     else:
         preset = _preset(pid)
@@ -298,6 +301,23 @@ def _is_local(url: str) -> bool:
         return bool(is_local_url(url))
     except Exception:
         return False
+
+
+def _migrate_custom_key(srv: "DashServer", base: str, kvar: str) -> None:
+    """Older versions saved a custom endpoint's key as AXON_API_KEY. When this endpoint is the one already in use
+    and it has no key of its own yet, copy that key to its own name; AXON_API_KEY itself is left as it was."""
+    from axon.providers.catalog import find_api_key, find_preset_by_url, save_api_key
+    if find_api_key([kvar]):
+        return
+    try:
+        cur = (getattr(srv.settings_obj(), "base_url", "") or "").strip()
+        if not cur or find_preset_by_url(cur) is not None or not _same_host(cur, base):
+            return
+        legacy = find_api_key(["AXON_API_KEY"])
+        if legacy:
+            save_api_key(kvar, legacy)
+    except Exception:
+        pass
 
 
 def _saved_key(preset: Any) -> str | None:

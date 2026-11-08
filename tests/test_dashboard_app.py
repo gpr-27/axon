@@ -1014,3 +1014,25 @@ def test_attachment_thumbnails_serve_only_images_axon_stored(c, env, llm):
 def test_signed_out_page_is_one_clear_message(c):
     st, h, body = c.get("/", cookie=False)
     assert st == 401 and "text/html" in h["content-type"] and b"axon open" in body and b"signed out" in body and b"<script" not in body
+
+
+def test_terminal_keys_reach_the_server_in_order_even_when_requests_finish_out_of_order():
+    import re
+    import shutil
+    import subprocess
+
+    from axon.features.dash_js_term import JS_TERM
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    fn = re.search(r"function termSender\(post\) \{.*?\n\}\n", JS_TERM, re.S).group(0)
+    script = fn + """
+const seen = []; let inFlight = 0, most = 0;
+const send = termSender(async (d) => { inFlight++; most = Math.max(most, inFlight); seen.push(d);
+  await new Promise(r => setTimeout(r, 15 - seen.length * 5)); inFlight--; });
+for (const k of 'top\\n') send(k);
+setTimeout(() => { send('x'); setTimeout(() => console.log(JSON.stringify({ text: seen.join(''), most })), 60); }, 60);
+"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {"text": "top\nx", "most": 1}

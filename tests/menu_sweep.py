@@ -168,6 +168,7 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
     def no_input(*_a: Any) -> str:
         raise EOFError
 
+    saved_alt_screen = plat.supports_alt_screen      # a Windows console without VT support prints instead of opening viewers
     saved = (sys.stdin, plat.read_key, plat.raw_terminal, plat.term_size, picker.LiveFrame.render, picker.LiveFrame.clear)
     menus_before = picker.menus_run()
     has_alarm = hasattr(signal, "SIGALRM")        # Windows has no SIGALRM: no per-command time limit there
@@ -180,6 +181,7 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
             plat.read_key = esc  # type: ignore[assignment]
             plat.raw_terminal = lambda *a, **k: contextlib.nullcontext(True)  # type: ignore[assignment]
             plat.term_size = lambda: (100, 30)  # type: ignore[assignment]
+            plat.supports_alt_screen = lambda: True  # type: ignore[assignment]
             picker.LiveFrame.render = no_draw  # type: ignore[method-assign]
             picker.LiveFrame.clear = no_draw  # type: ignore[method-assign]
         with contextlib.redirect_stdout(out), _patched_input(no_input), _patched_getpass(no_input), _no_browser(), _in_workspace(agent):
@@ -191,6 +193,7 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_alarm)
         sys.stdin, plat.read_key, plat.raw_terminal, plat.term_size, picker.LiveFrame.render, picker.LiveFrame.clear = saved
+        plat.supports_alt_screen = saved_alt_screen
         result.menus_shown = picker.menus_run() - menus_before + keys_read[0]
     result.output = out.getvalue()
     result.hints = [] if name in CONTENT_ONLY else hint_lines(result.output, name)

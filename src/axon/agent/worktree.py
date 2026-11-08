@@ -6,7 +6,7 @@ code without colliding with the main working tree or other concurrent subagents.
 from __future__ import annotations
 import logging
 import os
-from axon.platform import rmtree as _rmtree
+from axon.platform import IS_WINDOWS, rmtree as _rmtree
 from typing import Any
 import subprocess
 from dataclasses import dataclass
@@ -79,8 +79,7 @@ class WorktreeManager:
         clean_id = "".join(c for c in task_id if c.isalnum() or c in ("-", "_")) + f"-{uuid.uuid4().hex[:8]}"
         branch_name = f"axon-subagent-{clean_id}"
         try:
-            from axon import storage
-            worktree_dir = storage.project_dir(workspace) / "worktrees" / clean_id
+            worktree_dir = worktrees_root(workspace) / clean_id
         except Exception:
             worktree_dir = workspace / ".axon" / "worktrees" / clean_id
 
@@ -297,6 +296,18 @@ def hook_remove_worktree(info: WorktreeInfo) -> bool:
     return not info.worktree_path.exists() or not (res.blocked or res.warnings)
 
 
+def worktrees_root(workspace: Path, existing: str | None = None) -> Path:
+    """Folder that holds this project's worktrees. ``~/.axon/projects/<key>/worktrees`` normally; on Windows the
+    long project key doubles the path and git then fails with "'$GIT_DIR' too big" (260-char limit), so a short
+    hashed folder is used instead. A worktree that already exists in the old place keeps being found there."""
+    from axon import storage
+    legacy = storage.project_dir(workspace) / "worktrees"
+    if not IS_WINDOWS or (existing and (legacy / existing / ".git").exists()):
+        return legacy
+    import hashlib
+    return storage.axon_home() / "wt" / hashlib.sha1(storage.project_key(workspace).encode("utf-8")).hexdigest()[:10]
+
+
 def create_session_worktree(workspace: Path, name: str | None = None) -> WorktreeInfo | None:
     """Worktree for the main session (``axon --worktree [name]``): reused when it already exists,
     otherwise created on branch ``axon/<name>`` from HEAD under ~/.axon/projects/<p>/worktrees/."""
@@ -309,8 +320,7 @@ def create_session_worktree(workspace: Path, name: str | None = None) -> Worktre
     if not WorktreeManager.is_git_repo(workspace):
         return None
     try:
-        from axon import storage
-        wt_dir = storage.project_dir(workspace) / "worktrees" / clean
+        wt_dir = worktrees_root(workspace, clean) / clean
     except Exception:
         return None
     branch = f"axon/{clean}"

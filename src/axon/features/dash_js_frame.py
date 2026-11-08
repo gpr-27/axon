@@ -158,7 +158,7 @@ function setActive(t) {
   document.getElementById('panes').classList.toggle('split', !!(UI.split && UI.split !== t));
   document.querySelectorAll('.side-nav a').forEach(a => a.removeAttribute('aria-current'));
   const nav = document.querySelector('.side-nav a[data-nav="' + (t.route === 'agent' || t.route === 'agents' ? 'chat' : t.route) + '"]'); if (nav) nav.setAttribute('aria-current', 'page');
-  if (t.route === 'chat' && t.C) { UI.chat = t.C; setStatus(t.C.st); renderRight(); if (t.C.checkReady) t.C.checkReady(); }
+  if (t.route === 'chat' && t.C) { UI.chat = t.C; setStatus(t.C.st); renderRight(); if (t.C.checkReady) t.C.checkReady(); if (t.C.runtime && !t.C.es && typeof refreshState === 'function') refreshState(t.C, true); }
   wbTitleSync(); savePrefs();
 }
 function drawTabs() {
@@ -196,7 +196,6 @@ function shell(route, bodyFn, opts) {
 }
 function onLeave(fn) { if (UI.building) UI.building.cleanup.push(fn); }
 function leave() { /* tabs keep their own cleanups; closing a tab runs them */ }
-function currentTab() { return UI.building; }
 
 // The project tree lives in the Files panel; this name stays for the callers that reload it after Change folder.
 function drawLeftTabs() { if (typeof wbRefreshFiles === 'function') wbRefreshFiles(); }

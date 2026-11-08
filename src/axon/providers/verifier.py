@@ -27,7 +27,6 @@ from axon.providers.transport import (
 )
 
 _PLACEHOLDERS = {"", "sk-placeholder", "your_api_key_here", "your-api-key-here", "replace_me", "null", "none"}
-_TEST_KEY_PREFIXES = ("sk-test-", "test-", "mock-", "AIzaSy_test_")
 
 
 def _resolve_preset(preset_or_id: ProviderPreset | str | None) -> ProviderPreset | None:
@@ -81,9 +80,6 @@ def verify_api_key(
         return True, "Local provider (zero key required)"
     if not clean_key or clean_key.lower() in _PLACEHOLDERS:
         return False, "API key is empty or a placeholder"
-    # Offline bypass for unit-test fixtures.
-    if clean_key.startswith(_TEST_KEY_PREFIXES) or clean_key.endswith("-test"):
-        return True, "OK"
 
     test_model = model or (preset.default_model if preset else "deepseek-v4-flash")
     endpoint, headers, payload = build_ping_request(preset, clean_key, active_url, test_model)

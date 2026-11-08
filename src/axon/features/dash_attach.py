@@ -128,7 +128,13 @@ def attach_paths(ws: Path, extra: list[Path], raw_paths: Any) -> list[dict[str, 
             with _lock:
                 _refs[chip] = {"abs": str(p)}
                 _bounded(_refs)
-            items.append({"kind": "pdf" if ext == ".pdf" else "ref", "chip": chip, "name": name, "path": rel, "size": size})
+            item = {"kind": "pdf" if ext == ".pdf" else "ref", "chip": chip, "name": name, "path": rel, "size": size}
+            if ext != ".pdf" and size <= INLINE_BYTES:
+                from axon.agent.attachments import secret_labels
+                labels = secret_labels(p)
+                if labels:
+                    item["secrets"] = labels
+            items.append(item)
         except OSError as e:
             items.append(_item_error(raw, f"it could not be read ({e.strerror or e})"))
     if len(raw_paths) > MAX_PATHS:

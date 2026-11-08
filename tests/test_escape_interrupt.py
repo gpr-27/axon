@@ -34,7 +34,7 @@ from tests.test_core_helpers import make_agent, make_settings
 QUICK = 1.5   # seconds an interrupted wait may still take (the slices are 0.1 s)
 
 
-def _interrupt_after(delay: float, fn: Callable[[], Any]) -> tuple[float, str]:
+def _interrupt_after(delay: float, fn: Callable[[], Any], ready: Callable[[], bool] | None = None) -> tuple[float, str]:
     """Run fn on a worker thread, raise KeyboardInterrupt in it after `delay` (what Esc does), and
     return (seconds from the interrupt to the end, name of the exception fn ended with)."""
     out: dict[str, Any] = {"error": ""}
@@ -52,6 +52,10 @@ def _interrupt_after(delay: float, fn: Callable[[], Any]) -> tuple[float, str]:
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
     time.sleep(delay)
+    if ready is not None:                  # wait for the work to really be under way (a slow CI start-up) before Esc
+        limit = time.monotonic() + 20
+        while not ready() and time.monotonic() < limit and not finished.is_set():
+            time.sleep(0.05)
     sent = time.monotonic()
     ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(worker.ident), ctypes.py_object(KeyboardInterrupt))
     finished.wait(10)
@@ -204,7 +208,7 @@ def test_esc_kills_running_hook_commands(workspace: Path, tmp_path: Path, count:
     def run() -> None:
         manager.run("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
 
-    took, error = _interrupt_after(1.0, run)      # 1 s: time for the hooks to start and write their pids
+    took, error = _interrupt_after(1.0, run, ready=lambda: all(p.exists() and p.read_text().strip() for p in pid_files))
     assert error == "KeyboardInterrupt" and took < QUICK + 1.0      # + the SIGTERM grace
     for pid_file in pid_files:
         pid = int(_wait_for_file(pid_file))

@@ -408,6 +408,20 @@ def read_env_file(path: Path | None = None) -> dict[str, str]:
     return out
 
 
+def custom_key_var(base_url: str) -> str:
+    """The key name for a custom endpoint, tied to its host (and port): ``CUSTOM_API_EXAMPLE_COM_API_KEY``.
+    AXON_API_KEY belongs to AgentRouter; a custom endpoint's key is never stored there or sent anywhere else."""
+    from urllib.parse import urlparse
+    try:
+        u = urlparse((base_url or "").strip())
+        host = (u.hostname or "").lower()
+        port = f"_{u.port}" if u.port else ""
+    except ValueError:
+        host, port = "", ""
+    token = re.sub(r"[^A-Z0-9]+", "_", (host + port).upper()).strip("_")
+    return f"CUSTOM_{token or 'ENDPOINT'}_API_KEY"
+
+
 def find_api_key(env_vars: list[str] | tuple[str, ...]) -> str | None:
     """First usable key among `env_vars`: process environment first, then ~/.axon/.env (exact names)."""
     names = [v for v in env_vars if v]

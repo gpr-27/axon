@@ -55,6 +55,15 @@ def git_call(args: dict[str, Any]) -> tuple[str, list[str], str]:
     return sub.lower(), extra, folder
 
 
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _looks_like_outside_path(val: str) -> bool:
+    """An argument that names a file outside the call's folder: absolute (POSIX, ``C:\\x`` or ``\\\\server``), ``~``,
+    or climbing out with ``..``. Checked the same way on every platform."""
+    return val.startswith(("/", "~", "../", "..\\", "\\")) or bool(_DRIVE_PATH.match(val))
+
+
 def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False) -> list[str]:
     """Return every path-like argument a tool call refers to. ``keep_prefixed``: a patch's ``a/x`` header
     is listed as well as ``x`` (for deny / protected-path checks; see ``patch_paths``)."""
@@ -71,7 +80,7 @@ def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False
             if a == "--":
                 continue
             val = a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
-            if val.startswith(("/", "~", "../")) and val not in out:
+            if _looks_like_outside_path(val) and val not in out:
                 out.append(val)         # a file named in the arguments (--flag=/path, or a path after --) is a path the call reads
     if tool_name == "Glob":
         base = _glob_pattern_base(args.get("pattern"))
@@ -526,6 +535,25 @@ def parse_rule(spec: str) -> Rule:
         pat = pat_part.strip()
         return Rule(tool=tool_part.strip(), pattern=pat or None)
     return Rule(tool=spec, pattern=None)
+
+
+_TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:*\-]*$")
+
+
+def validate_rule_spec(spec: str) -> str:
+    """The rule text cleaned up, or a ValueError with a plain message. Only used when someone adds a rule;
+    rules already in settings files are read with ``parse_rule``, which never refuses."""
+    text = (spec or "").strip()
+    if not text:
+        raise ValueError("A rule cannot be empty. Example: Bash(git status:*)")
+    tool, sep, rest = text.partition("(")
+    ok = bool(_TOOL_NAME.match(tool.strip()))
+    if sep:
+        ok = ok and text.endswith(")") and len(text) > len(tool) + 1
+    if not ok:
+        raise ValueError(f"'{text}' is not a rule. Use a tool name, or a tool name with a pattern in brackets, "
+                         "for example Bash(git status:*), Edit(src/**) or WebFetch(domain:docs.python.org).")
+    return text
 
 
 def parse_rules(specs: list[str]) -> list[Rule]:

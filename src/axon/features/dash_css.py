@@ -379,6 +379,7 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 .chip.rich .cthumb{width:32px;height:32px;object-fit:cover;border-radius:4px;flex:none;background:var(--raised)}
 .chip.rich .cicon{width:32px;height:32px;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;background:var(--raised);font:600 10px ui-monospace,monospace;color:var(--muted)}
 .chip.rich .cname{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.chip.rich .cwarn{color:var(--warn);font-size:12px;white-space:normal;max-width:260px}
 .chip.rich .cname b{font-weight:600;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip.rich .cname span{font-size:11px;color:var(--muted)}
 .chip.rich .copen{border:0;background:none;color:var(--primary);cursor:pointer;padding:0 4px;font-size:12px}

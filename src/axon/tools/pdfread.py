@@ -42,7 +42,16 @@ def page_count(path: Path) -> int | None:
         from pypdf import PdfReader  # optional dependency
         return len(PdfReader(str(path)).pages)
     except Exception:
-        return None
+        pass
+    exe = shutil.which("pdftotext")      # a poppler install without pdfinfo (some Windows builds): every page ends in a form feed
+    if exe:
+        try:
+            res = subprocess.run([exe, str(path), "-"], capture_output=True, timeout=30)
+            if res.returncode == 0 and res.stdout.count(b"\x0c"):
+                return res.stdout.count(b"\x0c")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
 
 
 def extract_pages(path: Path, first: int, last: int | None) -> tuple[str, str] | None:

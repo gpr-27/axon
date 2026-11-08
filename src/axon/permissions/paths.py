@@ -204,6 +204,22 @@ def is_protected_path(raw: str | Path, root: Path | None = None) -> str | None:
     return None
 
 
+def too_broad_for_workspace(raw: str | Path) -> str | None:
+    """A plain reason when ``raw`` is the filesystem root or the home folder itself (a project lives inside them)."""
+    try:
+        p = _real(_expand(raw))
+    except Exception:
+        return None
+    if p.parent == p:
+        return "That is the whole disk, which is too broad to work in. Pick a project folder instead."
+    try:
+        if p in (_real(Path.home()), _real(os.path.expanduser("~"))):
+            return "That is your home folder, which is too broad to work in. Pick a project folder inside it instead."
+    except Exception:
+        pass
+    return None
+
+
 def resolve_in_workspace(
     root: Path,
     raw: str | Path,
