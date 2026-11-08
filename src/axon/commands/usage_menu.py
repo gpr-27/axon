@@ -34,19 +34,20 @@ OWN_MENU = {
     "help": "command navigator", "hooks": "hook browser", "keys": "key manager", "marketplace": "store browser",
     "mcp": "server browser", "memory": "memory picker", "menu": "command navigator", "mode": "mode picker",
     "model": "model picker", "output": "tool output picker", "output-style": "style picker",
-    "payload": "section picker", "permissions": "rules panel", "plugin": "plugin browser",
+    "payload": "section picker", "permissions": "rules panel", "prompt": "saved prompts list", "plugin": "plugin browser",
     "provider": "provider picker", "release-notes": "version picker", "restore": "trash picker",
     "resume": "session picker", "rewind": "checkpoint menu", "sessions": "session switcher",
     "settings": "settings hub", "skills": "skill browser", "theme": "theme picker", "color": "colour picker",
     "trace": "level picker", "workbench": "workbench screen", "worktree": "worktree picker", "usage": "tabbed usage screen", "transcript": "full-screen viewer", "copy": "code block picker",
     "new": "template picker", "tips": "tip list", "tools": "tool browser",
+    "schedule": "task menu",
 }
 
 # Full-screen viewers draw and read keys themselves; there is no "What next?" after them.
 VIEWERS = {"transcript"}
 
 USAGE_MENU = {
-    "delete", "fast", "focus", "import", "init", "notify", "prompt", "statusbar", "statusline", "stop",
+    "delete", "fast", "focus", "import", "init", "notify", "statusbar", "statusline", "stop",
     "suggestions", "terminal-setup", "thinking", "vim", "search",
 }
 
@@ -56,12 +57,14 @@ ACTION_MENU = {
     "trust": "Shows, grants or revokes trust for this folder's hooks, plugins and MCP servers.",
     "autofix": "Runs the project checks and fixes what fails, until they pass.",
     "branch": "Continues this conversation in a new branch session.",
+    "bookmark": "Bookmarks the latest reply so you can find it again.",
     "btw": "Asks a quick side question that is not added to the conversation.",
     "bug": "Saves a bug report about what went wrong.",
     "cd": "Moves the whole session to another directory.",
     "clear": "Starts a new, empty conversation. This one stays in /resume.",
     "commit": "Writes a commit message for the staged changes and commits.",
     "compact": "Summarises the conversation so far to free up context.",
+    "compare": "Asks two to four models the same question at once, read-only, and prints each answer with its time, tokens and cost.",
     "debug": "Debugs the last error.",
     "fix": "Fixes the last failing check or command.",
     "index": "Builds the code index for this project.",
@@ -100,10 +103,10 @@ ACTION_MENU = {
 }
 
 REPORT_MENU = {
-    "activity", "add-dir", "autocompact", "budget", "changes", "context", "cost", "diff", "doctor", "env",
+    "bookmarks", "activity", "add-dir", "autocompact", "budget", "changes", "context", "cost", "diff", "doctor", "env",
     "ctxdiff", "faq", "git", "goal", "history", "insights", "keybindings", "library", "list-agents", "plan-resume",
     "pin", "plans", "pricing", "project", "receipts", "queue", "stats", "status", "storage", "subagents", "tasks", "todos",
-    "unpin", "whatif", "window", "files", "trail", "timeline", "ctxmap",
+    "unpin", "whatif", "window", "files", "trail", "timeline", "ctxmap", "overview",
 }
 
 NO_MENU = {
@@ -132,6 +135,7 @@ OVERRIDES: dict[str, list[Choice]] = {
     "bug": [ch("Describe what went wrong…", ask="What went wrong?")],
     "cd": [ch("Choose a directory…", ask="Directory")],
     "clear": [ch("Run it"), ch("Name the session being left…", ask="Name for the session being left")],
+    "compare": [ch("Compare models…", ask="Two to four models, then the prompt (for example: gpt-4o gpt-4.1 -- explain this file)")],
     "commit": [ch("Run it", hint="message written from the diff"), ch("Give a hint for the message…", ask="Hint")],
     "compact": [ch("Run it"), ch("Focus the summary…", ask="What should the summary focus on?")],
     "debug": [ch("Run it", hint="the last error"), ch("Describe what went wrong…", ask="What went wrong?")],
@@ -171,6 +175,14 @@ OVERRIDES: dict[str, list[Choice]] = {
     "stop": [ch("Stop every subagent"), ch("Stop one…", ask="Task id")],
     "import": [ch("From Cursor", "cursor"), ch("From Gemini", "gemini"), ch("From Codex", "codex"),
                ch("From all of them", "all"), ch("Preview only (dry run)", "all --dry-run")],
+    "notify": [ch("/notify", hint="the current settings"), ch("/notify important", "important", hint="only what matters"),
+               ch("/notify all", "all", hint="after every turn"), ch("/notify off", "off", hint="never"),
+               ch("/notify after <seconds>", "after", "<seconds>", "only for turns longer than this"),
+               ch("/notify terminal off", "terminal off", hint="no bell or notification code in the terminal"),
+               ch("/notify terminal bell", "terminal bell", hint="ring the terminal bell"),
+               ch("/notify terminal osc9", "terminal osc9", hint="notification code (iTerm2, kitty, WezTerm, Ghostty)"),
+               ch("/notify terminal osc777", "terminal osc777", hint="notification code (urxvt style)"),
+               ch("/notify test [message]", "test", "[message]", "send a test")],
     "statusbar": [ch("Show the current state"), ch("Turn the status bar on or off", "toggle")],
     "delete": [ch("Choose a session to delete…", hint="opens the session list"),
                ch("Delete every session", "--all")],
@@ -395,6 +407,8 @@ NEXT_STEPS: dict[str, list[Step]] = {
             step("Files changed this session", "/changes"), step("Review the changes", "/review")],
     "changes": [step("Diff", "/diff"), step("Rewind to a checkpoint", "/rewind"), step("Commit", "/commit"),
                 step("Review the changes", "/review")],
+    "overview": [step("Run the tests", "/test"), step("Changes", "/diff"), step("Usage this week", "/stats 7d"), step("Memory", "/memory"),
+                 step("Sessions", "/sessions")],
     "project": [step("Memory files", "/memory"), step("Sessions", "/sessions"), step("Storage", "/storage"),
                 step("Everything saved", "/library")],
     "pricing": [step("Filter by model name", "/pricing {}", "", "Model name"), step("Switch model", "/model"),
@@ -414,7 +428,8 @@ NEXT_STEPS: dict[str, list[Step]] = {
     "autocompact": [step("Set a percent or token count", "/autocompact {}", "e.g. 80 or 500k", "Percent (10-99) or tokens like 500k"),
                     step("Back to the default", "/autocompact auto"), step("Context usage", "/context")],
     "budget": [step("Set a limit in dollars", "/budget {}", "", "Amount in dollars"), step("Turn the limit off", "/budget off"),
-               step("Cost breakdown", "/cost")],
+               step("Daily limit for this project", "/budget day {}", "", "Amount in dollars"),
+               step("Monthly limit for this project", "/budget month {}", "", "Amount in dollars"), step("Cost breakdown", "/cost")],
     "diff": [step("Staged changes", "/diff staged"), step("Edits since a checkpoint", "/diff T{}", "", "Checkpoint number"),
              step("Rewind", "/rewind"), step("Commit", "/commit")],
     "faq": [step("402: out of credit", "/faq 402"), step("400: request rejected", "/faq 400"),

@@ -3708,12 +3708,12 @@ class Renderer:
         elif kind == "BudgetEvent":
             self._finish_stream()
             action = str(_get(e, "action", default="warn"))
-            color = ERROR if action == "stop" else WARNING
+            color = ERROR if action == "stop" else (MUTED if action == "notice" else WARNING)      # a notice (50, 80, 100 percent) is quiet
             msg = _get(e, "message", default="") or (
                 f"{_get(e, 'scope', default='turn')} budget {action}: spent ${float(_get(e, 'spent_usd', default=0) or 0):.4f}"
                 f" of ${float(_get(e, 'limit_usd', default=0) or 0):.2f}"
                 + (f" {dot} switching to {_get(e, 'new_model')}" if _get(e, "new_model", default="") else ""))
-            self._line(f"{color}{glyph('warn')} {_one_line(msg, 160)}{RST}", "  ")
+            self._line(f"{color}{glyph('info' if action == 'notice' else 'warn')} {_one_line(msg, 160)}{RST}", "  ")
         elif kind == "MemoryLoadedEvent":
             if self.level >= 1:
                 tok = int(_get(e, "tokens", default=0) or 0)

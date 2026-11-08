@@ -411,7 +411,7 @@ def test_session_share_is_self_contained_and_escaped(c, env):
     assert "<script" not in doc.lower() and "onerror=" not in re.sub(r"&lt;[^&]*?&gt;", "", doc)
     assert "&lt;script&gt;alert(&#x27;xss-user&#x27;)" in doc
     assert not re.search(r"(src|href)=[\"']https?://(?!example\.com)", doc) and "<link" not in doc
-    assert "<style>" in doc and "[REDACTED]" in doc and SECRET_KEY not in doc and "var(--axon-primary" in doc
+    assert "<style>" in doc and "[REDACTED]" in doc and SECRET_KEY not in doc and "@media print" in doc
     st, h, file = c.get(f"/api/share/file?sha={p['sha256']}")
     assert st == 200 and file.decode() == doc and h["content-disposition"].startswith("attachment; filename=")
     assert c.get("/api/share/file?sha=" + "0" * 64)[0] == 404

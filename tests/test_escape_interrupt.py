@@ -208,7 +208,10 @@ def test_esc_kills_running_hook_commands(workspace: Path, tmp_path: Path, count:
     def run() -> None:
         manager.run("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
 
-    took, error = _interrupt_after(1.0, run, ready=lambda: all(p.exists() and p.read_text().strip() for p in pid_files))
+    def under_way() -> bool:       # every hook script started AND its process is registered for the wait on it
+        return all(p.exists() and p.read_text().strip() for p in pid_files) and len(manager._live_procs) == count
+
+    took, error = _interrupt_after(1.0, run, ready=under_way)
     assert error == "KeyboardInterrupt" and took < QUICK + 1.0      # + the SIGTERM grace
     for pid_file in pid_files:
         pid = int(_wait_for_file(pid_file))

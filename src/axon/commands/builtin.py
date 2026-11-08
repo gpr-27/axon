@@ -13,7 +13,7 @@ from axon.commands.registry import (  # noqa: F401
 )
 from axon.commands import (  # noqa: F401  (import for registration side effects)
     agent_cmds, backend_cmds, code_cmds, context_cmds, endpoint_cmds, insight_cmds, keys_cmds, memory_cmds, model_cmds, perm_cmds, prefs_cmds,
-    sandbox_cmds, session_cmds, settings_cmds, system_cmds, workbench_cmds, workspace_cmds,
+    sandbox_cmds, schedule_cmds, session_cmds, settings_cmds, system_cmds, workbench_cmds, workspace_cmds,
 )
 from axon.commands.agent_cmds import (  # noqa: F401
     handle_agents, handle_explain, handle_hooks, handle_inspect, handle_main, handle_mcp, handle_plugin,

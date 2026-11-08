@@ -69,6 +69,25 @@ def test_only_committed_changes_are_not_reported_as_no_changes(repo: Path) -> No
         WorktreeManager.cleanup(info)
 
 
+def test_crlf_files_are_merged_back_intact(repo: Path) -> None:
+    """The patch travels as bytes: text mode rewrites CRLF (Windows) and the patch then no longer fits the file."""
+    git(repo, "config", "core.autocrlf", "false")
+    (repo / "crlf.txt").write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "crlf")
+    info = new_worktree(repo)
+    try:
+        (info.worktree_path / "crlf.txt").write_bytes(b"one\r\nTWO\r\nthree\r\n")
+        git(info.worktree_path, "commit", "-q", "-am", "edit")
+
+        ok, message = WorktreeManager.merge_back(info)
+
+        assert ok, message
+        assert (repo / "crlf.txt").read_bytes() == b"one\r\nTWO\r\nthree\r\n"
+    finally:
+        WorktreeManager.cleanup(info)
+
+
 def test_untouched_worktree_has_no_changes(repo: Path) -> None:
     info = new_worktree(repo)
     try:

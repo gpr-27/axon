@@ -354,15 +354,29 @@ class Transcript:
 
 
 def parse_transcript(path: Path) -> Transcript:
-    from axon.session.store import iter_records
+    from axon.session.store import is_user_prompt, iter_records
     tr = Transcript()
     tools: dict[str, dict[str, Any]] = {}
+    prompts: list[int | None] = []      # entry index of each prompt still in the conversation (mirrors SessionStore.user_message_times)
     for rec in iter_records(path):
         t, data, ts = rec.get("type"), rec.get("data"), rec.get("timestamp")
         if t == "user_message" and isinstance(data, dict):
             text = _blocks_text(data.get("content"))
             if text.strip():
                 tr.entries.append({"kind": "user", "ts": ts, "text": text})
+                prompts.append(len(tr.entries) - 1)
+        elif t == "rewind" and isinstance(data, dict) and isinstance(data.get("messages"), list):
+            # a rewound conversation no longer shows the prompts it dropped (the file keeps them: /history all)
+            n = sum(1 for m in data["messages"] if isinstance(m, dict) and is_user_prompt(m))
+            if data.get("mode") in ("conversation", "code_and_conversation") and n < len(prompts) and prompts[n] is not None:
+                del tr.entries[prompts[n]:]
+                del prompts[n:]
+        elif t == "compaction" and isinstance(data, dict) and isinstance(data.get("messages"), list):
+            n = sum(1 for m in data["messages"] if isinstance(m, dict) and is_user_prompt(m))
+            prompts = [None] * max(0, n - len(prompts)) + (prompts[-n:] if n else [])
+        elif t == "turn_failed" and isinstance(data, dict) and data.get("rolled_back") and prompts:
+            prompts.pop()
+            tr.entries.append({"kind": "note", "ts": ts, "text": "This turn failed and was rolled back."})
         elif t == "assistant_turn" and isinstance(data, dict):
             ent: dict[str, Any] = {
                 "kind": "assistant", "ts": ts, "text": str(data.get("text") or ""),
@@ -663,6 +677,7 @@ class SessionIndex:
         self._lock = threading.Lock()
         self._refs: dict[str, dict[str, SessionRef]] = {}
         self._at: dict[str, float] = {}
+        self.cut: dict[str, list[str]] = {}      # scope -> names of projects that have more than LIMIT_PER_PROJECT chats (older ones are not listed)
 
     def _build(self, scope: str) -> dict[str, SessionRef]:
         from axon import storage
@@ -670,9 +685,14 @@ class SessionIndex:
         from axon.session.store import SessionStore
         refs: dict[str, SessionRef] = {}
         cur_key = _project_key(self.workspace)
+        cut: list[str] = []
 
         def add(store: Any, key: str, ws: str) -> None:
-            for m in store.list_recent(limit=self.LIMIT_PER_PROJECT, all_workspaces=scope == "all"):
+            metas = store.list_recent(limit=self.LIMIT_PER_PROJECT + 1, all_workspaces=scope == "all")
+            if len(metas) > self.LIMIT_PER_PROJECT:       # one extra is read only to know that older chats exist
+                metas = metas[:self.LIMIT_PER_PROJECT]
+                cut.append(_project_name(key, ws))
+            for m in metas:
                 if SESSION_ID_RE.fullmatch(m.session_id) and m.session_id not in refs:
                     refs[m.session_id] = SessionRef(m.session_id, Path(m.path), key, _project_name(key, ws), ws, m)
 
@@ -699,6 +719,7 @@ class SessionIndex:
                     add(SessionStore(Path(ws) if ws else self.workspace, session_dir=sdir), d.name, ws)
                 except Exception:
                     continue
+        self.cut[scope] = cut
         return refs
 
     def refs(self, scope: str = "project", fresh: bool = False) -> dict[str, SessionRef]:
@@ -951,42 +972,11 @@ def theme_css() -> str:
             f":root[data-theme=\"light\"]{{color-scheme:light;{block(l)}}}\n")
 
 
-_EXPORT_CSS = """
-*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:15px/1.6 Charter,"Iowan Old Style",Georgia,serif}
-main{max-width:860px;margin:0 auto;padding:32px 16px 64px}
-h1{font:600 22px/1.3 ui-sans-serif,system-ui,sans-serif;margin:0 0 4px}.sub,.who,.turn,.note,summary,.lbl,footer{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink2)}
-.brand{display:flex;align-items:center;gap:8px;color:var(--primary);margin-bottom:16px}.brand svg{width:28px;height:28px}
-.entry{border-top:1px solid var(--line);padding:14px 0}.who{color:var(--primary)}.entry.a .who{color:var(--accent)}
-.md p{margin:.5em 0}.md pre,pre{background:var(--code-bg);padding:10px 12px;border-radius:4px;overflow:auto;font:12.5px/1.5 ui-monospace,Menlo,monospace;color:var(--ink);white-space:pre-wrap;word-break:break-word}
-code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:var(--code-bg);padding:1px 4px;border-radius:3px}pre code{background:none;padding:0}
-details.tool{margin:8px 0;border-left:2px solid var(--line);padding-left:10px}.tool.err,.tool.denied{border-color:var(--bad)}
-.tn{color:var(--ink);font-weight:600;margin-right:8px}.ta{margin-right:8px}.ts{float:right}
-.diff .add{color:var(--add);background:var(--add-bg)}.diff .del{color:var(--del);background:var(--del-bg)}.diff .hunk{color:var(--info)}
-.clipped{font:12px ui-monospace,monospace;color:var(--warn)}.clipped button{display:none}
-table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:3px 8px}a{color:var(--info)}
-footer{margin-top:40px;border-top:1px solid var(--line);padding-top:12px}
-"""
-
-
-def session_export_html(ref: SessionRef, tr: Transcript, title: str) -> str:
-    entries = tr.entries[:3000]
-    body = []
-    for e in entries:
-        cls = "a" if e["kind"] == "assistant" else ("n" if e["kind"] == "note" else "u")
-        body.append(f'<section class="entry {cls}">{render_entry(ref.id, e, limit=20_000, tool_limit=8_000)}</section>')
-    more = (f'<p class="note">{len(tr.entries) - len(entries):,} more entries not included.</p>'
-            if len(tr.entries) > len(entries) else "")
-    d, l = _theme_tokens()
-    css = theme_css() + _EXPORT_CSS
-    doc = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-           f'<meta name="robots" content="noindex"><title>{esc(redact_text(title))[:120]} - Axon session</title><style>{css}</style></head><body><main>'
-           f'<div class="brand">{logo_svg()}<strong>axon</strong></div>'
-           f'<h1>{esc(redact_text(title))[:200]}</h1>'
-           f'<p class="sub">{esc(ref.project)} · {len(tr.entries):,} entries · exported {datetime.now():%Y-%m-%d %H:%M}'
-           f'</p>{"".join(body)}{more}'
-           f'<footer>Exported from the Axon dashboard. Secrets (API keys, tokens, bearer headers, .env values) were redacted '
-           f'automatically; read it through before you share it.</footer></main></body></html>')
-    return redact_html_text(doc)
+def session_export_html(ref: SessionRef, tr: Transcript, title: str, include_tools: bool = True) -> str:
+    """One chat as a standalone, script-free HTML file (the same writer the Share dialog and /export use)."""
+    from axon.features import chat_export as cx
+    return cx.build(cx.items_from_entries(tr.entries), {"id": ref.id, "title": title, "model": tr.model}, "html", include_tools,
+                    True, redact_text)["content"]
 
 
 def run_gh_gist(content: str, filename: str, description: str) -> str:
@@ -1399,6 +1389,11 @@ class DashServer(ThreadingHTTPServer):
         if self.live is not None:
             self.live.detach()
         try:
+            from axon.features import compare_models
+            compare_models.drop_all()
+        except Exception:
+            pass
+        try:
             self.shell.kill_all()
             self.pty.close_all()
         except Exception:
@@ -1621,8 +1616,13 @@ class _Handler(BaseHTTPRequestHandler):
             if item is None:
                 raise DashError("preview expired; open Share again", 404)
             name = re.sub(r"[^A-Za-z0-9_.\-]", "_", item[0])
-            self._send(200, item[1].encode("utf-8"), "text/html; charset=utf-8",
-                       {"Content-Disposition": f'attachment; filename="{name}"'})
+            from axon.features.dash_js_chatx import MIME_BY_EXT
+            mime = MIME_BY_EXT.get(Path(name).suffix.lower(), "text/plain; charset=utf-8")
+            if qs.get("inline") == "1" and mime.startswith("text/html"):     # preview and print: nothing in it can run
+                self._send(200, item[1].encode("utf-8"), mime, {"Content-Disposition": "inline", "X-Frame-Options": "SAMEORIGIN",
+                           "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:"})
+            else:
+                self._send(200, item[1].encode("utf-8"), mime, {"Content-Disposition": f'attachment; filename="{name}"'})
         elif route == "/api/file/raw":
             self._serve_raw(qs)
         elif route == "/api/attachment/image":
@@ -1893,11 +1893,8 @@ class _Handler(BaseHTTPRequestHandler):
         srv = self.server
         kind = body.get("kind")
         if kind == "session":
-            ref = srv.index.lookup(str(body.get("id", "")))
-            tr = load_transcript(ref.path)
-            title = tr.title or (ref.meta.first_prompt if ref.meta else ref.id)
-            content = session_export_html(ref, tr, title)
-            filename = f"axon-{ref.id.removeprefix('session_')}.html"
+            from axon.features.dash_js_chatx import share_preview       # formats, tool details, secrets counted
+            return share_preview(srv, body)
         elif kind == "overview":
             scope = "all" if body.get("scope") == "all" else "project"
             content = overview_export_html(srv.workspace, str(body.get("period") or "30d"), scope)
@@ -2046,6 +2043,7 @@ def dash_main(argv: list[str]) -> int:
         sys.stderr.write(f"axon dash: cannot start the server: {e}\n")
         return 2
     restore_gates = _configure_gates()
+    _start_scheduler()
     opened = False if args.no_open else open_browser(server.open_url)
     _announce(server, opened, sys.stdout)
     sys.stdout.write("  Press Ctrl+C to stop.\n")
@@ -2062,6 +2060,15 @@ def dash_main(argv: list[str]) -> int:
 
 
 _LIVE: dict[str, Any] = {"server": None, "thread": None}
+
+
+def _start_scheduler() -> None:
+    """Scheduled tasks run while the app is open (see axon.features.scheduler)."""
+    try:
+        from axon.features.scheduler import ensure_started
+        ensure_started()
+    except Exception:
+        pass
 
 
 def _dash_command(agent: Any, arg: str) -> None:
@@ -2093,6 +2100,7 @@ def _dash_command(agent: Any, arg: str) -> None:
         t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.3}, name="axon-dash", daemon=True)
         t.start()
         _LIVE.update(server=srv, thread=t)
+        _start_scheduler()
     opened = False if no_open else open_browser(srv.open_url)  # type: ignore[union-attr]
     if reused:
         print("Dashboard already running; reusing it.")

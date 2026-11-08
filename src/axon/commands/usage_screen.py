@@ -296,11 +296,33 @@ def footprint(agent: Any) -> list[FootRow]:
 
 # ─── data: limits ──────────────────────────────────────────────────────────
 
-@dataclass
-class Spend:
-    today: float = 0.0
-    day24: float = 0.0
-    week: float = 0.0
+def spending_lines(agent: Any, width: int, cells: int = 20) -> list[str]:
+    """Today, this week and this month from the usage log (this project, and all projects), with the project's daily and
+    monthly budgets as bars when they are set. The same numbers as the Progress panel in the app."""
+    from axon.features import cost_forecast as cf
+    ws = getattr(getattr(agent, "settings", None), "workspace", None)
+    try:
+        sp = cf.spend_summary(ws)
+    except Exception as e:
+        return [f"    {ROSE}Spending could not be read ({type(e).__name__}).{RST}"]
+    out: list[str] = []
+    here = sp.get("project") or {}
+    for key, label in (("today", "Today"), ("week", "This week"), ("month", "This month")):
+        mine = (here.get(key) or {}).get("cost", 0.0)
+        every = sp["all"][key]["cost"]
+        extra = f"{DARK_SLATE}this project · {usd(every)} in all projects{RST}" if abs(every - mine) > 1e-9 else f"{DARK_SLATE}this project{RST}"
+        out.append(_fit(f"    {SLATE}{pad(label, 22)}{RST} {WHITE}{usd(mine)}{RST} {extra}", width))
+    for scope, label in (("day", "Daily"), ("month", "Monthly")):
+        b = (sp.get("budgets") or {}).get(scope)
+        if not b:
+            continue
+        frac = b["frac"]
+        color = MINT if frac < 0.75 else (GOLD if frac < 1 else ROSE)
+        out.append(_fit(f"    {SLATE}{pad(label + ' budget', 22)}{RST} {bar(frac, cells, color)} {color}{frac * 100:.0f}%{RST} "
+                        f"{SLATE}{usd(b['spent'])} of {usd(b['limit'])}{RST}", width))
+    if not any((sp.get("budgets") or {}).values()):
+        out.append(f"    {DARK_SLATE}No daily or monthly budget is set. /budget day 5 or /budget month 50 sets one.{RST}")
+    return out
 
 
 def budget_settings(agent: Any) -> dict[str, float]:
@@ -459,10 +481,7 @@ def usage_lines(agent: Any, width: int) -> list[str]:
         out.append(_fit(f"    {SLATE}{pad(label.capitalize() + ' budget', 22)}{RST} {bar(frac, cells, color)} "
                         f"{color}{frac * 100:.0f}%{RST} {SLATE}{usd(spent)} of {usd(limit)}{RST}", width))
     c = contributors()
-    out.append(_fit(f"    {SLATE}{pad('Last 24 hours', 22)}{RST} {WHITE}{usd(c.cost24)}{RST} {DARK_SLATE}spent · no daily limit "
-                    f"exists in /budget{RST}", width))
-    out.append(_fit(f"    {SLATE}{pad('Last 7 days', 22)}{RST} {WHITE}{usd(c.cost7)}{RST} {DARK_SLATE}spent · no weekly limit "
-                    f"exists in /budget{RST}", width))
+    out += spending_lines(agent, width, cells)
     from axon.features import quota
     from axon.features.quota import local_reset_text
     limits = quota.snapshot()

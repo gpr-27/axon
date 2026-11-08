@@ -13,6 +13,7 @@ Rewinding never destroys data: before files are restored, their current contents
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -29,6 +30,18 @@ class Snapshot:
     files: dict[Path, bytes | None]  # original bytes, or None if the file did not exist
     label: str = ""
     skipped: list[Path] = field(default_factory=list)
+    after: dict[Path, str | None] = field(default_factory=dict)  # sha1 of each file when the turn ended (None = gone); lets a restore notice later edits made outside Axon
+
+
+def digest_bytes(data: bytes | None) -> str | None:
+    return hashlib.sha1(data).hexdigest() if data is not None else None
+
+
+def digest_file(path: Path) -> str | None:
+    try:
+        return digest_bytes(path.read_bytes()) if path.is_file() else None
+    except OSError:
+        return None
 
 
 class CheckpointManager:
@@ -76,9 +89,13 @@ class CheckpointManager:
             for i, entry in enumerate(meta.get("files", [])):
                 blob = d / f"{i}.bin"
                 files[Path(entry["path"])] = blob.read_bytes() if entry.get("existed") else None
+            after_list = meta.get("after")
+            after: dict[Path, str | None] = {}
+            if isinstance(after_list, list) and len(after_list) == len(files):
+                after = {p: (str(a) if a else None) for p, a in zip(files, after_list)}
             return Snapshot(turn_id=int(meta.get("turn_id", d.name)), timestamp=float(meta.get("timestamp", 0)),
                             files=files, label=str(meta.get("label", "")),
-                            skipped=[Path(p) for p in meta.get("skipped", [])])
+                            skipped=[Path(p) for p in meta.get("skipped", [])], after=after)
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
@@ -96,6 +113,7 @@ class CheckpointManager:
             (d / "manifest.json").write_text(json.dumps({
                 "turn_id": snap.turn_id, "timestamp": snap.timestamp, "label": snap.label,
                 "files": entries, "skipped": [str(p) for p in snap.skipped],
+                **({"after": [snap.after.get(p) for p in snap.files]} if snap.after else {}),
             }, indent=1), encoding="utf-8")
             setattr(snap, "_seq", seq)
         except OSError:
@@ -220,6 +238,7 @@ class CheckpointManager:
             label=label[:80],
             skipped=list(self._pending_skipped),
         )
+        snap.after = {p: digest_file(p) for p in snap.files}
         self.history.append(snap)
         self._persist(snap, self._turn_counter)
         self._pending_files.clear()

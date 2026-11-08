@@ -220,14 +220,15 @@ class CacheStatus:
 
 @dataclass(frozen=True)
 class BudgetEvent:
-    scope: str                     # turn | session
-    action: str                    # warn | stop | downgrade
+    scope: str                     # turn | session | day | month
+    action: str                    # warn | stop | downgrade | notice (a quiet heads-up at 50, 80 and 100 percent)
     spent_usd: float
     projected_usd: float
     limit_usd: float
     model: str
     new_model: str = ""
     message: str = ""
+    percent: int = 0               # 50 | 80 | 100 for a notice
 
 
 @dataclass(frozen=True)

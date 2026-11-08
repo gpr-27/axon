@@ -172,31 +172,18 @@ function axCard(card, ev, text) {
   card.classList.add('c-' + model.kind);
 }
 
-// ----- desktop notifications (opt in, only while the tab is hidden) -----
+// ----- notifications (opt in in Settings, only while the tab is hidden; the choices and the sending live in dash_js_tasks) -----
 function axNotifyOn() { return typeof Notification !== 'undefined' && Notification.permission === 'granted' && lsGet('axon-notify') === '1'; }
-function axNotify(title, body, tag) {
-  if (!axNotifyOn() || !document.hidden) return;
-  try { const n = new Notification(title, { body: String(body || '').slice(0, 160), tag }); n.onclick = () => { window.focus(); n.close(); }; } catch (e) { /* blocked */ }
-}
-function axNotifyPill() {
-  const supported = typeof Notification !== 'undefined';
-  const b = h('button', { class: 'mini', type: 'button', 'aria-pressed': 'false', title: 'Show a desktop notification when a turn finishes or Axon needs permission while this tab is in the background' });
-  const draw = () => { const on = axNotifyOn(); b.setAttribute('aria-pressed', String(on)); b.textContent = !supported ? 'Notifications unavailable' : on ? 'Notifications on' : Notification.permission === 'denied' ? 'Notifications blocked' : 'Notify me'; b.disabled = !supported || (Notification.permission === 'denied'); };
-  b.addEventListener('click', async () => {
-    if (axNotifyOn()) { lsSet('axon-notify', '0'); draw(); toast('Notifications off'); return; }
-    try { const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission(); if (p === 'granted') { lsSet('axon-notify', '1'); toast('You will be told when a turn finishes or Axon needs permission while this tab is hidden'); } else toast('The browser did not allow notifications'); } catch (e) { toast('Notifications are not available here'); }
-    draw();
-  });
-  draw(); return h('span', { class: 'pill' }, b);
-}
+function axNotify(title, body, tag) { axnTell(title, body, tag); }
 // One hook for live events (called first thing in applyEvent).
 function axOnEvent(C, ev) {
   if (C.replaying) return;
-  if (ev.type === 'turn_end') axNotify('Axon finished', turnWord(ev.stop_reason) + (ev.cost_usd != null ? ' · ' + usd(ev.cost_usd) : ''), 'axon-turn');
+  if (ev.type === 'turn_start') C.turnT0 = Date.now();
+  if (ev.type === 'turn_end') axnTurnEnd(C, ev);
   else if (ev.type === 'approval_request') axNotify('Axon needs permission', 'It wants to use ' + ev.tool, 'axon-approval-' + ev.id);
-  else if (ev.type === 'question_request') axNotify('Axon has a question', ev.question, 'axon-q-' + ev.id);
-  else if (ev.type === 'error') axNotify('Axon hit an error', ev.message, 'axon-turn');
-  else if (ev.type === 'user' || ev.type === 'turn_start') { C.ghostGone = true; }
+  else if (ev.type === 'question_request') axNotify('Axon has a question', 'It is waiting for your answer.', 'axon-q-' + ev.id);
+  else if (ev.type === 'error') axNotify('Axon hit an error', 'A turn stopped with an error. Open Axon to read it.', 'axon-turn');
+  if (ev.type === 'user' || ev.type === 'turn_start') { C.ghostGone = true; }
   if (ev.type === 'user' || ev.type === 'turn_start' || ev.type === 'idle' || ev.type === 'turn_end') axGhostSoon(C);
 }
 

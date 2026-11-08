@@ -118,10 +118,10 @@ def test_plugin_create_exposes_namespaced_command(agent: Agent, workspace: Path)
 
 
 def test_prompt_library_placeholders(agent: Agent):
-    dispatch_command("/prompt tests path=src/app.py", agent)
+    dispatch_command("/prompt write-tests file=src/app.py", agent)
     assert "Write tests for src/app.py" in _last_user(agent)
     before = len(agent.conversation.messages)
-    dispatch_command("/prompt impact", agent)  # missing placeholder, no TTY -> nothing sent
+    dispatch_command("/prompt write-tests", agent)  # missing placeholder, no TTY -> nothing sent
     assert len(agent.conversation.messages) == before
 
 
@@ -216,7 +216,7 @@ def test_feature_commands_override_builtins(monkeypatch, agent: Agent):
 def test_multiline_usage_is_aligned_under_first_line(agent: Agent, capsys):
     """An invalid /rewind argument prints the multi-line usage with every line indented (not at column 0)."""
     from axon.ui.theme import strip_ansi
-    dispatch_command("/rewind 1 code", agent)
+    dispatch_command("/rewind banana", agent)
     lines = [ln for ln in strip_ansi(capsys.readouterr().out).splitlines() if "/rewind" in ln]
     assert len(lines) >= 5 and lines[0].startswith("  Usage: /rewind ")
     assert all(ln.startswith(" " * 9 + "/rewind") for ln in lines[1:]), lines

@@ -640,6 +640,7 @@ TERMINAL_ONLY: dict[str, str] = {
     "exit": "Ends the terminal session. Close the terminal (or press Ctrl+C there); the page keeps running.",
     "quit": "Ends the terminal session. Close the terminal (or press Ctrl+C there); the page keeps running.",
     "paste": "Not needed here: paste straight into the message box (Ctrl+V or Cmd+V). /paste is for the terminal prompt.",
+    "compare": "In the app, use Chat options > Compare models: the answers show side by side, with time, tokens and cost for each.",
     "terminal-setup": "This sets up key bindings for the terminal prompt, so it only applies in a terminal. The page needs no setup.",
 }
 # Commands that run here but only change the terminal prompt: the answer says so after the output.

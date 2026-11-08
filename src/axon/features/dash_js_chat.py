@@ -126,6 +126,7 @@ async function viewChat(sid) {
 }
 
 function emptyChat(C) {
+  if (typeof welcomeEmptyChat === 'function') return welcomeEmptyChat(C);
   const ws = state.ws || {};
   return h('div', { class: 'empty-chat' }, h('h2', null, 'Ask Axon about ' + (ws.name || 'this project')),
     h('p', null, 'Axon works in ', h('b', null, ws.workspace || ''), '. It can read and change files here and run commands, asking you first.'),
@@ -560,7 +561,7 @@ function applyEvent(C, ev) {
     case 'subagent': subagentEvent(C, ev); break;
     case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
     case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;
-    case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), 'warn')); break;
+    case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), ev.action === 'notice' ? (ev.percent >= 100 ? 'warn' : '') : 'warn')); break;
     case 'retry': hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + (Math.round(Number(ev.delay_s || 0) * 10) / 10) + 's: ' + ev.error, 'warn')); break;
     case 'steer': hostOf(C).append(notice('Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
     case 'queued': if (C.replaying) break; C.feed.append(notice((ev.steer ? 'Sent into the running turn: ' : 'Queued for after the turn: ') + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
@@ -608,7 +609,7 @@ function selectTab(card, k) {
 async function copyTab(card, btn) {
   const text = ({ in: card.axInText, out: card.axText, why: card.axWhyText })[card.axTab || 'out'] || '';
   try { await navigator.clipboard.writeText(text); }
-  catch (e) { const ta = h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand('copy'); } catch (x) { /* blocked */ } ta.remove(); }
+  catch (e) { const ta = h('textarea', { style: 'position:fixed;opacity:0', 'aria-hidden': 'true' }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand('copy'); } catch (x) { /* blocked */ } ta.remove(); }
   btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
 }
 function mkTool(name, input) {
@@ -847,6 +848,7 @@ async function finishTurn(C, ev, ts, how) {
     cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/ running together$/, ' tools').replace(/^(\d+) tools tools$/, '$1 tools'); });
     headMeta(cur, true);
     cur.art.dataset.done = '1';
+    cur.art.classList.remove('live');   // the reply is finished: its hover actions (Copy, Regenerate, Bookmark...) may show
     if (stopped) cur.answer.append(notice('Stopped', ''));
     else if (ev && ev.is_error) cur.answer.append(turnError(ev.result || ev.error || 'The turn failed.'));
   }
@@ -935,6 +937,7 @@ function buildComposer(C) {
   const accept = (i) => {
     const it = items[i]; if (!it) return;
     const v = ta.value, pos = ta.selectionStart;
+    if (mode === 'prompt') { closePop(); axPromptUse(C, ta, it.prompt); return; }
     if (mode === 'cmd') { ta.value = it.value + ' ' + v.slice(pos).replace(/^\S*/, '').trimStart(); }
     else { const before = v.slice(0, pos).replace(/@[^\s]*$/, '@' + it.value + ' '); ta.value = before + v.slice(pos); }
     closePop(); auto(); ta.focus();
@@ -950,6 +953,11 @@ function buildComposer(C) {
       if (ta.value.split('\n')[0] !== first) return;                     // the box changed (or was sent) while the list loaded
       showPop(cmdSuggest(C.cmds, first, C.hist), 'cmd'); return;       // fuzzy, grouped, recent first (dash_js_cmdcards.py)
     }
+    if (/^#[^\s#]*$/.test(first) && pos <= first.length) {            // # lists the saved prompts (dash_js_library.py)
+      let l = []; try { l = await axPromptItems(C, first.slice(1)); } catch (e) { /* no list */ }
+      if (ta.value.split('\n')[0] !== first) return;
+      showPop(l, 'prompt'); return;
+    }
     const m = v.slice(0, pos).match(/@([^\s@]*)$/);
     if (m) {
       const q = m[1]; clearTimeout(C.ft);
@@ -962,7 +970,7 @@ function buildComposer(C) {
   ta.addEventListener('keydown', (e) => {
     if (!pop.hidden && items.length) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; cmdPopSelect(pop, sel); return; }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && mode === 'file')) { e.preventDefault(); accept(sel); return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && (mode === 'file' || mode === 'prompt'))) { e.preventDefault(); accept(sel); return; }
       if (e.key === 'Enter' && !e.shiftKey && mode === 'cmd' && ta.value.trim() !== items[sel].value) { e.preventDefault(); accept(sel); return; }
       if (e.key === 'Escape') { closePop(); return; }
     }
@@ -970,10 +978,23 @@ function buildComposer(C) {
     if (e.key === 'ArrowDown' && C.hpos >= 0) { e.preventDefault(); C.hpos--; ta.value = C.hpos >= 0 ? C.hist[C.hist.length - 1 - C.hpos] : ''; auto(); return; }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(true); }
   });
+  // A file typed as @name (not picked as a chip) is sent like any other: warn before it goes if it looks like it holds a secret.
+  async function typedFilesAreSafe(text) {
+    const typed = [...new Set([...text.matchAll(/(?:^|\s)@([^\s@]+)/g)].map(m => m[1]).filter(n => !C.chips['@' + n]))].slice(0, 8);
+    if (!typed.length) return true;
+    let items; try { items = (await api('/api/attach/paths', { paths: typed })).items; } catch (e) { return true; }
+    const risky = items.filter(i => i.secrets && i.secrets.length);
+    if (!risky.length) return true;
+    return wbConfirm('Send a file that may hold a secret?', [
+      ...risky.map(i => h('p', null, h('b', null, i.name), ' looks like it holds a secret (' + i.secrets.slice(0, 3).join(', ') + ').')),
+      'It will be sent to the model with your message. Cancel to edit the message first.'], 'Send anyway', true);
+  }
   async function go(steer) {
     const text = ta.value.trim(); if (!text || C.locked) return;
+    if (axPromptSlash(C, ta, text)) return;                  // a bare /prompt opens the saved prompts
     C.hist.push(text); C.hist = C.hist.slice(-80); lsSet(histKey, JSON.stringify(C.hist)); C.hpos = -1;
     if (text.startsWith('!') && text.length > 1) { ta.value = ''; auto(); closePop(); return shellFromChat(C, text.slice(1).trim()); }
+    if (!(await typedFilesAreSafe(text))) { C.hist.pop(); return; }
     ta.value = ''; auto(); closePop(); redrawChips();
     C.atBottom = true;                       // sending is a reason to look at the newest reply
     send.disabled = true;
@@ -1001,7 +1022,7 @@ function buildComposer(C) {
   onLeave(() => clearInterval(sync));
   setTimeout(() => { const pre = lsGet('axon-prefill'); if (pre) { lsSet('axon-prefill', ''); ta.value = pre; auto(); } ta.focus(); }, 50);
   C.upload = upload;
-  return h('div', { class: 'composer-wrap' }, root, wbFooter(C));
+  return h('div', { class: 'composer-wrap' }, root, (typeof cfForecastLine === 'function' ? cfForecastLine(C, ta) : null), wbFooter(C));
 }
 function commandResultCard(C, line, r) {
   if (r.open) { location.hash = r.open; return; }

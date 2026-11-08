@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 FEATURE_MODULES: tuple[str, ...] = (
     "axon.features.analytics",
+    "axon.features.compare_models",
     "axon.features.repo_map",
     "axon.features.gitops",
     "axon.features.sdk",

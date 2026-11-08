@@ -142,7 +142,7 @@ async function viewExtensions() {
     };
     const btn = (label, line, ask, cls) => h('button', { class: 'mini' + (cls ? ' ' + cls : ''), style: 'border-color:var(--ink2);padding:2px 9px', type: 'button', onclick: () => run(line, ask) }, label);
     const acts = (...b) => h('div', { class: 'formrow', style: 'gap:4px;flex-wrap:wrap;margin:0' }, ...b.filter(Boolean));
-    const field = (ph, w) => h('input', { type: 'text', placeholder: ph, style: 'flex:1;min-width:' + (w || 140) + 'px', autocomplete: 'off', spellcheck: 'false' });
+    const field = (ph, w) => h('input', { type: 'text', placeholder: ph, 'aria-label': ph, style: 'flex:1;min-width:' + (w || 140) + 'px', autocomplete: 'off', spellcheck: 'false' });
     const q = (s) => /^[A-Za-z0-9_.@:\/-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
 
     function drawTrust() {
@@ -255,34 +255,8 @@ async function viewExtensions() {
   });
 }
 
-// ---------- share ----------
-function shareModal(req) {
-  const scrim = h('div', { class: 'scrim', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Share' });
-  const close = () => scrim.remove();
-  scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
-  const box = h('div', { class: 'modal' }, h('p', { class: 'muted' }, 'Preparing a redacted copy...'));
-  scrim.append(box); document.body.append(scrim);
-  api('/api/share/preview', req).then(p => {
-    const pre = h('pre'); pre.textContent = p.content;
-    const out = h('div');
-    const gistBtn = h('button', { class: 'btn', disabled: !(p.gh && p.gist_ok) }, 'Create secret GitHub gist...');
-    gistBtn.addEventListener('click', () => {
-      gistBtn.disabled = true;
-      const confirmBtn = h('button', { class: 'btn primary' }, 'Confirm: upload exactly this file as a secret gist');
-      confirmBtn.addEventListener('click', async () => {
-        confirmBtn.disabled = true;
-        try { const r = await api('/api/share/gist', { sha256: p.sha256, confirm: true }); out.replaceChildren(h('p', null, 'Created: ', h('a', { href: r.url, target: '_blank', rel: 'noopener noreferrer' }, r.url)), h('p', { class: 'muted' }, 'Secret gists are unlisted, not private: anyone with the link can read it.')); }
-        catch (e) { confirmBtn.disabled = false; out.append(errorBox(e.message)); }
-      });
-      out.replaceChildren(h('p', null, 'Everything in the box above (' + p.bytes.toLocaleString() + ' bytes, sha256 ' + p.sha256.slice(0, 12) + '...) will be sent to GitHub through the gh CLI. Nothing is uploaded until you confirm.'), h('div', { class: 'acts' }, confirmBtn, h('button', { class: 'btn', onclick: () => { out.replaceChildren(); gistBtn.disabled = false; } }, 'Cancel')));
-    });
-    box.replaceChildren(h('h3', null, 'Share a copy'),
-      h('p', { class: 'muted' }, 'One self-contained HTML file, no scripts. API keys, tokens, bearer headers and .env values were redacted. Review it before you send it anywhere.'),
-      pre,
-      h('div', { class: 'acts' }, h('a', { class: 'btn primary', href: '/api/share/file?sha=' + p.sha256, download: p.filename }, 'Download ' + p.filename), gistBtn, h('button', { class: 'btn', onclick: close }, 'Close'),
-        h('span', { class: 'muted' }, p.bytes.toLocaleString() + ' bytes' + (p.gh ? '' : ' · gh CLI not found, gist unavailable') + (p.gist_note ? ' · ' + p.gist_note : ''))), out);
-  }).catch(e => box.replaceChildren(errorBox(e.message), h('button', { class: 'btn', onclick: close }, 'Close')));
-}
+// The Share and Export dialog (shareModal) lives in dash_js_chatx.py.
+
 
 
 """

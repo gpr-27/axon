@@ -318,6 +318,8 @@ def handle_test(agent: Any, arg: str) -> CommandResult:
     except OSError as e:
         err(f"Could not run tests: {e}")
         return CommandResult(handled=True)
+    from axon.features import project_overview
+    project_overview.record_test_result(ws, " ".join(argv), proc.returncode)       # what Insights and /overview show as the last test result
     lines = (proc.stdout + ("\n" + proc.stderr if proc.returncode else "")).strip().splitlines()
     for ln in lines[-25:]:
         print(f"    {ln}")

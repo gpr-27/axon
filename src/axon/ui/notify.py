@@ -6,6 +6,7 @@ data (argv / environment), never interpolated into a script.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -163,9 +164,12 @@ def notify_if_unfocused(title: str = "Axon", message: str = "Task finished.") ->
 # `notifications = "all"` notifies after every turn; "off" never. Tests, scripts, print mode and
 # subagents never notify, and the same kind is not repeated within a few seconds.
 NOTIFY_MODES = ("important", "all", "off")
+# The terminal itself can be told too (off by default): a bell, or the notification escape codes that iTerm2, kitty,
+# WezTerm, Ghostty and others turn into a system notification (OSC 9) or that urxvt-style terminals read (OSC 777).
+TERMINAL_MODES = ("off", "bell", "osc9", "osc777")
 ALWAYS_IMPORTANT = frozenset({"permission_prompt", "question", "turn_failed", "background_task"})
 _DEDUPE_S = 5.0
-_policy: dict[str, Any] = {"mode": "important", "after": 30.0}
+_policy: dict[str, Any] = {"mode": "important", "after": 30.0, "terminal": "off"}
 _last_sent: dict[str, float] = {}
 _lock = threading.Lock()
 
@@ -178,6 +182,51 @@ def configure(settings: Any) -> None:
         _policy["after"] = max(0.0, float(getattr(settings, "notify_after_seconds", 30.0)))
     except (TypeError, ValueError):
         _policy["after"] = 30.0
+    term = str(getattr(settings, "terminal_notify", "off") or "off").lower()
+    _policy["terminal"] = term if term in TERMINAL_MODES else "off"
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def safe_notice_text(text: Any, limit: int = 120) -> str:
+    """Text that may go into a notification or a terminal escape code: one line, no control characters (an escape
+    sequence in a message could otherwise drive the terminal), and nothing that looks like a key or password."""
+    clean = " ".join(_CONTROL.sub(" ", str(text or "")).split())[:limit]
+    try:
+        from axon.features.memory_files import scan_secrets
+        if scan_secrets(clean):
+            return "Something needs your attention"
+    except Exception:
+        pass
+    return clean
+
+
+def terminal_signal(mode: str, title: str, message: str) -> str:
+    """The characters that make the terminal notify, for *mode* ('' when off)."""
+    title, message = safe_notice_text(title, 60).replace(";", ","), safe_notice_text(message).replace(";", ",")
+    if mode == "bell":
+        return "\a"
+    if mode == "osc9":
+        return f"\x1b]9;{title}: {message}\x07" if message else f"\x1b]9;{title}\x07"
+    if mode == "osc777":
+        return f"\x1b]777;notify;{title};{message}\x07"
+    return ""
+
+
+def emit_terminal_notice(title: str, message: str, mode: str | None = None, stream: Any = None) -> bool:
+    """Write the terminal signal to the terminal (only when it is one). True when something was written."""
+    mode = mode or _policy["terminal"]
+    out = stream if stream is not None else sys.stdout
+    sig = terminal_signal(mode, title, message)
+    try:
+        if not sig or not out.isatty():
+            return False
+        out.write(sig)
+        out.flush()
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _blocked_by_env() -> bool:
@@ -219,4 +268,6 @@ def notify_event(kind: str, message: str, *, settings: Any = None, elapsed: floa
         if now - _last_sent.get(kind, -1e9) < _DEDUPE_S:
             return False
         _last_sent[kind] = now
-    return notify_if_unfocused(title, message)
+    message = safe_notice_text(message, 200)
+    signalled = emit_terminal_notice(title, message)
+    return notify_if_unfocused(title, message) or signalled

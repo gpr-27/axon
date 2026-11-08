@@ -156,7 +156,13 @@ def test_type_scale_and_one_code_face():
     assert sizes <= {12, 13, 14, 15, 16, 17, 22}, sizes
     assert set(re.findall(r"font-weight:(\w+)", over)) <= {"400", "500", "600"}
     assert "ui-monospace" not in over and "italic" not in over
-    assert css.endswith(TYPE_TAIL)
+    # The type pass is the last base rule. After it come only the language size bumps (Telugu and Hindi need larger
+    # glyphs), and every one of those is scoped to html:lang(..), so English keeps exactly the scale above.
+    cut = css.rfind(TYPE_TAIL)
+    assert cut >= 0
+    after = css[cut + len(TYPE_TAIL):]
+    sels = [x.strip() for head in re.findall(r"(?:^|[{}])\s*([^{}@]+)\{", after) for x in head.split(",") if x.strip()]
+    assert sels and all(x.startswith("html:lang(") for x in sels), [x for x in sels if not x.startswith("html:lang(")][:5]
     # labels and figures: the interface face; only code keeps the code face
     assert re.search(r"\.num,\.kpi \.v[^{]*\{font-family:var\(--font-ui\)\}", TYPE_TAIL)
     assert "pre,code,.code,.editor" in TYPE_TAIL and "var(--font-code)" in TYPE_TAIL

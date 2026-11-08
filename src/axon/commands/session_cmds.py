@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -265,6 +265,79 @@ def handle_star(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
+def _bookmark_context(agent: Any) -> tuple[Path, list[dict[str, Any]]]:
+    """(the session's folder, the chat's turns as the app lists them): both surfaces read the same bookmark file."""
+    from axon.features import chat_export as cx
+    from axon.features.dashboard import load_transcript
+    path = Path(agent.session._file(agent.session.active_session_id))
+    try:
+        entries = load_transcript(path).entries
+    except OSError:
+        entries = []
+    return path.parent, cx.turns_of(entries, {})
+
+
+@command("bookmark", category=CAT, description="Bookmark the latest reply, so you can find it again (the app lists it too)",
+         usage="/bookmark [note]   marks the latest reply; /bookmarks lists them")
+def handle_bookmark(agent: Any, arg: str) -> CommandResult:
+    from axon.features import chat_export as cx
+    folder, turns = _bookmark_context(agent)
+    t = next((x for x in reversed(turns) if x["reply_ts"] is not None), None)
+    if t is None:
+        info("Nothing to bookmark yet: Axon has not replied in this chat.")
+        return CommandResult(handled=True)
+    try:
+        row, created = cx.add_bookmark(folder, t["reply_ts"], "assistant", " ".join(t["reply"]) or t["user"], arg.strip())
+    except ValueError as e:
+        err(str(e))
+        return CommandResult(handled=True, success=False)
+    if created:
+        ok(f"Bookmarked: {row['snippet'][:70]}")
+        print(f"  {SLATE}{typed_only('/bookmarks lists them. ')}The app shows them under Chat options > Bookmarks.{RST}\n")
+    else:
+        info("That reply is already bookmarked.")
+    return CommandResult(handled=True)
+
+
+@command("bookmarks", category=CAT, description="List this chat's bookmarks, show one in full, or remove one",
+         usage="/bookmarks               list\n/bookmarks show <n>      print the message in full\n/bookmarks remove <n>    remove a bookmark")
+def handle_bookmarks(agent: Any, arg: str) -> CommandResult:
+    from axon.features import chat_export as cx
+    folder, turns = _bookmark_context(agent)
+    rows = cx.live_bookmarks(folder, turns)
+    words = arg.split()
+    if words and words[0].lower() in ("show", "remove", "rm", "delete"):
+        try:
+            row = rows[int(words[1]) - 1]
+            if int(words[1]) < 1:
+                raise IndexError
+        except (IndexError, ValueError):
+            err(f"Give a bookmark number from 1 to {len(rows)}." if rows else "There are no bookmarks.")
+            return CommandResult(handled=True, success=False)
+        if words[0].lower() == "show":
+            t = turns[row["n"]]
+            text = "\n\n".join(t["reply"]) if row["kind"] == "assistant" else t["user"]
+            from axon.session.activity import redact_text
+            print(f"\n{redact_text(text).strip()}\n")
+        else:
+            cx.remove_bookmark(folder, row["id"])
+            ok("Bookmark removed")
+        return CommandResult(handled=True)
+    if words:
+        usage("/bookmarks [show <n> | remove <n>]")
+        return CommandResult(handled=True)
+    header("Bookmarks", f"{len(rows)} in this chat")
+    if not rows:
+        print(f"    {SLATE}No bookmarks yet.{typed_only(' /bookmark marks the latest reply.')}{RST}\n")
+        return CommandResult(handled=True)
+    for i, b in enumerate(rows, 1):
+        when = datetime.fromtimestamp(b["created"]).strftime("%m-%d %H:%M") if b.get("created") else ""
+        note = f"  {DARK_SLATE}{b['note']}{RST}" if b.get("note") else ""
+        print(f"    {CYAN}{i:>3}{RST}  {SLATE}{when}{RST}  {WHITE}{b['snippet'][:70]}{RST}{note}")
+    print()
+    return CommandResult(handled=True)
+
+
 @command("branch", category=CAT, description="Fork the conversation into a new session", aliases=("fork",),
          usage="/branch [name]")
 def handle_branch_cmd(agent: Any, arg: str) -> CommandResult:
@@ -290,6 +363,7 @@ class RewindPoint:
     ts: float               # when the prompt was sent (0.0 when unknown)
     files_changed: int      # files edited from this prompt until the next one
     message_index: int = 0  # position of the prompt in conversation.messages
+    files: list[str] = field(default_factory=list)   # the files those edits touched (paths)
 
 
 def _prompt_text(m: dict[str, Any]) -> str:
@@ -336,7 +410,8 @@ def rewind_points(agent: Any) -> list[RewindPoint]:
             for sn in snaps:
                 if (sn.turn_id == -1 and k == len(idxs) - 1) or ts <= sn.timestamp < nxt:
                     files.update(str(p) for p in sn.files)
-        points.append(RewindPoint(index=k + 1, prompt=_prompt_text(msgs[mi]), ts=ts, files_changed=len(files), message_index=mi))
+        points.append(RewindPoint(index=k + 1, prompt=_prompt_text(msgs[mi]), ts=ts, files_changed=len(files), message_index=mi,
+                                  files=sorted(files)))
     return points
 
 
@@ -352,7 +427,28 @@ def _summarize_tail(agent: Any, tail: list[dict[str, Any]]) -> str:
                     transcript, max_tokens=700, source="rewind_summary")
 
 
-def apply_rewind(agent: Any, index: int, mode: str) -> dict[str, Any]:
+class RewindConflict(ValueError):
+    """Files changed outside Axon since it last wrote them: a code rewind would overwrite the changes."""
+
+    def __init__(self, message: str, files: list[str]) -> None:
+        super().__init__(message)
+        self.files = files
+
+
+def _code_conflicts(cp: Any, ts: float) -> list[str]:
+    """Files a rewind to time ``ts`` would overwrite although they changed outside Axon (see features/checkpoint_view)."""
+    from axon.features import checkpoint_view as cv
+    snaps = cp.list_snapshots() if hasattr(cp, "list_snapshots") else []
+    n = next((i + 1 for i, s in enumerate(snaps) if s.timestamp >= ts or s.turn_id == -1), 0)
+    if not n or cp.pending_count():
+        return []
+    try:
+        return [f["rel"] for f in cv.plan_restore(cp, n)["conflicts"]]
+    except cv.RestoreError:
+        return []
+
+
+def apply_rewind(agent: Any, index: int, mode: str, force: bool = False) -> dict[str, Any]:
     """Rewind to before prompt ``index`` (1-based). Modes: code_and_conversation | conversation | code |
     summarize_from_here. Returns {"reverted": [...], "removed": n, "prompt": text, "summary": str|None}."""
     if mode not in {m for m, _ in REWIND_MODES}:
@@ -366,6 +462,10 @@ def apply_rewind(agent: Any, index: int, mode: str) -> dict[str, Any]:
     if mode in ("code", "code_and_conversation"):
         cp = getattr(agent, "checkpoints", None)
         if cp is not None and pt.ts and hasattr(cp, "rewind_to"):
+            clash = [] if force else _code_conflicts(cp, pt.ts)
+            if clash:
+                raise RewindConflict(f"{len(clash)} file(s) changed outside Axon since it last wrote them: {', '.join(clash[:6])}"
+                                     + (" ..." if len(clash) > 6 else "") + ". Nothing was changed.", clash)
             out["reverted"] = cp.rewind_to(pt.ts)
         elif cp is not None and not pt.ts:
             out["reverted"] = ["Skipped code restore: the prompt's time is unknown (resumed without a transcript)"]
@@ -439,15 +539,25 @@ def _rewind_menu(agent: Any, points: list[RewindPoint]) -> CommandResult:
         info("Rewind cancelled.")
         return CommandResult(handled=True)
     pt, mode = picked
-    _print_rewind_result(apply_rewind(agent, pt.index, mode), mode, pt.index)
+    try:
+        res = apply_rewind(agent, pt.index, mode)
+    except RewindConflict as e:
+        err(str(e))
+        if not confirm("Overwrite those files anyway? A copy of what is there now is kept.", default=False):
+            info("Nothing was changed.")
+            return CommandResult(handled=True)
+        res = apply_rewind(agent, pt.index, mode, force=True)
+    _print_rewind_result(res, mode, pt.index)
     return CommandResult(handled=True)
 
 
 REWIND_USAGE = """/rewind                     pick a prompt, then restore code and/or conversation (menu)
-/rewind to <n> [mode]       modes: code_and_conversation (default), conversation, code, summarize_from_here
+/rewind to <n> [mode] [--overwrite]   modes: code_and_conversation (default), conversation, code, summarize_from_here
 /rewind points              list prompts you can rewind to
-/rewind <n>                 undo the file edits of the last n turns
-/rewind list                show file checkpoints"""
+/rewind list                the file checkpoints: time, prompt, files, +/- lines
+/rewind show <n>            what checkpoint n changed
+/rewind restore <n> [--keep-mine|--overwrite] [--yes]   put the files back to before checkpoint n (undo it by restoring the new checkpoint)
+/rewind <n> [--overwrite]   undo the file edits of the last n turns"""
 
 
 @command("rewind", category=CAT, description="Restore code and/or conversation to an earlier prompt",
@@ -465,7 +575,8 @@ def handle_rewind(agent: Any, arg: str) -> CommandResult:
         _print_points(rewind_points(agent))
         return CommandResult(handled=True)
     if a.startswith("to "):
-        parts = a.split()
+        force = "--overwrite" in a.split()
+        parts = [w for w in a.split() if w != "--overwrite"]
         try:
             idx = int(parts[1].lstrip("#"))
         except (IndexError, ValueError):
@@ -473,7 +584,10 @@ def handle_rewind(agent: Any, arg: str) -> CommandResult:
             return CommandResult(handled=True)
         mode = parts[2] if len(parts) > 2 else "code_and_conversation"
         try:
-            res = apply_rewind(agent, idx, mode)
+            res = apply_rewind(agent, idx, mode, force=force)
+        except RewindConflict as e:
+            err(str(e) + typed_only(" Add --overwrite to replace them (a copy is kept)."))
+            return CommandResult(handled=True)
         except ValueError as e:
             err(str(e))
             return CommandResult(handled=True)
@@ -482,25 +596,27 @@ def handle_rewind(agent: Any, arg: str) -> CommandResult:
     if cp is None:
         info("Checkpoints are not enabled for this session.")
         return CommandResult(handled=True)
-    if a in ("list", "ls", "show"):
-        snaps = cp.list_snapshots() if hasattr(cp, "list_snapshots") else list(getattr(cp, "history", []))
-        header("Checkpoints", f"{len(snaps)} snapshot(s), newest last")
-        if not snaps:
-            print(f"    {SLATE}No file edits recorded yet.{RST}\n")
-            return CommandResult(handled=True)
-        for i, s in enumerate(snaps, 1):
-            when = datetime.fromtimestamp(s.timestamp).strftime("%H:%M:%S")
-            names = ", ".join(sorted(p.name for p in s.files))[:70]
-            label = f" {DARK_SLATE}{s.label}{RST}" if getattr(s, "label", "") else ""
-            print(f"    {CYAN}{i:>2}{RST}  {SLATE}{when}{RST}  {WHITE}{len(s.files)} file(s){RST}  {SLATE}{names}{RST}{label}")
-        typed_hint("    /rewind <n> undoes the newest n snapshots")
-        print()
-        return CommandResult(handled=True)
+    if a in ("list", "ls") or a.startswith(("show", "restore")):
+        return _rewind_checkpoints(agent, cp, a)
+    words = a.split()
+    force = "--overwrite" in words
+    words = [w for w in words if w != "--overwrite"]
     try:
-        steps = max(1, int(a))
-    except ValueError:
+        steps = max(1, int(words[0]))
+    except (ValueError, IndexError):
         usage(REWIND_USAGE)
         return CommandResult(handled=True)
+    snaps = cp.list_snapshots() if hasattr(cp, "list_snapshots") else []
+    if snaps and not force and not cp.pending_count():
+        from axon.features import checkpoint_view as cv
+        try:
+            clash = cv.plan_restore(cp, max(1, len(snaps) - steps + 1))["conflicts"]
+        except cv.RestoreError:
+            clash = []
+        if clash:
+            err(f"{len(clash)} file(s) changed outside Axon since it last wrote them: " + ", ".join(f["rel"] for f in clash[:6])
+                + ". Nothing was changed." + typed_only(" Add --overwrite to replace them (a copy is kept)."))
+            return CommandResult(handled=True)
     reverted = cp.rewind(steps) if hasattr(cp, "rewind") else cp.rewind_last()
     if not reverted:
         info("No file modifications to rewind.")
@@ -513,7 +629,89 @@ def handle_rewind(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
-def _export_markdown(agent: Any) -> str:
+def _rewind_checkpoints(agent: Any, cp: Any, a: str) -> CommandResult:
+    """/rewind list, show <n> and restore <n>: the checkpoint timeline (axon.features.checkpoint_view, same as the app)."""
+    from axon.features import checkpoint_view as cv
+    ws = ws_of(agent)
+    words = a.split()
+    if words[0] in ("list", "ls") or (words[0] == "show" and len(words) == 1):
+        rows = cv.timeline(cp, [(p.ts, p.prompt) for p in rewind_points(agent) if p.ts], ws)
+        header("Checkpoints", f"{len(rows)} checkpoint(s), newest last")
+        if not rows:
+            print(f"    {SLATE}No file edits recorded yet.{RST}\n")
+            return CommandResult(handled=True)
+        for r in rows:
+            names = ", ".join(f["rel"] for f in r["files"][:3]) + (f" +{r['file_count'] - 3}" if r["file_count"] > 3 else "")
+            what = r["label"] or (" ".join(r["prompt"].split())[:44] if r["prompt"] else "(no prompt recorded)")
+            print(f"    {CYAN}{r['n']:>2}{RST}  {SLATE}{cv.when(r['time'])}{RST}  {WHITE}{what}{RST}")
+            print(f"        {SLATE}{r['file_count']} file(s): {names}{RST}  {MINT}+{r['added']}{RST} {ROSE}-{r['removed']}{RST}")
+        typed_hint("\n    /rewind show <n> · /rewind restore <n>")
+        print()
+        return CommandResult(handled=True)
+    try:
+        n = int(words[1].lstrip("T#t")) if len(words) > 1 else 0
+    except ValueError:
+        n = 0
+    if not n:
+        usage(REWIND_USAGE)
+        return CommandResult(handled=True)
+    try:
+        if words[0] == "show":
+            files = cv.checkpoint_diff(cp, n, ws)
+            if not files:
+                info(f"Checkpoint {n} changed no files.")
+            from axon.commands.code_cmds import _print_diff
+            for f in files:
+                header(f["rel"], f["status"])
+                if f["rows"]:
+                    sign = {"add": "+", "del": "-", "ctx": " ", "meta": "\\"}
+                    _print_diff("\n".join([f"--- a/{f['rel']}", f"+++ b/{f['rel']}"] + [r["text"] if r["kind"] == "hunk" else sign[r["kind"]] + r["text"] for r in f["rows"]]))
+                else:
+                    print(f"    {SLATE}{f['note']}{RST}\n")
+            return CommandResult(handled=True)
+        flags = [w for w in words[2:] if w.startswith("--")]
+        plan = cv.plan_restore(cp, n, ws)
+        if not plan["files"]:
+            info("Nothing to restore: the files already match how they were before that checkpoint."
+                 + "".join(f"\n    {s['rel']}: {s['why']}" for s in plan["skipped"]))
+            return CommandResult(handled=True)
+        header(f"Restore to before checkpoint {n}", f"{len(plan['files'])} file(s), undoes {plan['checkpoints']} checkpoint(s)")
+        for line in cv.summary_lines(plan):
+            print(f"    {ROSE if 'CONFLICT' in line else WHITE}{line}{RST}")
+        for s in plan["skipped"]:
+            print(f"    {SLATE}{s['rel']}: left alone ({s['why']}){RST}")
+        mode = "overwrite" if "--overwrite" in flags else "keep" if "--keep-mine" in flags else "refuse"
+        if plan["conflicts"] and mode == "refuse":
+            if is_tty():
+                from axon.ui.menus import choose_value
+                mode = choose_value(f"{len(plan['conflicts'])} file(s) changed outside Axon", [
+                    ("Keep my changes, restore the rest", "keep", "the conflicting files are left as they are"),
+                    ("Overwrite my changes too", "overwrite", "a copy of what is there now is kept; restore the new checkpoint to get it back"),
+                    ("Cancel", None, "nothing is changed")]) or ""
+                if not mode:
+                    info("Nothing was changed.")
+                    return CommandResult(handled=True)
+            else:
+                err("Those files changed outside Axon since it last wrote them. Nothing was changed. Add --keep-mine or --overwrite.")
+                return CommandResult(handled=True)
+        if not ("--yes" in flags or (is_tty() and confirm("Restore these files?", default=False))):
+            info("Nothing was changed." if is_tty() else "Nothing was changed. Add --yes to restore.")
+            return CommandResult(handled=True)
+        res = cv.restore(cp, n, ws, mode)
+        try:
+            agent.file_state.clear()
+        except Exception:
+            pass
+    except cv.RestoreError as e:
+        err(str(e))
+        return CommandResult(handled=True)
+    (ok if res["ok"] else err)(res["message"] + (f" Undo it by restoring checkpoint {res['checkpoint']}." if res["checkpoint"] else ""))
+    for name in res["failed"]:
+        print(f"    {ROSE}• {name}{RST}")
+    return CommandResult(handled=True)
+
+
+def _export_markdown(agent: Any, messages: list[dict[str, Any]] | None = None) -> str:
     lines = [
         f"# Axon session {agent.session.active_session_id}",
         "",
@@ -523,7 +721,7 @@ def _export_markdown(agent: Any) -> str:
         f"- Cost: ${float(agent.ledger.total()):.4f}",
         "",
     ]
-    for m in agent.conversation.messages:
+    for m in (agent.conversation.messages if messages is None else messages):
         role = str(m.get("role", "unknown"))
         content = m.get("content", "")
         if role == "user" and isinstance(content, list) and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
@@ -552,10 +750,10 @@ def _export_markdown(agent: Any) -> str:
     return "\n".join(lines)
 
 
-def _export_text(agent: Any) -> str:
+def _export_text(agent: Any, messages: list[dict[str, Any]] | None = None) -> str:
     """Plain-text transcript: user prompts and answers, tool calls as one-liners."""
     lines = [f"Axon session {agent.session.active_session_id} · {agent.settings.model} · {agent.settings.workspace}", ""]
-    for m in agent.conversation.messages:
+    for m in (agent.conversation.messages if messages is None else messages):
         role = str(m.get("role", "?"))
         content = m.get("content", "")
         if isinstance(content, str):
@@ -575,26 +773,58 @@ def _export_text(agent: Any) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def export_payload(agent: Any, fmt: str) -> str:
+def _without_tools(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The conversation as prompts and answers only: no tool calls, no tool results."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        c = m.get("content")
+        if m.get("role") == "tool" or (m.get("role") == "user" and isinstance(c, list) and c and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in c)):
+            continue
+        keep = dict(m)
+        keep.pop("tool_calls", None)
+        if isinstance(c, list):
+            keep["content"] = [b for b in c if not (isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result", "thinking"))]
+        if m.get("role") == "assistant" and not (keep.get("content") if not isinstance(keep.get("content"), str) else keep["content"].strip()):
+            continue
+        out.append(keep)
+    return out
+
+
+def export_page(agent: Any, fmt: str, include_tools: bool = True) -> tuple[str, int]:
+    """(standalone HTML, secrets removed) for ``html`` and ``pdf``: the file the app's Export dialog writes too."""
+    from axon.features import chat_export as cx
+    meta = {"id": agent.session.active_session_id, "title": f"Axon session {agent.session.active_session_id}",
+            "model": agent.settings.model}
+    out = cx.build(cx.items_from_messages(list(agent.conversation.messages)), meta, "html", include_tools, True)
+    return out["content"], out["redacted"]
+
+
+def export_payload(agent: Any, fmt: str, include_tools: bool = True) -> str:
+    msgs = None if include_tools else _without_tools(list(agent.conversation.messages))
+    if fmt in ("html", "pdf"):
+        return export_page(agent, fmt, include_tools)[0]
     if fmt == "json":
         return json.dumps({
             "session_id": agent.session.active_session_id,
             "model": agent.settings.model,
             "workspace": str(agent.settings.workspace),
             "cost_usd": float(agent.ledger.total()),
-            "messages": agent.conversation.messages,
+            "messages": agent.conversation.messages if msgs is None else msgs,
         }, indent=2, ensure_ascii=False, default=str)
     if fmt == "txt":
-        return _export_text(agent)
-    return _export_markdown(agent)
+        return _export_text(agent, msgs)
+    return _export_markdown(agent, msgs)
 
 
-_FMT_ALIASES = {"md": "md", "markdown": "md", "json": "json", "txt": "txt", "text": "txt", "plain": "txt"}
+_FMT_ALIASES = {"md": "md", "markdown": "md", "json": "json", "txt": "txt", "text": "txt", "plain": "txt", "html": "html", "pdf": "pdf"}
 
 
-@command("export", category=CAT, description="Export the conversation (Markdown, JSON, text) to a file or the clipboard",
-         usage="/export [md|json|txt] [path]      default path: ~/.axon/projects/<project>/exports/<session>.<ext>\n/export [md|json|txt] clipboard   copy instead of saving\n/export                          on a terminal: choose clipboard or file")
+@command("export", category=CAT, description="Export the conversation (Markdown, web page, PDF, JSON, text) to a file or the clipboard",
+         usage="/export [md|html|pdf|json|txt] [path]   default path: ~/.axon/projects/<project>/exports/<session>.<ext>\n/export [md|json|txt] clipboard   copy instead of saving\n/export html|pdf                 one file with secrets removed (pdf: open it in a browser and print)\n/export <format> --no-tools      leave out tool calls and results\n/export                          on a terminal: choose clipboard or file")
 def handle_export(agent: Any, arg: str) -> CommandResult:
+    words = arg.split()
+    include_tools = "--no-tools" not in words
+    arg = " ".join(w for w in words if w != "--no-tools") if not include_tools else arg
     parts = arg.strip().split(maxsplit=1)
     fmt, fname = "md", ""
     if parts:
@@ -604,12 +834,14 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
         else:
             fname = arg.strip()
             low = fname.lower()
-            fmt = "json" if low.endswith(".json") else "txt" if low.endswith(".txt") else "md"
+            fmt = "json" if low.endswith(".json") else "txt" if low.endswith(".txt") else "html" if low.endswith((".html", ".htm")) else "md"
     to_clipboard = fname.lower() in ("clipboard", "clip", "copy", "--clipboard")
     if not arg.strip() and is_tty():
         from axon.ui.picker import SelectItem, Selector
         sel = Selector([SelectItem(label="Copy to clipboard (Markdown)", value="clip"),
                         SelectItem(label="Save to a file (Markdown)", value="file", hint=f"~/.axon/projects/<project>/exports/{agent.session.active_session_id}.md"),
+                        SelectItem(label="Save as a web page (HTML, secrets removed)", value="html"),
+                        SelectItem(label="Save for PDF (HTML to print from a browser)", value="pdf"),
                         SelectItem(label="Save as JSON", value="json"), SelectItem(label="Save as plain text", value="txt")],
                        title="Export conversation").run()
         choice = getattr(sel, "value", None)
@@ -617,8 +849,12 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
             info("Export cancelled.")
             return CommandResult(handled=True)
         to_clipboard = choice == "clip"
-        fmt = choice if choice in ("json", "txt") else "md"
-    payload = export_payload(agent, fmt)
+        fmt = choice if choice in ("json", "txt", "html", "pdf") else "md"
+    removed = None
+    if fmt in ("html", "pdf"):
+        payload, removed = export_page(agent, fmt, include_tools)
+    else:
+        payload = export_payload(agent, fmt, include_tools)
     if to_clipboard:
         from axon.ui.clipboard import copy_to_clipboard
         if copy_to_clipboard(payload):
@@ -632,7 +868,7 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
             out_path = ws_of(agent) / out_path
     else:
         from axon import storage
-        out_path = storage.session_subdir(ws_of(agent), agent.session.active_session_id, "exports") / f"{agent.session.active_session_id}.{fmt}"
+        out_path = storage.session_subdir(ws_of(agent), agent.session.active_session_id, "exports") / f"{agent.session.active_session_id}.{'html' if fmt == 'pdf' else fmt}"
     if out_path.exists() and not is_tty():
         # No keyboard to ask "Overwrite?" (the web app): never overwrite; the default file gets a numbered name instead.
         if fname:
@@ -648,6 +884,10 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
     from axon.session.store import atomic_write_text
     atomic_write_text(out_path, payload)
     ok(f"Exported {len(agent.conversation.messages)} messages to {WHITE}{out_path}{RST}")
+    if removed is not None:
+        print(f"  {SLATE}{removed} secret{'s' if removed != 1 else ''} (keys, tokens, passwords) removed. Read it through before you share it; nothing was uploaded.{RST}")
+    if fmt == "pdf":
+        print(f"  {SLATE}Open it in a browser and print it (Save as PDF): it has a print layout.{RST}")
     return CommandResult(handled=True)
 
 

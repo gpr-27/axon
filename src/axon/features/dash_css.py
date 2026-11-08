@@ -101,6 +101,7 @@ a.plink{color:var(--info);text-decoration:underline dotted;text-underline-offset
 .node{display:flex;align-items:center;gap:6px;padding:2px 10px 2px calc(10px + min(var(--d,0),8)*14px + max(var(--d,0) - 8,0)*3px);font-size:13px;cursor:pointer;white-space:nowrap;border:0;background:none;width:100%;text-align:left}
 .node:hover{background:var(--raised)}.node.sel{background:var(--raised);box-shadow:inset 2px 0 0 var(--primary)}
 .node .nm{overflow:hidden;text-overflow:ellipsis;flex:1}.node .g{font:11px ui-monospace,monospace;color:var(--accent);width:12px;text-align:center}
+.dirpick .node .nm.rn{flex:0 0 auto;margin-right:10px;font-weight:600}.dirpick .node .rpath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .node .ar{width:10px;color:var(--muted);font-size:10px}.node.ign{opacity:.5}.node.dir .nm{color:var(--ink)}
 .fview{display:flex;flex-direction:column;min-width:0;min-height:0}
 .ftoolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line)}

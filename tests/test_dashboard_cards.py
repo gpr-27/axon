@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from axon.features import dash_css  # noqa: E402
 from axon.features.dash_js_cards import JS_CARDS  # noqa: E402
 from axon.features.dash_js_chat import JS_CHAT  # noqa: E402
+from axon.features.dash_js_tasks import JS_TASKS  # noqa: E402
 from axon.features.dashboard_web import APP_JS  # noqa: E402
 from test_dashboard import c, env, llm, server  # noqa: E402,F401
 
@@ -41,8 +42,10 @@ var lsGet=()=>null, lsSet=()=>{}, toast=()=>{}, usd=(x)=>'$'+x, onLeave=()=>{}, 
 """
 
 
-def run_js(body: str) -> object:
-    src = HARNESS + JS_CARDS + "\n" + body
+def run_js(body: str, tasks: bool = False) -> object:
+    # `tasks`: the notification sending (axnTell/axnTurnEnd) now lives in the Tasks script, so a real page always has it.
+    stubs = "var api=async()=>({runs:[]}),dur=(x)=>x+'s',tkStatusWord=(x)=>x,setInterval=()=>1,setTimeout=()=>1; document.addEventListener=()=>{};\n" if tasks else ""
+    src = HARNESS + JS_CARDS + "\n" + (stubs + JS_TASKS if tasks else "") + "\n" + body
     p = subprocess.run(["node", "-"], input=src, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout)
@@ -57,7 +60,7 @@ def test_page_script_is_valid_javascript(tmp_path):
     f.write_text(APP_JS, encoding="utf-8")
     p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True, encoding="utf-8")
     assert p.returncode == 0, p.stderr
-    assert "function axCard(" in APP_JS and "axOnEvent(C, ev)" in APP_JS and "axGhost(C, ta)" in APP_JS and "axNotifyPill()" in APP_JS
+    assert "function axCard(" in APP_JS and "axOnEvent(C, ev)" in APP_JS and "axGhost(C, ta)" in APP_JS and "function axnTell(" in APP_JS  # the old header pill axNotifyPill() became the Settings Notifications card (dash_js_tasks)
 
 
 def test_every_tool_has_a_sentence_and_unknown_and_mcp_fall_back():
@@ -149,14 +152,14 @@ def test_notifications_only_when_opted_in_and_hidden():
 const calls=[]; let granted=true, store='1';
 globalThis.Notification=function(t,o){calls.push(t);this.close=()=>{};}; Notification.permission='granted';
 globalThis.window={focus(){}}; globalThis.document.hidden=true;
-lsGet=()=>store;
+lsGet=(k)=>k==='axon-notify-after'?'0':store;
 const C={replaying:false};
 axOnEvent(C,{type:'turn_end',stop_reason:'end_turn',cost_usd:0.01});
 axOnEvent(C,{type:'approval_request',tool:'Bash',id:'1'});
 store='0'; axOnEvent(C,{type:'turn_end'});          // toggled off
 store='1'; document.hidden=false; axOnEvent(C,{type:'turn_end'});   // tab visible
 C.replaying=true; document.hidden=true; axOnEvent(C,{type:'turn_end'});  // replay of history
-console.log(JSON.stringify(calls));""")
+console.log(JSON.stringify(calls));""", tasks=True)
     assert r == ["Axon finished", "Axon needs permission"]
 
 

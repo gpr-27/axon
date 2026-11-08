@@ -24,7 +24,7 @@ Every menu entry runs the same handler as the typed command (`/cost calls` and t
 The tables below are generated from the command registry by `scripts/gen_docs.py`.
 
 <!-- BEGIN GENERATED: commands-reference -->
-139 built-in commands in 13 groups.
+144 built-in commands in 13 groups.
 
 Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Modes](#model--modes) · [Code & Review](#code--review) · [Agents, Skills & Tools](#agents-skills--tools) · [Memory & Project](#memory--project) · [System](#system) · [Code](#code) · [Getting started](#getting-started) · [Git](#git) · [Insight](#insight) · [Integrations](#integrations) · [Solve](#solve)
 
@@ -33,15 +33,18 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | Command | Aliases | Description |
 |---|---|---|
 | `/activity` | `/journal` | Everything you and Axon did: prompts, commands, shell, tools, settings, errors |
+| `/bookmark` |  | Bookmark the latest reply, so you can find it again (the app lists it too) |
+| `/bookmarks` |  | List this chat's bookmarks, show one in full, or remove one |
 | `/branch` | `/fork` | Fork the conversation into a new session |
 | `/clear` | `/reset` | Start a fresh session (the old one stays resumable) |
 | `/delete` |  | Delete a saved session (picker, id, or --all) |
 | `/exit` | `/quit` | Save the session and quit |
-| `/export` |  | Export the conversation (Markdown, JSON, text) to a file or the clipboard |
+| `/export` |  | Export the conversation (Markdown, web page, PDF, JSON, text) to a file or the clipboard |
 | `/files` | `/attachments` | Files, images and documents you gave this session, and where each is saved |
 | `/history` |  | List the messages in the conversation |
 | `/library` | `/saved` | Everything saved: sessions, subagent runs, skills, agents, memory, hooks, plans |
 | `/loop` | `/repeat` | Repeat a prompt N times or on an interval |
+| `/overview` |  | This project at a glance: files, git, tests, spend this week, last chats, memory |
 | `/project` | `/where` | Current project: name, path, data folder, sessions, journal, memory |
 | `/rename` | `/title` | Rename the current session (no name: generate one) |
 | `/restore` | `/trash` | List deleted sessions (the trash) and restore them |
@@ -67,6 +70,24 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 /activity --all-projects       every project's journal
 /activity --export <file>      write the selection (.md or .jsonl)
 /activity --path               where the journal lives
+```
+
+</details>
+
+<details><summary><code>/bookmark</code> usage</summary>
+
+```text
+/bookmark [note]   marks the latest reply; /bookmarks lists them
+```
+
+</details>
+
+<details><summary><code>/bookmarks</code> usage</summary>
+
+```text
+/bookmarks               list
+/bookmarks show <n>      print the message in full
+/bookmarks remove <n>    remove a bookmark
 ```
 
 </details>
@@ -98,8 +119,10 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 <details><summary><code>/export</code> usage</summary>
 
 ```text
-/export [md|json|txt] [path]      default path: ~/.axon/projects/<project>/exports/<session>.<ext>
+/export [md|html|pdf|json|txt] [path]   default path: ~/.axon/projects/<project>/exports/<session>.<ext>
 /export [md|json|txt] clipboard   copy instead of saving
+/export html|pdf                 one file with secrets removed (pdf: open it in a browser and print)
+/export <format> --no-tools      leave out tool calls and results
 /export                          on a terminal: choose clipboard or file
 ```
 
@@ -134,6 +157,14 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 /loop <interval> <N>x <prompt>   ... at most N times
 /loop                         list loops
 /loop stop [id]               stop all loops (or one)
+```
+
+</details>
+
+<details><summary><code>/overview</code> usage</summary>
+
+```text
+/overview          files and languages, git and recent commits, the test command and its last result, spend this week, last chats, memory notes
 ```
 
 </details>
@@ -176,10 +207,12 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /rewind                     pick a prompt, then restore code and/or conversation (menu)
-/rewind to <n> [mode]       modes: code_and_conversation (default), conversation, code, summarize_from_here
+/rewind to <n> [mode] [--overwrite]   modes: code_and_conversation (default), conversation, code, summarize_from_here
 /rewind points              list prompts you can rewind to
-/rewind <n>                 undo the file edits of the last n turns
-/rewind list                show file checkpoints
+/rewind list                the file checkpoints: time, prompt, files, +/- lines
+/rewind show <n>            what checkpoint n changed
+/rewind restore <n> [--keep-mine|--overwrite] [--yes]   put the files back to before checkpoint n (undo it by restoring the new checkpoint)
+/rewind <n> [--overwrite]   undo the file edits of the last n turns
 ```
 
 </details>
@@ -859,7 +892,8 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/learn` | `/remember` | Save a memory (same as /memory add) |
 | `/memory` | `/mem` | Browse, search and manage memory: global, project and repo scopes |
 | `/optimize` | `/enhance` | Rewrite a rough request into a precise agent prompt |
-| `/prompt` | `/prompts` `/template` `/templates` | Prompt library: templates with {placeholders} |
+| `/prompt` | `/prompts` `/template` `/templates` | Saved prompts with fill-in fields |
+| `/schedule` | `/cron` | Run a prompt in a folder daily, weekly, on an interval or once (while Axon is open) |
 
 <details><summary><code>/add-dir</code> usage</summary>
 
@@ -935,10 +969,31 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/prompt</code> usage</summary>
 
 ```text
-/prompt                         list templates
-/prompt <name> [key=value ...]  fill placeholders (asks for missing ones) and send
-/prompt show <name>
-/prompt save <name> [--global] <template text>
+/prompt                         the saved prompts (menu)
+/prompt <name> [key=value ...]  fill in the fields (asks for missing ones) and send
+/prompt list [words]            list or search the saved prompts
+/prompt show <name>             show one prompt and its fields
+/prompt save <name> [--global] [-d description] <text with {{fields}}>   save for this project (or for every project)
+/prompt delete <name>           delete a saved prompt, or remove a starter
+/prompt export [file]           write the saved prompts to one file
+/prompt import <file> [--global] [--replace|--rename]   add the prompts of an exported file
+/prompt restore-starters        bring back removed starter prompts
+```
+
+</details>
+
+<details><summary><code>/schedule</code> usage</summary>
+
+```text
+/schedule                                    open the task menu
+/schedule list                               every task, when it runs next and how the last run went
+/schedule add every 30m <prompt>             run every 30 minutes (m, h, d; at least 1m)
+/schedule add daily 09:00 <prompt>           run every day at 09:00
+/schedule add weekly mon,wed 09:00 <prompt>  run on those days
+/schedule add once 2026-11-09 14:30 <prompt> run once (or: once in 2h)
+    options: --mode readonly|edits   --budget 1.50   --folder DIR   (default: read-only, $1.00, this folder)
+/schedule run|pause|resume|delete|history <id>
+Tasks run only while Axon is open (this terminal or the app).
 ```
 
 </details>
@@ -1023,7 +1078,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/notify</code> usage</summary>
 
 ```text
-/notify [important|all|off|after <seconds>|test [message]]
+/notify [important|all|off|after <seconds>|terminal <off|bell|osc9|osc777>|test [message]]
 ```
 
 </details>
@@ -1212,7 +1267,8 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 | Command | Aliases | Description |
 |---|---|---|
-| `/budget` |  | Show or set this session's spending limit |
+| `/budget` |  | Show or set the spending limits: this session, and this project per day and per month |
+| `/compare` |  | Ask 2 to 4 models the same question at once, read-only, with time, tokens and cost for each |
 | `/insights` |  | Ask the analytics subagent to explain your spending and suggest savings |
 | `/report` |  | Write a self-contained HTML usage dashboard |
 | `/stats` | `/analytics` | Usage analytics: cost, tokens, cache, models, sources, tools, expensive turns |
@@ -1221,6 +1277,16 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 
 ```text
 /budget [amount|off]
+/budget day [amount|off]
+/budget month [amount|off]
+```
+
+</details>
+
+<details><summary><code>/compare</code> usage</summary>
+
+```text
+/compare <model> <model> [<model> ...] <prompt>
 ```
 
 </details>

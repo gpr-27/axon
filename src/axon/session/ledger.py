@@ -24,6 +24,7 @@ SOURCE_LABELS = {
     "doctor_ping": "Diagnostics Ping (/doctor)",
     "compaction": "Context Compaction",
     "tips": "Usage Tips (/tips)",
+    "compare": "Model comparison (/compare)",
 }
 
 

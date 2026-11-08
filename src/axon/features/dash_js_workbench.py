@@ -20,7 +20,7 @@ const WB_DEF = {
   files: { title: 'Files', kind: 'narrow', icon: 'files', mount: (P) => wbFiles(P) },
   changes: { title: 'Changes', kind: 'wide', icon: 'changes', mount: (P) => wbChanges(P) },
   browser: { title: 'Browser', kind: 'wide', icon: 'browser', mount: (P) => wbBrowser(P) },
-  tasks: { title: 'Background tasks', kind: 'narrow', icon: 'list', mount: (P) => wbTasks(P) },
+  tasks: { title: 'Tasks', kind: 'narrow', icon: 'list', mount: (P) => wbTasks(P) },
   plan: { title: 'Plan and todos', kind: 'narrow', icon: 'list', mount: (P) => wbPlan(P) },
   memory: { title: 'Memory', kind: 'narrow', icon: 'list', mount: (P) => wbMemory(P) },
   hooks: { title: 'Hooks', kind: 'narrow', icon: 'list', mount: (P) => wbHooks(P) },
@@ -179,9 +179,9 @@ function wbToolbar() {
 async function wbMoreMenu(anchor) {
   const C = UI.chat; const st = (C && C.st) || {};
   const items = [{ label: 'Search commands and pages', hint: IS_MAC_WB() ? '⌘K' : 'Ctrl+K', run: () => openPalette() },
-    { label: 'Theme: switch light or dark', run: () => toggleTheme() }, { label: 'Keyboard shortcuts', hint: '?', run: () => helpModal() }];
+    { label: 'Theme: switch light or dark', run: () => toggleTheme() }, { label: 'Keyboard shortcuts', hint: '?', run: () => helpModal() }, { label: 'Welcome and setup guide', run: () => welcomeOpen(true) }];
   const panels = [];
-  if ((st.background || []).length) panels.push({ label: 'Background tasks', hint: String(st.background.length), run: () => wbOpen('tasks') });
+  panels.push({ label: 'Tasks', hint: (st.background || []).length ? String(st.background.length) + ' running' : 'scheduled and background', run: () => wbOpen('tasks') });
   if ((st.todos || []).length) panels.push({ label: 'Plan and todos', hint: String(st.todos.length), run: () => wbOpen('plan') });
   const mem = WB.ctx && WB.ctx.lists && WB.ctx.lists.memory_files || [];
   if (mem.length) panels.push({ label: 'Memory', hint: String(mem.length), run: () => wbOpen('memory') });
@@ -196,21 +196,22 @@ function wbTitleSync() {
   const t = UI.active; const C = UI.chat;
   const isChat = !!(t && t.route === 'chat' && C);
   if (isChat && C.tab === t && C.meta && C.meta.title && t.title !== C.meta.title.slice(0, 26)) { t.title = C.meta.title.slice(0, 26); drawTabs(); }   // the tab carries the chat's name
-  b.hidden = !isChat; b.disabled = !isChat; b.title = 'Chat options: rename, fork, share, delete'; b.setAttribute('aria-label', 'Chat options');
+  b.hidden = !isChat; b.disabled = !isChat; b.title = 'Chat options: rename, fork, export, find, bookmarks, delete'; b.setAttribute('aria-label', 'Chat options');
   b.replaceChildren(h('span', { class: 'ct-t' }, 'Chat options'), wbIco('chevd'));
 }
 function wbTitleMenu(anchor) {
   const C = UI.chat; if (!C) return; const sid = C.sid;
   const trace = [['compact', 'Compact'], ['normal', 'Normal'], ['detailed', 'Detailed'], ['debug', 'Debug (raw events)']];
-  const notifyOn = typeof axNotifyOn === 'function' && axNotifyOn(); const can = typeof Notification !== 'undefined';
   wbMenu(anchor, [
     { label: 'New chat', run: () => newChat(C) },
     '-', { label: 'Rename…', disabled: !sid, run: () => wbRename(C) },
     { label: 'Fork into a new chat', disabled: !sid, run: async () => { try { toast('Forking this chat…'); const st = await api('/api/chat/fork', { session: sid }); location.hash = '#/chat/' + encodeURIComponent(st.session); } catch (e) { toast(e.message); } } },
-    { label: 'Share…', disabled: !(C.meta && C.meta.share !== false && sid), run: () => shareModal({ kind: 'session', id: sid }) },
+    { label: 'Export or share…', disabled: !(C.meta && C.meta.share !== false && sid), title: 'Markdown, web page, PDF or JSON, with secrets removed. A file on this computer; nothing is uploaded.', run: () => shareModal({ kind: 'session', id: sid }) },
+    { label: 'Find in chat', hint: IS_MAC_WB() ? '⌘F' : 'Ctrl+F', run: () => cxFind(C) },
+    { label: 'Bookmarks…', disabled: !sid, run: () => cxBookmarksMenu(C, anchor) },
+    { label: 'Compare models…', disabled: !sid, title: 'Ask two to four models the same question side by side. Read-only: nothing in your project changes.', run: () => cfCompareOpen(C) },
     '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); drawStatus(); document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
-    '-', { label: can ? (notifyOn ? 'Notifications: on (turn off)' : 'Notify me when a turn finishes') : 'Notifications unavailable here', disabled: !can, title: 'A desktop notification when a turn ends or Axon needs permission while this tab is in the background',
-      run: async () => { if (notifyOn) { lsSet('axon-notify', '0'); toast('Notifications off'); return; } try { const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission(); if (p === 'granted') { lsSet('axon-notify', '1'); toast('You will be told when a turn finishes or Axon needs you.'); } else toast('The browser did not allow notifications.'); } catch (e) { toast(e.message); } } },
+    '-', { label: 'Notification settings…', title: 'Choose when Axon tells you a turn finished or needs you', run: () => { location.hash = '#/settings/preferences'; } },
     '-', { label: 'Delete this chat…', cls: 'danger', disabled: !sid, run: () => wbDelete(C) }]);
 }
 async function wbRename(C) {
@@ -333,7 +334,7 @@ function wbChanges(P) {
   const scroller = h('div', { class: 'ch-scroll' }); const inner = h('div', { class: 'ch-inner' }); scroller.append(inner);
   const sticky = h('div', { class: 'ch-sticky', hidden: true });
   const note = h('div', { class: 'ch-note', hidden: true });
-  P.body.append(search, note, h('div', { class: 'ch-wrap' }, sticky, scroller));
+  P.body.append(search, note, axCheckpoints(P), h('div', { class: 'ch-wrap' }, sticky, scroller));
   let flat = [], offs = [0], total = 0;
   const visible = () => { const q = CH.q.toLowerCase().trim(); return q ? CH.files.filter(f => f.path.toLowerCase().includes(q)) : CH.files; };
   const rebuild = () => {
@@ -411,7 +412,7 @@ function wbChanges(P) {
       if (!d.repo) { note.hidden = false; note.textContent = 'This folder is not a git repository, so there is nothing to compare. Axon’s own edits for this chat are listed in the Progress panel.'; }
       else if (!CH.files.length) { note.hidden = false; note.textContent = CH.mode === 'working' ? 'The working tree is clean: no changes since the last commit.' : 'No differences for this comparison.'; }
       head(); rebuild(); for (const p of [...CH.open]) { const f = CH.files.find(x => x.path === p); if (f) loadDiff(f); }
-      wbChangesSummary(d);
+      wbChangesSummary(d); if (P.cpRefresh) P.cpRefresh();
     } catch (e) { note.hidden = false; note.textContent = e.message; }
     CH.loading = false;
   };
@@ -464,12 +465,15 @@ function wbBrowser(P) {
 }
 // ---------- small panels with real data ----------
 function wbTasks(P) {
-  const draw = () => {
+  // Scheduled tasks first (tasksMount), then the shell commands the agent started in the background.
+  const bgNode = () => {
     const bg = ((UI.chat && UI.chat.st) || {}).background || [];
-    P.body.replaceChildren(h('div', { class: 'wp-pad' }, ...(bg.length ? bg.map(b => h('div', { class: 'row' }, h('span', { class: 'dot ' + (b.status === 'running' ? 'running' : 'finished') }), h('span', { class: 't', title: b.command }, b.command), h('span', { class: 'muted' }, b.status),
-      b.status === 'running' ? h('button', { class: 'mini', onclick: async () => { try { await api('/api/shell/bg/kill', { id: b.id }); toast('Stopped'); refreshState(UI.chat, true); } catch (e) { toast(e.message); } } }, 'Stop') : null)) : [h('p', { class: 'muted' }, 'No background commands are running.')])));
+    return h('div', null, ...(bg.length ? bg.map(b => h('div', { class: 'row' }, h('span', { class: 'dot ' + (b.status === 'running' ? 'running' : 'finished') }), h('span', { class: 't', title: b.command }, b.command), h('span', { class: 'muted' }, b.status),
+      b.status === 'running' ? h('button', { class: 'mini', onclick: async () => { try { await api('/api/shell/bg/kill', { id: b.id }); toast('Stopped'); refreshState(UI.chat, true); } catch (e) { toast(e.message); } } }, 'Stop') : null)) : [h('p', { class: 'muted' }, 'No background commands are running.')]));
   };
-  P.onShow = draw; P.redraw = draw; draw();
+  const holder = h('div'); tasksMount(P, holder);
+  const redrawBg = () => holder.replaceChildren(bgNode());
+  const baseRedraw = P.redraw; P.redraw = () => { redrawBg(); if (baseRedraw) baseRedraw(); }; redrawBg();
 }
 function wbPlan(P) {
   const draw = () => {
@@ -520,7 +524,7 @@ async function wbFetch(key, url, ttl, set, C) {
 function wbRailData(C) {
   const st = C.st || {}; const busy = !!st.busy; const sig = (C.steps || []).length + ':' + busy + ':' + ((st.context || {}).used || 0);
   const sidq = encodeURIComponent(C.sid || '');
-  if (C.sid) { const force = C.wbSig !== sig; C.wbSig = sig; if (force) WB_BUSY.ctx = Object.assign(WB_BUSY.ctx || { on: false }, { t: 0 });
+  if (C.sid) { const force = C.wbSig !== sig; C.wbSig = sig; if (force) { WB_BUSY.ctx = Object.assign(WB_BUSY.ctx || { on: false }, { t: 0 }); WB_BUSY.usage = Object.assign(WB_BUSY.usage || { on: false }, { t: 0 }); }   // a turn starting or ending also refreshes the spending
     wbFetch('ctx', '/api/workbench/context?session=' + sidq, busy ? 2500 : 20000, (d) => { WB.ctx = d.none ? null : d; const n = WB.nodes.memory; if (n && n.P.redraw) n.P.redraw(); }, C);
     wbFetch('usage', '/api/workbench/usage?session=' + sidq, 45000, (d) => { WB.lim = d; }, C); }
   wbFetch('conn', '/api/workbench/connectors', 20000, (d) => { WB.conn = d; }, C);
@@ -531,7 +535,7 @@ function wbRail(C) {
   const r = document.getElementById('rpbody'); if (!r) return;
   wbRailData(C); wbFooterDraw(C);
   const st = C.st || {};
-  const sec = (title, kids, right, cls) => h('section', { class: 'rs ' + (cls || '') }, h('h3', { class: 'rh' }, h('span', null, title), right || null), ...[].concat(kids).filter(Boolean));
+  const sec = (title, kids, right, cls) => h('section', { class: 'rs ' + (cls || '') }, h('h3', { class: 'rh' }, h('span', null, title, typeof helpTip === 'function' ? helpTip('progress:' + title) : null), right || null), ...[].concat(kids).filter(Boolean));
   const row = (icon, left, right, fn, title, cls) => { const e = h(fn ? 'button' : 'div', { class: 'rrow ' + (cls || ''), type: fn ? 'button' : null, title: title || '', onclick: fn || null }, icon ? wbIco(icon) : null, left, h('span', { style: 'flex:1' }), right || null); return e; };
   const kids = [];
   // Environment
@@ -602,6 +606,7 @@ function wbUsageSection(C, sec) {
   const out = [kv('This turn', steps.length ? usd(cost) + '  ·  ' + dur(time) + ' model time' : (st.busy ? 'starting' : (st.last && st.last.cost != null ? usd(st.last.cost) + ' (last)' : 'idle'))), kv('Session', usd(st.cost || 0))];
   if (steps.length) { out.push(kv('Tokens', 'in ' + wbTok(tin) + '  out ' + wbTok(tout) + '  cached ' + wbTok(cread), 'Input, output and cache-read tokens of this turn')); out.push(kv('Cache hit', tin ? Math.round(100 * cread / tin) + '%' : '—', 'Share of input served from the prompt cache')); }
   if (steps.length > 1) { const mx = Math.max(...steps.map(s => s.cost || 0), 0.0001); out.push(h('div', { class: 'steps', 'aria-label': 'Cost per model call' }, ...steps.slice(-28).map(s => h('i', { style: 'height:' + Math.max(8, 100 * (s.cost || 0) / mx) + '%' + (s.miss ? ';background:var(--warn)' : ''), title: '#' + s.n + '  ' + usd(s.cost || 0) + '  ' + dur(s.dur || 0) + (s.miss && (state.trace === 'detailed' || state.trace === 'debug') ? '  cache miss: ' + s.miss : '') })))); }
+  out.push(...cfSpendRows(lim.spend, kv));
   for (const l of (lim.limits || [])) { const p = Math.round(100 * l.used); out.push(h('div', { class: 'lim', title: l.remaining != null ? l.remaining.toLocaleString() + ' of ' + (l.limit || 0).toLocaleString() + ' left' : '' }, h('div', { class: 'kvr' }, h('span', { class: 'muted' }, l.label), h('span', { class: 'num' }, p + '%')), h('div', { class: 'bar thin ' + (p > 90 ? 'bad' : p > 75 ? 'warn' : '') }, h('i', { style: 'width:' + Math.min(100, p) + '%' })), l.reset ? h('div', { class: 'muted lr' }, l.reset) : null)); }
   const b = lim.budget; if (b && b.session_usd) { const p = Math.min(100, Math.round(100 * (st.cost || 0) / b.session_usd)); out.push(h('div', { class: 'lim' }, h('div', { class: 'kvr' }, h('span', { class: 'muted' }, 'Session budget'), h('span', { class: 'num' }, usd(st.cost || 0) + ' of ' + usd(b.session_usd))), h('div', { class: 'bar thin ' + (p > 90 ? 'bad' : p > 75 ? 'warn' : '') }, h('i', { style: 'width:' + p + '%' })))); }
   return sec('Usage', out, h('a', { class: 'plink', href: '#/usage' }, 'details'));
@@ -666,7 +671,7 @@ function wbFooter(C) {
   const mk = (cls, label) => h('button', { class: 'fw ' + cls, type: 'button', 'aria-haspopup': 'menu', title: label }, '');
   const model = mk('fw-model', 'Model'), effort = mk('fw-effort', 'How much the model thinks before it answers'), mode = mk('fw-mode', 'What Axon may do without asking');
   const ring = h('span', { class: 'ring', role: 'img' });
-  const root = h('div', { class: 'cfoot' }, model, effort, mode, h('span', { style: 'flex:1' }), ring);
+  const root = h('div', { class: 'cfoot' }, model, effort, mode, typeof helpTip === 'function' ? helpTip('mode') : null, h('span', { style: 'flex:1' }), ring);
   C.foot = { root, model, effort, mode, ring };
   model.addEventListener('click', async () => {
     let list = []; try { list = (await api('/api/models?session=' + encodeURIComponent(C.sid))).models; } catch (e) { toast(e.message); return; }
@@ -711,7 +716,7 @@ function wbPlus(C, ta) {
   const file = h('input', { type: 'file', multiple: true, hidden: true, 'aria-label': 'Attach files' }); const img = h('input', { type: 'file', multiple: true, accept: 'image/*', hidden: true, 'aria-label': 'Attach images' });
   const onPick = (inp) => () => { const fs = [...inp.files]; inp.value = ''; if (C.upload) fs.forEach(f => C.upload(f)); };
   file.addEventListener('change', onPick(file)); img.addEventListener('change', onPick(img));
-  const btn = h('button', { class: 'cplus', type: 'button', title: 'Attach', 'aria-label': 'Attach', 'aria-haspopup': 'menu', onclick: (e) => wbMenu(e.currentTarget, [{ label: 'Attach a file', run: () => file.click() }, { label: 'Attach an image', run: () => img.click() }, { label: 'Add a project file (@)', run: () => { ta.value += (ta.value && !/\s$/.test(ta.value) ? ' ' : '') + '@'; ta.focus(); ta.dispatchEvent(new Event('input')); } }], { up: true }) }, wbIco('plus'));
+  const btn = h('button', { class: 'cplus', type: 'button', title: 'Attach', 'aria-label': 'Attach', 'aria-haspopup': 'menu', onclick: (e) => wbMenu(e.currentTarget, [{ label: 'Attach a file', run: () => file.click() }, { label: 'Attach an image', run: () => img.click() }, { label: 'Add a project file (@)', run: () => { ta.value += (ta.value && !/\s$/.test(ta.value) ? ' ' : '') + '@'; ta.focus(); ta.dispatchEvent(new Event('input')); } }, { label: 'Saved prompts (#)', run: () => axPromptLibrary(C, ta) }], { up: true }) }, wbIco('plus'));
   return h('span', { class: 'cplus-wrap' }, btn, file, img);
 }
 function wbMic(C, ta) {

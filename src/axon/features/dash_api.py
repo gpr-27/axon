@@ -37,9 +37,18 @@ def _s(body: dict[str, Any], key: str, limit: int = 100_000) -> str:
 def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     """JSON-able payload for *route*, or None when the route is not an app route."""
     ws = srv.workspace
+    if route == "/api/welcome" or route.startswith("/api/project/"):     # welcome, starter prompts, project overview, recent projects
+        from axon.features import dash_js_welcome
+        return dash_js_welcome.handle_get(srv, route, qs)
     if route.startswith("/api/manage/"):          # Sessions and Usage controls (dash_manage.py)
         from axon.features import dash_manage
         return dash_manage.get(srv, route, qs)
+    if route.startswith("/api/chatx/"):           # message actions, find, bookmarks (dash_js_chatx.py)
+        from axon.features import dash_js_chatx
+        return dash_js_chatx.handle_get(srv, route, qs)
+    if route.startswith(("/api/compare/", "/api/cost/")):      # Compare models, cost forecast, project budgets (dash_js_compare.py)
+        from axon.features import dash_js_compare
+        return dash_js_compare.handle_get(srv, route, qs)
     if route == "/api/ws":
         info = dash_fs.git_info(ws)
         return {"workspace": str(ws), "name": ws.name, "home": str(Path.home()), "recent": dash_fs.recent_projects(),
@@ -75,6 +84,12 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     if route.startswith("/api/workbench/"):
         from axon.features import dash_workbench
         return dash_workbench.handle_get(srv, route, qs)
+    if route.startswith("/api/tasks"):            # scheduled tasks (dash_js_tasks.py)
+        from axon.features import dash_js_tasks
+        return dash_js_tasks.api_get(srv, route, qs)
+    if route.startswith("/api/library/"):          # prompt library and checkpoint timeline (dash_library.py)
+        from axon.features import dash_library
+        return dash_library.handle_get(srv, route, qs)
     if route == "/api/chat/state":
         rt = srv.runtime(qs.get("session", ""), create=qs.get("create") != "0")
         return rt.state() if rt else {"key": "", "busy": False, "none": True}
@@ -97,6 +112,9 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     if route == "/api/provider/models":
         from axon.features import dash_providers as dp
         return dp.list_models(qs.get("preset", ""), qs.get("base_url", ""))
+    if route.startswith("/api/i18n/"):
+        from axon.features import dash_js_i18n
+        return dash_js_i18n.get(srv, route, qs)
     if route == "/api/settings/panel":
         from axon.features import dash_providers as dp
         return dp.settings_panel(srv, srv.runtime(qs.get("session", ""), create=False))
@@ -239,9 +257,18 @@ def permissions_view(srv: "DashServer", session: str) -> dict[str, Any]:
 
 def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     ws = srv.workspace
+    if route.startswith(("/api/welcome/", "/api/project/")):
+        from axon.features import dash_js_welcome
+        return dash_js_welcome.handle_post(srv, route, body)
     if route.startswith("/api/manage/"):          # Sessions and Usage controls (dash_manage.py)
         from axon.features import dash_manage
         return dash_manage.post(srv, route, body)
+    if route.startswith("/api/chatx/"):
+        from axon.features import dash_js_chatx
+        return dash_js_chatx.handle_post(srv, route, body)
+    if route.startswith(("/api/compare/", "/api/cost/")):
+        from axon.features import dash_js_compare
+        return dash_js_compare.handle_post(srv, route, body)
     if route == "/api/extensions/trust":
         from axon.features import dash_ext
         return dash_ext.trust_post(srv, body)
@@ -260,6 +287,12 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     if route.startswith("/api/workbench/"):
         from axon.features import dash_workbench
         return dash_workbench.handle_post(srv, route, body)
+    if route.startswith("/api/tasks/"):           # scheduled tasks (dash_js_tasks.py)
+        from axon.features import dash_js_tasks
+        return dash_js_tasks.api_post(srv, route, body)
+    if route.startswith("/api/library/"):
+        from axon.features import dash_library
+        return dash_library.handle_post(srv, route, body)
     if route == "/api/chat/send":
         return chat_send(srv, body)
     if route == "/api/chat/new":
@@ -315,7 +348,7 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
             raise DashError("that subagent is not running, so it cannot be told anything", 409)
         return {"ok": True}
     if route == "/api/chat/fork":
-        return chat_fork(srv, _s(body, "session", 300), str(body.get("name") or "")[:40])
+        return chat_fork(srv, _s(body, "session", 300), str(body.get("name") or "")[:40], _int(body.get("upto"), 0, 0, 10**6))
     if route == "/api/term/start":
         kind = "axon" if body.get("kind") == "axon" else "shell"
         cwd = dash_fs.jail(ws, srv.extra_dirs(), str(body.get("cwd") or "."))
@@ -343,6 +376,9 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     if route == "/api/provider/apply":
         from axon.features import dash_providers as dp
         return dp.apply_choice(srv, body)
+    if route.startswith("/api/i18n/"):
+        from axon.features import dash_js_i18n
+        return dash_js_i18n.post(srv, route, body)
     if route == "/api/settings/set":
         from axon.features import dash_providers as dp
         return dp.set_setting(srv, srv.runtime(str(body.get("session") or ""), create=False), _s(body, "key", 60), body.get("value"))
@@ -509,8 +545,9 @@ def subagents_view(srv: "DashServer", sid: str) -> dict[str, Any]:
     return {"session": sid, "subagents": [tasks[k] for k in sorted(tasks)], "notes": notes}
 
 
-def chat_fork(srv: "DashServer", sid: str, name: str) -> dict[str, Any]:
-    """Copy a session someone else holds into a new session (the original is never written)."""
+def chat_fork(srv: "DashServer", sid: str, name: str, upto: int = 0) -> dict[str, Any]:
+    """Copy a session someone else holds into a new session (the original is never written). ``upto`` keeps the
+    conversation only through the reply to that prompt number (Branch from here)."""
     import contextlib
     import io
     ref = srv.index.lookup(sid)
@@ -523,6 +560,13 @@ def chat_fork(srv: "DashServer", sid: str, name: str) -> dict[str, Any]:
     except Exception as e:
         rt.close()
         raise DashError(f"could not read that session: {type(e).__name__}", 500) from None
+    if upto:
+        from axon.features.chat_export import messages_through_prompt
+        try:
+            conv.messages = messages_through_prompt(conv.messages, upto)
+        except ValueError as e:
+            rt.close()
+            raise DashError(str(e), 404) from None
     rt.agent.conversation = conv
     with contextlib.redirect_stdout(io.StringIO()):
         handle_branch(rt.agent, name)
@@ -544,6 +588,8 @@ def session_events(srv: "DashServer", sid: str, what: str, qs: dict[str, str]) -
     if what == "blob":
         return log.blob(qs.get("id", ""), _int(qs.get("offset"), 0, 0, 10**10), _int(qs.get("limit"), 400_000, 1, 1_000_000))
     evs = log.read(_int(qs.get("after"), 0, 0, 10**12), _int(qs.get("limit"), 4000, 1, 20_000))
+    from axon.features.dash_js_chatx import apply_rewinds        # turns a rewind removed are not replayed
+    evs = apply_rewinds(evs)
     return {"events": evs, "last": log.seq, "first_ts": evs[0]["ts"] if evs else None, "exists": log.path.exists()}
 
 

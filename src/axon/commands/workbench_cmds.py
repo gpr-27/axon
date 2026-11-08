@@ -982,6 +982,10 @@ def workbench_sections(agent: Any, width: int, data: dict[str, Any] | None = Non
     b = u.get("budget") or {}
     if b.get("session_usd"):
         lines.append(f"{SLATE}Session budget{RST}  {WHITE}{usd(spent)} of {usd(b['session_usd'])}{RST}")
+    sp = (u.get("spend") or {}).get("project")
+    if sp:
+        lines.append(_lr(f"{SLATE}Today{RST}  {WHITE}{usd(sp['today']['cost'])}{RST}",
+                         f"{DARK_SLATE}week {usd(sp['week']['cost'])} · month {usd(sp['month']['cost'])}{RST}", width))
     out.append(("u", lines))
     # connectors
     cn = d["connectors"]
@@ -1259,6 +1263,18 @@ def handle_workbench(agent: Any, arg: str) -> CommandResult:
         run_workbench(agent)
         return CommandResult(handled=True)
     print(workbench_text(agent, min(100, max(40, width() + 2))))
+    return CommandResult(handled=True)
+
+
+@command("overview", category="Session", description="This project at a glance: files, git, tests, spend this week, last chats, memory",
+         usage="/overview          files and languages, git and recent commits, the test command and its last result, spend this week, last chats, memory notes")
+def handle_overview(agent: Any, arg: str) -> CommandResult:
+    from axon.commands.common import header, width, ws_of
+    from axon.features import project_overview as po
+    header("Overview", ws_of(agent).name)
+    for line in po.render_text(po.overview(ws_of(agent)), min(100, max(40, width()))):
+        print("  " + line)
+    print()
     return CommandResult(handled=True)
 
 

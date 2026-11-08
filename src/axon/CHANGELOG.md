@@ -3,6 +3,31 @@
 ## Unreleased
 
 Work in progress; not a release yet.
+- Interface languages: English, Telugu and Hindi in Settings > Appearance, saved in the browser, with English fallback. The app
+  frame is translated first (about 70% of the frame's strings by the coverage script, about 40% of all page strings); code, paths,
+  tool output and model replies are not. "Reply in this language" (`replyLanguage`, off by default) adds one line to the system prompt.
+  Terminal command descriptions stay English. Catalogs: `features/i18n/*.json`; coverage: `python -m axon.features.dash_js_i18n`.
+- Accessibility pass over the app: skip link, landmarks, named controls, tab strip and file tree keyboard patterns, focus kept in and
+  returned from dialogs and menus, turn state announced without reading every token, visible focus, 24 px hit targets, reduced
+  motion, 200% zoom. A test fails on a button or field in the page scripts that has no accessible name.
+- Chat actions: Copy, Edit and resend, Regenerate (optionally with another model), Bookmark and Branch from here on messages;
+  Edit and Regenerate rewind the conversation (and, if you choose, the files, through checkpoints) after saying what is removed.
+  `Ctrl/Cmd+F` finds text in the chat, collapsed tool rows included. Bookmarks are listed in Chat options and kept with the
+  session (`/bookmark`, `/bookmarks`). One Export or share dialog writes Markdown, a standalone web page, PDF (by print) or JSON
+  with secrets removed and counted, tool details optional; `/export html|pdf` and `--no-tools` in the terminal. The chat view no
+  longer shows prompts a rewind removed, and the Share dialog no longer offers a gist upload.
+- Saved prompts with `{{fields}}`: the `+` menu, `#` or `/prompt` in the message box open a list; a small form fills the fields
+  (file fields offer the project's files) and fills the box. Global or per project, search, edit, delete, import and export as
+  a file, a few removable starters. `/prompt` in the terminal uses the same prompts (menu, `save`, `delete`, `export`, `import`).
+- Checkpoint timeline in the Changes panel: time, prompt, files and +/- counts per checkpoint, a diff per file, and Restore that
+  names exactly which files change and can itself be undone. Files you edited outside Axon are conflicts and are never
+  overwritten silently; `/rewind list`, `show <n>` and `restore <n>` in the terminal, and `/rewind <n>` and `/rewind to` now refuse
+  to overwrite such files unless `--overwrite` is given.
+- Compare models: Chat options > Compare models (or `/compare <model> <model> ... <prompt>`) asks two to four models the same
+  question at once, read-only, with time, tokens and cost per column; costs are logged as `compare`.
+- Cost estimate under the message box for expensive turns (threshold in Settings), quiet budget notices at 50%, 80% and 100%,
+  daily and monthly project budgets (`/budget day|month`, Usage page) that stop new turns, and a today / week / month spending
+  summary in Progress and `/usage`.
 - Web app (`axon open`): a real local app with chat, files, a real terminal, sessions, usage, memory and settings.
   Each turn shows steps, tools, status, time and cost on an aligned timeline; live, reload and stored turns draw alike.
 - Web app panels: Progress with the context breakdown and usage, Changes (`main → working tree`), Terminal, Browser and
@@ -14,10 +39,21 @@ Work in progress; not a release yet.
   the Marketplace tab includes marketplaces you added, chats in the app connect MCP servers and ask for their input
   on the page, and a folder's hooks, plugins and servers wait for "Trust this folder". Installing or removing a
   plugin or marketplace item applies hooks and plugin servers in the running chat.
+- Scheduled tasks: More > Tasks in the app and `/schedule` in the terminal run a prompt in a folder daily, weekly, at an
+  interval or once, only while Axon is open. Read-only by default, a spending limit per run, one run at a time per task
+  (also across two Axon windows), missed runs recorded and not replayed, each run saved as a session with its status, time
+  and cost.
+- Notifications: Settings > Preferences > Notifications (opt-in browser notifications, a "turns over N seconds"
+  threshold, tab title flash, finished tasks). The terminal can ring the bell or send an OSC 9/777 notification
+  (`/notify terminal ...`, off by default). Notification text never carries questions, errors or file contents.
 - Terminal: `/diff` is a working-tree screen; `/worktree`, `/context` legend, `/mcp servers` and `/workbench`.
 - Files: Read and the app share one reader for Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, notebooks, SQLite,
   archives and binaries. `@file` mentions give readable text, and credential files are refused.
 - Git tool: takes a repository folder through `path` or `-C`; permission checks see the same folder.
+- Web app first run and orientation: a short skippable welcome when no model works (choose a provider, paste a key or use a
+  local model, test it, pick a folder; reachable later from More), starter prompts in an empty chat taken from the real
+  project, small "?" notes on Progress sections and pages, a Project overview at the top of Insights (also `/overview` in
+  the terminal), and recent projects in the project name menu and `Cmd+K`.
 - Large input: a message above `large_input_tokens` (default automatic: a quarter of the context window, at most
   100,000 tokens; below 0 sends everything) is saved to the session's `pastes/` folder and sent as its start and end
   plus the path. The prompt shows the size of a paste, a cost notice appears for input of 20,000 tokens or more, and a

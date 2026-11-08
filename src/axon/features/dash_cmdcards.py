@@ -165,6 +165,16 @@ def b_usage(c: SimpleNamespace, arg: str, o: dict[str, str]) -> dict[str, Any] |
         frac = spent / limit if limit else 0
         limit_rows.append({"label": key.capitalize() + " budget", "frac": min(frac, 1.0), "value": pct(frac) + " used",
                            "tone": tone_for(frac), "note": f"{usd(spent)} of {usd(limit)}"})
+    from axon.features import cost_forecast as cf
+    try:
+        sp = cf.spend_summary(c.ws)
+    except Exception:
+        sp = {"project": None, "all": {}, "budgets": {}}
+    for span, word in (("day", "Daily"), ("month", "Monthly")):     # not `scope`: that is the card's own dropdown value below
+        b = (sp.get("budgets") or {}).get(span)
+        if b:
+            limit_rows.append({"label": word + " budget (project)", "frac": min(b["frac"], 1.0), "value": pct(b["frac"]) + " used",
+                               "tone": tone_for(b["frac"]), "note": f"{usd(b['spent'])} of {usd(b['limit'])}"})
     blocks.append(h("Limits", "what your provider reported and the budgets you set"))
     if limit_rows:
         blocks.append(bars(limit_rows))
@@ -173,6 +183,14 @@ def b_usage(c: SimpleNamespace, arg: str, o: dict[str, str]) -> dict[str, Any] |
     if not us.budget_settings(agent):
         blocks.append(text("No session budget is set. /budget 5 sets one.", "muted"))
 
+    if sp.get("project") is not None:
+        mine, everyone = sp["project"], sp["all"]
+        blocks.append(h("Spending", "from the usage log; the week starts on Monday"))
+        blocks.append(table(["", "This project", "All projects"],
+                            [[label, usd(mine[k]["cost"]), usd(everyone[k]["cost"])] for k, label in (("today", "Today"), ("week", "This week"), ("month", "This month"))],
+                            right=(1, 2), note="Model comparisons are included." if mine["month"]["compare"] > 0 else ""))
+        if not (sp.get("budgets") or {}).get("day") and not (sp.get("budgets") or {}).get("month"):
+            blocks.append(text("No daily or monthly budget is set. Set one on the Usage page, or with /budget day 5.", "muted"))
     blocks.append(h("This session"))
     if su.total_cost is None:
         blocks.append(text("No API calls yet in this session.", "muted"))

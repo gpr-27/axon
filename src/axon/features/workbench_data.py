@@ -177,7 +177,15 @@ def usage_limits(agent: Any | None) -> dict[str, Any]:
             for r in quota.snapshot() if r.used_fraction is not None]
     s = getattr(agent, "settings", None)
     cap, turn_cap = getattr(s, "budget_session_usd", None), getattr(s, "budget_turn_usd", None)
-    return {"limits": rows, "budget": {"session_usd": cap, "turn_usd": turn_cap} if (cap or turn_cap) else None}
+    spend = None
+    ws = getattr(s, "workspace", None)
+    if ws is not None:
+        try:
+            from axon.features import cost_forecast
+            spend = cost_forecast.spend_summary(ws)
+        except Exception:
+            spend = None
+    return {"limits": rows, "budget": {"session_usd": cap, "turn_usd": turn_cap} if (cap or turn_cap) else None, "spend": spend}
 
 
 def plan_and_todos(agent: Any) -> dict[str, Any]:

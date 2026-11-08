@@ -45,7 +45,7 @@ async function providersTab(body, from) {
     for (const p of list) body.append(providerRow(p, note));
   }
 }
-function providerRow(p, note) {
+function providerRow(p, note, after) {
   const chip = p.active ? h('span', { class: 'gbadge', style: 'border-color:var(--primary);color:var(--primary)' }, 'in use') : null;
   const keyState = !p.requires_key ? 'No key needed' : (p.key_set ? 'Key set (' + p.key_source + ')' : 'Needs a key');
   const det = h('details', { class: 'tool provider', open: p.active }, h('summary', null, h('span', { class: 'tn' }, p.name), h('span', { class: 'ta' }, p.description), chip, h('span', { class: 'ts ' + (p.requires_key && !p.key_set ? 'bad' : '') }, keyState)));
@@ -60,7 +60,7 @@ function providerRow(p, note) {
     h('div', { class: 'formrow' }, h('label', { class: 'muted' }, 'Model'), model, dl, loadModels),
     h('details', { class: 'adv' }, h('summary', null, 'Advanced'), h('div', { class: 'formrow' }, h('label', { class: 'muted' }, 'Endpoint URL'), base)),
     h('div', { class: 'formrow' }, h('button', { class: 'btn', onclick: async () => { note(out, 'Testing the key...'); try { const r = await api('/api/provider/test', { preset: p.id, key: key.value, base_url: base.value, model: model.value }); note(out, r.message, r.ok ? 'ok' : 'bad'); } catch (e) { note(out, e.message, 'bad'); } } }, 'Test'),
-      h('button', { class: 'btn primary', onclick: async () => { try { const r = await api('/api/provider/apply', { preset: p.id, base_url: base.value === p.base_url ? '' : base.value, model: model.value, key: key.value }); key.value = ''; toast(r.message); viewSettings('providers'); } catch (e) { note(out, e.message, 'bad'); } } }, 'Use this provider'),
+      h('button', { class: 'btn primary', onclick: async () => { try { const r = await api('/api/provider/apply', { preset: p.id, base_url: base.value === p.base_url ? '' : base.value, model: model.value, key: key.value }); key.value = ''; toast(r.message); if (after) after(r); else viewSettings('providers'); } catch (e) { note(out, e.message, 'bad'); } } }, 'Use this provider'),
       p.docs_url ? h('a', { class: 'btn', href: p.docs_url, target: '_blank', rel: 'noopener noreferrer' }, 'Get a key') : null), out));
   return det;
 }
@@ -81,6 +81,7 @@ async function preferencesTab(body) {
     if (s.key === 'theme') ctl.setAttribute('aria-label', label);
     return h('div', { class: 'formrow', style: 'justify-content:space-between;border-bottom:1px solid var(--line);padding:8px 0;margin:0' }, s.key === 'theme' ? h('label', null, label, h('span', { class: 'muted', style: 'display:block;font-size:13px' }, 'For the terminal app. The web app\'s own colours are in Appearance.')) : h('label', null, label), ctl);
   })), res);
+  body.append(axnSettingsCard());
 }
 // The words the composer and status bar use for a stored setting value.
 function prefWord(key, v) {
@@ -193,6 +194,7 @@ function appearanceTab(body) {
       row('Code font size', 'Also sets the Terminal tab font.', seg('Code font size', 'csize', AP.CODE_SIZES.map(n => [n, String(n)])))),
     h('div', { class: 'ap-foot' }, h('button', { class: 'btn', type: 'button', onclick: () => { AP.reset(); toast('Appearance reset to defaults'); } }, 'Reset to defaults'),
       h('span', { class: 'muted' }, 'Saved in this browser.')));
+  if (typeof i18nGroup === 'function') body.querySelector('.ap-foot').before(i18nGroup());   // Language (dash_js_i18n.py)
   const sync = () => syncs.forEach(f => f());
   sync();
   const off = AP.subscribe(() => { if (!body.isConnected) { off(); return; } sync(); });

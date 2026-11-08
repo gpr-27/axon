@@ -451,6 +451,7 @@ class Agent:
         self._memory_lock = threading.Lock()
         self._consecutive_compactions = 0
         self._budget_warned: set[str] = set()
+        self._notice_marks: set[str] = set()      # budget notices (50, 80, 100 percent) this chat already gave
         self._prev_round_tools: list[ToolUseBlock] = []
         self._rationales: dict[str, tuple[str, str]] = {}
         self._tool_timings: dict[str, float] = {}
@@ -1783,7 +1784,19 @@ class Agent:
             pass
         if cache_status is not None:
             self._emit(cache_status)
+        if not self.is_subagent:
+            self._budget_notices()
         return cost, call_model
+
+    def _budget_notices(self) -> None:
+        """A quiet notice, once each, when the session, daily or monthly budget reaches 50, 80 and 100 percent."""
+        try:
+            from axon.features import cost_forecast as cf
+            for n in cf.due_notices(self.settings, self.settings.workspace, float(self.ledger.total()), self._notice_marks):
+                self._emit(BudgetEvent(scope=n["scope"], action="notice", spent_usd=n["spent"], projected_usd=0.0,
+                                       limit_usd=n["limit"], model=self.settings.model, message=n["message"], percent=n["step"]))
+        except Exception:
+            pass
 
     def _step_limit_wrap_up(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]],
                             iterations: int, last_round: list[dict[str, Any]], user_input: str) -> tuple[str | None, Usage]:
@@ -1902,6 +1915,15 @@ class Agent:
                 "Raise session_cost_ceiling in ~/.axon/config.toml or start a new session.",
                 "budget_exceeded", 0, 0, total_usage,
             )
+
+        if not self.is_subagent:           # the project's daily and monthly budgets stop new turns like the session ceiling does
+            try:
+                from axon.features import cost_forecast as cf
+                hit = cf.period_limit_hit(self.settings.workspace)
+            except Exception:
+                hit = None
+            if hit:
+                return self._stop_result(cf.limit_message(hit), "budget_exceeded", 0, 0, total_usage)
 
         self._hook_stop = ""
         if not self.is_subagent:
@@ -2293,12 +2315,20 @@ class Agent:
         """Live budget guard: project the next request's cost and warn / stop / downgrade before sending."""
         turn_limit = getattr(self.settings, "budget_turn_usd", None)
         sess_limit = getattr(self.settings, "budget_session_usd", None)
-        if not turn_limit and not sess_limit:
+        period: list[tuple[str, float, float]] = []
+        if not self.is_subagent:
+            try:
+                from axon.features import cost_forecast as cf
+                st = cf.budget_status(self.settings.workspace)
+                period = [(k, st[k]["spent"], st[k]["limit"]) for k in cf.SCOPES if st.get(k)]
+            except Exception:
+                period = []
+        if not turn_limit and not sess_limit and not period:
             return None
         projected = self._projected_request_cost(system_blocks, tool_schemas)
         spent_turn = float(self._trace.cost) if self._trace is not None else 0.0
         spent_sess = float(self.ledger.total())
-        checks = [("turn", spent_turn, turn_limit), ("session", spent_sess, sess_limit)]
+        checks = [("turn", spent_turn, turn_limit), ("session", spent_sess, sess_limit), *period]
         for scope, spent, limit in checks:
             if not limit or spent + projected <= float(limit):
                 continue

@@ -55,6 +55,7 @@ def test_windows_worktrees_live_in_a_short_folder(monkeypatch, tmp_path: Path) -
     monkeypatch.setenv("AXON_HOME", str(tmp_path / "h"))
     ws = tmp_path / ("deep-" * 20) / "repo"
     ws.mkdir(parents=True)
+    monkeypatch.setattr(worktree, "IS_WINDOWS", False)       # the long folder, whatever system this runs on
     legacy = worktree.worktrees_root(ws)
     monkeypatch.setattr(worktree, "IS_WINDOWS", True)
     short = worktree.worktrees_root(ws)

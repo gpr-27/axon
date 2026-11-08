@@ -3,7 +3,9 @@ in Usage, forks that keep replies, Insights empty states, trace menu status, dea
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +25,9 @@ from test_dashboard_manage import _fake_chat  # noqa: E402
 
 def test_a_saved_tab_for_a_deleted_chat_says_not_found_instead_of_opening_empty():
     assert "C.missing = true" in APP_JS and "Chat not found" in APP_JS
-    seg = APP_JS.split("Chat not found")[0][-420:]
+    from axon.features.dashboard_web import i18n_asset
+    code = APP_JS.replace(i18n_asset("i18n.js")[0], "", 1)      # the translation catalog also holds the words "Chat not found"
+    seg = code.split("Chat not found")[0][-420:]
     assert "C.missing && !C.runtime" in seg and "composerEl.hidden = true" in seg     # a chat that is running is never called missing
 
 
@@ -106,15 +110,14 @@ def test_subagent_page_title_is_the_task_label_not_the_whole_prompt():
 # ─── the first page load ─────────────────────────────────────────────────────
 
 def test_make_server_imports_the_tools_package_before_request_threads_do():
-    code = "import sys; from axon.features.dashboard import make_server; print('axon.tools._files' in sys.modules)"
-    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60,
-                         env={"PATH": "/usr/bin:/bin", "AXON_HOME": str(Path(__file__).parent), "PYTHONPATH": str(Path(__file__).parents[1] / "src")})
+    # Windows needs SystemRoot to start Python at all (random numbers for hash seeding), so it is kept.
+    base_env = {k: v for k, v in os.environ.items() if k.upper() in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP")}
     # importing the module alone is allowed to be lazy; the check is on make_server itself
     code2 = ("import sys, tempfile; from pathlib import Path; from axon.features.dashboard import make_server;"
              "s = make_server(0, Path(tempfile.mkdtemp())); print('axon.tools._files' in sys.modules); s.server_close()")
     out = subprocess.run([sys.executable, "-I", "-c", code2], capture_output=True, text=True, timeout=60,
-                         env={"PATH": "/usr/bin:/bin", "AXON_HOME": tempfile_dir(), "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
-                              "AXON_OFFLINE": "1", "AXON_NO_UPDATE_CHECK": "1"})
+                         env={**base_env, "PATH": "/usr/bin:/bin", "AXON_HOME": tempfile_dir(),
+                              "PYTHONPATH": str(Path(__file__).parents[1] / "src"), "AXON_OFFLINE": "1", "AXON_NO_UPDATE_CHECK": "1"})
     assert out.stdout.strip().endswith("True"), out.stderr[-400:]
 
 
@@ -131,7 +134,7 @@ def test_orphaned_functions_are_gone(name):
 
 
 def test_the_page_script_still_parses():
-    node = subprocess.run(["which", "node"], capture_output=True, text=True).stdout.strip()
+    node = shutil.which("node")
     if not node:
         pytest.skip("no node")
     p = Path(__file__).parent / "_left_browser_parse.js"

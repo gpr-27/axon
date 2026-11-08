@@ -901,6 +901,17 @@ def coalesce_paste(units: list[str]) -> list[str]:
     if not any(u in ("enter", "shift-enter", "ctrl-j") for u in units):
         return units
     text_units = {"enter": "\n", "shift-enter": "\n", "ctrl-j": "\n", "tab": "\t"}
+    # Enter, text, Enter read in one burst is type-ahead (as on POSIX, see _looks_like_paste): only a line break
+    # between text, or a burst too long to have been typed, is a paste.
+    breaks = ("enter", "shift-enter", "ctrl-j")
+    lead = 0
+    while lead < len(units) and units[lead] in breaks:
+        lead += 1
+    trail = len(units)
+    while trail > lead and units[trail - 1] in breaks:
+        trail -= 1
+    if not any(u in breaks for u in units[lead:trail]) and len(units) < _PASTE_MIN_CHARS:
+        return units
     if all(len(u) == 1 or u in text_units for u in units):
         chars = sum(1 for u in units if len(u) == 1)
         if chars >= 2:

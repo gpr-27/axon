@@ -178,13 +178,12 @@ class WorktreeManager:
                     # Without a fresh commit, the diff below would re-apply the user's last real commit.
                     return False, f"Could not commit worktree changes: {(commit_res.stderr or commit_res.stdout).strip()}"
 
+            # Bytes both ways: text mode turns CRLF into LF on the way out and LF into CRLF on the way in
+            # (Windows), which corrupts a patch for any file that has CRLF line endings.
             patch_res = subprocess.run(
                 ["git", "diff", "--binary", info.base_commit or "HEAD~1", "HEAD"],
                 cwd=str(info.worktree_path),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=30,
             )
             if patch_res.returncode == 0 and patch_res.stdout.strip():
@@ -193,14 +192,11 @@ class WorktreeManager:
                     input=patch_res.stdout,
                     cwd=str(info.base_workspace),
                     capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     timeout=30,
                 )
                 if apply_res.returncode == 0:
                     return True, "Changes successfully applied to workspace"
-                return False, f"Merge conflict applying worktree changes: {apply_res.stderr}"
+                return False, f"Merge conflict applying worktree changes: {apply_res.stderr.decode('utf-8', 'replace')}"
 
             return True, "Worktree committed"
         except Exception as e:

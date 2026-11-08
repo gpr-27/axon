@@ -62,14 +62,14 @@ function ensureFrame() {
   const ws = state.ws || {};
   const logo = h('span', { html: state.logo || '' });
   const nav = h('nav', { 'aria-label': 'Sections', class: 'side-nav' }, ...NAV.map(([id, label, keys]) => h('a', { href: '#/' + id, 'data-nav': id, title: label + (NAV_HELP[id] ? ': ' + NAV_HELP[id] : '') + '  (' + keys + ')' }, svgIcon(ICONS[id]), h('span', { class: 'lbl' }, label))));
-  const chip = h('a', { class: 'ws-chip', href: '#/chat', id: 'ws-chip', title: ws.workspace || '', onclick: (e) => { e.preventDefault(); folderChooser(); } });
+  const chip = h('a', { class: 'ws-chip', href: '#/chat', id: 'ws-chip', title: ws.workspace || '', 'aria-haspopup': 'menu', onclick: (e) => { e.preventDefault(); if (typeof projectMenu === 'function') projectMenu(e.currentTarget); else folderChooser(); } });
   const top = h('header', { class: 'top' }, h('a', { class: 'brand', href: '#/chat' }, logo, h('span', null, 'axon')), chip,
     h('button', { class: 'ctitle', id: 'chat-title', type: 'button', 'aria-haspopup': 'menu', onclick: (e) => wbTitleMenu(e.currentTarget) }),
     wbToolbar());
   const rp = h('aside', { class: 'rpanel', id: 'rpanel' }, h('div', { class: 'pbody', id: 'rpbody' }));
   const rwrap = h('div', { class: 'rwrap', id: 'rwrap' }, rp, wbBuild());
   const rzr = h('div', { class: 'rz rz-r', role: 'separator', 'aria-orientation': 'vertical', title: 'Drag to resize' });
-  const tabscroll = h('div', { class: 'tabscroll', id: 'tabscroll' });
+  const tabscroll = h('div', { class: 'tabscroll', id: 'tabscroll', role: 'tablist', 'aria-label': 'Open tabs' });
   tabscroll.addEventListener('wheel', (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { tabscroll.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
   tabscroll.addEventListener('scroll', () => tabArrows());
   const tabstrip = h('div', { class: 'tabstrip', id: 'tabstrip' },
@@ -92,7 +92,7 @@ function ensureFrame() {
 }
 function drawChip() {
   const ws = state.ws || {}; const chip = document.getElementById('ws-chip'); if (!chip) return;
-  chip.title = (ws.workspace || '') + '  (click to change folder)';
+  chip.title = (ws.workspace || '') + '  (recent projects and change folder)';
   chip.replaceChildren(h('span', { class: 'ws-dot' }), h('b', null, ws.name || 'workspace'));   // the full path and the branch are in Progress, under Environment
 }
 function drawStatus() {
@@ -164,8 +164,8 @@ function setActive(t) {
 function drawTabs() {
   const sc = document.getElementById('tabscroll'); if (!sc) return;
   sc.replaceChildren(...UI.tabs.map(t => {
-    const el = h('div', { class: 'tab' + (t === UI.active ? ' on' : '') + (UI.split === t ? ' split' : ''), role: 'tab', 'aria-selected': String(t === UI.active), title: t.title },
-      h('button', { class: 'tl', type: 'button', onclick: () => { location.hash = t.hash || '#/chat'; setActive(t); } }, svgIcon(ICONS[TAB_ICON[t.route]] || ICONS.files), h('span', null, t.title)),
+    const el = h('div', { class: 'tab' + (t === UI.active ? ' on' : '') + (UI.split === t ? ' split' : ''), role: 'presentation', title: t.title },
+      h('button', { class: 'tl', type: 'button', role: 'tab', 'aria-selected': String(t === UI.active), onclick: () => { location.hash = t.hash || '#/chat'; setActive(t); } }, svgIcon(ICONS[TAB_ICON[t.route]] || ICONS.files), h('span', null, t.title)),
       UI.tabs.length > 1 ? h('button', { class: 'tx', type: 'button', 'aria-label': 'Close ' + t.title, onclick: (e) => { e.stopPropagation(); closeTab(t); } }, '×') : null);   // the only tab has nothing to close into
     el.addEventListener('contextmenu', (e) => { e.preventDefault(); openTabMenu(el, t); });
     el.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); closeTab(t); } });
@@ -190,6 +190,7 @@ function shell(route, bodyFn, opts) {
   t.pane.replaceChildren(); UI.building = t; t.pane.classList.toggle('wide', !!o.wide);
   const r = bodyFn(t.pane, t);
   return Promise.resolve(r).then(() => {
+    if (typeof helpPageHook === 'function') helpPageHook(t.pane, route);
     if (PAGE_HINT[route] && !t.pane.querySelector(':scope > .page-hint')) t.pane.prepend(h('div', { class: 'page-hint' }, h('b', null, labelFor(route) + ': '), PAGE_HINT[route]));
     savePrefs();
   });

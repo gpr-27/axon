@@ -174,15 +174,15 @@ async function viewCommands() {
 function quickForms(out) {
   const show = (line) => { out.scrollIntoView({ block: 'nearest' }); return execLine(line, out); };
   const card = (title, ...kids) => h('div', { class: 'card' }, h('h3', null, title), ...kids);
-  const modelSel = h('select', null); api('/api/models').then(d => modelSel.append(...d.models.map(m => h('option', { value: m, selected: m === d.current }, m)))).catch(() => { });
-  const modeSel = h('select', null, [['default', 'Ask before edits and commands'], ['acceptEdits', 'Allow file edits'], ['plan', 'Plan only'], ['bypass', 'Run everything']].map(([v, l]) => h('option', { value: v }, l)));
-  const focus = h('input', { type: 'text', placeholder: 'What to keep in the summary (optional)' });
-  const rn = h('input', { type: 'text', placeholder: 'prompt number', style: 'max-width:120px' }); const rmode = h('select', null, [['code_and_conversation', 'Code and conversation'], ['conversation', 'Conversation only'], ['code', 'Code only'], ['summarize_from_here', 'Summarise from here']].map(([v, l]) => h('option', { value: v }, l)));
-  const note = h('input', { type: 'text', placeholder: 'Something Axon should remember' });
-  const pr = h('input', { type: 'text', placeholder: 'Bash(git status:*)' }); const pk = h('select', null, ['allow', 'ask', 'deny'].map(v => h('option', { value: v }, v)));
-  const mcpName = h('input', { type: 'text', placeholder: 'server name' });
-  const mk = h('input', { type: 'search', placeholder: 'Search the marketplace' }); const mres = h('div', { style: 'max-height:260px;overflow:auto;margin-top:8px' });
-  const tab = h('select', null, ['connectors', 'skills', 'plugins'].map(v => h('option', { value: v }, v)));
+  const modelSel = h('select', { 'aria-label': 'Model' }); api('/api/models').then(d => modelSel.append(...d.models.map(m => h('option', { value: m, selected: m === d.current }, m)))).catch(() => { });
+  const modeSel = h('select', { 'aria-label': 'Permission mode' }, [['default', 'Ask before edits and commands'], ['acceptEdits', 'Allow file edits'], ['plan', 'Plan only'], ['bypass', 'Run everything']].map(([v, l]) => h('option', { value: v }, l)));
+  const focus = h('input', { type: 'text', placeholder: 'What to keep in the summary (optional)', 'aria-label': 'What to keep in the summary (optional)' });
+  const rn = h('input', { type: 'text', placeholder: 'prompt number', 'aria-label': 'Prompt number', style: 'max-width:120px' }); const rmode = h('select', { 'aria-label': 'What to rewind' }, [['code_and_conversation', 'Code and conversation'], ['conversation', 'Conversation only'], ['code', 'Code only'], ['summarize_from_here', 'Summarise from here']].map(([v, l]) => h('option', { value: v }, l)));
+  const note = h('input', { type: 'text', placeholder: 'Something Axon should remember', 'aria-label': 'Something Axon should remember' });
+  const pr = h('input', { type: 'text', placeholder: 'Bash(git status:*)', 'aria-label': 'Permission rule' }); const pk = h('select', { 'aria-label': 'Rule type' }, ['allow', 'ask', 'deny'].map(v => h('option', { value: v }, v)));
+  const mcpName = h('input', { type: 'text', placeholder: 'server name', 'aria-label': 'MCP server name' });
+  const mk = h('input', { type: 'search', placeholder: 'Search the marketplace', 'aria-label': 'Search the marketplace' }); const mres = h('div', { style: 'max-height:260px;overflow:auto;margin-top:8px' });
+  const tab = h('select', { 'aria-label': 'What to browse' }, ['connectors', 'skills', 'plugins'].map(v => h('option', { value: v }, v)));
   async function browse() {
     mres.replaceChildren(h('p', { class: 'muted' }, 'Loading...'));
     try { const d = await api('/api/marketplace?tab=' + tab.value + '&q=' + encodeURIComponent(mk.value)); mres.replaceChildren(...d.entries.slice(0, 40).map(e => h('div', { class: 'row', style: 'padding:4px 0;display:flex;gap:8px;align-items:baseline;border-bottom:1px solid var(--line)' }, h('div', { style: 'flex:1;min-width:0' }, h('b', null, e.name), e.verified ? ' ✓' : '', h('div', { class: 'muted', style: 'font-size:12px' }, (e.description || '').slice(0, 120))), h('button', { class: 'mini', onclick: () => show('/marketplace install ' + e.id) }, 'Install'), h('button', { class: 'mini', onclick: () => show('/marketplace remove ' + e.id) }, 'Remove'))), d.entries.length ? null : h('p', { class: 'muted' }, 'Nothing found.')); } catch (e) { mres.replaceChildren(errorBox(e.message)); }
@@ -214,7 +214,8 @@ function openPalette() {
   scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.remove(); });
   let items = [], sel = 0;
   const pages = [...NAV.map(([id, label]) => ({ label: 'Go to ' + label, hint: '#/' + id, run: () => { location.hash = '#/' + id; } })),
-    ...NAV_PANELS.map(([id, label, , help]) => ({ label: 'Open ' + label, hint: help, run: () => { location.hash = '#/' + id; } }))];
+    ...NAV_PANELS.map(([id, label, , help]) => ({ label: 'Open ' + label, hint: help, run: () => { location.hash = '#/' + id; } })), ...(typeof projPaletteItems === 'function' ? projPaletteItems() : [])];
+  pages.push({ label: 'Open Tasks', hint: 'scheduled and background tasks', run: () => wbOpen('tasks') });
   allCommands().then((c) => { items = [...pages, ...c.map(x => ({ label: x.name, hint: x.description, cmd: x }))]; draw(); }).catch(() => { items = pages; draw(); });
   function matches() { const q = input.value.toLowerCase().trim(); return items.filter(i => !q || i.label.toLowerCase().includes(q.replace(/^\//, '')) || (i.hint || '').toLowerCase().includes(q)).slice(0, 40); }
   function draw() { const m = matches(); sel = Math.min(sel, Math.max(0, m.length - 1)); list.replaceChildren(...m.map((i, k) => h('div', { class: 'it', 'aria-selected': String(k === sel), onclick: () => choose(i) }, h('b', null, i.label), h('span', null, i.hint || '')))); }
@@ -225,7 +226,7 @@ function openPalette() {
 }
 function helpModal() {
   const scrim = h('div', { class: 'scrim', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts' }); scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.remove(); });
-  const rows = [['Ctrl/Cmd+K', 'Command palette'], ['/', 'Focus search or the message box'], ['g then c / f / h / x / m / s / u / i / y / e / t', 'Chat, Files panel, Shell (Terminal panel), Terminal panel, Commands, Sessions, Usage, Insights, Memory, Extensions, Settings'], ['Ctrl+P', 'Choose the model for this chat'], ['Shift+Tab in the message box', 'Cycle the permission mode'], ['Ctrl/Cmd+J', 'Show or hide the Terminal panel'], ['Ctrl/Cmd+\\', 'Show or hide the Files panel'], ['Enter', 'Send (Shift+Enter for a new line)'], ['/ in the message box', 'Slash commands'], ['@ in the message box', 'Mention a file'], ['! at the start', 'Run a shell command, then Axon sees the output'], ['Up in an empty box', 'Previous prompt'], ['Ctrl/Cmd+S', 'Save the file you are editing'], ['Esc', 'Close a dialog'], ['?', 'This list']];
+  const rows = [['Ctrl/Cmd+K', 'Command palette'], ['Ctrl/Cmd+F', 'Find in the chat (Enter next, Shift+Enter previous)'], ['/', 'Focus search or the message box'], ['g then c / f / h / x / m / s / u / i / y / e / t', 'Chat, Files panel, Shell (Terminal panel), Terminal panel, Commands, Sessions, Usage, Insights, Memory, Extensions, Settings'], ['Ctrl+P', 'Choose the model for this chat'], ['Shift+Tab in the message box', 'Cycle the permission mode'], ['Ctrl/Cmd+J', 'Show or hide the Terminal panel'], ['Ctrl/Cmd+\\', 'Show or hide the Files panel'], ['Enter', 'Send (Shift+Enter for a new line)'], ['/ in the message box', 'Slash commands'], ['@ in the message box', 'Mention a file'], ['! at the start', 'Run a shell command, then Axon sees the output'], ['Up in an empty box', 'Previous prompt'], ['Ctrl/Cmd+S', 'Save the file you are editing'], ['Esc', 'Close a dialog'], ['?', 'This list']];
   scrim.append(h('div', { class: 'modal' }, h('h3', null, 'Keyboard shortcuts'), h('dl', { class: 'kv' }, ...rows.flatMap(([k, v]) => [h('dt', null, h('span', { class: 'kbd' }, k)), h('dd', null, v)])), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => scrim.remove() }, 'Close'))));
   document.body.append(scrim);
 }
@@ -315,5 +316,6 @@ Promise.all([api('/api/info'), api('/api/ws')]).then(async ([i, w]) => {
   const here = location.hash;
   for (const hh of (UI.restore && UI.restore.tabs) || []) { if (hh && hh !== here && !/^#\/(commands|sessions|usage|memory|extensions|settings)$/.test(hh)) { try { openHash(hh, false); } catch (e) { /* stale tab */ } } }
   route();
+  if (typeof welcomeBoot === 'function') welcomeBoot();
 }).catch((e) => { app.replaceChildren(h('main', null, errorBox(e.message + '. Open the dashboard using the URL printed in your terminal.'))); });
 """

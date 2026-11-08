@@ -214,6 +214,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `budget_turn_usd` | `AXON_BUDGET_TURN_USD` | `budget.turn_usd` | `none` |
 | `budget_session_usd` | `AXON_BUDGET_SESSION_USD` | `budget.session_usd` | `none` |
 | `budget_action` | `AXON_BUDGET_ACTION` | `budget.action` | `"stop"` |
+| `forecast_threshold_usd` | `AXON_FORECAST_THRESHOLD_USD` | – | `0.25` |
 | `instruction_files` | `AXON_INSTRUCTION_FILES` | `instructionFiles` | `"axon-md-or-agents-md"` |
 | `auto_memory` | `AXON_AUTO_MEMORY` | `autoMemoryEnabled` | `true` |
 | `memory_excludes` | `AXON_MEMORY_EXCLUDES` | `axonMdExcludes`, `claudeMdExcludes` | `[]` |
@@ -222,6 +223,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `additional_dirs` | `AXON_ADDITIONAL_DIRS` | `additionalDirectories` | `[]` |
 | `system_prompt_override` | `AXON_SYSTEM_PROMPT_OVERRIDE` | `systemPrompt` | `none` |
 | `output_style` | `AXON_OUTPUT_STYLE` | `outputStyle` | `"default"` |
+| `reply_language` | `AXON_REPLY_LANGUAGE` | `replyLanguage` | `""` |
 | `status_line` | `AXON_STATUS_LINE` | `statusLine` | `none` |
 | `vim_mode` | `AXON_VIM_MODE` | `editorMode`, `vimMode` | `false` |
 | `theme` | `AXON_THEME` | `theme` | `"auto"` |
@@ -242,6 +244,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `mouse_click_expand` | `AXON_MOUSE_CLICK_EXPAND` | `mouseClickExpand` | `false` |
 | `notifications` | `AXON_NOTIFICATIONS` | `preferredNotifChannel` | `"important"` |
 | `notify_after_seconds` | `AXON_NOTIFY_AFTER_SECONDS` | `notifyAfterSeconds` | `30.0` |
+| `terminal_notify` | `AXON_TERMINAL_NOTIFY` | `terminalNotify` | `"off"` |
 | `tips_refresh_minutes` | `AXON_TIPS_REFRESH_MINUTES` | `tipsRefreshMinutes` | `15.0` |
 | `auto_title` | `AXON_AUTO_TITLE` | `autoTitle` | `true` |
 | `title_llm` | `AXON_TITLE_LLM` | `titleLlm` | `true` |

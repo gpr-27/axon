@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     budget_turn_usd: float | None = None
     budget_session_usd: float | None = None
     budget_action: Literal["warn", "stop", "downgrade"] = "stop"
+    forecast_threshold_usd: float | None = 0.25   # a cost estimate shows under the message box above this (0 or None = off)
     # Instruction files: axon-md-or-agents-md | axon-md-and-agents-md | axon-md | managed-only
     instruction_files: str = "axon-md-or-agents-md"
     auto_memory: bool = True
@@ -118,6 +119,7 @@ class Settings(BaseSettings):
     # Replaces the core system prompt (identity + operating rules); env/memory/tools layers stay.
     system_prompt_override: str | None = None
     output_style: str = "default"
+    reply_language: str = ""             # "" (off) or a language code (te, hi, en): one line in the system prompt asks for replies in it
     status_line: dict[str, Any] | None = None
     vim_mode: bool = False
     theme: str = "auto"
@@ -139,6 +141,7 @@ class Settings(BaseSettings):
     mouse_click_expand: bool = False     # capture clicks at the prompt to expand blocks (wheel/drag then go to Axon)
     notifications: str = "important"     # desktop notifications: important | all | off
     notify_after_seconds: float = 30.0   # "important": notify a finished turn only if it ran this long
+    terminal_notify: str = "off"         # also tell the terminal itself when work finishes: off | bell | osc9 | osc777
     tips_refresh_minutes: float = 15.0   # min minutes between LLM tip refreshes
     auto_title: bool = True
     title_llm: bool = True              # the session's model writes the title; False: heuristic title only
@@ -403,6 +406,7 @@ _JSON_KEY_MAP = {
     "verbose": "verbose", "alwaysThinkingEnabled": "thinking",
     "fallbackModel": "fallback_model", "fallback_model": "fallback_model", "routing": "routing",
     "outputStyle": "output_style", "output_style": "output_style",
+    "replyLanguage": "reply_language", "reply_language": "reply_language",
     "statusLine": "status_line", "status_line": "status_line", "theme": "theme",
     "cleanupPeriodDays": "cleanup_period_days", "cleanup_period_days": "cleanup_period_days",
     "verifyCommands": "verify_commands", "verify_commands": "verify_commands",
@@ -411,6 +415,7 @@ _JSON_KEY_MAP = {
     "suggestions": "suggestions", "promptSuggestionEnabled": "suggestions",
     "contextLimit": "context_limit", "context_limit": "context_limit",
     "notifications": "notifications", "preferredNotifChannel": "notifications",
+    "terminalNotify": "terminal_notify", "terminal_notify": "terminal_notify",
     "notifyAfterSeconds": "notify_after_seconds", "notify_after_seconds": "notify_after_seconds",
     "workbenchHint": "workbench_hint", "workbench_hint": "workbench_hint", "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
     "liveStatus": "live_status", "live_status": "live_status",
@@ -480,6 +485,8 @@ def map_json_settings(data: dict[str, Any]) -> dict[str, Any]:
             out["budget_session_usd"] = budget.get("session_usd", budget.get("sessionUsd"))
         if "action" in budget:
             out["budget_action"] = budget["action"]
+        if "forecast_usd" in budget:
+            out["forecast_threshold_usd"] = budget["forecast_usd"]
     env = data.get("env")
     if isinstance(env, dict):
         for ek, ev in env.items():

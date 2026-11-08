@@ -14,7 +14,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-139 slash commands · 28 built-in tools · 16 provider presets
+144 slash commands · 28 built-in tools · 16 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -440,21 +440,21 @@ Related commands:
 ## Commands
 
 <!-- BEGIN GENERATED: commands-overview -->
-139 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
+144 built-in commands. Run `/help` for the list or `/help <command>` for details; the full reference is in [docs/commands.md](docs/commands.md).
 
 | Group | Commands |
 |---|---|
-| **Session** | `/activity` `/branch` `/clear` `/delete` `/exit` `/export` `/files` `/history` `/library` `/loop` `/project` `/rename` `/restore` `/resume` `/retitle` `/retry` `/rewind` `/search` `/sessions` `/star` `/tag` `/workbench` |
+| **Session** | `/activity` `/bookmark` `/bookmarks` `/branch` `/clear` `/delete` `/exit` `/export` `/files` `/history` `/library` `/loop` `/overview` `/project` `/rename` `/restore` `/resume` `/retitle` `/retry` `/rewind` `/search` `/sessions` `/star` `/tag` `/workbench` |
 | **Context & Cost** | `/autocompact` `/compact` `/context` `/cost` `/ctxdiff` `/ctxmap` `/faq` `/payload` `/pin` `/pricing` `/recap` `/receipts` `/timeline` `/trail` `/unpin` `/usage` `/whatif` `/window` |
 | **Model & Modes** | `/effort` `/endpoint` `/fast` `/goal` `/keys` `/mode` `/model` `/permissions` `/plan` `/provider` `/thinking` `/trace` |
 | **Code & Review** | `/btw` `/copy` `/diff` `/find` `/output` `/paste` `/queue` `/review` `/security-review` `/simplify` `/test` `/todos` `/transcript` `/worktree` |
 | **Agents, Skills & Tools** | `/agents` `/debug` `/explain` `/hooks` `/inspect` `/list-agents` `/main` `/marketplace` `/mcp` `/plugin` `/reload-plugins` `/reload-skills` `/skill-doctor` `/skills` `/stop` `/subagents` `/subtask` `/tasks` `/tell` `/tools` `/trust` |
-| **Memory & Project** | `/add-dir` `/cd` `/import` `/init` `/learn` `/memory` `/optimize` `/prompt` |
+| **Memory & Project** | `/add-dir` `/cd` `/import` `/init` `/learn` `/memory` `/optimize` `/prompt` `/schedule` |
 | **System** | `/bug` `/color` `/config` `/doctor` `/env` `/focus` `/help` `/keybindings` `/notify` `/output-style` `/release-notes` `/sandbox` `/settings` `/status` `/statusbar` `/statusline` `/storage` `/suggestions` `/terminal-setup` `/theme` `/vim` |
 | **Code** | `/index` `/map` |
 | **Getting started** | `/menu` `/new` `/next` `/setup` `/tips` |
 | **Git** | `/changes` `/commit` `/git` `/pr` |
-| **Insight** | `/budget` `/insights` `/report` `/stats` |
+| **Insight** | `/budget` `/compare` `/insights` `/report` `/stats` |
 | **Integrations** | `/open` `/serve` |
 | **Solve** | `/autofix` `/fix` `/plan-resume` `/plan-run` `/plans` `/verify` |
 <!-- END GENERATED: commands-overview -->

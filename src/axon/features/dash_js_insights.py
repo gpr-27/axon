@@ -12,7 +12,7 @@ async function viewInsights(rest) {
   return shell('insights', async (pane) => {
     const sid = () => (UI.chat ? UI.chat.sid : '');
     const body = h('div'); const tabs = h('div', { class: 'tabs', role: 'tablist' }, ...INSIGHT_TABS.map(([k, l]) => h('button', { role: 'tab', 'aria-selected': String(k === tab), onclick: () => { location.hash = '#/insights/' + k; } }, l)));
-    pane.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Insights'), h('div', { class: 'sub' }, 'What the agent did and why, what fills the context window, and what it cost. Read from the live session' + (sid() ? '.' : ': open a chat first.')))), tabs, body);
+    pane.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Insights'), h('div', { class: 'sub' }, 'What the agent did and why, what fills the context window, and what it cost. Read from the live session' + (sid() ? '.' : ': open a chat first.')))), typeof overviewSection === 'function' ? overviewSection() : null, tabs, body);
     const get = (name, extra) => api('/api/insights/' + name + '?session=' + encodeURIComponent(sid()) + (extra || ''));
     const reload = () => viewInsights(tab);
     const post = async (name, data) => { try { const r = await api('/api/insights/' + name, Object.assign({ session: sid() }, data)); toast(r.message || (r.ok === false ? 'Not done' : 'Done')); } catch (e) { toast(e.message); } reload(); };

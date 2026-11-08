@@ -236,6 +236,7 @@ def _panel_keys(agent: Any) -> list[tuple[str, str, Any, str]]:
         ("prompt_suggestions", "Next-prompt ghost text", "bool", "promptSuggestions"),
         ("tips", "Usage tips", "bool", "tips"),
         ("tips_llm", "Model-written tips", "bool", "tipsLlm"),
+        ("forecast_threshold_usd", "Cost estimate above (USD, 0 = off)", None, "budget.forecast_usd"),
     ]
 
 
@@ -291,6 +292,12 @@ def set_config_value(agent: Any, key: str, raw: Any, persist: bool = True) -> st
         elif key == "output_style":
             from axon.commands.prefs_cmds import handle_output_style
             handle_output_style(agent, value)
+        elif key == "forecast_threshold_usd":
+            try:
+                value = max(0.0, float(str(value).strip().lstrip("$")))
+            except ValueError:
+                raise ValueError("expected a number of dollars, like 0.25 (0 turns estimates off)") from None
+            update_settings(agent, forecast_threshold_usd=value)
         else:
             update_settings(agent, **{key: value})
     if persist:
@@ -528,7 +535,7 @@ def handle_keybindings(agent: Any, arg: str) -> CommandResult:
 
 
 @command("notify", category=CAT, description="Desktop notifications: when they fire (important/all/off), or send a test",
-         usage="/notify [important|all|off|after <seconds>|test [message]]")
+         usage="/notify [important|all|off|after <seconds>|terminal <off|bell|osc9|osc777>|test [message]]")
 def handle_notify(agent: Any, arg: str) -> CommandResult:
     from axon.commands.common import update_settings, update_settings_file
     from axon.ui.notify import NOTIFY_MODES, configure, send_desktop_notification
@@ -552,6 +559,19 @@ def handle_notify(agent: Any, arg: str) -> CommandResult:
         configure(agent.settings)
         ok(f"Finished turns notify only after running {secs:g}s or longer")
         return CommandResult(handled=True)
+    if sub == "terminal":
+        from axon.ui.notify import TERMINAL_MODES, emit_terminal_notice
+        mode = words[1].lower() if len(words) > 1 else ""
+        if mode not in TERMINAL_MODES:
+            err("Usage: /notify terminal off|bell|osc9|osc777")
+            return CommandResult(handled=True)
+        update_settings(agent, terminal_notify=mode)
+        update_settings_file({"terminalNotify": mode}, workspace=ws_of(agent))
+        configure(agent.settings)
+        ok(f"Terminal signal: {mode}" + ("" if mode == "off" else " (sent when a long turn finishes or Axon needs you)"))
+        if mode != "off":
+            emit_terminal_notice("Axon", "Terminal notifications work.", mode)
+        return CommandResult(handled=True)
     if sub == "test":      # only "test" sends one; any other word is a mistake, not a message
         msg = " ".join(words[1:]).strip() or "Axon notifications work."
         if send_desktop_notification("Axon", msg):
@@ -560,7 +580,7 @@ def handle_notify(agent: Any, arg: str) -> CommandResult:
             info("Desktop notifications are not available here.")
         return CommandResult(handled=True)
     if sub:
-        usage("/notify [important|all|off|after <seconds>|test [message]]")
+        usage("/notify [important|all|off|after <seconds>|terminal <off|bell|osc9|osc777>|test [message]]")
         return CommandResult(handled=True)
     mode = getattr(s, "notifications", "important")
     after = float(getattr(s, "notify_after_seconds", 30.0))
@@ -574,6 +594,7 @@ def handle_notify(agent: Any, arg: str) -> CommandResult:
     }.get(mode, [])
     for r in rows:
         print(f"    {SLATE}·{RST} {WHITE}{r}{RST}")
+    print(f"    {SLATE}Terminal signal (bell or notification code, any time the terminal is a terminal): {getattr(s, 'terminal_notify', 'off')}{RST}")
     print(f"\n  {SLATE}Only while you are in another app.{typed_only(' /notify important|all|off · /notify after <seconds> · /notify test')}{RST}\n")
     return CommandResult(handled=True)
 

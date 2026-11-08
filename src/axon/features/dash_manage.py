@@ -237,6 +237,10 @@ def list_sessions(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
     res: dict[str, Any] = {"rows": page, "total": len(out), "scope_total": len(rows), "scope": scope, "offset": offset,
                            "tags": sorted(tags.items()), "models": sorted(models.items()),
                            "cost": round(sum(r["cost"] for r in out), 5), "full": {k: v for k, v in (full or {}).items() if k != "snippets"} or None}
+    cut = list(getattr(srv.index, "cut", {}).get(scope) or [])
+    if cut:       # the index lists the newest chats of each project only: say so instead of silently hiding the rest
+        from axon.features.dashboard import SessionIndex
+        res["cut_off"] = {"limit": SessionIndex.LIMIT_PER_PROJECT, "projects": cut[:20]}
     if qs.get("ids") == "1":
         res["ids"] = [r["id"] for r in out][:MAX_BATCH]
     return res

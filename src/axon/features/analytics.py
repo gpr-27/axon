@@ -821,11 +821,55 @@ def budget_lines(agent: Any) -> list[str]:
     return lines
 
 
+def project_budget_lines(agent: Any) -> list[str]:
+    """The project's daily and monthly budgets (set with /budget day 5, /budget month 50), measured on the usage log."""
+    from axon.features import cost_forecast as cf
+    ws = getattr(getattr(agent, "settings", None), "workspace", None)
+    if ws is None:
+        return []
+    try:
+        st = cf.budget_status(ws)
+    except Exception:
+        return []
+    lines: list[str] = []
+    for scope, word in (("day", "Daily"), ("month", "Monthly")):
+        b = st.get(scope)
+        if not b:
+            lines.append("  " + ch.paint(f"{word} budget (this project)", "BOLD", "PRIMARY") + "  "
+                         + ch.paint("no limit set" + typed_only(f" · /budget {scope} <amount>"), "MUTED"))
+            continue
+        frac = b["frac"]
+        color = "SUCCESS" if frac < 0.75 else ("WARNING" if frac < 1 else "ERROR")
+        lines.append("  " + ch.paint(f"{word} budget (this project)", "BOLD", "PRIMARY"))
+        lines.append(f"  {ch.hbar(b['spent'], b['limit'], 30, color)}  {ch.paint(fmt_pct(min(frac, 9.99) * 100), color)}")
+        lines.append(f"  Spent {ch.paint(fmt_usd(b['spent']), 'BOLD')} of {fmt_usd(b['limit'])} · "
+                     + (f"{fmt_usd(b['remaining'])} remaining" if b["remaining"] > 0 else ch.paint("limit reached - new turns will not start", "ERROR")))
+    return lines
+
+
+def _project_budget_cmd(agent: Any, scope: str, rest: str) -> None:
+    from axon.features import cost_forecast as cf
+    ws = agent.settings.workspace
+    if rest:
+        try:
+            cf.set_project_budget(ws, scope, None if rest in ("off", "none", "unlimited", "disable", "clear", "0") else rest)
+        except (ValueError, OSError) as e:
+            _emit(["  " + ch.paint(f"{e} Usage: /budget {scope} [amount|off]", "WARNING")])
+            return
+    _emit([""] + project_budget_lines(agent) + [""])
+
+
 def cmd_budget(agent: Any, arg: str) -> None:
     if getattr(agent, "settings", None) is None:
         _emit(["  " + ch.paint("No active session settings.", "WARNING")])
         return
     a = (arg or "").strip().lower()
+    head, _, rest = a.partition(" ")
+    if head in ("day", "daily", "month", "monthly"):
+        _project_budget_cmd(agent, "day" if head.startswith("d") else "month", rest.strip())
+        return
+    if head == "session":
+        a = rest.strip()
     if a:
         if a in ("off", "none", "unlimited", "disable", "clear", "0"):
             new = Decimal("0")
@@ -839,7 +883,7 @@ def cmd_budget(agent: Any, arg: str) -> None:
         except Exception as e:
             _emit(["  " + ch.paint(f"Could not update the budget: {e}", "ERROR")])
             return
-    _emit([""] + budget_lines(agent) + [""])
+    _emit([""] + budget_lines(agent) + ([""] + project_budget_lines(agent) if not a else []) + [""])
 
 
 # ─── HTML report ───────────────────────────────────────────────────────────
@@ -1431,8 +1475,8 @@ COMMANDS = [
                    description="Usage analytics: cost, tokens, cache, models, sources, tools, expensive turns",
                    usage="/stats [today|7d|30d|all] [--project|--all-projects]"),
     FeatureCommand(name="/budget", handler=cmd_budget, category="Insight",
-                   description="Show or set this session's spending limit",
-                   usage="/budget [amount|off]"),
+                   description="Show or set the spending limits: this session, and this project per day and per month",
+                   usage="/budget [amount|off]\n/budget day [amount|off]\n/budget month [amount|off]"),
     FeatureCommand(name="/report", handler=cmd_report, category="Insight",
                    description="Write a self-contained HTML usage dashboard",
                    usage="/report [--days N] [--out PATH] [--all-projects] [--open]"),

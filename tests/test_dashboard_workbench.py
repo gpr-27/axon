@@ -250,7 +250,9 @@ def test_usage_shows_only_real_limits(c, env):
     from axon.features import quota
     quota.clear()
     st = c.json("/api/chat/state?session=&create=1")
-    assert c.json("/api/workbench/usage?session=" + st["session"]) == {"limits": [], "budget": None}
+    u = c.json("/api/workbench/usage?session=" + st["session"])
+    # `spend` (this project and all projects, from the usage log) was added beside the limits; only limits and budget must stay empty
+    assert u["limits"] == [] and u["budget"] is None and set(u) == {"limits", "budget", "spend"}
     quota.record_rate_limits({"anthropic-ratelimit-requests-limit": "100", "anthropic-ratelimit-requests-remaining": "25",
                               "anthropic-ratelimit-requests-reset": "2999-01-01T00:00:00Z"}, provider="anthropic")
     try:

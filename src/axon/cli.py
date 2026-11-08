@@ -1304,7 +1304,7 @@ def _run_agent_turn(agent: Any, renderer: Any, turn_input: str, label: str) -> N
         from axon.ui.notify import notify_event
         failed = getattr(res, "stop_reason", "") in ("error", "blocked", "budget_exceeded", "max_iterations")
         if failed:
-            notify_event("turn_failed", f"{label} stopped: {_one_line(str(getattr(res, 'final_text', '') or res.stop_reason), 120)}",
+            notify_event("turn_failed", f"{label} stopped ({getattr(res, 'stop_reason', '')})",   # the reason word only: never the model's text
                          settings=agent.settings, elapsed=elapsed)
         else:
             notify_event("turn_complete", f"{label} finished ({elapsed:.1f}s · ${tot_cost:.4f})",
@@ -1566,6 +1566,12 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
     try:
         from axon.agent.subagent import sync_subagents_for_session
         sync_subagents_for_session(agent)
+    except Exception:
+        pass
+
+    try:
+        from axon.commands.schedule_cmds import start_in_terminal
+        start_in_terminal(agent)         # scheduled tasks run while this terminal is open
     except Exception:
         pass
 

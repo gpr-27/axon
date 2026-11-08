@@ -908,55 +908,8 @@ def handle_init(agent: Any, arg: str) -> CommandResult:
 
 
 # ─── Prompt library ─────────────────────────────────────────────────────────
-
-BUILTIN_PROMPTS: dict[str, tuple[str, str]] = {
-    "overview": ("Explain the codebase", "Give me an overview of this codebase: purpose, architecture, main modules, data flow and how to run it. Cite key files."),
-    "trace": ("Trace a feature", "Trace how {feature} works end to end in this codebase. List the files and functions involved in order, with file:line references."),
-    "impact": ("What would break", "What would break if I deleted or changed {target}? Find every usage, explain the impact and how to do it safely."),
-    "tests": ("Write and run tests", "Write tests for {path}, run them, and fix any failures. Cover edge cases and error paths."),
-    "bugfix": ("Fix a bug", "Investigate and fix this bug: {description}. Reproduce it first, explain the root cause, apply a minimal fix and verify it with a test."),
-    "refactor": ("Safe refactor", "Refactor {target} to {goal} without changing behaviour. Keep tests passing and match the repository's conventions."),
-    "review": ("Review changes", "Review my uncommitted changes for bugs, security issues and missing tests. Report by severity with file:line references."),
-    "docs": ("Document code", "Write clear documentation for {target}: purpose, usage examples, parameters and pitfalls."),
-    "commit": ("Commit message", "Look at the staged changes (git diff --cached) and write a conventional commit message. Do not commit."),
-}
-_PH = re.compile(r"\{([A-Za-z_][A-Za-z0-9_ -]*)\}")
-
-
-def prompt_dirs(ws: Path) -> list[Path]:
-    return [_axon_home() / "prompts", ws / ".axon" / "prompts"]
-
-
-def load_prompts(ws: Path) -> dict[str, tuple[str, str, str]]:
-    """name -> (description, template, source)."""
-    out = {k: (d, t, "built-in") for k, (d, t) in BUILTIN_PROMPTS.items()}
-    from axon.skills.manager import parse_frontmatter
-    for d in prompt_dirs(ws):
-        if not d.is_dir():
-            continue
-        for f in sorted(d.glob("*.md")):
-            try:
-                fm, body = parse_frontmatter(f.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
-            desc = fm.get("description") if isinstance(fm.get("description"), str) else ""
-            out[f.stem] = (str(desc or (body.splitlines()[0][:60] if body else "")), body.strip(), str(f))
-    return out
-
-
-def fill_placeholders(template: str, given: dict[str, str], ask: bool) -> str | None:
-    names = list(dict.fromkeys(m.group(1) for m in _PH.finditer(template)))
-    values = dict(given)
-    for n in names:
-        if n not in values:
-            if not ask:
-                return None
-            v = ask_text(f"{n}:")
-            if not v:
-                return None
-            values[n] = v
-    return _PH.sub(lambda m: values.get(m.group(1), m.group(0)), template)
-
+# The prompts, their fields, storage, import and export live in axon.features.prompt_library (shared with the
+# app's "Saved prompts"). Files are the same markdown files the earlier /prompt used; fields are {{name}}.
 
 def parse_template_args(rest: str, names: list[str]) -> tuple[dict[str, str], list[str]]:
     """``key=value`` pairs for /prompt. A value runs until the next ``key=`` (so
@@ -979,64 +932,219 @@ def parse_template_args(rest: str, names: list[str]) -> tuple[dict[str, str], li
     return given, free
 
 
-@command("prompt", category=CAT, description="Prompt library: templates with {placeholders}",
-         aliases=("prompts", "template", "templates"),
-         usage="/prompt                         list templates\n/prompt <name> [key=value ...]  fill placeholders (asks for missing ones) and send\n/prompt show <name>\n/prompt save <name> [--global] <template text>")
+PROMPT_USAGE = """/prompt                         the saved prompts (menu)
+/prompt <name> [key=value ...]  fill in the fields (asks for missing ones) and send
+/prompt list [words]            list or search the saved prompts
+/prompt show <name>             show one prompt and its fields
+/prompt save <name> [--global] [-d description] <text with {{fields}}>   save for this project (or for every project)
+/prompt delete <name>           delete a saved prompt, or remove a starter
+/prompt export [file]           write the saved prompts to one file
+/prompt import <file> [--global] [--replace|--rename]   add the prompts of an exported file
+/prompt restore-starters        bring back removed starter prompts"""
+
+
+def _prompt_rows(prompts: list[Any]) -> None:
+    for p in prompts:
+        flds = ", ".join(f.name for f in p.fields)
+        where = {"project": "this project", "global": "all projects", "starter": "starter"}[p.scope]
+        print(f"    {CYAN}{p.name:<20}{RST} {WHITE}{p.description[:44]:<44}{RST} {DARK_SLATE}{where:<13}{('{{' + flds + '}}') if flds else ''}{RST}")
+
+
+def _fill_in(p: Any, given: dict[str, str], free: list[str]) -> str | None:
+    """The prompt text with every field filled: values from key=value, free words for a lone gap, then asked."""
+    from axon.features import prompt_library as pl
+    values = dict(given)
+    gaps = [f.name for f in p.fields if f.name not in values and not f.default]
+    if free and len(gaps) == 1:
+        values[gaps[0]] = " ".join(free)
+    for f in p.fields:
+        if f.name in values or not is_tty():
+            continue
+        v = ask_text(f"{f.name}{' (a file in the project)' if f.kind == 'file' else ''}" + (f" [{f.default}]" if f.default else "") + ":")
+        if v:
+            values[f.name] = v
+    try:
+        return pl.fill(p.text, values)
+    except pl.PromptError as e:
+        err(f"{e}. Use key=value, for example {p.fields[0].name}=value.")
+        return None
+
+
+def _use_prompt(agent: Any, p: Any, given: dict[str, str], free: list[str]) -> None:
+    text = _fill_in(p, given, free)
+    if text is None:
+        return
+    print(f"\n  {TEAL}▸ /prompt {p.name}{RST}  {SLATE}{text[:100]}{'…' if len(text) > 100 else ''}{RST}\n")
+    agent.run_turn(text)
+
+
+def _save_prompt(ws: Path, name: str, text: str, desc: str, scope: str, **kw: str) -> bool:
+    from axon.features import prompt_library as pl
+    try:
+        p = pl.save(ws, name, text, desc, scope, **kw)
+    except pl.PromptError as e:
+        err(str(e))
+        return False
+    ok(f"Saved prompt {BOLD}{p.name}{RST} {SLATE}({'this project' if scope == 'project' else 'all projects'}) · {p.path}{RST}")
+    return True
+
+
+def _prompt_menu(agent: Any, ws: Path) -> None:
+    from axon.features import prompt_library as pl
+    from axon.ui.menus import Action, browse
+    from axon.ui.picker import SelectItem
+
+    def rows() -> list[Any]:
+        return [SelectItem(label=p.name, value=p, hint=(p.description[:50] + ("  " + "{{" + ", ".join(f.name for f in p.fields) + "}}" if p.fields else "")),
+                           badge={"project": "project", "global": "global", "starter": "starter"}[p.scope]) for p in pl.list_prompts(ws)]
+
+    def edit(p: Any) -> None:
+        if p.scope == "starter":                    # edit a copy: the starter itself is part of Axon
+            if not _save_prompt(ws, p.name, p.text, p.description, "global", replace=p.name, replace_scope="starter"):
+                return
+            p = pl.get(ws, p.name)
+        open_in_editor(Path(p.path))
+
+    def delete(p: Any) -> None:
+        try:
+            ok(pl.delete(ws, p.name, p.scope))
+        except pl.PromptError as e:
+            err(str(e))
+
+    def new() -> None:
+        name = ask_text("Name (letters, digits, - and _):")
+        text = ask_text("Prompt text; write {{file}} or {{language}} where a value goes:") if name else ""
+        if name and text:
+            scope = "global" if confirm("Keep it for every project (No = this project only)?", default=False) else "project"
+            _save_prompt(ws, name, text, "", scope)
+
+    def show(p: Any) -> None:
+        header(p.name, p.description)
+        print(f"    {WHITE}{p.text}{RST}\n")
+
+    def use(p: Any) -> None:
+        _use_prompt(agent, p, {}, [])
+
+    def actions_for(p: Any) -> list[Any]:
+        return [Action("Use it", lambda: use(p), "fill in the fields and send"), Action("Show", lambda: show(p)),
+                Action("Edit in your editor", lambda: edit(p)),
+                Action("Delete" if p.scope != "starter" else "Remove this starter", lambda: delete(p),
+                       confirm=f"Delete the prompt {p.name}?")]
+
+    def extra() -> list[Any]:
+        return [Action("Save a new prompt…", new, "name, text and where to keep it"),
+                Action("Bring back removed starters", lambda: ok(f"Restored {pl.restore_starters()} starter prompt(s)"))]
+
+    browse("Saved prompts", rows, actions_for, extra, subtitle="choose one to use, edit or delete")
+
+
+@command("prompt", category=CAT, description="Saved prompts with fill-in fields",
+         aliases=("prompts", "template", "templates"), usage=PROMPT_USAGE)
 def handle_prompt(agent: Any, arg: str) -> CommandResult:
+    from axon.features import prompt_library as pl
     ws = ws_of(agent)
-    prompts = load_prompts(ws)
     a = arg.strip()
     sub, _, rest = a.partition(" ")
-    if not a or sub.lower() in ("list", "ls"):
-        header("Prompt library", f"{len(prompts)} templates · ~/.axon/prompts and .axon/prompts")
-        for name, (desc, tpl, src) in sorted(prompts.items()):
-            phs = ", ".join(dict.fromkeys(m.group(1) for m in _PH.finditer(tpl)))
-            print(f"    {CYAN}{name:<12}{RST} {WHITE}{desc[:44]:<44}{RST} {DARK_SLATE}{('{' + phs + '}') if phs else ''}{RST}")
-        typed_hint("\n    /prompt <name> key=value · /prompt save <name> <text>")
+    low = sub.lower()
+    if not a:
+        if is_tty():
+            _prompt_menu(agent, ws)
+            return CommandResult(handled=True)
+        low = "list"
+    if low in ("list", "ls", "search", "find"):
+        prompts = pl.search(ws, rest.strip())
+        header("Saved prompts", f"{len(prompts)} found · fields are written {{{{name}}}}")
+        _prompt_rows(prompts)
+        typed_hint("\n    /prompt <name> key=value · /prompt save <name> <text> · /prompt delete <name>")
         print()
         return CommandResult(handled=True)
-    if sub.lower() == "show":
-        p = prompts.get(rest.strip())
+    if low == "show":
+        p = pl.get(ws, rest.strip())
         if not p:
-            err(f"No template '{rest.strip()}'.")
+            err(f"No prompt '{rest.strip()}'.")
             return CommandResult(handled=True)
-        header(rest.strip(), p[2])
-        print(f"    {WHITE}{p[1]}{RST}\n")
+        header(p.name, f"{p.scope} · {p.description}")
+        print(f"    {WHITE}{p.text}{RST}\n")
         return CommandResult(handled=True)
-    if sub.lower() == "save":
-        words = rest.split()
-        glob = "--global" in words
-        words = [w for w in words if w != "--global"]
+    if low == "save":
+        import shlex
+        try:
+            words = shlex.split(rest, posix=os.name != "nt")
+        except ValueError:
+            words = rest.split()
+        scope = "global" if "--global" in words else "project"
+        desc = ""
+        if "-d" in words:
+            i = words.index("-d")
+            desc = words[i + 1] if i + 1 < len(words) else ""
+            del words[i:i + 2]
+        words = [w for w in words if w not in ("--global", "--project")]
         if len(words) < 2:
-            usage("/prompt save <name> [--global] <template text with {placeholders}>")
+            usage("/prompt save <name> [--global] [-d description] <text with {{fields}}>")
             return CommandResult(handled=True)
-        name = re.sub(r"[^A-Za-z0-9_-]+", "-", words[0]).strip("-").lower()
-        if not name:
-            err("Template names may contain letters, digits, - and _.")
-            return CommandResult(handled=True)
-        d = prompt_dirs(ws)[0 if glob else 1]
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{name}.md").write_text(" ".join(words[1:]) + "\n", encoding="utf-8")
-        from axon.session.library import record_saved
-        record_saved(d / f"{name}.md", action="created", source="/prompt save", workspace=ws, agent=agent)
-        ok(f"Saved template {BOLD}{name}{RST} → {d / (name + '.md')}")
+        _save_prompt(ws, words[0], " ".join(words[1:]), desc, scope)
         return CommandResult(handled=True)
-    p = prompts.get(sub)
+    if low in ("delete", "remove", "rm"):
+        name = rest.strip()
+        p = pl.get(ws, name)
+        if p is None:
+            err(f"No prompt '{name}'.")
+            return CommandResult(handled=True)
+        if not confirm(f"Delete the prompt {p.name}?", default=False):
+            info("Kept it.")
+            return CommandResult(handled=True)
+        try:
+            ok(pl.delete(ws, p.name, p.scope))
+        except pl.PromptError as e:
+            err(str(e))
+        return CommandResult(handled=True)
+    if low == "restore-starters":
+        ok(f"Restored {pl.restore_starters()} starter prompt(s).")
+        return CommandResult(handled=True)
+    if low == "export":
+        import json as _json
+        target = Path(rest.strip() or "axon-prompts.json").expanduser()
+        if not target.is_absolute():
+            target = ws / target
+        bundle = pl.export_bundle(ws)
+        if not bundle["prompts"]:
+            info("No saved prompts to export (the starters are built in).")
+            return CommandResult(handled=True)
+        from axon.session.store import atomic_write_text
+        atomic_write_text(target, _json.dumps(bundle, indent=1, ensure_ascii=False) + "\n")
+        ok(f"Exported {len(bundle['prompts'])} prompt(s) → {target}")
+        return CommandResult(handled=True)
+    if low == "import":
+        words = rest.split()
+        flags = [w for w in words if w.startswith("--")]
+        files = [w for w in words if not w.startswith("--")]
+        if not files:
+            usage("/prompt import <file> [--global] [--replace|--rename]")
+            return CommandResult(handled=True)
+        src = Path(" ".join(files)).expanduser()
+        if not src.is_absolute():
+            src = ws / src
+        try:
+            raw = src.read_text(encoding="utf-8") if src.stat().st_size <= pl.MAX_BUNDLE_BYTES else None
+        except OSError as e:
+            err(f"Could not read {src}: {e.strerror or e}")
+            return CommandResult(handled=True)
+        mode = "replace" if "--replace" in flags else "rename" if "--rename" in flags else "skip"
+        try:
+            res = pl.import_bundle(ws, raw if raw is not None else "x" * (pl.MAX_BUNDLE_BYTES + 1), "global" if "--global" in flags else "project", mode)
+        except pl.PromptError as e:
+            err(str(e))
+            return CommandResult(handled=True)
+        ok(f"Added {len(res['added'])} prompt(s)" + (f", skipped {len(res['skipped'])}" if res["skipped"] else ""))
+        for s in res["skipped"]:
+            print(f"    {SLATE}• {s['name']}: {s['why']}{RST}")
+        return CommandResult(handled=True)
+    p = pl.get(ws, sub)
     if p is None:
-        err(f"No template '{sub}'.{typed_only(' /prompt lists them.')}")
+        err(f"No prompt '{sub}'.{typed_only(' /prompt lists them.')}")
         return CommandResult(handled=True)
-    names = list(dict.fromkeys(m.group(1) for m in _PH.finditer(p[1])))
-    given, free = parse_template_args(rest, names)
-    if free and names:
-        pending = [n for n in names if n not in given]
-        if len(pending) == 1:
-            given[pending[0]] = " ".join(free)
-    text = fill_placeholders(p[1], given, ask=is_tty())
-    if text is None:
-        err(f"Missing values for: {', '.join(n for n in names if n not in given)} (use key=value)")
-        return CommandResult(handled=True)
-    print(f"\n  {TEAL}▸ /prompt {sub}{RST}  {SLATE}{text[:100]}{'…' if len(text) > 100 else ''}{RST}\n")
-    agent.run_turn(text)
+    given, free = parse_template_args(rest, [f.name for f in p.fields])
+    _use_prompt(agent, p, given, free)
     return CommandResult(handled=True)
 
 

@@ -416,4 +416,9 @@ def build_system(
     if settings.append_system_prompt:
         blocks.append({"type": "text", "text": settings.append_system_prompt})
 
+    from axon.features.i18n_data import reply_line
+    reply = reply_line(getattr(settings, "reply_language", ""))
+    if reply:
+        blocks.append({"type": "text", "text": reply})
+
     return blocks

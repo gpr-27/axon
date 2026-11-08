@@ -236,8 +236,7 @@ class AskUserQuestionTool(Tool):
             _pause_input = contextlib.nullcontext  # type: ignore[assignment]
         try:
             from axon.ui.notify import notify_event
-            first = str((questions[0] or {}).get("question", "")) if questions and isinstance(questions[0], dict) else ""
-            notify_event("question", f"Axon is asking you: {first[:150]}" if first else "Axon is asking you a question")
+            notify_event("question", "Axon is asking you a question")      # never the question itself: it can quote files
         except Exception:
             pass
         with _ASK_LOCK, _pause_input():

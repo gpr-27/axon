@@ -11,6 +11,7 @@ INDEX_HTML = """<!doctype html>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/appearance.js"></script>
 </head><body>
+<a class="skip-link" href="#main">Skip to the main content</a>
 <div id="app"><p class="boot">Loading the dashboard...</p></div>
 <script src="/static/app.js"></script>
 </body></html>
@@ -175,6 +176,8 @@ from axon.features.dash_appearance import APPEARANCE_CSS, APPEARANCE_JS  # noqa:
 from axon.features.dash_css import APP_LAYOUT_CSS  # noqa: E402
 from axon.features.dash_design import DESIGN_CSS, TYPE_TAIL, type_overrides  # noqa: E402
 from axon.features.dash_js_cards import JS_CARDS  # noqa: E402
+from axon.features.dash_js_chatx import CHATX_CSS, JS_CHATX  # noqa: E402
+from axon.features.dash_js_compare import COMPARE_CSS, JS_COMPARE  # noqa: E402
 from axon.features.dash_js_cmdcards import CMDCARDS_CSS, JS_CMDCARDS  # noqa: E402
 from axon.features.dash_js_chat import JS_CHAT  # noqa: E402
 from axon.features.dash_js_core import JS_CORE  # noqa: E402
@@ -189,19 +192,27 @@ from axon.features.dash_js_term import JS_TERM  # noqa: E402
 from axon.features.dash_js_workbench import JS_WORKBENCH, JS_WORKBENCH_PANELS, JS_WORKBENCH_RAIL  # noqa: E402
 from axon.features.dash_workbench_css import WORKBENCH_CSS  # noqa: E402
 from axon.features.dash_js_tools import JS_TOOLS  # noqa: E402
+from axon.features.dash_js_welcome import JS_WELCOME, WELCOME_CSS  # noqa: E402
+from axon.features.dash_js_i18n import I18N_CSS, JS_I18N, asset as i18n_asset, lang_type_scale  # noqa: E402
+from axon.features.dash_js_a11y import A11Y_CSS, JS_A11Y  # noqa: E402
+from axon.features.dash_js_tasks import JS_TASKS, TASKS_CSS  # noqa: E402
 
-APP_JS = '(() => {\n"use strict";\n' + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_CMDCARDS + "\n})();\n"
+from axon.features.dash_js_library import JS_LIBRARY, LIBRARY_CSS  # noqa: E402
+
+APP_JS = '(() => {\n"use strict";\n' + i18n_asset("i18n.js")[0] + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_CMDCARDS + JS_WELCOME + JS_I18N + JS_TASKS + JS_COMPARE + JS_CHATX + JS_LIBRARY + JS_A11Y + "\n})();\n"
 
 
 def asset(name: str) -> tuple[str, str] | None:
     from axon.features import dashboard as d
     if name == "app.js":
         return APP_JS, "text/javascript; charset=utf-8"
+    if name == "i18n.js" or name.startswith("i18n/"):
+        return i18n_asset(name)
     if name == "appearance.js":
         return APPEARANCE_JS, "text/javascript; charset=utf-8"
     if name == "app.css":
-        sheet = d.theme_css() + APP_CSS + APP_LAYOUT_CSS + APPEARANCE_CSS + DESIGN_CSS + WORKBENCH_CSS + CMDCARDS_CSS
-        return sheet + type_overrides(sheet) + TYPE_TAIL, "text/css; charset=utf-8"
+        sheet = d.theme_css() + APP_CSS + APP_LAYOUT_CSS + APPEARANCE_CSS + DESIGN_CSS + WORKBENCH_CSS + CMDCARDS_CSS + COMPARE_CSS + WELCOME_CSS + I18N_CSS + TASKS_CSS + CHATX_CSS + LIBRARY_CSS + A11Y_CSS
+        return sheet + type_overrides(sheet) + TYPE_TAIL + lang_type_scale(sheet), "text/css; charset=utf-8"
     if name in ("icon.svg", "logo.svg"):
         svg = d.logo_svg()
         if name == "icon.svg":

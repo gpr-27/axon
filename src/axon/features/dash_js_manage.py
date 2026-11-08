@@ -85,10 +85,6 @@ function mgCloseChatTabs(ids) {
   const set = new Set(ids);
   for (const t of (UI.tabs || []).slice()) { const sid = mgTabSid(t); if (sid && set.has(sid)) closeTab(t); }
 }
-async function mgExport(sid, fmt) {
-  try { const r = await api('/api/manage/export?' + mgQs({ id: sid, format: fmt })); mgDownload(r.filename, r.content, r.mime); }
-  catch (e) { mgNotice('Could not export: ' + e.message, { error: true }); }
-}
 async function mgRename(sid, current) {
   const v = await mgAsk('Rename chat', 'Name', current, 'Rename', 64);
   if (v == null) return null;
@@ -153,8 +149,7 @@ function mgChatItems(sid, getTitle, hooks) {
   const h2 = hooks || {};
   return [
     ['Rename...', async () => { const t = await mgRename(sid, getTitle()); if (t && h2.renamed) h2.renamed(t); }],
-    ['Export as Markdown', () => mgExport(sid, 'md')],
-    ['Export as JSON', () => mgExport(sid, 'json')],
+    ['Export or share...', () => shareModal({ kind: 'session', id: sid })],
     '-',
     ['Delete chat', () => mgDelete([sid], { after: h2.deleted }), { danger: true }]];
 }
@@ -265,7 +260,7 @@ async function viewSessions() {
         ['Rename...', async () => { const t = await mgRename(s.id, s.title); if (t) { s.title = t; draw(); } }],
         [s.starred ? 'Remove star' : 'Star', async () => { if (await mgPatch(s.id, { starred: !s.starred })) { s.starred = !s.starred; draw(); } }],
         ['Set tag...', async () => { const v = await mgAsk('Tag', 'Tag (empty removes it)', s.tags[0] || '', 'Save', 32); if (v != null && await mgPatch(s.id, { tag: v.trim() })) { s.tags = v.trim() ? [v.trim().replace(/^#/, '')] : []; draw(); } }],
-        '-', ['Export as Markdown', () => mgExport(s.id, 'md')], ['Export as JSON', () => mgExport(s.id, 'json')],
+        '-', ['Export or share...', () => shareModal({ kind: 'session', id: s.id })],
         '-', ['Delete', () => mgDelete([s.id], { after: () => { SS.sel.delete(s.id); load(true, true); loadTrash(); } }), { danger: true }]]) }, '⋯');
       const row = h('div', { class: 'mg-row' + (SS.sel.has(s.id) ? ' sel' : ''), 'data-id': s.id },
         check, star,
@@ -279,7 +274,8 @@ async function viewSessions() {
       const d = lastData;
       sub.textContent = d ? total.toLocaleString() + (total === d.scope_total ? '' : ' of ' + d.scope_total.toLocaleString()) + ' chats' + (state.sessionScope === 'all' ? ' across all projects' : ' in this project') + (d.cost ? ' · ' + usd(d.cost) : '') : '';
       const note = document.getElementById('sess-note');
-      if (note) note.textContent = d && d.full ? (d.full.truncated ? 'Showing the first matches inside chats; narrow the search to see the rest.' : 'Searched ' + d.full.files.toLocaleString() + ' chats in ' + (d.full.ms / 1000).toFixed(1) + 's') + (d.full.encrypted ? ' · ' + d.full.encrypted + ' encrypted chats cannot be searched' : '') : '';
+      const capNote = d && d.cut_off ? 'Only the newest ' + d.cut_off.limit.toLocaleString() + ' chats of ' + d.cut_off.projects.join(', ') + ' are listed here; older ones are still on disk and are not shown. ' : '';
+      if (note) note.textContent = capNote + (d && d.full ? (d.full.truncated ? 'Showing the first matches inside chats; narrow the search to see the rest.' : 'Searched ' + d.full.files.toLocaleString() + ' chats in ' + (d.full.ms / 1000).toFixed(1) + 's') + (d.full.encrypted ? ' · ' + d.full.encrypted + ' encrypted chats cannot be searched' : '') : '');
       list.replaceChildren(); more.replaceChildren();
       if (!rows.length) {
         list.append(h('div', { class: 'empty' }, h('strong', null, d && d.scope_total ? 'Nothing matches' : 'No chats yet'), d && d.scope_total ? 'Clear the search or filters to see everything.' : 'Start Axon in this project and your chats will show up here.'));
@@ -477,6 +473,7 @@ async function viewOverview() {
     // ----- session budget -----
     const budget = h('section', { class: 'panel mg-budget' }, h('h2', null, 'Session budget'), h('p', { class: 'muted' }, 'Loading...'));
     body.append(budget);
+    if (typeof cfProjectBudgetSection === 'function') body.append(cfProjectBudgetSection());
     async function drawBudget() {
       let b; try { b = await api('/api/manage/budget'); } catch (e) { budget.replaceChildren(h('h2', null, 'Session budget'), errorBox(e.message)); return; }
       budget.replaceChildren(h('h2', null, 'Session budget'), h('p', { class: 'muted' }, 'A budget stops new turns in one chat once its spending reaches the limit. It is the same as typing /budget in that chat.'));
