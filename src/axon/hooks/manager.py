@@ -566,6 +566,49 @@ def _fill_input(value: Any, payload: dict[str, Any]) -> Any:
     return value
 
 
+_ACTIVE: list[Any] = []       # weakrefs to the session's HookManagers (those built with settings)
+
+
+def active_manager() -> "HookManager | None":
+    """The newest live HookManager of a session, for code that has no agent at hand (MCP elicitation,
+    settings writers). Managers built without settings (worktree helpers, tests of a single event) are skipped."""
+    import weakref  # noqa: F401 - documents that _ACTIVE holds weakrefs
+    for ref in reversed(_ACTIVE):
+        mgr = ref()
+        if mgr is not None:
+            return mgr
+    return None
+
+
+def fire(event: str, payload: dict[str, Any] | None = None) -> "HookResult | None":
+    """Run ``event`` on the active session's hooks; None when there is no session or no matching hook."""
+    mgr = active_manager()
+    if mgr is None or not mgr.has(event):
+        return None
+    try:
+        return mgr.run(event, payload)
+    except Exception:  # noqa: BLE001 - a hook problem never breaks the action that fired it
+        return None
+
+
+def config_change(path: Path | str, kind: str = "settings") -> None:
+    """Fire ConfigChange before Axon writes a settings / MCP file. A hook that blocks (exit 2) stops the
+    write: ValueError. ``source`` is user_settings | project_settings | local_settings | mcp_config."""
+    p = Path(path)
+    try:
+        from axon import storage
+        user = storage.axon_home() in p.parents
+    except Exception:  # noqa: BLE001
+        user = False
+    if kind == "mcp":
+        source = "mcp_config"
+    else:
+        source = "user_settings" if user else ("local_settings" if ".local." in p.name else "project_settings")
+    res = fire("ConfigChange", {"source": source, "file_path": str(p)})
+    if res is not None and res.blocked:
+        raise ValueError(f"a ConfigChange hook blocked the change to {p}" + (f": {res.message}" if res.message else ""))
+
+
 class HookManager:
     """Loads hook configuration and runs hooks for lifecycle events."""
 
@@ -596,6 +639,11 @@ class HookManager:
         # Built-in handlers: fn(event, payload) -> {"additional_context": str, "system_message": str}.
         # They run for UserPromptSubmit after the configured hooks (see axon.skills.auto).
         self.internal_handlers: list[Callable[[str, dict[str, Any]], dict[str, str]]] = []
+        self._file_snapshot: dict[str, int | None] = {}
+        self._in_event_poll = False
+        if settings is not None:
+            import weakref
+            _ACTIVE.append(weakref.ref(self, lambda r: _ACTIVE.remove(r) if r in _ACTIVE else None))
         self.reload()
         self._install_internal_handlers()
 
@@ -620,11 +668,17 @@ class HookManager:
             self._base = []
             self._rebuild()
             return
-        cfg = getattr(self.settings, "hooks", None) or {}
+        from axon.hooks import trust
+        project_ok = trust.allowed(self.workspace)      # untrusted folder: only user-scope hooks load
+        if not project_ok:
+            self.load_errors.append(trust.blocked_line(self.workspace))
+        cfg = (getattr(self.settings, "hooks", None) or {}) if project_ok else self._user_toml_hooks()
         if isinstance(cfg, dict):
             self._add_from(cfg, "config.toml", hooks)
         for label, path in self.config_files():
             if not path.is_file():
+                continue
+            if label != "user" and not project_ok:
                 continue
             data = _read_json(path)
             if data is None:
@@ -642,6 +696,18 @@ class HookManager:
         self._add_plugin_hooks(hooks)
         self._base = hooks
         self._rebuild()
+
+    @staticmethod
+    def _user_toml_hooks() -> dict[str, Any]:
+        """``hooks`` of ~/.axon/config.toml alone (the merged settings also carry <ws>/.axon/config.toml)."""
+        try:
+            import tomllib
+            from axon import storage
+            data = tomllib.loads(storage.user_file("config.toml").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - missing or unreadable: no user hooks
+            return {}
+        hooks = data.get("hooks")
+        return hooks if isinstance(hooks, dict) else {}
 
     def _rebuild(self) -> None:
         # Deduplicate identical handlers registered for the same event+matcher.
@@ -675,7 +741,11 @@ class HookManager:
         except Exception as e:  # noqa: BLE001 - a broken plugin must not disable settings hooks
             self.load_errors.append(f"Could not load plugin hooks: {e}")
             return
+        from axon.hooks import trust
+        project_ok = trust.allowed(self.workspace)
         for plug in plugins:
+            if plug.scope == "project" and not project_ok:
+                continue
             section = plugin_hooks(plug)
             if not section:
                 continue
@@ -892,9 +962,64 @@ class HookManager:
 
     # ── execution ────────────────────────────────────────────────────
     def run(self, event: str, payload: dict[str, Any] | None = None) -> HookResult:
+        ev = normalize_event(event)
+        if ev == "SessionStart" and (payload or {}).get("source") == "startup":
+            self._first_run_setup()
+        if ev in ("SessionStart", "UserPromptSubmit", "PostToolUse"):
+            self._poll_watched_files()
         result = self._run_configured(event, payload)
         self._run_internal(normalize_event(event), dict(payload or {}), result)
         return result
+
+    # Setup: runs once per folder, the first time Axon starts in it (before that session's SessionStart hooks).
+    def _first_run_setup(self) -> None:
+        try:
+            from axon import storage
+            key = str(self.workspace.resolve())
+            done = storage.read_state("setup-done", {})
+            done = done if isinstance(done, dict) else {}
+            if key in done:
+                return
+            done[key] = int(__import__("time").time())
+            storage.write_state("setup-done", done)
+        except Exception:  # noqa: BLE001 - without a marker Setup would repeat every start: skip it instead
+            return
+        if self.has("Setup"):
+            self._run_configured("Setup", {"trigger": "init"})
+
+    # FileChanged: the literal file names in FileChanged matchers are checked (mtime) when a prompt is
+    # submitted, after each tool and at session start; there is no background watcher.
+    def _watched_names(self) -> list[str]:
+        names: list[str] = []
+        for h in self._hooks:
+            if h.event == "FileChanged":
+                names += [n.strip() for n in re.split(r"[|,]", h.matcher or "") if n.strip() and "*" not in n]
+        return list(dict.fromkeys(names))
+
+    def _poll_watched_files(self) -> None:
+        if self._in_event_poll or not self.has("FileChanged"):
+            return
+        base = Path(self.cwd or self.workspace)
+        self._in_event_poll = True
+        try:
+            for name in self._watched_names():
+                path = base / name
+                try:
+                    stamp: int | None = path.stat().st_mtime_ns
+                except OSError:
+                    stamp = None
+                key = str(path)
+                if key not in self._file_snapshot:
+                    self._file_snapshot[key] = stamp          # baseline: the first look is not a change
+                    continue
+                before = self._file_snapshot[key]
+                if stamp == before:
+                    continue
+                self._file_snapshot[key] = stamp
+                kind = "unlink" if stamp is None else ("add" if before is None else "change")
+                self._run_configured("FileChanged", {"file_path": key, "file_name": name, "event": kind})
+        finally:
+            self._in_event_poll = False
 
     def _run_configured(self, event: str, payload: dict[str, Any] | None = None) -> HookResult:
         ev = normalize_event(event)

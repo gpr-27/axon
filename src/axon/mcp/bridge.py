@@ -53,6 +53,11 @@ IDLE_TIMEOUT_STDIO_S = 1800.0                   # ... 30 minutes for stdio serve
 CONNECT_RETRY_DELAYS = (0.5, 1.0, 2.0)          # a first HTTP/SSE connection retries transient errors 3 times
 CONNECTING_GRACE_S = 10.0                       # a call waits this long for a server's first connection
 RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)   # a dropped remote server: 5 attempts, exponential backoff
+LOCAL_RECONNECT_DELAYS = (1.0, 2.0, 4.0)        # a crashed local (stdio) server: 3 attempts, backoff doubling
+CRASH_BUDGET = 3                                # ... and at most this many crashes inside CRASH_WINDOW_S
+CRASH_WINDOW_S = 120.0
+LATE_START_RETRIES = ((2.0, 2.0), (5.0, 4.0))   # a stdio server that missed its connect timeout: (pause s, timeout x)
+LATE_START_TIMEOUT_CAP = 120.0
 AUTO_CONNECT_BACKOFF = (2.0, 5.0, 15.0, 30.0, 60.0)   # automation.connect_retries: pauses before each retry
 FAILURE_STATES = ("failed", "disconnected")             # states that count towards auto-disable
 DESC_LIMIT_UPFRONT = 4096                       # tool description loaded upfront / server instructions
@@ -184,6 +189,8 @@ class MCPServerConnection:
         self._gen = 0
         self._lock = threading.RLock()
         self._epoch = 0                 # bumped by stop()/start(): cancels a running reconnect loop
+        self._timed_out = False         # the last start failed by missing the connect timeout
+        self._crashes: list[float] = []
 
     # Backward-compatible attributes
     @property
@@ -292,14 +299,39 @@ class MCPServerConnection:
             scope = self.auth_challenge.get("scope", "")
             return (f"needs additional permissions{f' (scope: {scope})' if scope else ''}; add the scope to "
                     f"oauth.scopes and authenticate again")
-        return "needs authentication: run /mcp authenticate " + self.name + " or `axon mcp login " + self.name + "`"
+        return "needs authentication: run /mcp login " + self.name + " or `axon mcp login " + self.name + "`"
 
     def start(self, timeout: float | None = None) -> bool:
         """Connect, handshake and discover tools. Never raises; sets status/error.
         The lock is only held for state changes, so stop() can abort a slow handshake."""
         self._epoch += 1
         with waiting("mcp_connect", server=self.name):
-            return self._start(timeout)
+            ok = self._start(timeout)
+        if (not ok and timeout is None and self._timed_out and self.spec.type == "stdio"
+                and self.auto_reconnect and LATE_START_RETRIES):
+            threading.Thread(target=self._late_start_loop, args=(self._epoch,), daemon=True,
+                             name=f"mcp-late-start-{self.name}").start()
+        return ok
+
+    def _late_start_loop(self, epoch: int) -> None:
+        """A local server that was merely slow: try again a bounded number of times with a longer limit."""
+        base = mcp_timeout_s(self.spec.timeout)
+        for pause, factor in LATE_START_RETRIES:
+            end = time.monotonic() + pause
+            while time.monotonic() < end:
+                if self._epoch != epoch:
+                    return
+                time.sleep(0.05)
+            if self._epoch != epoch:
+                return
+            logger.debug("mcp %s: late start retry (timeout x%.0f)", self.name, factor)
+            if self._start(min(base * factor, LATE_START_TIMEOUT_CAP)):
+                if self.on_tools_changed:
+                    self.on_tools_changed(self)
+                self._report_outcome()
+                return
+            if self._epoch != epoch or not self._timed_out:
+                return                      # stopped, or it now fails for another reason: not a slow start
 
     def _start(self, timeout: float | None = None) -> bool:
         with self._lock:
@@ -333,6 +365,7 @@ class MCPServerConnection:
                 if gen == self._gen:
                     self.status, self.error = "failed", _redact(str(e), self.spec, spec)
             return False
+        self._timed_out = False
         delays = (0.0,) + (CONNECT_RETRY_DELAYS if spec.type in ("http", "sse") else ())
         failure: Exception | None = None
         client: MCPClient | None = None
@@ -378,6 +411,7 @@ class MCPServerConnection:
         except Exception as e:  # a broken server must never crash Axon
             with self._lock:
                 if gen == self._gen:
+                    self._timed_out = isinstance(e, MCPTimeout)
                     cause = e.__cause__
                     code = getattr(cause, "status", None)
                     auth_msg = (self._auth_error(cause, spec, dyn)
@@ -427,20 +461,32 @@ class MCPServerConnection:
         if client is self.client and self.status == "connected":
             logger.debug("mcp %s: disconnected: %s", self.name, reason)
             self.status, self.error = "disconnected", reason
+            if not self.spec.remote and self._crashed_too_often():
+                self.status = "failed"
+                self.error = (f"MCP server \"{self.name}\" crashed {len(self._crashes)} times in "
+                              f"{int(CRASH_WINDOW_S)}s ({reason}); not restarting it automatically. "
+                              f"Fix it, then /mcp reconnect {self.name}")
+                if self.on_tools_changed:
+                    self.on_tools_changed(self)
+                return
             if self._wants_reconnect():
                 self._epoch += 1
                 threading.Thread(target=self._reconnect_loop, args=(self._epoch,), daemon=True,
                                  name=f"mcp-reconnect-{self.name}").start()
 
+    def _crashed_too_often(self) -> bool:
+        now = time.monotonic()
+        self._crashes = [t for t in self._crashes if now - t < CRASH_WINDOW_S] + [now]
+        return len(self._crashes) > CRASH_BUDGET
+
     def _wants_reconnect(self) -> bool:
-        if not self.auto_reconnect or self.spec.disabled:
-            return False
-        return self.spec.remote or self.reconnect_local
+        # Local (stdio) servers reconnect too, with a shorter backoff and a crash budget (see _closed).
+        return bool(self.auto_reconnect and not self.spec.disabled)
 
     def _reconnect_loop(self, epoch: int) -> None:
         """A remote server dropped mid-session: five attempts, backoff doubling from one second."""
         reason = self.error or "connection lost"
-        for delay in RECONNECT_DELAYS:
+        for delay in (RECONNECT_DELAYS if self.spec.remote else LOCAL_RECONNECT_DELAYS):
             with self._lock:
                 if self._epoch != epoch:
                     return
@@ -860,8 +906,8 @@ class MCPToolBridge:
             return self.elicitation_handler
         from axon.mcp import state as mcp_state
         if mcp_state.is_interactive():
-            from axon.mcp.elicit import terminal_elicitation
-            return terminal_elicitation
+            from axon.mcp.elicit import terminal_elicitation, with_hooks
+            return with_hooks(terminal_elicitation)
         return None
 
     def _make_connection(self, spec: ServerSpec) -> MCPServerConnection:

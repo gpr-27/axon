@@ -6,7 +6,7 @@ from __future__ import annotations
 import inspect
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, TYPE_CHECKING
 
@@ -30,6 +30,7 @@ class ToolContext:
     agent: Agent | None = None  # For sub-agent dispatch
     checkpoints: CheckpointManager | None = None
     tool_use_id: str = ""  # the model's id for this call (Task uses it to keep subagent numbers in call order)
+    images: list[Any] = field(default_factory=list)  # ImageRef(s) a tool wants carried with its result
 
 
 class Tool(ABC):
@@ -118,6 +119,8 @@ def resolve_path(ctx: ToolContext, raw: str | Path, *, allow_git_read: bool = Fa
     """Resolve a model-supplied path through the permission path jail."""
     from axon.permissions import paths as _paths
     raw_s = str(raw).strip() if raw is not None else ""
+    if "\x00" in raw_s:
+        raise ToolError("Invalid path: it contains a NUL character.")
     if not raw_s:
         raw_s = "."
     # Models sometimes send quoted paths or file:// URIs.
@@ -165,16 +168,25 @@ def cap_text(text: str, limit: int, hint: str = "") -> str:
     return text[:cut] + msg + " ...]"
 
 
-def int_arg(args: dict[str, Any], key: str, default: int, lo: int | None = None, hi: int | None = None) -> int:
-    """Parse an integer argument leniently (models send "5" or 5.0), with clamping."""
+def int_arg(args: dict[str, Any], key: str, default: int, lo: int | None = None, hi: int | None = None,
+            strict: bool = False) -> int:
+    """Parse an integer argument leniently (models send "5" or 5.0), with clamping.
+    Booleans and fractional numbers are rejected; with strict=True a value below `lo` is an error, not clamped."""
     val = args.get(key)
     if val is None or val == "":
         out = default
     else:
         try:
-            out = int(float(val))
-        except (TypeError, ValueError) as e:
+            if isinstance(val, bool):
+                raise ValueError
+            f = float(val)
+            if f != int(f):
+                raise ValueError
+            out = int(f)
+        except (TypeError, ValueError, OverflowError) as e:
             raise ToolError(f"Argument '{key}' must be an integer, got {val!r}.") from e
+        if strict and lo is not None and out < lo:
+            raise ToolError(f"Argument '{key}' must be at least {lo}, got {val!r}.")
     if lo is not None:
         out = max(lo, out)
     if hi is not None:

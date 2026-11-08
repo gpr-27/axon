@@ -40,6 +40,21 @@ PATH_ARG_KEYS = ("path", "file_path", "notebook_path", "path_a", "path_b")
 _GLOB_CHARS = set("*?[")
 
 
+def git_call(args: dict[str, Any]) -> tuple[str, list[str], str]:
+    """(subcommand, arguments, folder) of a Git tool call, wherever the call put ``-C <folder>``: the ``path``
+    argument, before the subcommand, or among the arguments. The tool and the permission checks both read this."""
+    sub = str(args.get("subcommand") or "").strip()
+    extra = [a for a in (args.get("args") or []) if isinstance(a, str)] if isinstance(args.get("args"), list) else []
+    folder = str(args.get("path") or "").strip()
+    if sub == "-C" and extra:
+        folder, extra = extra[0], extra[1:]
+        sub, extra = (extra[0], extra[1:]) if extra else ("", [])
+    if "-C" in extra and "--" not in extra[:extra.index("-C")] and extra.index("-C") + 1 < len(extra):
+        i = extra.index("-C")
+        folder, extra = extra[i + 1], extra[:i] + extra[i + 2:]
+    return sub.lower(), extra, folder
+
+
 def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False) -> list[str]:
     """Return every path-like argument a tool call refers to. ``keep_prefixed``: a patch's ``a/x`` header
     is listed as well as ``x`` (for deny / protected-path checks; see ``patch_paths``)."""
@@ -48,6 +63,10 @@ def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False
         v = args.get(k)
         if isinstance(v, str) and v.strip():
             out.append(v.strip())
+    if tool_name == "Git":
+        folder = git_call(args)[2]
+        if folder and folder not in out:
+            out.append(folder)
     if tool_name == "Glob":
         base = _glob_pattern_base(args.get("pattern"))
         if base:

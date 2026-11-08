@@ -135,9 +135,18 @@ def in_additional_dir(path: str | Path, extra: list[str | Path] | tuple[str | Pa
     return any(is_within(d, path) for d in additional_dirs(extra))
 
 
+def _expand(raw: str | Path) -> Path:
+    """``Path(raw).expanduser()`` that keeps an unknown ``~user`` literal, as a shell does, instead of raising."""
+    p = Path(str(raw).strip())
+    try:
+        return p.expanduser()
+    except RuntimeError:
+        return p
+
+
 def credential_location(raw: str | Path, root: Path | None = None) -> str | None:
     """The credential component (".ssh", ".aws", ".axon/.env", ...) ``raw`` points into, else None."""
-    p = Path(str(raw).strip()).expanduser()
+    p = _expand(raw)
     if not p.is_absolute() and root is not None:
         p = Path(root) / p
     try:
@@ -146,9 +155,37 @@ def credential_location(raw: str | Path, root: Path | None = None) -> str | None
         return None
 
 
+def credential_stores() -> list[Path]:
+    """Credential files and directories that exist on this machine."""
+    try:
+        home = Path.home()
+    except RuntimeError:
+        home = None
+    names = sorted(n for n in _CREDENTIAL_PARTS if n.startswith("."))
+    stores = [home / n for n in names] if home is not None else []
+    stores.append(_axon_home() / ".env")
+    return [s for s in stores if s.exists()]
+
+
+def holds_credentials(raw: str | Path, root: Path | None = None) -> str | None:
+    """The credential store a directory contains, for commands that read a whole tree (``grep -r``, ``tar``)."""
+    p = _expand(raw)
+    if not p.is_absolute() and root is not None:
+        p = Path(root) / p
+    try:
+        if not p.is_dir():
+            return None
+        for store in credential_stores():
+            if is_within(p, store):
+                return ".axon/.env" if store.name == ".env" else store.name
+    except OSError:
+        return None
+    return None
+
+
 def is_protected_path(raw: str | Path, root: Path | None = None) -> str | None:
     """Return a reason string when ``raw`` points at a credential store or system dir."""
-    p = Path(str(raw).strip()).expanduser()
+    p = _expand(raw)
     if not p.is_absolute() and root is not None:
         p = Path(root) / p
     resolved = _real(p)
@@ -176,8 +213,7 @@ def resolve_in_workspace(
     that run after an approval may keep the default ``allow_outside=True``.
     """
     root_resolved = _real(root)
-    raw_str = str(raw).strip()
-    p = Path(raw_str).expanduser()
+    p = _expand(raw)
     if not p.is_absolute():
         p = root_resolved / p
     resolved = _real(p)
@@ -209,6 +245,6 @@ def is_in_workspace(root: Path, raw: str | Path) -> bool:
         return False
     except Exception:
         return False
-    raw_p = Path(str(raw).strip()).expanduser()
+    raw_p = _expand(raw)
     target = raw_p if raw_p.is_absolute() else Path(root) / raw_p
     return is_within(root, target) or in_additional_dir(target)

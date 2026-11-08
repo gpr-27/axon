@@ -23,8 +23,11 @@ New persistent rules are written to <ws>/.axon/settings.local.json.
 """
 from __future__ import annotations
 
+import glob
+import itertools
 import json
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +36,7 @@ from typing import Any, Literal
 from axon.storage import axon_home as _axon_home
 from axon.config import Mode, Settings
 from axon.permissions.paths import additional_dirs, is_protected_path, is_within, outside_allowlist
-from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, parse_rule, redirect_targets, split_shell_commands,
+from axon.permissions.rules import (EDIT_TOOLS, READ_TOOLS, Rule, all_subcommands, git_call, parse_rule, redirect_targets, split_shell_commands,
                                     strip_wrappers, tool_paths)
 
 DecisionOutcome = Literal["allow", "ask", "deny"]
@@ -76,40 +79,159 @@ def _is_root_target(arg: str) -> bool:
     return False
 
 
-def shell_credential_access(cmd: str, workspace: Path | None = None) -> str | None:
-    """Reason string when a shell command names a credential store (~/.ssh, ~/.aws, ~/.axon/.env, ...)
-    as an argument or redirection target; the path tools' guard would be bypassed otherwise."""
-    from axon.permissions.paths import credential_location
-    for sub in all_subcommands(cmd):
-        try:
-            argv = shlex.split(strip_wrappers(sub), posix=True)
-        except ValueError:
-            argv = strip_wrappers(sub).split()
-        for tok in argv[1:]:
-            tok = tok.lstrip("<>0123456789&=").strip()
-            if "=" in tok and not tok.startswith(("/", "~", ".")):
-                tok = tok.split("=", 1)[1]  # --key=~/.ssh/id_rsa
-            if not tok or tok.startswith("-") or not any(c in tok for c in "/\\~.$"):
-                continue
-            hit = credential_location(os.path.expandvars(tok), workspace)
-            if hit:
-                return hit
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+_MAX_NESTED_SHELLS = 4
+_MAX_GLOB_MATCHES = 500
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+_VAR_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_BRACES = re.compile(r"\{([^{}]*,[^{}]*)\}")
+_DECODER = r"(?:base64\s+(?:-d|-D|--decode)\b|base32\s+(?:-d|--decode)\b|xxd\s+-r\b|openssl\s+(?:enc\s+)?(?:base64\s+)?-d\b)"
+_SHELL_NAME = r"(?:/\S*/)?(?:ba|z|da|k|fi)?sh\b"
+_DECODED_EXEC = (
+    re.compile(_DECODER + r"[^;\n]*\|\s*(?:sudo\s+)?" + _SHELL_NAME),                 # base64 -d | sh
+    re.compile(r"(?:^|[;&|\s])eval\b[^;\n]*" + _DECODER),                             # eval "$(... base64 -d)"
+    re.compile(r"\b" + _SHELL_NAME + r"\s+(?:-\w+\s+)*[\"']?(?:\$\(|<\(|`)[^;\n]*" + _DECODER),  # bash -c "$(... base64 -d)"
+)
+
+
+def _shell_payload(argv: list[str]) -> str | None:
+    """The command text a ``bash -c '...'`` or ``eval ...`` will run, else None."""
+    prog = os.path.basename(argv[0]).lower()
+    if prog == "eval":
+        return " ".join(argv[1:]) or None
+    if prog not in _SHELLS:
+        return None
+    for i, arg in enumerate(argv[1:], start=1):
+        if not arg.startswith("-"):
+            return None  # a script file: its contents are not visible here
+        if not arg.startswith("--") and "c" in arg:
+            return argv[i + 1] if i + 1 < len(argv) else None
     return None
 
 
-def catastrophic_command(cmd: str) -> str | None:
-    """Return a reason when a shell command is irrecoverably destructive."""
-    compact = cmd.replace(" ", "")
-    if ":(){:|:&};:" in compact:
-        return "fork bomb"
+def _simple_commands(cmd: str, _depth: int = 0) -> list[list[str]]:
+    """The argv of every simple command in a line, in order, including ``bash -c`` and ``eval`` bodies."""
+    out: list[list[str]] = []
     for sub in all_subcommands(cmd):
-        core = strip_wrappers(sub)
+        core = strip_wrappers(sub).strip().lstrip("({ ").rstrip(") ")
         try:
             argv = shlex.split(core, posix=True)
         except ValueError:
             argv = core.split()
         if not argv:
             continue
+        out.append(argv)
+        payload = _shell_payload(argv)
+        if payload and _depth < _MAX_NESTED_SHELLS:
+            out += _simple_commands(payload, _depth + 1)
+    return out
+
+
+def _expand_braces(tok: str) -> list[str]:
+    variants, pending = [], [tok]
+    while pending and len(variants) + len(pending) < 64:
+        cur = pending.pop()
+        m = _BRACES.search(cur)
+        if not m:
+            variants.append(cur)
+            continue
+        pending += [cur[:m.start()] + choice + cur[m.end():] for choice in m.group(1).split(",")]
+    return variants + pending
+
+
+def _reads_whole_tree(argv: list[str]) -> bool:
+    """True for commands that read every file below a directory argument, hidden ones included."""
+    prog = os.path.basename(argv[0]).lower()
+    short = "".join(a[1:] for a in argv[1:] if a.startswith("-") and not a.startswith("--"))
+    long_flags = {a.split("=", 1)[0] for a in argv[1:] if a.startswith("--")}
+    if prog in ("grep", "egrep", "fgrep"):
+        return bool(set(short) & set("rR")) or bool(long_flags & {"--recursive", "--dereference-recursive"})
+    if prog == "rg":  # ripgrep skips hidden files unless told otherwise
+        return "." in short or "uu" in short or bool(long_flags & {"--hidden", "--unrestricted"})
+    if prog == "cp":
+        return bool(set(short) & set("rRa")) or bool(long_flags & {"--recursive", "--archive"})
+    if prog == "scp":
+        return "r" in short
+    return prog in ("tar", "zip", "7z", "rsync")
+
+
+def _dynamic_credential(tok: str) -> str | None:
+    """A path whose start is only known at run time (``$(echo ~)/.ssh/x``), judged by its literal tail."""
+    if not any(c in tok for c in "$`()"):
+        return None
+    from axon.permissions.paths import _CREDENTIAL_PARTS
+    parts = tok.replace("\\", "/").split("/")
+    for part in parts:
+        if part in _CREDENTIAL_PARTS:
+            return part
+    if parts[-1:] == [".env"] and parts[-2:-1] == [_axon_home().name]:
+        return ".axon/.env"
+    return None
+
+
+def shell_credential_access(cmd: str, workspace: Path | None = None) -> str | None:
+    """Reason string when a shell command reaches a credential store (~/.ssh, ~/.aws, ~/.axon/.env, ...)
+    through an argument, redirection, glob, ``cd``, shell variable, nested shell or recursive read;
+    the path tools' guard would be bypassed otherwise. This reads the command text, so it cannot see
+    what a script or interpreter does at run time."""
+    from axon.permissions.paths import credential_location, holds_credentials
+    start = Path(workspace) if workspace is not None else Path.cwd()
+    cwd = start
+    variables: dict[str, str] = {}
+
+    def expand(tok: str) -> str:
+        tok = _VAR_REFERENCE.sub(lambda m: variables.get(m.group(1) or m.group(2), m.group(0)), tok)
+        return os.path.expandvars(tok)
+
+    for argv in _simple_commands(cmd):
+        assignment = _ASSIGNMENT.match(argv[0])
+        if assignment and len(argv) == 1:
+            variables[assignment.group(1)] = expand(assignment.group(2))
+            continue
+        prog = os.path.basename(argv[0]).lower()
+        recursive = _reads_whole_tree(argv)
+        # "cat<file" arrives as one word, so the program word can hold a redirection target too
+        first = [re.split(r"[<>]", argv[0])[-1]] if re.search(r"[<>]", argv[0]) else []
+        for raw in first + argv[1:]:
+            tok = raw.lstrip("<>0123456789&=").strip()
+            if "=" in tok and not tok.startswith(("/", "~", ".")):
+                tok = tok.split("=", 1)[1]  # --key=~/.ssh/id_rsa
+            if not tok or tok.startswith("-") or not any(c in tok for c in "/\\~.$*?[{"):
+                continue
+            for variant in _expand_braces(expand(tok)):
+                candidates = [variant]
+                if any(c in variant for c in "*?["):
+                    try:
+                        matches = glob.iglob(os.path.expanduser(variant), root_dir=str(cwd))
+                        candidates += list(itertools.islice(matches, _MAX_GLOB_MATCHES))
+                    except (OSError, ValueError, re.error):
+                        pass
+                for candidate in candidates:
+                    hit = _dynamic_credential(candidate) or credential_location(candidate, cwd)
+                    if not hit and recursive:
+                        hit = holds_credentials(candidate, cwd)
+                    if hit:
+                        return hit
+        if recursive and prog in ("grep", "egrep", "fgrep", "rg") and cwd != start:
+            hit = holds_credentials(cwd)  # with no path argument these search the current directory
+            if hit:
+                return hit
+        if prog in ("cd", "pushd"):
+            targets = [a for a in argv[1:] if not a.startswith("-")]
+            target = expand(targets[0]) if targets else "~"
+            if not any(c in target for c in "$`()"):
+                cwd = cwd / os.path.expanduser(target)
+    return None
+
+
+def catastrophic_command(cmd: str) -> str | None:
+    """Return a reason when a shell command is irrecoverably destructive, or hides what it runs."""
+    compact = cmd.replace(" ", "")
+    if ":(){:|:&};:" in compact:
+        return "fork bomb"
+    if any(p.search(cmd) for p in _DECODED_EXEC):
+        return "decoded payload run by a shell, so its contents cannot be checked"
+    for argv in _simple_commands(cmd):
         prog = os.path.basename(argv[0]).lower()
         if prog in ("rm", "rm.exe"):
             flags = "".join(a.lstrip("-") for a in argv[1:] if a.startswith("-") and not a.startswith("--"))
@@ -343,10 +465,9 @@ class PermissionEngine:
     def _readonly_git(self, name: str, args: dict[str, Any]) -> bool:
         if name != "Git":
             return False
-        sub = str(args.get("subcommand", "")).strip().lower()
+        sub, extra, _folder = git_call(args)
         if sub not in READONLY_GIT:
             return False
-        extra = [str(a) for a in (args.get("args") or [])]
         if sub in ("branch", "tag", "remote") and any(not a.startswith("-") or a in ("-d", "-D", "--delete", "-m", "-M") for a in extra):
             return sub == "remote" and all(a in ("-v", "--verbose") for a in extra)
         return True

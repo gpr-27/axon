@@ -375,7 +375,11 @@ class MCPConfig:
         except Exception:  # noqa: BLE001 - plugins are optional
             return []
         out: list[tuple[Path, str, dict[str, Any]]] = []
+        from axon.hooks import trust
+        project_ok = trust.allowed(self.workspace)
         for plug in plugins:
+            if plug.scope == "project" and not project_ok:
+                continue
             for name, raw in plugin_mcp_servers(plug).items():
                 out.append((plug.path / ".mcp.json", name, raw))
         return out
@@ -412,8 +416,12 @@ class MCPConfig:
         if pol.exclusive is None:
             for path, name, raw in self.plugin_servers():
                 _take(name, raw, "plugin", path)
+            from axon.hooks import trust
+            project_ok = trust.allowed(self.workspace)
+            if not project_ok:
+                self.notices.append(trust.blocked_line(self.workspace))
             for scope, path in self.config_files():
-                if not path.is_file():
+                if not path.is_file() or (scope == "local" and not project_ok):
                     continue
                 for name, raw in _servers_in(_read_json(path)).items():
                     _take(str(name), raw, scope, path)
@@ -512,6 +520,8 @@ class MCPConfig:
 
     # ── Writing ──────────────────────────────────────────────────────────
     def _write(self, path: Path, data: dict[str, Any]) -> None:
+        from axon.hooks.manager import config_change
+        config_change(path, "mcp")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

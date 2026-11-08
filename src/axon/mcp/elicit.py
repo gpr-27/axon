@@ -115,3 +115,30 @@ def terminal_elicitation(server: str, params: dict[str, Any], *, ask: Callable[[
             return {"action": "accept", "content": content}
         except (EOFError, KeyboardInterrupt):
             return {"action": "cancel"}
+
+
+def with_hooks(handler: Callable[[str, dict[str, Any]], dict[str, Any]]) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """Wrap an elicitation handler with the Elicitation / ElicitationResult hook events.
+
+    ``Elicitation`` runs before the dialog: a hook that blocks, or answers ``action``/``content`` itself,
+    replaces the dialog. ``ElicitationResult`` runs after the user (or that hook) answered and may override
+    the answer. Without a session (no active HookManager) the handler is called as is."""
+    def wrapped(server: str, params: dict[str, Any]) -> dict[str, Any]:
+        from axon.hooks.manager import fire
+        payload = {"mcp_server_name": server, "message": params.get("message", ""), "mode": params.get("mode") or "form",
+                   "url": params.get("url"), "requested_schema": params.get("requestedSchema")}
+        pre = fire("Elicitation", payload)
+        if pre is not None and (pre.blocked or pre.action):
+            answer: dict[str, Any] = {"action": pre.action or "decline"}
+            if pre.content is not None and answer["action"] == "accept":
+                answer["content"] = pre.content
+        else:
+            answer = handler(server, params)
+        post = fire("ElicitationResult", {**payload, "action": answer.get("action"), "content": answer.get("content")})
+        if post is not None:
+            if post.blocked:
+                return {"action": "decline"}
+            if post.action:
+                answer = {"action": post.action, **({"content": post.content} if post.content is not None else {})}
+        return answer
+    return wrapped

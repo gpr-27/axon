@@ -22,7 +22,8 @@ from typing import Any, Callable, ClassVar
 from axon import interruptible
 from axon import platform as plat
 from axon.errors import ToolError
-from axon.tools.base import Tool, ToolContext
+from axon.permissions import sandbox
+from axon.tools.base import Tool, ToolContext, int_arg
 
 _SCRUB_ENV_SUBSTRINGS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
 # Variables that match a scrub substring but hold no secret, and that tools need: the ssh-agent
@@ -349,11 +350,8 @@ class BashTool(Tool):
         cmd = str(args.get("command", "")).strip()
         if not cmd:
             raise ToolError("Bash requires a non-empty 'command'.")
-        try:
-            timeout = int(args.get("timeout_s") or getattr(ctx.settings, "bash_timeout_s", 0) or 180)
-        except (TypeError, ValueError):
-            timeout = 180
-        timeout = max(1, min(MAX_TIMEOUT_S, timeout))
+        default_t = int(getattr(ctx.settings, "bash_timeout_s", 0) or 180)
+        timeout = int_arg(args, "timeout_s", default_t, lo=1, hi=MAX_TIMEOUT_S, strict=True)
         cap = int(getattr(ctx.settings, "tool_output_cap", 0) or 30000)
         info = plat.shell_info()
         cwd = self.current_dir(ctx.workspace)
@@ -367,7 +365,8 @@ class BashTool(Tool):
             except Exception:
                 log_path = None
             try:
-                shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path)
+                shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path,
+                                         wrap=lambda argv: sandbox.wrap_argv(argv, ctx.settings))
             except FileNotFoundError as e:
                 raise ToolError(f"Shell not found ({info.name}): {e}. Set AXON_SHELL to a valid shell.") from e
             except OSError as e:
@@ -377,7 +376,7 @@ class BashTool(Tool):
                     f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.{logged}")
         stream_cb = getattr(ctx, "on_output", None)
         capture = _Capture(cap, stream_cb if callable(stream_cb) else None)
-        argv = self._wrap(cmd, info)
+        argv = sandbox.wrap_argv(self._wrap(cmd, info), ctx.settings)
         try:
             proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, **plat.new_process_group_kwargs())
@@ -427,6 +426,13 @@ class BashTool(Tool):
                             + (f"\n{full_note}" if full_note else ""))
         code = proc.returncode
         notes = []
+        if sandbox.enabled(ctx.settings):
+            failed = sandbox.start_failure(output, code)
+            if failed:
+                raise ToolError(f"{sandbox.SANDBOX_TAG} the sandbox could not start, so the command did not run: {failed}")
+            note = sandbox.denial_note(output, code)
+            if note:
+                notes.append(note)
         if detached:
             notes.append("(a background process is still running and holds the output pipe; its output is not captured)")
         if "python: command not found" in output or "python: not found" in output:
@@ -550,8 +556,9 @@ class BackgroundShells:
         self._seq = 0
 
     def start(self, command: str, cwd: str, env: dict[str, str], info: plat.ShellInfo,
-              log_path: Path | None = None) -> BackgroundShell:
-        proc = subprocess.Popen(plat.shell_command_argv(command, info), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+              log_path: Path | None = None, wrap: Callable[[Any], Any] | None = None) -> BackgroundShell:
+        argv = plat.shell_command_argv(command, info)
+        proc = subprocess.Popen(wrap(argv) if wrap else argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **plat.new_process_group_kwargs())
         with self._lock:
             self._seq += 1

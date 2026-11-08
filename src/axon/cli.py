@@ -494,8 +494,7 @@ def build_agent(
     if getattr(settings, "auto_title", True) and getattr(settings, "title_llm", True) and not provider_given:
         try:
             from axon.agent.loop import make_provider
-            title_model = settings.small_model or settings.model   # a short call: about 24 tokens out
-            agent.title_provider = make_provider(title_model, settings, role="title")
+            agent.title_provider = make_provider(settings.model, settings, role="title")   # a short call on the session's model
         except Exception:
             agent.title_provider = None
     return agent
@@ -608,6 +607,29 @@ def _session_file(agent: Any, session_id: str) -> Any:
     from axon.ui.history_view import session_file
     return session_file(agent, session_id)
 
+def _session_in_use(agent: Any, say: Callable[[str], None]) -> bool | None:
+    """Another live process is writing this session. Interactively, ask; otherwise warn and carry on, since a
+    script chose this session on purpose. True: forked into a new session. False: continue. None: cancelled."""
+    holder = getattr(agent.session, "conflict", None)
+    if not holder:
+        return False
+    who = f"the {holder.get('owner', 'terminal')} (process {holder.get('pid', '?')})"
+    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
+        say(f"Warning: this session is also open in {who}. Both will write to it.")
+        return False
+    say(f"This session is open in {who}. Writing from two places would mix their histories.")
+    try:
+        answer = input("  [f]ork into a new session (recommended), [c]ontinue here anyway, [q]uit? ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if answer.startswith("q"):
+        return None
+    if answer.startswith("c"):
+        return False
+    fork_session(agent, say)
+    return True
+
+
 def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mode: bool = True,
             replay: bool = True) -> bool:
     try:
@@ -617,6 +639,8 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
         agent.ledger = agent.session.load_ledger(session_id, agent.settings.model)
     except Exception as e:
         say(f"Could not resume session {session_id}: {e}")
+        return False
+    if _session_in_use(agent, say) is None:
         return False
     from axon.session.store import restore_retry_state
     restore_retry_state(agent, session_id)
@@ -634,8 +658,8 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
         except Exception:
             pass
         restored_mode = mode
-    if state.get("title") and hasattr(agent, "mark_titled"):
-        agent.mark_titled(state["title"])
+    if hasattr(agent, "reload_title"):
+        agent.reload_title()
     tot_tok = agent.ledger.total_input_tokens + agent.ledger.total_output_tokens
     _journal("resume", {"session": session_id, "title": state.get("title") or "",
                         "messages": len(agent.conversation.messages)}, agent=agent)
@@ -872,9 +896,20 @@ def expand_file_mentions(line: str, workspace: Path, limit: int = 20_000) -> str
             if p.is_dir():
                 line = line.replace(f"@{m}", f"\n\n[Directory: {m}]\n```\n{_dir_listing(p)}\n```\n")
                 continue
-            if not p.is_file() or p.stat().st_size > MENTION_MAX_BYTES:
+            if not p.is_file():
                 continue
-            text = p.read_text(encoding="utf-8", errors="replace")
+            from axon.permissions.paths import is_protected_path
+            from axon.features.dash_fs import is_secret_file
+            if is_protected_path(p) or is_secret_file(p.name):
+                line = line.replace(f"@{m}", f"[{m}: protected file, not sent to the model]")
+                continue
+            from axon.tools.file_formats import detect_kind, extract
+            if detect_kind(p) not in ("text", "csv", "json", "jsonl", "yaml", "toml", "xml", "html", "svg", "log"):
+                text = extract(p, limit=2000).text      # Word, Excel, PDF, images, binaries: readable text, never bytes
+            elif p.stat().st_size > MENTION_MAX_BYTES:
+                continue
+            else:
+                text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         note = ""
@@ -1353,8 +1388,9 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
         print(f"\n  {MINT}Queued {n} follow-up question{'s' if n > 1 else ''} (in queue: {len(agent.message_queue)}){RST}\n")
 
     try:
+        from axon.agent.attachments import expand_file_chips
         from axon.agent.images import compact_image_paths
-        line, attachments = compact_image_paths(line)
+        line, attachments = compact_image_paths(expand_file_chips(line))
     except Exception:
         attachments = []
     if attachments:
@@ -1786,6 +1822,17 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(f"axon: --agents: {e}\n")
             return 2
 
+    if args.mcp_config or args.strict_mcp_config:
+        # A managed-mcp.json policy conflict is reported before a missing API key, so it is never masked.
+        try:
+            from axon.mcp.policy import cli_conflict
+            early = cli_conflict(Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd(),
+                                 cli_servers=bool(args.mcp_config), strict=bool(args.strict_mcp_config))
+        except Exception:
+            early = None
+        if early:
+            return _startup_error(args, early, 2, "config_error")
+
     try:
         settings = Settings.load(_overrides_from_args(args))
         settings = _apply_prompt_flags(settings, args)
@@ -1837,6 +1884,15 @@ def main(argv: list[str] | None = None) -> int:
     try:  # approval prompts and elicitation dialogs only in the REPL; -p and SDK runs never block on one
         from axon.mcp import state as _mcp_state
         _mcp_state.set_interactive(bool(interactive and not headless))
+    except Exception:
+        pass
+    try:  # folder trust (axon.hooks.trust): project hooks, plugins and MCP servers load only in a trusted folder
+        from axon.hooks import trust as _trust
+        _trust.configure(bool(interactive and not headless))
+        if interactive and not headless:
+            _trust.prompt_if_needed(settings.workspace)
+        elif _trust.blocked_line(settings.workspace):
+            sys.stderr.write("axon: " + _trust.blocked_line(settings.workspace) + "\n")
     except Exception:
         pass
     on_approval = None

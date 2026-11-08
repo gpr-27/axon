@@ -1168,6 +1168,15 @@ def _menu(ctx: _Ctx) -> None:
            extra_actions=lambda: _menu_extra_actions(ctx))
 
 
+def _cmd_servers(ctx: _Ctx, args: list[str]) -> None:
+    """Connectors at a glance: state and tool counts; tool names only inside an expanded server."""
+    from axon.commands import workbench_cmds as wb
+    if _interactive():
+        wb.run_connectors(ctx.agent)
+    else:
+        wb.print_connectors(ctx.agent, 100, show_all=True, expand=set(args))
+
+
 def _cmd_help(_ctx: _Ctx, _args: list[str]) -> None:
     _out(f"\n  {GOLD}{BOLD}/mcp{RST}")
     for line in (__doc__ or "").strip().splitlines()[2:]:
@@ -1176,7 +1185,7 @@ def _cmd_help(_ctx: _Ctx, _args: list[str]) -> None:
 
 
 _COMMANDS = {
-    "list": _cmd_list, "ls": _cmd_list, "status": _cmd_list, "get": _cmd_get, "show": _cmd_get,
+    "servers": lambda c, a: _cmd_servers(c, a), "list": _cmd_list, "ls": _cmd_list, "status": _cmd_list, "get": _cmd_get, "show": _cmd_get,
     "login": _cmd_login, "authenticate": _cmd_login, "auth": _cmd_login,
     "logout": _cmd_logout, "clear-auth": _cmd_logout,
     "approve": _cmd_approve, "reject": _cmd_reject, "reset-project-choices": _cmd_reset_choices,

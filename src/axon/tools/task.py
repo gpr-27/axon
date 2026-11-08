@@ -148,3 +148,26 @@ class ExitPlanModeTool(Tool):
         except Exception:
             pass
         return f"Plan proposed for approval:\n\n{plan}"
+
+
+class EnterPlanModeTool(Tool):
+    name: ClassVar[str] = "EnterPlanMode"
+    description: ClassVar[str] = (
+        "Switch to read-only 'plan' mode for a non-trivial or risky task: explore, then present the plan with "
+        "ExitPlanMode. No edits or commands run until the user approves."
+    )
+    schema: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}, "additionalProperties": False}
+    readonly: ClassVar[bool] = True  # it only restricts what can run
+    default_permission: ClassVar[str] = "allow"
+
+    def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        agent = getattr(ctx, "agent", None)
+        if agent is None or not hasattr(agent, "set_mode"):
+            raise ToolError("EnterPlanMode requires the running agent.")
+        if getattr(agent, "is_subagent", False):
+            raise ToolError("A subagent cannot change the permission mode.")
+        if getattr(agent.settings, "mode", "") == "plan":
+            return "Already in plan mode."
+        agent.set_mode("plan")
+        return ("Entered plan mode: only read-only exploration is allowed. Investigate, then call ExitPlanMode with "
+                "the complete plan; the user decides whether to leave plan mode.")

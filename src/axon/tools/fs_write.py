@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from axon.agent.filechanges import diff_counts
+from axon.agent.state import path_lock
 from axon.errors import ToolError
 from axon.tools.base import (
     Tool, ToolContext, bool_arg, capture_checkpoint, default_summary, display_path, human_size, plural, resolve_path,
@@ -34,6 +35,23 @@ def _load_for_edit(p: Path, raw_path: str, ctx: ToolContext) -> TextFile:
         raise ToolError(f"{raw_path} is a directory, not a file.")
     ctx.file_state.check_writable(p)
     return read_text_file(p)
+
+
+def _guard_memory(p: Path, text: str, ctx: ToolContext) -> tuple[str, str]:
+    """Memory files keep the version being replaced, and never store secrets. Returns (text, note for the model)."""
+    from axon.features.memory_files import guard_write
+    guarded, notes = guard_write(Path(ctx.workspace), p, text)
+    return guarded, f"\n{' '.join(notes)}" if notes else ""
+
+
+def _write_back(p: Path, text: str, tf: TextFile, ctx: ToolContext) -> str:
+    """Save an edited file. Returns a note for the model when a memory file's text was changed on the way."""
+    text, note = _guard_memory(p, text, ctx)
+    try:
+        atomic_write_text(p, text, encoding=tf.encoding, newline=tf.newline)
+    except UnicodeEncodeError:
+        raise ToolError("The new text contains lone surrogate characters that cannot be encoded; remove them.") from None
+    return note
 
 
 def _prepare(tf: TextFile, s: str) -> str:
@@ -125,9 +143,18 @@ class WriteTool(Tool):
         if content is None:
             raise ToolError("Write requires 'content' (use an empty string for an empty file).")
         if not isinstance(content, str):
-            content = str(content)
+            raise ToolError(f"Write 'content' must be a string, got {type(content).__name__}.")
+        try:
+            content.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ToolError("Write 'content' contains lone surrogate characters that cannot be encoded as text; "
+                            "remove or replace them.") from None
 
         p = resolve_path(ctx, raw_path)
+        with path_lock(p):
+            return self._write(p, raw_path, content, ctx)
+
+    def _write(self, p: Path, raw_path: Any, content: str, ctx: ToolContext) -> str:
         if p.is_dir():
             raise ToolError(f"{raw_path} is a directory, not a file.")
         rel = display_path(p, ctx.workspace)
@@ -146,6 +173,7 @@ class WriteTool(Tool):
 
         # Content keeps the model's newlines unless the file was uniformly CRLF.
         text = normalize_newlines(content) if newline == "\r\n" else content
+        text, memory_note = _guard_memory(p, text, ctx)
         atomic_write_text(p, text, encoding=encoding, newline=newline if newline == "\r\n" else "")
         ctx.file_state.record_read(p)
         n_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
@@ -157,7 +185,7 @@ class WriteTool(Tool):
         else:
             change = "Overwrote file"
         return (f"Successfully wrote {len(content):,} characters ({n_lines} lines) to {rel}. {change}."
-                f"{reencoding_note(text, encoding) if existed else ''}")
+                f"{reencoding_note(text, encoding) if existed else ''}{memory_note}")
 
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
@@ -211,18 +239,19 @@ class EditTool(Tool):
         replace_all = bool_arg(args, "replace_all", False)
 
         p = resolve_path(ctx, raw_path)
-        tf = _load_for_edit(p, raw_path, ctx)
-        rel = display_path(p, ctx.workspace)
+        with path_lock(p):
+            tf = _load_for_edit(p, raw_path, ctx)
+            rel = display_path(p, ctx.workspace)
 
-        new_text, count = _apply_edit(
-            tf.text, _prepare(tf, str(old_str)), _prepare(tf, str(new_str)), replace_all, "Edit failed", rel
-        )
-        capture_checkpoint(ctx, p)
-        atomic_write_text(p, new_text, encoding=tf.encoding, newline=tf.newline)
-        ctx.file_state.record_read(p)
+            new_text, count = _apply_edit(
+                tf.text, _prepare(tf, str(old_str)), _prepare(tf, str(new_str)), replace_all, "Edit failed", rel
+            )
+            capture_checkpoint(ctx, p)
+            memory_note = _write_back(p, new_text, tf, ctx)
+            ctx.file_state.record_read(p)
         return (
             f"Successfully applied edit to {rel} ({count} occurrence{'s' if count != 1 else ''} replaced, "
-            f"{_summarize_change(tf.text, new_text)}).{reencoding_note(new_text, tf.encoding)}"
+            f"{_summarize_change(tf.text, new_text)}).{reencoding_note(new_text, tf.encoding)}{memory_note}"
         )
 
 
@@ -272,6 +301,10 @@ class MultiEditTool(Tool):
             raise ToolError("MultiEdit 'edits' must be a list of {old_string, new_string, replace_all?} objects.")
 
         p = resolve_path(ctx, raw_path)
+        with path_lock(p):
+            return self._edit_locked(p, raw_path, edits, ctx)
+
+    def _edit_locked(self, p: Path, raw_path: Any, edits: list, ctx: ToolContext) -> str:
         tf = _load_for_edit(p, raw_path, ctx)
         rel = display_path(p, ctx.workspace)
 
@@ -293,11 +326,11 @@ class MultiEditTool(Tool):
             total += cnt
 
         capture_checkpoint(ctx, p)
-        atomic_write_text(p, text, encoding=tf.encoding, newline=tf.newline)
+        memory_note = _write_back(p, text, tf, ctx)
         ctx.file_state.record_read(p)
         return (
             f"Successfully applied {len(edits)} edits to {rel} ({total} replacement{'s' if total != 1 else ''}, "
-            f"{_summarize_change(tf.text, text)}).{reencoding_note(text, tf.encoding)}"
+            f"{_summarize_change(tf.text, text)}).{reencoding_note(text, tf.encoding)}{memory_note}"
         )
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:

@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -44,6 +44,53 @@ def ensure_online(tool: str, url: str = "") -> None:
         raise ToolError(f"{tool} failed: offline mode (AXON_OFFLINE is set); no network request was made.{hint}")
 
 
+def _resolve_ips(host: str) -> list[str]:
+    """Every address `host` resolves to; empty when it does not resolve (the request itself then fails)."""
+    import socket
+    try:
+        return sorted({ai[4][0] for ai in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
+    except (OSError, UnicodeError):
+        return []
+
+
+def _blocked_address(ip: str) -> bool:
+    """Private, link-local, CGNAT, reserved, multicast and unspecified addresses. Loopback stays reachable:
+    local docs servers and the offline test servers live there."""
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return True
+    if isinstance(a, ipaddress.IPv6Address) and a.ipv4_mapped is not None:
+        a = a.ipv4_mapped
+    if a.is_loopback:
+        return False
+    return (a.is_private or a.is_link_local or a.is_reserved or a.is_multicast or a.is_unspecified
+            or (isinstance(a, ipaddress.IPv4Address) and a in ipaddress.ip_network("100.64.0.0/10")))
+
+
+def check_public_url(url: str) -> None:
+    """Refuse URLs that point at private or link-local addresses (cloud metadata, LAN services), by literal
+    address and, outside the test transport, after DNS resolution. Called for the first URL and every redirect."""
+    import ipaddress
+    host = (urlparse(url).hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ToolError(f"Invalid URL '{url}': no host.")
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+        ips = [host]
+    except ValueError:
+        if _TRANSPORT is not None:
+            return
+        ips = _resolve_ips(host)
+    for ip in ips:
+        if _blocked_address(ip):
+            raise ToolError(
+                f"Refusing to fetch {url}: {host} is a private, link-local or internal address ({ip}). "
+                f"Only public hosts (and localhost) can be fetched."
+            )
+
+
 @dataclass
 class FetchResult:
     url: str            # final URL after redirects
@@ -77,33 +124,49 @@ def fetch(
 def _fetch_now(url: str, method: str, data: dict[str, Any] | None, params: dict[str, Any] | None,
                hdrs: dict[str, str], timeout: float, max_bytes: int) -> FetchResult:
     try:
-        with httpx.Client(timeout=httpx.Timeout(timeout), follow_redirects=True, max_redirects=8,
-                          transport=_TRANSPORT) as client:
-            with client.stream(method, url, data=data, params=params, headers=hdrs) as resp:
-                buf = bytearray()
-                truncated = False
-                for chunk in resp.iter_bytes():
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
-                        truncated = True
-                        del buf[max_bytes:]
-                        break
-                ctype = resp.headers.get("content-type", "")
-                encoding = resp.encoding or "utf-8"
-                m = re.search(r"charset=([\w\-]+)", ctype, re.I)
-                if m:
-                    encoding = m.group(1)
-                try:
-                    text = bytes(buf).decode(encoding, errors="replace")
-                except LookupError:
-                    text = bytes(buf).decode("utf-8", errors="replace")
-                return FetchResult(str(resp.url), resp.status_code, ctype, text, truncated)
+        with httpx.Client(timeout=httpx.Timeout(timeout), follow_redirects=False, transport=_TRANSPORT) as client:
+            cur, hops = url, 0
+            while True:
+                check_public_url(cur)
+                with client.stream(method, cur, data=data, params=params, headers=hdrs) as resp:
+                    loc = resp.headers.get("location")
+                    if resp.status_code in (301, 302, 303, 307, 308) and loc:
+                        hops += 1
+                        if hops > 8:
+                            raise httpx.TooManyRedirects("too many redirects", request=resp.request)
+                        cur = str(resp.url.join(loc))
+                        if resp.status_code == 303 or (resp.status_code in (301, 302) and method == "POST"):
+                            method, data = "GET", None
+                        params = None
+                        continue
+                    return _read_response(resp, max_bytes)
     except httpx.TimeoutException as e:
         raise ToolError(f"Request to {url} timed out after {timeout:.0f}s.") from e
     except httpx.TooManyRedirects as e:
         raise ToolError(f"Too many redirects fetching {url}.") from e
     except httpx.HTTPError as e:
         raise ToolError(f"Network error fetching {url}: {type(e).__name__}: {e}") from e
+
+
+def _read_response(resp: httpx.Response, max_bytes: int) -> FetchResult:
+    buf = bytearray()
+    truncated = False
+    for chunk in resp.iter_bytes():
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            truncated = True
+            del buf[max_bytes:]
+            break
+    ctype = resp.headers.get("content-type", "")
+    encoding = resp.encoding or "utf-8"
+    m = re.search(r"charset=([\w\-]+)", ctype, re.I)
+    if m:
+        encoding = m.group(1)
+    try:
+        text = bytes(buf).decode(encoding, errors="replace")
+    except LookupError:
+        text = bytes(buf).decode("utf-8", errors="replace")
+    return FetchResult(str(resp.url), resp.status_code, ctype, text, truncated)
 
 
 _DROP_TAGS = ("script", "style", "noscript", "svg", "iframe", "template", "form", "button", "nav", "footer", "aside")

@@ -24,7 +24,7 @@ from axon.tools.shell import BashTool
 from axon.tools.todo import TodoWriteTool
 from axon.tools.web import WebFetchTool
 from axon.tools.web_search import WebSearchTool
-from axon.tools.task import TaskTool, SendMessageTool, ExitPlanModeTool
+from axon.tools.task import TaskTool, SendMessageTool, ExitPlanModeTool, EnterPlanModeTool
 from axon.tools.doctor import DoctorTool
 from axon.tools.interactive import AskUserQuestionTool, SkillTool, ToolSearchTool
 
@@ -36,6 +36,10 @@ def _platform_extra_tools() -> list[Tool]:
     extras: list[Tool] = []
     for mod_name, cls_names in (
         ("axon.tools.shell", ("BashOutputTool", "KillShellTool")),
+        ("axon.tools.monitor", ("MonitorTool",)),
+        ("axon.tools.git_tool", ("GitTool",)),
+        ("axon.tools.lsp", ("LspTool",)),
+        ("axon.tools.checkpoint_tool", ("CheckpointListTool", "CheckpointUndoTool")),
         ("axon.tools.process_tool", ("BashOutputTool", "KillShellTool")),
     ):
         try:
@@ -118,6 +122,7 @@ def create_default_registry() -> ToolRegistry:
         WebSearchTool(),
         TaskTool(),
         SendMessageTool(),
+        EnterPlanModeTool(),
         ExitPlanModeTool(),
         SkillTool(),
         AskUserQuestionTool(),
@@ -152,6 +157,7 @@ __all__ = [
     "TaskTool",
     "SendMessageTool",
     "ExitPlanModeTool",
+    "EnterPlanModeTool",
     "DoctorTool",
     "SkillTool",
     "AskUserQuestionTool",
