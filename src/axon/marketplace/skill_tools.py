@@ -133,12 +133,28 @@ def _write_scripts(folder: Path, scripts: dict[str, str]) -> None:
         (script_dir / file_name).write_text(text, encoding="utf-8")
 
 
-def install_skill(entry: SkillEntry, workspace: Path, scope: str = "user", force: bool = False) -> Path:
-    """Download a catalog skill from GitHub into the chosen skills folder."""
-    from axon.skills.importer import import_skill_from_url
-    imported = import_skill_from_url(entry.source, workspace, target_root=skills_root(workspace, scope),
-                                     overwrite=force)
-    write_origin(imported.target_path.parent, entry.source, imported.instructions)
+def fetch_skill(entry: SkillEntry, fetch=None):
+    """Download the whole skill folder of a catalog entry (pinned to its ``sha`` when it has one).
+    Nothing is written; show ``bundle.listing()`` before :func:`install_skill`."""
+    if entry.kind == "local":                      # a folder from a marketplace you added
+        from axon.marketplace.sources import bundle_from_folder
+        from axon.skills.bundle import BundleError
+        try:
+            return bundle_from_folder(Path(entry.source))
+        except BundleError as e:
+            raise ValueError(f"Skill rejected: {e}") from e
+    from axon.skills.importer import fetch_skill_bundle
+    return fetch_skill_bundle(entry.source, entry.sha, fetch)
+
+
+def install_skill(entry: SkillEntry, workspace: Path, scope: str = "user", force: bool = False,
+                  bundle=None) -> Path:
+    """Install a catalog skill (SKILL.md plus its scripts, references and assets) from GitHub."""
+    from axon.skills.importer import import_skill_bundle
+    bundle = bundle or fetch_skill(entry)
+    imported = import_skill_bundle(bundle, workspace, target_root=skills_root(workspace, scope),
+                                   overwrite=force, fallback_name=entry.id)
+    write_origin(imported.target_path.parent, entry.source, bundle.skill_md, bundle)
     return imported.target_path
 
 
@@ -146,9 +162,12 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def write_origin(folder: Path, source: str, text: str) -> None:
-    """Remember where a skill came from and what it looked like, so an update check can compare."""
+def write_origin(folder: Path, source: str, text: str, bundle=None) -> None:
+    """Remember where a skill came from and what it looked like, so an update check can compare.
+    With a bundle it also records the commit and a hash of every file (checked before an update)."""
     record = {"source": source, "sha256": text_hash(text), "installed_at": int(time.time())}
+    if bundle is not None:
+        record.update({"commit": bundle.commit, "content_hash": bundle.content_hash(), "files": len(bundle.files)})
     (folder / ORIGIN_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
@@ -181,3 +200,23 @@ def remove_skill(name: str, workspace: Path, scope: str | None = None) -> bool:
             shutil.rmtree(folder)
             return True
     return False
+
+
+def listing_tokens(name: str, description: str, folder_skill=None) -> int:
+    """Tokens the skill's listing line costs in every prompt (what /skill-doctor reports as "Listing")."""
+    from axon.commands.common import estimate_tokens
+    from axon.skills.manager import Skill, skills_prompt_section
+    skill = folder_skill or Skill(name=name, description=description, instructions="", path=Path(name), scope="catalog")
+    last = skills_prompt_section([skill]).splitlines()[-1]
+    return estimate_tokens(last)
+
+
+def installed_listing_tokens(workspace: Path) -> dict[str, int]:
+    """Listing tokens of every skill Axon currently loads, by name (the numbers /skill-doctor shows)."""
+    from axon.skills.manager import SkillManager
+    try:
+        manager = SkillManager(workspace)
+        return {n: listing_tokens(n, "", s) for n, s in manager.skills.items()
+                if not getattr(s, "disable_model_invocation", False)}
+    except Exception:  # noqa: BLE001 - a broken skill must not break browsing
+        return {}

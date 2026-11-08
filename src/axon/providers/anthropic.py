@@ -34,6 +34,7 @@ from axon.providers.base import (
 from axon.providers import transport as _transport
 from axon.providers.base import StreamCanceller, retry_event
 from axon.providers.transport import (
+    note_rate_limits,
     backoff_delay,
     parse_retry_after,
     retry_budget,
@@ -139,6 +140,8 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
         if role == "tool":
             block = {"type": "tool_result", "tool_use_id": msg.get("tool_call_id", ""),
                      "content": content if isinstance(content, str) else json.dumps(content)}
+            if msg.get("images"):
+                block["images"] = msg["images"]
             if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list) and all(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in out[-1]["content"]
             ):
@@ -201,7 +204,26 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
         if ids and (i >= len(out) or out[i]["role"] != "user"):
             fixed.append({"role": "user", "content": _interrupted_stubs(ids)})
     _clean_tool_ids(fixed)
+    _attach_tool_images(fixed)
     return fixed
+
+
+def _attach_tool_images(messages: list[dict[str, Any]]) -> None:
+    """Turn a tool_result's ``images`` (file references) into image blocks inside its content; the key
+    never reaches the wire. A file that is gone or too large is dropped and the text stands alone."""
+    from axon.providers.base import load_image_refs
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for i, block in enumerate(content):
+            if not (isinstance(block, dict) and block.get("type") == "tool_result" and "images" in block):
+                continue
+            block = content[i] = dict(block)
+            pics = load_image_refs(block.pop("images"))
+            if pics and isinstance(block.get("content"), str):
+                block["content"] = [{"type": "text", "text": block["content"] or "(image)"},
+                                    *({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}} for mt, b64 in pics)]
 
 
 _VALID_TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -415,6 +437,22 @@ def stream_error_status(body: Any) -> int | None:
     return None
 
 
+def _object_field(obj: Any, name: str) -> dict[str, Any] | None:
+    """A dict-valued field the SDK may not model yet (``diagnostics``, ``stop_details``), from an event, message or dict."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        value = obj.get(name)
+    else:
+        value = getattr(obj, name, None)
+        if value is None:
+            extra = getattr(obj, "model_extra", None)
+            value = extra.get(name) if isinstance(extra, dict) else None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(exclude_none=True)
+    return dict(value) if isinstance(value, dict) and value else None
+
+
 class AnthropicProvider:
     name: str = "anthropic"
 
@@ -425,6 +463,9 @@ class AnthropicProvider:
         self._aliases = dict(aliases or {})
         self._max_retries = max_retries_for(settings)
         self._cache_last_only = False  # set when a gateway rejects cache_control placement
+        self._official = False
+        self._diagnostics_on = True    # cleared for the session when the API rejects the diagnostics field
+        self._prev_message_ids: dict[tuple[int, bool], str] = {}
         self._canceller = StreamCanceller()
         key_obj = getattr(settings, "api_key", None)
         key = key_obj.get_secret_value() if hasattr(key_obj, "get_secret_value") else str(key_obj or "")
@@ -440,6 +481,7 @@ class AnthropicProvider:
             "timeout": request_timeout_for(settings),
         }
         if is_official_anthropic(base):
+            self._official = True
             kwargs["api_key"] = key or None
         else:
             # Anthropic-compatible gateways (AgentRouter & co.) authenticate with a Bearer token.
@@ -505,6 +547,12 @@ class AnthropicProvider:
             if _matches(wire_model, ("claude-sonnet-4", "claude-sonnet-4-5")):
                 kwargs["extra_headers"] = {"anthropic-beta": "context-1m-2025-08-07"}
 
+        diag_key = (threading.get_ident(), bool(tool_defs))
+        prev_id = self._prev_message_ids.get(diag_key)
+        if self._official and self._diagnostics_on and prev_id:
+            # Claude API only: ask which part of the request broke the cache, relative to the previous call.
+            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), "diagnostics": {"previous_message_id": prev_id}}
+
         stripped_thinking = False
         dropped_signatures = False
         retry_no = 0
@@ -515,6 +563,8 @@ class AnthropicProvider:
                 self._canceller.check()
                 yield from self._run(kwargs, state, emitted, thinking, wire_model)
                 self._canceller.check()
+                if self._official and getattr(state, "message_id", ""):
+                    self._prev_message_ids[diag_key] = state.message_id
                 return
             except ProviderError:
                 self._canceller.check()
@@ -529,9 +579,20 @@ class AnthropicProvider:
                     # with the HTTP status of the stream itself (200). Use the status the error type stands for.
                     status = stream_error_status(body)
                 text = f"{getattr(e, 'message', '')} {body or ''} {e}".lower()
-                if (not emitted[0] and not stripped_thinking and status == 400 and "extra_body" in kwargs
+                if (not emitted[0] and status == 400 and "diagnostics" in kwargs.get("extra_body", {}) and "diagnostics" in text):
+                    self._diagnostics_on = False   # the API does not take the field: stop sending it this session
+                    rest = {k: v for k, v in kwargs["extra_body"].items() if k != "diagnostics"}
+                    if rest:
+                        kwargs["extra_body"] = rest
+                    else:
+                        kwargs.pop("extra_body", None)
+                    continue
+                if (not emitted[0] and not stripped_thinking and status == 400 and set(kwargs.get("extra_body", {})) - {"diagnostics"}
                         and any(k in text for k in ("thinking", "effort", "output_config", "budget_tokens", "adaptive"))):
+                    diag = kwargs.get("extra_body", {}).get("diagnostics")
                     kwargs.pop("extra_body", None)  # endpoint/model rejects thinking params: retry plain
+                    if diag:
+                        kwargs["extra_body"] = {"diagnostics": diag}
                     stripped_thinking = True
                     continue
                 if (not emitted[0] and not dropped_signatures and status == 400
@@ -575,13 +636,20 @@ class AnthropicProvider:
     def _run(self, kwargs: dict[str, Any], state: StreamState, emitted: list[bool], thinking: bool, wire_model: str = "") -> Iterator[StreamEvent]:
         buffers: dict[int, dict[str, Any]] = {}
         blocks: list[Block] = []
+        diagnostics: dict[str, Any] | None = None
+        stop_details: dict[str, Any] | None = None
         with self._canceller.open_stream(lambda: self._client.messages.stream(**kwargs)) as stream:
+            note_rate_limits(getattr(getattr(stream, "response", None), "headers", None), self.name)
             for event in stream:
                 etype = getattr(event, "type", "")
                 if etype == "message_start":
                     # The prompt is billed from here on: keep its tokens so a stream cut short (Esc, a dropped
                     # connection) still reports them; message_delta only arrives at the very end.
-                    started = getattr(getattr(event, "message", None), "usage", None)
+                    msg0 = getattr(event, "message", None)
+                    state.message_id = str(getattr(msg0, "id", "") or "")
+                    diagnostics = _object_field(msg0, "diagnostics") or diagnostics
+                    stop_details = _object_field(msg0, "stop_details") or stop_details
+                    started = getattr(msg0, "usage", None)
                     if started is not None:
                         state.usage = self._usage(started, state.usage)
                 elif etype == "content_block_start":
@@ -638,12 +706,19 @@ class AnthropicProvider:
                         parsed, perr = parse_tool_arguments(buf["json"])
                         blocks.append(ToolUseBlock(id=buf["id"], name=buf["name"], input=parsed, parse_error=perr))
                 elif etype == "message_delta":
+                    for holder in (event, getattr(event, "delta", None)):
+                        diagnostics = _object_field(holder, "diagnostics") or diagnostics
+                        stop_details = _object_field(holder, "stop_details") or stop_details
                     u = getattr(event, "usage", None)
                     if u is not None:
                         state.usage = self._usage(u, state.usage)
             final_msg = stream.get_final_message()
 
         stop_reason: StopReason = getattr(final_msg, "stop_reason", None) or "end_turn"  # type: ignore[assignment]
+        diagnostics = _object_field(final_msg, "diagnostics") or diagnostics
+        stop_details = _object_field(final_msg, "stop_details") or stop_details
+        if not getattr(state, "message_id", ""):
+            state.message_id = str(getattr(final_msg, "id", "") or "")
         raw_usage = getattr(final_msg, "usage", None)
         usage = self._usage(raw_usage, Usage()) if raw_usage is not None else state.usage
         state.usage = usage
@@ -667,8 +742,9 @@ class AnthropicProvider:
         for b in blocks:
             if isinstance(b, ToolUseBlock):
                 yield ToolUseComplete(id=b.id)
-        state.turn = AssistantTurn(blocks=blocks, stop_reason=stop_reason, usage=usage, native=native, model=wire_model or None)
-        yield TurnComplete(stop_reason=stop_reason, usage=usage)
+        state.turn = AssistantTurn(blocks=blocks, stop_reason=stop_reason, usage=usage, native=native, model=wire_model or None,
+                                diagnostics=diagnostics, stop_details=stop_details)
+        yield TurnComplete(stop_reason=stop_reason, usage=usage, stop_details=stop_details)
 
     @staticmethod
     def _usage(raw: Any, prev: Usage) -> Usage:
@@ -704,9 +780,11 @@ class AnthropicProvider:
             block: dict[str, Any] = {"type": "tool_result", "tool_use_id": r.tool_use_id, "content": r.content}
             if r.is_error:
                 block["is_error"] = True
+            if r.images:
+                block["images"] = [i.to_dict() for i in r.images]   # by reference; read when the request is built
             content.append(block)
         return [{"role": "user", "content": content}]
 
     def supports(self, feature: str) -> bool:
-        return feature in ("tools", "thinking", "prompt_caching", "streaming")
+        return feature in ("tools", "thinking", "prompt_caching", "streaming", "tool_images")
 

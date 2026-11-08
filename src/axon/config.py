@@ -87,8 +87,12 @@ class Settings(BaseSettings):
     max_history_turns: int = 0  # Sliding context window in turns (0 = unlimited)
     session_cost_ceiling: Decimal = Decimal("50.00")
     compact_at: float = 0.75            # auto-compact at this share of the context limit
+    large_input_tokens: int = 0         # a single message above this is saved and sent as its start and end; 0: automatic; below 0: send whole
     parallel_tools: int = 6
     bash_timeout_s: int = 180
+    sandbox_enabled: bool = False        # run Bash under the OS sandbox (macOS sandbox-exec, Linux bwrap)
+    sandbox_allow_network: bool = False  # the sandbox blocks network access unless this is true
+    lsp_diagnostics_after_edit: bool = True   # append new language-server errors to Edit, Write and MultiEdit results
     tool_output_cap: int = 150_000
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
     hooks: dict[str, list[HookSpec]] = Field(default_factory=dict)
@@ -126,6 +130,7 @@ class Settings(BaseSettings):
     # Usage tips (spinner line / after turns). AXON_NO_TIPS=1 turns them off regardless.
     tips: bool = True
     tips_llm: bool = True                # model-written contextual tips (False: derived from the command registry)
+    workbench_hint: bool = False         # a short "/workbench" pointer at the end of the built-in status line
     live_status: bool = True             # "what is happening now" line + state-based tip under the spinner; explainers above choices
     tips_refresh_turns: int = 5          # min turns between LLM tip refreshes
     context_limit: int = 0               # tokens of the model's window Axon uses; 0 = auto: the model's full window (up to 1M)
@@ -136,7 +141,8 @@ class Settings(BaseSettings):
     notify_after_seconds: float = 30.0   # "important": notify a finished turn only if it ran this long
     tips_refresh_minutes: float = 15.0   # min minutes between LLM tip refreshes
     auto_title: bool = True
-    title_llm: bool = True              # the model writes the session title (small model); False: heuristic title only
+    title_llm: bool = True              # the session's model writes the title; False: heuristic title only
+    title_refresh_turns: int = 5        # rewrite an automatic title on turn 3, then every N turns; 0: never
     prompt_suggestions: bool = True     # ghost text in the empty prompt: the next message you will probably type
     # `!cmd` output is added to the conversation; when true the model also replies to it.
     respond_to_bash_commands: bool = True     # `!cmd`: the model responds to the output
@@ -390,7 +396,7 @@ _JSON_KEY_MAP = {
     "model": "model", "smallModel": "small_model", "small_model": "small_model",
     "effortLevel": "effort", "effort": "effort", "baseUrl": "base_url", "base_url": "base_url",
     "provider": "provider", "traceLevel": "trace_level", "trace_level": "trace_level",
-    "maxTurns": "max_iterations", "maxRetries": "max_retries", "max_retries": "max_retries", "parallelTools": "parallel_tools", "compactAt": "compact_at",
+    "maxTurns": "max_iterations", "maxRetries": "max_retries", "max_retries": "max_retries", "parallelTools": "parallel_tools", "compactAt": "compact_at", "largeInputTokens": "large_input_tokens", "large_input_tokens": "large_input_tokens",
     "autoMemoryEnabled": "auto_memory", "instructionFiles": "instruction_files",
     "axonMdExcludes": "memory_excludes", "claudeMdExcludes": "memory_excludes",
     "appendSystemPrompt": "append_system_prompt", "isolateWorktrees": "isolate_worktrees",
@@ -406,12 +412,13 @@ _JSON_KEY_MAP = {
     "contextLimit": "context_limit", "context_limit": "context_limit",
     "notifications": "notifications", "preferredNotifChannel": "notifications",
     "notifyAfterSeconds": "notify_after_seconds", "notify_after_seconds": "notify_after_seconds",
-    "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
+    "workbenchHint": "workbench_hint", "workbench_hint": "workbench_hint", "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
     "liveStatus": "live_status", "live_status": "live_status",
     "tipsRefreshTurns": "tips_refresh_turns", "tips_refresh_turns": "tips_refresh_turns",
     "tipsRefreshMinutes": "tips_refresh_minutes", "tips_refresh_minutes": "tips_refresh_minutes",
     "autoTitle": "auto_title", "auto_title": "auto_title",
     "titleLlm": "title_llm", "title_llm": "title_llm",
+    "titleRefreshTurns": "title_refresh_turns", "title_refresh_turns": "title_refresh_turns",
     "promptSuggestions": "prompt_suggestions", "prompt_suggestions": "prompt_suggestions",
     "respondToBashCommands": "respond_to_bash_commands", "disableAllHooks": "disable_all_hooks",
     "vimMode": "vim_mode", "vim_mode": "vim_mode", "additionalDirectories": "additional_dirs",
@@ -456,6 +463,15 @@ def map_json_settings(data: dict[str, Any]) -> dict[str, Any]:
         dirs = perms.get("additionalDirectories")
         if isinstance(dirs, list):
             out["additional_dirs"] = [str(x) for x in dirs if isinstance(x, str) and x.strip()]
+    sandbox = data.get("sandbox")
+    if isinstance(sandbox, dict):
+        if "enabled" in sandbox:
+            out["sandbox_enabled"] = bool(sandbox["enabled"])
+        if "allowNetwork" in sandbox:
+            out["sandbox_allow_network"] = bool(sandbox["allowNetwork"])
+    for key in ("lspDiagnosticsAfterEdit", "lsp_diagnostics_after_edit"):
+        if key in data:
+            out["lsp_diagnostics_after_edit"] = bool(data[key])
     budget = data.get("budget")
     if isinstance(budget, dict):
         if "turn_usd" in budget or "turnUsd" in budget:

@@ -763,3 +763,15 @@ def find_preset_by_url(base_url: str) -> ProviderPreset | None:
         if port == 1234:
             return get_preset_by_id("lmstudio")
     return None
+
+
+def endpoint_notice(preset: "ProviderPreset | None", base_url: str = "") -> str | None:
+    """One plain line when the endpoint is a staging host, else None. Pure data: callers render it."""
+    from axon.providers.transport import host_of
+
+    url = base_url or (preset.base_url if preset is not None else "")
+    host = (host_of(url) or "").lower()
+    if not host or not (host.startswith(("stg-", "staging-", "staging.")) or ".staging." in host):
+        return None
+    name = preset.name if preset is not None else host
+    return f"{name} is a staging endpoint ({host}); your prompts and keys are sent there."

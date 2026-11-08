@@ -2,6 +2,17 @@
   "version": 1,
   "plugins": [
     {
+      "id": "create-plugin",
+      "name": "Plugin creator (built in)",
+      "publisher": "Axon",
+      "description": "Scaffolds a new Axon plugin folder with a manifest and an example command.",
+      "category": "Authoring",
+      "kind": "builtin",
+      "source": {},
+      "docs_url": "",
+      "verified": true
+    },
+    {
       "id": "agent-sdk-dev",
       "name": "agent-sdk-dev",
       "publisher": "Anthropic",
@@ -12,9 +23,238 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/agent-sdk-dev",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/agent-sdk-dev",
+      "verified": true
+    },
+    {
+      "id": "asana-plugin",
+      "name": "asana",
+      "publisher": "Anthropic",
+      "description": "Asana project management integration. Connects Claude Code to Asana's V2 MCP server to create and manage tasks, search projects, update assignments, and track progress. Requires a one-time Asana OAuth app setup — run /asana-setup after installing.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/asana",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/asana",
+      "verified": true
+    },
+    {
+      "id": "atlassian-plugin",
+      "name": "atlassian",
+      "publisher": "atlassian",
+      "description": "Connect to Atlassian products including Jira and Confluence. Search and create issues, access documentation, manage sprints, and integrate your development workflow with Atlassian's collaboration tools.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/atlassian/atlassian-mcp-server.git",
+        "sha": "b74220d41142fae52b4f680c805b2ab81050991a"
+      },
+      "docs_url": "https://github.com/atlassian/atlassian-mcp-server",
+      "verified": true
+    },
+    {
+      "id": "auth0",
+      "name": "auth0",
+      "publisher": "Auth0",
+      "description": "Enterprise-grade auth, easy to implement. Add login, SSO, MFA, and access control to any app with framework-aware guidance.",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/auth0/agent-skills.git",
+        "path": "plugins/auth0",
+        "ref": "main",
+        "sha": "7b3821d533430eef35fd7406a87b7b8d02302bdf"
+      },
+      "docs_url": "https://auth0.com",
+      "verified": true
+    },
+    {
+      "id": "aws-core",
+      "name": "aws-core",
+      "publisher": "Amazon Web Services",
+      "description": "Build, deploy, and operate applications on AWS. Skills to author infrastructure-as-code, use core services, and complete common tasks.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/aws/agent-toolkit-for-aws.git",
+        "path": "plugins/aws-core",
+        "ref": "main",
+        "sha": "34b3eccfd8b619ea0cb4ba04a9be9dfefebd94e7"
+      },
+      "docs_url": "https://github.com/aws/agent-toolkit-for-aws",
+      "verified": true
+    },
+    {
+      "id": "azure",
+      "name": "azure",
+      "publisher": "microsoft",
+      "description": "Transform Claude into an Azure expert. This plugin integrates the Azure MCP server and specialized Azure skills to move beyond generic advice.",
+      "category": "Deployment",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/microsoft/azure-skills.git",
+        "sha": "5b4f0c0778079a2f568581107f23349ce9a0a9b2"
+      },
+      "docs_url": "https://github.com/microsoft/azure-skills",
+      "verified": true
+    },
+    {
+      "id": "canva",
+      "name": "canva",
+      "publisher": "Canva",
+      "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",
+      "category": "Design",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/canva-sdks/canva-skills.git",
+        "path": "plugins/canva",
+        "ref": "main",
+        "sha": "bfcbc681560f6031e9949ea52f81e20beb87e39e"
+      },
+      "docs_url": "https://www.canva.com",
+      "verified": true
+    },
+    {
+      "id": "chrome-devtools-mcp",
+      "name": "chrome-devtools-mcp",
+      "publisher": "ChromeDevTools",
+      "description": "Control and inspect a live Chrome browser from your coding agent. Record performance traces, analyze network requests, check console messages with source-mapped stack traces, and automate browser actions with Puppeteer.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/ChromeDevTools/chrome-devtools-mcp.git",
+        "sha": "a878bcad39584337e055778353246820deafa7c0"
+      },
+      "docs_url": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "verified": true
+    },
+    {
+      "id": "clangd-lsp",
+      "name": "clangd-lsp",
+      "publisher": "Anthropic",
+      "description": "C/C++ language server (clangd) for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/clangd-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/clangd-lsp",
+      "verified": true
+    },
+    {
+      "id": "claude-code-setup",
+      "name": "claude-code-setup",
+      "publisher": "Anthropic",
+      "description": "Analyze codebases and recommend tailored Claude Code automations such as hooks, skills, MCP servers, and subagents.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/claude-code-setup",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-code-setup",
+      "verified": true
+    },
+    {
+      "id": "claude-md-management",
+      "name": "claude-md-management",
+      "publisher": "Anthropic",
+      "description": "Tools to maintain and improve CLAUDE.md files - audit quality, capture session learnings, and keep project memory current.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/claude-md-management",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-md-management",
+      "verified": true
+    },
+    {
+      "id": "claude-security",
+      "name": "claude-security",
+      "publisher": "Anthropic",
+      "description": "Deep vulnerability scanning of your own code, run entirely inside your Claude Code session at a chosen effort tier, with every finding challenged before it is reported and the verification tally computed in code.",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/claude-security",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-security",
+      "verified": true
+    },
+    {
+      "id": "clickhouse",
+      "name": "clickhouse",
+      "publisher": "ClickHouse",
+      "description": "Connect Claude to your ClickHouse Cloud databases. Browse organizations, services, databases, and table schemas. Run read-only SQL queries against your data and get instant analytical answers.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/ClickHouse/clickhouse-claude-code-plugin.git",
+        "sha": "652664c8924c5a9454d9a7a5f6191944b4adfb11"
+      },
+      "docs_url": "https://github.com/ClickHouse/clickhouse-claude-code-plugin",
+      "verified": true
+    },
+    {
+      "id": "cloudflare",
+      "name": "cloudflare",
+      "publisher": "cloudflare",
+      "description": "Skills for the Cloudflare developer platform: Workers, Durable Objects, Agents SDK, MCP servers, Wrangler CLI, and web performance.",
+      "category": "Deployment",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/cloudflare/skills.git",
+        "sha": "b052c32bab7dd493513260228a36c88294f343f1"
+      },
+      "docs_url": "https://github.com/cloudflare/skills",
+      "verified": true
+    },
+    {
+      "id": "code-modernization",
+      "name": "code-modernization",
+      "publisher": "Anthropic",
+      "description": "Guided modernization for any legacy codebase: start with /modernize, get an assessment, an interactive map, the business rules mined from the code, and a plan you approve, then an upgrade, a rewrite or a rebuild with independent proof that the new code behaves like the old.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/code-modernization",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-modernization",
       "verified": true
     },
     {
@@ -28,9 +268,27 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/code-review",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/code-review",
+      "verified": true
+    },
+    {
+      "id": "code-simplifier",
+      "name": "code-simplifier",
+      "publisher": "Anthropic",
+      "description": "Agent that simplifies and refines code for clarity, consistency, and maintainability while preserving functionality. Focuses on recently modified code.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/code-simplifier",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-simplifier",
       "verified": true
     },
     {
@@ -44,9 +302,89 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/commit-commands",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/commit-commands",
+      "verified": true
+    },
+    {
+      "id": "context7-plugin",
+      "name": "context7",
+      "publisher": "Upstash",
+      "description": "Upstash Context7 MCP server for up-to-date documentation lookup. Connects to Context7's hosted remote MCP server (https://mcp.context7.com/mcp) — no local Node.js or npx required — to pull version-specific documentation and code examples directly from source repositories into your LLM context.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/context7",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/context7",
+      "verified": true
+    },
+    {
+      "id": "convex",
+      "name": "convex",
+      "publisher": "Convex",
+      "description": "Official Convex plugin for Claude Code with bundled Convex skills, the convex-expert subagent for code-writing, a runtime-error monitor, and MCP access for backend development, schema design, real-time features, auth, file storage, scheduled jobs, and AI agents.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/get-convex/convex-backend-skill.git",
+        "sha": "6ca54f6e2e7582812187b8a5a4783fb4dff52692"
+      },
+      "docs_url": "https://github.com/get-convex/convex-backend-skill",
+      "verified": true
+    },
+    {
+      "id": "csharp-lsp",
+      "name": "csharp-lsp",
+      "publisher": "Anthropic",
+      "description": "C# language server for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/csharp-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/csharp-lsp",
+      "verified": true
+    },
+    {
+      "id": "datadog",
+      "name": "datadog",
+      "publisher": "Datadog",
+      "description": "Use Datadog directly in Claude Code through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation. This plugin is in preview.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/datadog-labs/claude-code-plugin.git",
+        "sha": "195f570c002beab3d7bd342739034d0019aa4863"
+      },
+      "docs_url": "https://www.datadoghq.com/",
+      "verified": true
+    },
+    {
+      "id": "dynatrace",
+      "name": "dynatrace",
+      "publisher": "Dynatrace",
+      "description": "Dynatrace observability skills: DQL query patterns, application and infrastructure monitoring, log analysis, problem investigation, and incident response workflows, with the Dynatrace MCP server for live platform access.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Dynatrace/dynatrace-for-ai.git",
+        "sha": "4f9aa71f9802aa6db0a4069ae5619eb3392ff411"
+      },
+      "docs_url": "https://www.dynatrace.com/hub/detail/claude-code-cli/",
       "verified": true
     },
     {
@@ -60,9 +398,27 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/explanatory-output-style",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/explanatory-output-style",
+      "verified": true
+    },
+    {
+      "id": "expo",
+      "name": "expo",
+      "publisher": "expo",
+      "description": "Official Expo skills for building, deploying, upgrading, and debugging React Native apps with Expo.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/expo/skills.git",
+        "path": "plugins/expo",
+        "ref": "main",
+        "sha": "d4f484024fec15196bfd3c272e953e3f983972cf"
+      },
+      "docs_url": "https://github.com/expo/skills/blob/main/plugins/expo/README.md",
       "verified": true
     },
     {
@@ -76,41 +432,242 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/feature-dev",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/feature-dev",
+      "verified": true
+    },
+    {
+      "id": "figma-plugin",
+      "name": "figma",
+      "publisher": "figma",
+      "description": "Figma design platform integration. Access design files, extract component information, read design tokens, and translate designs into code. Bridge the gap between design and development workflows.",
+      "category": "Design",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/figma/mcp-server-guide.git",
+        "sha": "f2789420e7e8b4e2465dfeb1e12e1fc6a31397e5"
+      },
+      "docs_url": "https://github.com/figma/mcp-server-guide",
+      "verified": true
+    },
+    {
+      "id": "firebase",
+      "name": "firebase",
+      "publisher": "Anthropic",
+      "description": "Google Firebase MCP integration. Manage Firestore databases, authentication, cloud functions, hosting, and storage. Build and manage your Firebase backend directly from your development workflow.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/firebase",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/firebase",
+      "verified": true
+    },
+    {
+      "id": "firecrawl-plugin",
+      "name": "firecrawl",
+      "publisher": "firecrawl",
+      "description": "Web scraping and crawling powered by Firecrawl. Turn any website into clean, LLM-ready markdown or structured data. Scrape single pages, crawl entire sites, search the web, and extract structured information.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/firecrawl/firecrawl-claude-plugin.git",
+        "sha": "3e1fb0c319d71b067906b8b602208dded3932cdb"
+      },
+      "docs_url": "https://github.com/firecrawl/firecrawl-claude-plugin.git",
       "verified": true
     },
     {
       "id": "frontend-design",
       "name": "frontend-design",
       "publisher": "Anthropic",
-      "description": "Create distinctive, production-grade frontend interfaces with high design quality. Generates creative, polished code that avoids generic AI ",
+      "description": "Create distinctive, production-grade frontend interfaces with high design quality. Generates creative, polished code that avoids generic AI aesthetics.",
       "category": "Development",
       "kind": "git",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/frontend-design",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/frontend-design",
+      "verified": true
+    },
+    {
+      "id": "github-plugin",
+      "name": "github",
+      "publisher": "Anthropic",
+      "description": "Official GitHub MCP server for repository management. Create issues, manage pull requests, review code, search repositories, and interact with GitHub's full API directly from Claude Code.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/github",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/github",
+      "verified": true
+    },
+    {
+      "id": "gitlab",
+      "name": "gitlab",
+      "publisher": "Anthropic",
+      "description": "GitLab DevOps platform integration. Manage repositories, merge requests, CI/CD pipelines, issues, and wikis. Full access to GitLab's comprehensive DevOps lifecycle tools.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/gitlab",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/gitlab",
+      "verified": true
+    },
+    {
+      "id": "gopls-lsp",
+      "name": "gopls-lsp",
+      "publisher": "Anthropic",
+      "description": "Go language server for code intelligence and refactoring",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/gopls-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/gopls-lsp",
+      "verified": true
+    },
+    {
+      "id": "grafana-mcp",
+      "name": "grafana-mcp",
+      "publisher": "Grafana",
+      "description": "MCP server for AI-assisted Grafana dashboard, datasource, alerting, and incident management.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/grafana/ai-marketplace.git",
+        "path": "plugins/grafana-mcp",
+        "ref": "main",
+        "sha": "6c28ba1961d502d82301cbd64d2322e6e960477c"
+      },
+      "docs_url": "https://grafana.com",
       "verified": true
     },
     {
       "id": "hookify",
       "name": "hookify",
       "publisher": "Anthropic",
-      "description": "Easily create custom hooks to prevent unwanted behaviors by analyzing conversation patterns or from explicit instructions. Define rules via ",
+      "description": "Easily create custom hooks to prevent unwanted behaviors by analyzing conversation patterns or from explicit instructions. Define rules via simple markdown files.",
       "category": "Productivity",
       "kind": "git",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/hookify",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/hookify",
+      "verified": true
+    },
+    {
+      "id": "hubspot-sales",
+      "name": "hubspot-sales",
+      "publisher": "HubSpot",
+      "description": "Run your HubSpot sales workflow directly from Claude. Adds skills that cover the full sales day: import contacts and deals into HubSpot, get a prioritised morning brief, prep for any call with full CRM context, draft personalised follow-ups grounded in deal history, log calls and update records by...",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/HubSpot/hubspot-mcp-plugins.git",
+        "path": "HubSpot-Sales",
+        "ref": "main",
+        "sha": "a0c59600fc1ddcf03ceca71aebf0c28aa55f49e3"
+      },
+      "docs_url": "https://www.hubspot.com",
+      "verified": true
+    },
+    {
+      "id": "huggingface-skills",
+      "name": "huggingface-skills",
+      "publisher": "huggingface",
+      "description": "Build, train, evaluate, and use open source AI models, datasets, and spaces.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/huggingface/skills.git",
+        "sha": "c3ff942be3e07116b475253f0a8fc4f54682c1a8"
+      },
+      "docs_url": "https://github.com/huggingface/skills.git",
+      "verified": true
+    },
+    {
+      "id": "jdtls-lsp",
+      "name": "jdtls-lsp",
+      "publisher": "Anthropic",
+      "description": "Java language server (Eclipse JDT.LS) for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/jdtls-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/jdtls-lsp",
+      "verified": true
+    },
+    {
+      "id": "kotlin-lsp",
+      "name": "kotlin-lsp",
+      "publisher": "Anthropic",
+      "description": "Kotlin language server for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/kotlin-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/kotlin-lsp",
+      "verified": true
+    },
+    {
+      "id": "laravel-boost",
+      "name": "laravel-boost",
+      "publisher": "Anthropic",
+      "description": "Laravel development toolkit MCP server. Provides intelligent assistance for Laravel applications including Artisan commands, Eloquent queries, routing, migrations, and framework-specific code generation.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/laravel-boost",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/laravel-boost",
       "verified": true
     },
     {
@@ -124,25 +681,332 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/learning-output-style",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/learning-output-style",
+      "verified": true
+    },
+    {
+      "id": "linear-plugin",
+      "name": "linear",
+      "publisher": "Anthropic",
+      "description": "Linear issue tracking integration. Create issues, manage projects, update statuses, search across workspaces, and streamline your software development workflow with Linear's modern issue tracker.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/linear",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/linear",
+      "verified": true
+    },
+    {
+      "id": "lua-lsp",
+      "name": "lua-lsp",
+      "publisher": "Anthropic",
+      "description": "Lua language server for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/lua-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/lua-lsp",
+      "verified": true
+    },
+    {
+      "id": "math-olympiad",
+      "name": "math-olympiad",
+      "publisher": "Anthropic",
+      "description": "Solve competition math (IMO, Putnam, USAMO) with adversarial verification that catches what self-verification misses. Fresh-context verifiers attack proofs with specific failure patterns. Calibrated abstention over bluffing.",
+      "category": "Math",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/math-olympiad",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/math-olympiad",
+      "verified": true
+    },
+    {
+      "id": "math-proof",
+      "name": "math-proof",
+      "publisher": "Anthropic",
+      "description": "Two skills for hard mathematics problems, each ending in a self-contained proof.md: /math-proof:solo has the session work the problem itself in stages with a notes file; /math-proof:siege works on it for hours in rounds of judge and worker sub-agents and says plainly what is and is not proved.",
+      "category": "Math",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/math-proof",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/math-proof",
+      "verified": true
+    },
+    {
+      "id": "mcp-server-dev",
+      "name": "mcp-server-dev",
+      "publisher": "Anthropic",
+      "description": "Skills for designing and building MCP servers that work seamlessly with Claude. Guides you through deployment models (remote HTTP, MCPB, local), tool design patterns, auth, and interactive MCP apps.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/mcp-server-dev",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/mcp-server-dev",
+      "verified": true
+    },
+    {
+      "id": "microsoft-docs",
+      "name": "microsoft-docs",
+      "publisher": "MicrosoftDocs",
+      "description": "Access official Microsoft documentation, API references, and code samples for Azure, .NET, Windows, and more.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/MicrosoftDocs/mcp.git",
+        "sha": "f0a9478a954c9b3a7c6525a5183466902ca60731"
+      },
+      "docs_url": "https://github.com/microsoftdocs/mcp",
+      "verified": true
+    },
+    {
+      "id": "mintlify",
+      "name": "mintlify",
+      "publisher": "mintlify",
+      "description": "Build beautiful documentation sites with Mintlify. Convert non-markdown files into properly formatted MDX pages, add and modify content with correct component use, and automate documentation updates.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/mintlify/mintlify-claude-plugin.git",
+        "sha": "c1c1700d405dc375c2d90a1d4f8b283e6422b7ec"
+      },
+      "docs_url": "https://www.mintlify.com/",
+      "verified": true
+    },
+    {
+      "id": "mongodb-plugin",
+      "name": "mongodb",
+      "publisher": "mongodb",
+      "description": "Official Claude plugin for MongoDB (MCP Server + Skills). Connect to databases, explore data, manage collections, optimize queries, generate reliable code, implement best practices, develop advanced features, and more.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/mongodb/agent-skills.git",
+        "path": "plugins/mongodb",
+        "ref": "main",
+        "sha": "c370a63b27075008a92134686b24af3817edeb00"
+      },
+      "docs_url": "https://www.mongodb.com/docs/mcp-server/overview/",
+      "verified": true
+    },
+    {
+      "id": "neon-plugin",
+      "name": "neon",
+      "publisher": "neondatabase",
+      "description": "Manage your Neon projects and databases with the neon-postgres agent skill and the Neon MCP Server.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/neondatabase/agent-skills.git",
+        "path": "plugins/neon-postgres",
+        "ref": "main",
+        "sha": "827249744ed96416d799b68fb6bf033f4068b18a"
+      },
+      "docs_url": "https://github.com/neondatabase/agent-skills/tree/main/plugins/neon-postgres",
+      "verified": true
+    },
+    {
+      "id": "netlify-skills",
+      "name": "netlify-skills",
+      "publisher": "netlify",
+      "description": "Netlify platform skills for Claude Code — functions, edge functions, blobs, database, image CDN, forms, config, CLI, frameworks, caching, AI gateway, and deployment.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/netlify/context-and-tools.git",
+        "sha": "dc9ebf1b994420a4791e9d5d7cd68f62e07a0a41"
+      },
+      "docs_url": "https://github.com/netlify/context-and-tools",
+      "verified": true
+    },
+    {
+      "id": "newrelic",
+      "name": "newrelic",
+      "publisher": "New Relic",
+      "description": "New Relic observability intelligence for Claude Code. Investigate APM performance, analyze cloud costs, debug Kubernetes, write NRQL queries, and respond to alerts — all from your terminal using New Relic telemetry data.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/newrelic/claude-code-plugin.git",
+        "sha": "f8e5f8b62139072a22153ec92de1c0cc1af2f56a"
+      },
+      "docs_url": "https://newrelic.com",
+      "verified": true
+    },
+    {
+      "id": "notion-plugin",
+      "name": "notion",
+      "publisher": "makenotion",
+      "description": "Notion workspace integration. Search pages, create and update documents, manage databases, and access your team's knowledge base directly from Claude Code for seamless documentation workflows.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/makenotion/claude-code-notion-plugin.git",
+        "sha": "9847f2aa1a15f25df35ed1fb7b4557dbb60cd651"
+      },
+      "docs_url": "https://github.com/makenotion/claude-code-notion-plugin",
+      "verified": true
+    },
+    {
+      "id": "pagerduty",
+      "name": "pagerduty",
+      "publisher": "PagerDuty",
+      "description": "Enhance code quality and security through PagerDuty risk scoring and incident correlation. Score pre-commit diffs against historical incident data and surface deployment risk before you ship.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/PagerDuty/claude-code-plugins.git",
+        "sha": "761cba75bd50fd561405c3b173ecf36084432089"
+      },
+      "docs_url": "https://github.com/PagerDuty/claude-code-plugins",
+      "verified": true
+    },
+    {
+      "id": "php-lsp",
+      "name": "php-lsp",
+      "publisher": "Anthropic",
+      "description": "PHP language server (Intelephense) for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/php-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/php-lsp",
+      "verified": true
+    },
+    {
+      "id": "pinecone",
+      "name": "pinecone",
+      "publisher": "pinecone-io",
+      "description": "Pinecone vector database integration. Streamline your Pinecone development with powerful tools for managing vector indexes, querying data, and rapid prototyping. Use slash commands like /quickstart to generate AGENTS.md files and initialize Python projects and /query to quickly explore indexes.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/pinecone-io/pinecone-claude-code-plugin.git",
+        "sha": "c383d38b5cc3c5ec219f2e68026e47ffbf46524a"
+      },
+      "docs_url": "https://github.com/pinecone-io/pinecone-claude-code-plugin",
+      "verified": true
+    },
+    {
+      "id": "planetscale",
+      "name": "planetscale",
+      "publisher": "planetscale",
+      "description": "An authenticated hosted MCP server that accesses your PlanetScale organizations, databases, branches, schema, and Insights data. Query against your data, surface slow queries, and get organizational and account information.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/planetscale/claude-plugin.git",
+        "sha": "95c80f9f391be9b1b6172bf82d4191e1ec11b637"
+      },
+      "docs_url": "https://planetscale.com/",
+      "verified": true
+    },
+    {
+      "id": "playground",
+      "name": "playground",
+      "publisher": "Anthropic",
+      "description": "Creates interactive HTML playgrounds — self-contained single-file explorers with visual controls, live preview, and prompt output with copy button. Includes templates for design playgrounds, data explorers, concept maps, and document critique.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/playground",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/playground",
+      "verified": true
+    },
+    {
+      "id": "playwright-plugin",
+      "name": "playwright",
+      "publisher": "Anthropic",
+      "description": "Browser automation and end-to-end testing MCP server by Microsoft. Enables Claude to interact with web pages, take screenshots, fill forms, click elements, and perform automated browser testing workflows.",
+      "category": "Testing",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/playwright",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/playwright",
       "verified": true
     },
     {
       "id": "plugin-dev",
       "name": "plugin-dev",
       "publisher": "Anthropic",
-      "description": "Comprehensive toolkit for developing Claude Code plugins. Includes 7 expert skills covering hooks, MCP integration, commands, agents, and be",
+      "description": "Comprehensive toolkit for developing Claude Code plugins. Includes 7 expert skills covering hooks, MCP integration, commands, agents, and best practices. AI-assisted plugin creation and validation.",
       "category": "Development",
       "kind": "git",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/plugin-dev",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/plugin-dev",
+      "verified": true
+    },
+    {
+      "id": "postman",
+      "name": "postman",
+      "publisher": "postmanlabs",
+      "description": "Work with Postman from your agent: bootstrap a repo's Postman setup, mock an API before it's implemented, run collection and governance checks in CI, monitor a live endpoint, deploy and debug Postman Flows, and publish generated API documentation.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/postmanlabs/postman-plugin.git",
+        "sha": "1fdd3f1e2736c7cb83780a221cb9f83641215ab7"
+      },
+      "docs_url": "https://github.com/postmanlabs/postman-plugin",
       "verified": true
     },
     {
@@ -156,52 +1020,444 @@
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/pr-review-toolkit",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/pr-review-toolkit",
+      "verified": true
+    },
+    {
+      "id": "prisma-plugin",
+      "name": "prisma",
+      "publisher": "prisma",
+      "description": "Prisma MCP integration for Postgres database management, schema migrations, SQL queries, and connection string management. Provision Prisma Postgres databases, run migrations, and interact with your data directly.",
+      "category": "Other",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/prisma/claude-plugin.git",
+        "sha": "82edd74d81892bcccf7294cbbf76752d76391da5"
+      },
+      "docs_url": "https://prisma.io",
+      "verified": true
+    },
+    {
+      "id": "pyright-lsp",
+      "name": "pyright-lsp",
+      "publisher": "Anthropic",
+      "description": "Python language server (Pyright) for type checking and code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/pyright-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/pyright-lsp",
+      "verified": true
+    },
+    {
+      "id": "railway",
+      "name": "railway",
+      "publisher": "railwayapp",
+      "description": "Deploy and manage apps, databases, and infrastructure on Railway. Covers project setup, deploys, environment configuration, networking, troubleshooting, and monitoring.",
+      "category": "Deployment",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/railwayapp/railway-skills.git",
+        "path": "plugins/railway",
+        "ref": "main",
+        "sha": "a100f93e482c5153774fed74d0b3fb8f8ca63342"
+      },
+      "docs_url": "https://docs.railway.com/ai/claude-code-plugin",
       "verified": true
     },
     {
       "id": "ralph-loop",
       "name": "ralph-loop",
       "publisher": "Anthropic",
-      "description": "Interactive self-referential AI loops for iterative development. Claude works on the same task repeatedly, seeing its previous work, until c",
+      "description": "Interactive self-referential AI loops for iterative development, implementing the Ralph Wiggum technique. Claude works on the same task repeatedly, seeing its previous work, until completion.",
       "category": "Development",
       "kind": "git",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/ralph-loop",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/plugins/ralph-loop",
+      "verified": true
+    },
+    {
+      "id": "redis-development",
+      "name": "redis-development",
+      "publisher": "Redis",
+      "description": "Redis development best practices — data structures, query engine, vector search, caching, and performance optimization",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/redis/agent-skills.git",
+        "path": "plugins/redis-development",
+        "ref": "main",
+        "sha": "a84871d065f398fed55e1633f66b66f731eb4e2b"
+      },
+      "docs_url": "https://redis.io",
+      "verified": true
+    },
+    {
+      "id": "render-plugin",
+      "name": "render",
+      "publisher": "Render",
+      "description": "Deploy, debug, and monitor applications on Render. Includes skills, an agent, slash commands, and a render.yaml validation hook.",
+      "category": "Deployment",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/render-oss/render-plugin-claude-code.git",
+        "sha": "d7ecf826c5971eb7dfdb5aed79fa838a8d67ff46"
+      },
+      "docs_url": "https://render.com",
+      "verified": true
+    },
+    {
+      "id": "resend",
+      "name": "resend",
+      "publisher": "Resend",
+      "description": "Agent skills for working with Resend to send and receive emails — email API integration, agent inbox, CLI, React Email components, and deliverability best practices. Includes the Resend MCP server.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/resend/resend-skills.git",
+        "sha": "fd14937dba5a99de5dba902808f70fa575513cc5"
+      },
+      "docs_url": "https://resend.com",
+      "verified": true
+    },
+    {
+      "id": "ruby-lsp",
+      "name": "ruby-lsp",
+      "publisher": "Anthropic",
+      "description": "Ruby language server for code intelligence and analysis",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/ruby-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/ruby-lsp",
+      "verified": true
+    },
+    {
+      "id": "rust-analyzer-lsp",
+      "name": "rust-analyzer-lsp",
+      "publisher": "Anthropic",
+      "description": "Rust language server for code intelligence and analysis",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/rust-analyzer-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/rust-analyzer-lsp",
+      "verified": true
+    },
+    {
+      "id": "sanity",
+      "name": "sanity",
+      "publisher": "Sanity",
+      "description": "Sanity content platform integration with MCP server, agent skills, and slash commands. Query and author content, build and optimize GROQ queries, design schemas, and set up Visual Editing.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/sanity-io/agent-toolkit.git",
+        "sha": "88d6cdfa7cb06c99edd5f376efa4dac21ae3f877"
+      },
+      "docs_url": "https://www.sanity.io",
       "verified": true
     },
     {
       "id": "security-guidance",
       "name": "security-guidance",
       "publisher": "Anthropic",
-      "description": "Security review for Claude-generated code. Pattern-based warnings on edits, LLM-powered diff review on Stop, and an agentic commit reviewer ",
+      "description": "Security review for Claude-generated code. Pattern-based warnings on edits, LLM-powered diff review on Stop, and an agentic commit reviewer that catches injection, XSS, SSRF, hardcoded secrets, and 25+ other vulnerability classes.",
       "category": "Security",
       "kind": "git",
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/anthropics/claude-plugins-official.git",
         "path": "plugins/security-guidance",
-        "ref": "main"
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
       },
-      "docs_url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/security-guidance",
       "verified": true
     },
     {
-      "id": "create-plugin",
-      "name": "Plugin creator (built in)",
-      "publisher": "Axon",
-      "description": "Scaffolds a new Axon plugin folder with a manifest and an example command.",
-      "category": "Authoring",
-      "kind": "builtin",
-      "source": {},
-      "docs_url": "",
+      "id": "semgrep",
+      "name": "semgrep",
+      "publisher": "semgrep",
+      "description": "Semgrep catches security vulnerabilities in real-time and guides Claude to write secure code from the start.",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/semgrep/mcp-marketplace.git",
+        "path": "plugin",
+        "sha": "b58f407c6ac0f5fe47dee8301602f2e290a8ecfb"
+      },
+      "docs_url": "https://github.com/semgrep/mcp-marketplace.git",
+      "verified": true
+    },
+    {
+      "id": "sentry-plugin",
+      "name": "sentry",
+      "publisher": "getsentry",
+      "description": "Sentry error monitoring integration. Access error reports, analyze stack traces, search issues by fingerprint, and debug production errors directly from your development environment.",
+      "category": "Monitoring",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/getsentry/plugin-claude.git",
+        "sha": "73e53541d7af21672e27428c7067f4264b8a3d65"
+      },
+      "docs_url": "https://github.com/getsentry/plugin-claude",
+      "verified": true
+    },
+    {
+      "id": "serena",
+      "name": "serena",
+      "publisher": "Anthropic",
+      "description": "Semantic code analysis MCP server providing intelligent code understanding, refactoring suggestions, and codebase navigation through language server protocol integration.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/serena",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/serena",
+      "verified": true
+    },
+    {
+      "id": "shopify-ai-toolkit",
+      "name": "shopify-ai-toolkit",
+      "publisher": "Shopify",
+      "description": "Shopify's AI Toolkit provides 18 development skills for building on the Shopify platform, covering documentation search, API schema access, GraphQL and Liquid code validation, Hydrogen storefronts, Polaris UI extensions, store management via CLI, and onboarding guidance for both developers and...",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Shopify/Shopify-AI-Toolkit.git",
+        "sha": "3c32168c6e4cb73f0b46243c82586176ca58bb48"
+      },
+      "docs_url": "https://shopify.dev",
+      "verified": true
+    },
+    {
+      "id": "skill-creator",
+      "name": "skill-creator",
+      "publisher": "Anthropic",
+      "description": "Create new skills, improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, update or optimize an existing skill, run evals to test a skill, or benchmark skill performance with variance analysis.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/skill-creator",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/skill-creator",
+      "verified": true
+    },
+    {
+      "id": "slack-plugin",
+      "name": "slack",
+      "publisher": "slackapi",
+      "description": "Slack workspace integration. Search messages, access channels, read threads, and stay connected with your team's communications while coding. Find relevant discussions and context quickly.",
+      "category": "Productivity",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/slackapi/slack-mcp-plugin.git",
+        "sha": "ad6be88096678812c448b0279390b4d25bce0164"
+      },
+      "docs_url": "https://github.com/slackapi/slack-mcp-plugin/tree/main",
+      "verified": true
+    },
+    {
+      "id": "sonarqube",
+      "name": "sonarqube",
+      "publisher": "SonarSource",
+      "description": "Automatically enforce SonarQube code quality and security in the agent coding loop — 7,000+ rules, secrets scanning, agentic analysis, and quality gates across 40+ languages. PostToolUse hooks run analysis after every file edit.",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/SonarSource/sonarqube-agent-plugins.git",
+        "sha": "5a9356d957db063e4d2cf87511b44cc1ba88dc99"
+      },
+      "docs_url": "https://www.sonarsource.com",
+      "verified": true
+    },
+    {
+      "id": "stripe-plugin",
+      "name": "stripe",
+      "publisher": "stripe",
+      "description": "Stripe development plugin for Claude",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/stripe/ai.git",
+        "path": "providers/claude/plugin",
+        "ref": "main",
+        "sha": "deae744bc0cbf6034b4b6f22f51c690b71a4e779"
+      },
+      "docs_url": "https://github.com/stripe/ai/tree/main/providers/claude/plugin",
+      "verified": true
+    },
+    {
+      "id": "supabase-plugin",
+      "name": "supabase",
+      "publisher": "supabase-community",
+      "description": "Supabase MCP integration for database operations, authentication, storage, and real-time subscriptions. Manage your Supabase projects, run SQL queries, and interact with your backend directly.",
+      "category": "Database",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/supabase-community/supabase-plugin.git",
+        "sha": "2c6d02d4565babe784103ee4d446a93ae9b24151"
+      },
+      "docs_url": "https://github.com/supabase-community/supabase-plugin",
+      "verified": true
+    },
+    {
+      "id": "superpowers",
+      "name": "superpowers",
+      "publisher": "obra",
+      "description": "Superpowers teaches Claude brainstorming, subagent driven development with built in code review, systematic debugging, and red/green TDD. Additionally, it teaches Claude how to author and test new skills.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/obra/superpowers.git",
+        "sha": "bb92a77741419a4ab5f06e711a283343f1ada0c3"
+      },
+      "docs_url": "https://github.com/obra/superpowers.git",
+      "verified": true
+    },
+    {
+      "id": "swift-lsp",
+      "name": "swift-lsp",
+      "publisher": "Anthropic",
+      "description": "Swift language server (SourceKit-LSP) for code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/swift-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/swift-lsp",
+      "verified": true
+    },
+    {
+      "id": "terraform",
+      "name": "terraform",
+      "publisher": "HashiCorp",
+      "description": "The Terraform MCP Server provides seamless integration with Terraform ecosystem, enabling advanced automation and interaction capabilities for Infrastructure as Code (IaC) development.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "external_plugins/terraform",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-public/tree/main/external_plugins/terraform",
+      "verified": true
+    },
+    {
+      "id": "twilio-developer-kit",
+      "name": "twilio-developer-kit",
+      "publisher": "Twilio",
+      "description": "Twilio Skills provide procedural knowledge for AI coding agents — which APIs to use, in what order, and what to avoid. Covers SMS, Voice, WhatsApp, Verify, SendGrid, Compliance, and 30+ products.",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/twilio/ai.git",
+        "sha": "803790a281f0ef11d2928ffb41bc8422237fb434"
+      },
+      "docs_url": "https://www.twilio.com",
+      "verified": true
+    },
+    {
+      "id": "typescript-lsp",
+      "name": "typescript-lsp",
+      "publisher": "Anthropic",
+      "description": "TypeScript/JavaScript language server for enhanced code intelligence",
+      "category": "Development",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/anthropics/claude-plugins-official.git",
+        "path": "plugins/typescript-lsp",
+        "ref": "main",
+        "sha": "0412be76f50ab4f4f8abff3753efa9269fbbca5b"
+      },
+      "docs_url": "https://github.com/anthropics/claude-plugins-official/tree/0412be76f50ab4f4f8abff3753efa9269fbbca5b/plugins/typescript-lsp",
+      "verified": true
+    },
+    {
+      "id": "vercel-plugin",
+      "name": "vercel",
+      "publisher": "vercel",
+      "description": "Vercel deployment platform integration. Manage deployments, check build status, access logs, configure domains, and control your frontend infrastructure directly from Claude Code.",
+      "category": "Deployment",
+      "kind": "git",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/vercel/vercel-plugin.git",
+        "sha": "882e66c2698689324c341b7bb8fd8beb92c27bf6"
+      },
+      "docs_url": "https://github.com/vercel/vercel-plugin",
+      "verified": true
+    },
+    {
+      "id": "workos",
+      "name": "workos",
+      "publisher": "WorkOS",
+      "description": "WorkOS integration skills for AuthKit, SSO, Directory Sync, RBAC, Vault, Audit Logs, migrations, and API references.",
+      "category": "Security",
+      "kind": "git",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/workos/skills.git",
+        "path": "plugins/workos",
+        "ref": "main",
+        "sha": "e25141bae047a7c837d93817347f95977598720f"
+      },
+      "docs_url": "https://workos.com",
       "verified": true
     }
   ]

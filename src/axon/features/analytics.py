@@ -109,6 +109,7 @@ class Period:
     label: str
     since: float | None      # epoch seconds (local midnight), None = all time
     days: int | None
+    until: float | None = None   # epoch seconds, exclusive: set by a custom date range, else None
 
 
 def _midnight(d: date) -> float:
@@ -119,6 +120,19 @@ def parse_period(token: str | None, today: date | None = None) -> Period | None:
     """'today' | '7d' | '30d' | 'all' | '<n>d' | '<n>' -> Period (None when not a period)."""
     t = (token or DEFAULT_PERIOD).strip().lower()
     today = today or date.today()
+    rng = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?:\.\.(\d{4}-\d{2}-\d{2}))?", t)
+    if rng:      # a custom range, "2026-10-01..2026-10-15" (or one day); both ends are included
+        try:
+            a = date.fromisoformat(rng.group(1))
+            b = date.fromisoformat(rng.group(2) or rng.group(1))
+        except ValueError:
+            return None
+        if b < a:
+            a, b = b, a
+        if (b - a).days >= 3650:
+            return None
+        label = f"{a.isoformat()}" if a == b else f"{a.isoformat()} to {b.isoformat()}"
+        return Period(f"{a.isoformat()}..{b.isoformat()}", label, _midnight(a), (b - a).days + 1, _midnight(b + timedelta(days=1)))
     if t in ("today", "1d", "day"):
         return Period("today", "today", _midnight(today), 1)
     if t in ("all", "ever", "all-time", "alltime"):
@@ -280,6 +294,7 @@ class Stats:
     sessions: list[SessionRow]
     latencies: list[float]
     generated_at: float = field(default_factory=time.time)
+    by_project: list[tuple[str, str, "Agg"]] = field(default_factory=list)   # (project key, name, usage), costliest first
 
     @property
     def empty(self) -> bool:
@@ -334,12 +349,12 @@ def _parse_ts(v: Any) -> float | None:
     return ts if 0 < ts < _MAX_TS else None
 
 
-def load_usage(since: float | None = None, project: str | None = None) -> list[UsageRec]:
+def load_usage(since: float | None = None, project: str | None = None, until: float | None = None) -> list[UsageRec]:
     """Records from ~/.axon/usage.jsonl, filtered by start time and project key."""
     out: list[UsageRec] = []
     for d in storage.read_jsonl(storage.user_file("usage.jsonl")):
         ts = _parse_ts(d.get("ts"))
-        if ts is None or (since is not None and ts < since):
+        if ts is None or (since is not None and ts < since) or (until is not None and ts >= until):
             continue
         proj = str(d.get("project") or "")
         if project and proj != project:
@@ -382,13 +397,13 @@ def _trace_files(project: str | None, since: float | None) -> list[tuple[str, Pa
     return out
 
 
-def load_traces(since: float | None = None, project: str | None = None) -> list[dict[str, Any]]:
+def load_traces(since: float | None = None, project: str | None = None, until: float | None = None) -> list[dict[str, Any]]:
     """Saved TurnTrace dicts (each tagged with ``_project`` and ``_session``)."""
     out: list[dict[str, Any]] = []
     for proj, path, sid in _trace_files(project, since):
         for rec in storage.read_jsonl(path):
             started = _float(rec.get("started_at"))
-            if since is not None and started and started < since:
+            if (since is not None and started and started < since) or (until is not None and started and started >= until):
                 continue
             rec["_project"], rec["_session"] = proj, sid
             out.append(rec)
@@ -455,6 +470,8 @@ class _Pricer:
 
 
 def _day_range(period: Period, recs: Sequence[UsageRec], today: date) -> list[date]:
+    if period.until is not None:      # a custom range ends on its last day, not today
+        today = min(today, datetime.fromtimestamp(period.until - 1).date())
     if period.since is not None and period.days:
         start = datetime.fromtimestamp(period.since).date()
     elif recs:
@@ -468,8 +485,8 @@ def _day_range(period: Period, recs: Sequence[UsageRec], today: date) -> list[da
 def collect(period: Period, project: str | None = None, scope: str = "", today: date | None = None) -> Stats:
     """Aggregate usage + traces for *period* (optionally one project key)."""
     today = today or date.today()
-    recs = load_usage(period.since, project)
-    traces = load_traces(period.since, project)
+    recs = load_usage(period.since, project, period.until)
+    traces = load_traces(period.since, project, period.until)
     pricer = _Pricer()
 
     totals = Agg()
@@ -477,10 +494,12 @@ def collect(period: Period, project: str | None = None, scope: str = "", today: 
     models: dict[str, Agg] = {}
     sources: dict[str, Agg] = {}
     sessions: dict[str, SessionRow] = {}
+    projects: dict[str, tuple[str, Agg]] = {}
     latencies: list[float] = []
     for r in recs:
         unc, listed = pricer.costs(r)
         totals.add(r, unc, listed)
+        projects.setdefault(r.project, (r.workspace, Agg()))[1].add(r, unc, listed)
         if r.day in days:
             days[r.day].add(r, unc, listed)
         models.setdefault(r.model, Agg()).add(r, unc, listed)
@@ -571,6 +590,7 @@ def collect(period: Period, project: str | None = None, scope: str = "", today: 
         tools=sorted(tools.values(), key=lambda a: (a.calls, a.total_s), reverse=True),
         turns=sorted((t for t in turns if t.cost > 0 or t.tokens > 0), key=lambda t: (t.cost, t.tokens), reverse=True),
         sessions=srows, latencies=latencies,
+        by_project=sorted(((k, _project_name(k, w), a) for k, (w, a) in projects.items()), key=lambda x: (x[2].cost, x[2].calls), reverse=True),
     )
 
 

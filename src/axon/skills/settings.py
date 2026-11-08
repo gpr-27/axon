@@ -91,6 +91,8 @@ def _write_overrides(path: Path, change: Any) -> None:
         data[SKILL_OVERRIDES] = overrides
     else:
         data.pop(SKILL_OVERRIDES, None)
+    from axon.hooks.manager import config_change
+    config_change(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 

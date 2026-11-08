@@ -3,6 +3,7 @@ Internal normalized data model and Provider Protocol.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator, Literal, Protocol
 
 # ─── Normalized Block Types ────────────────────────────────────────────────
@@ -25,14 +26,46 @@ class ToolUseBlock:
     parse_error: str | None = field(default=None, compare=False)
 
 @dataclass(frozen=True)
+class ImageRef:
+    """A picture a tool result carries, by reference: the file stays on disk and is only read (and
+    base64-encoded) when a request is built, so neither the history nor session.jsonl holds image bytes."""
+    path: str
+    media_type: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "media_type": self.media_type}
+
+
+@dataclass(frozen=True)
 class ToolResultBlock:
     tool_use_id: str
     content: str
     is_error: bool = False
+    images: tuple[ImageRef, ...] = ()
+
+
+MAX_TOOL_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def load_image_refs(refs: Any) -> list[tuple[str, str]]:
+    """[(media_type, base64)] for the readable referenced files; missing or oversized ones are skipped."""
+    import base64
+    out: list[tuple[str, str]] = []
+    for ref in refs or []:
+        if not isinstance(ref, dict) or not ref.get("path"):
+            continue
+        try:
+            p = Path(str(ref["path"]))
+            if p.stat().st_size > MAX_TOOL_IMAGE_BYTES:
+                continue
+            out.append((str(ref.get("media_type") or "image/png"), base64.b64encode(p.read_bytes()).decode("ascii")))
+        except OSError:
+            continue
+    return out
 
 Block = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock
 
-StopReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"]
+StopReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal", "model_context_window_exceeded"]
 
 @dataclass(frozen=True)
 class Usage:
@@ -61,6 +94,8 @@ class AssistantTurn:
     usage: Usage = field(default_factory=Usage)
     native: Any = None  # Provider-native payload replayed verbatim (ADR-003)
     model: str | None = None  # model that actually produced the turn (differs from settings.model after failover)
+    diagnostics: dict[str, Any] | None = None  # Claude API cache diagnostics, when the API returned them
+    stop_details: dict[str, Any] | None = None  # why the model stopped (refusal category / explanation), when given
 
     @property
     def tool_uses(self) -> list[ToolUseBlock]:
@@ -128,6 +163,7 @@ class ToolExecutionResult:
 class TurnComplete:
     stop_reason: StopReason
     usage: Usage
+    stop_details: dict[str, Any] | None = None   # refusal category / explanation / recommended_model, when the API gave them
 
 @dataclass(frozen=True)
 class LLMCallStart:

@@ -40,6 +40,7 @@ from axon.providers.base import (
     parse_tool_arguments,
 )
 from axon.providers.transport import (
+    note_rate_limits,
     azure_chat_url,
     backoff_delay,
     chat_completions_url,
@@ -102,7 +103,7 @@ def _strip_cache_control(content: Any) -> Any:
 
 
 def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = False,
-                             reasoning_passback: bool = False) -> list[dict[str, Any]]:
+                             reasoning_passback: bool = False, tool_images: bool = False) -> list[dict[str, Any]]:
     """
     Normalize a mixed Anthropic/OpenAI conversation into valid OpenAI chat messages:
     1. Unpack accidental nested message dicts; content is never None.
@@ -111,6 +112,9 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
     4. Every assistant tool_calls message is followed by one tool message per id (synthesized if missing).
     5. Orphaned tool messages and empty assistant turns are dropped; consecutive user turns are merged.
     6. strict=True strips non-standard fields (reasoning_content, cache_control) for picky servers.
+    8. A tool result's ``images`` (file references) become a user message with image_url parts right
+       after its tool messages when tool_images=True (Chat Completions tool messages are text only);
+       otherwise they are dropped and the tool's text stands alone. The key never reaches the wire.
     7. reasoning_passback=True (ignored when strict) gives every assistant tool_calls message a
        non-empty reasoning_content, as thinking-mode APIs (DeepSeek) reject the request otherwise.
     Input messages are never mutated.
@@ -165,7 +169,10 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
                             c_str = raw_c if isinstance(raw_c, str) else json.dumps(raw_c)
                         if b.get("is_error") and not c_str.startswith("Error"):
                             c_str = f"Error: {c_str}"
-                        cleaned.append({"role": "tool", "tool_call_id": b.get("tool_use_id", ""), "content": c_str})
+                        tool_msg: dict[str, Any] = {"role": "tool", "tool_call_id": b.get("tool_use_id", ""), "content": c_str}
+                        if b.get("images"):
+                            tool_msg["images"] = b["images"]
+                        cleaned.append(tool_msg)
                     elif isinstance(b, dict) and b.get("type") == "text":
                         user_texts.append(b.get("text", ""))
                 if user_texts:
@@ -202,16 +209,26 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
             sanitized.append(m)
             i += 1
             found_ids: set[str] = set()
+            picture_refs: list[Any] = []
             while i < len(cleaned) and cleaned[i].get("role") == "tool":
                 tm = cleaned[i]
                 tid = tm.get("tool_call_id")
                 if tid in expected_ids and tid not in found_ids:
+                    if "images" in tm:
+                        tm = dict(tm)
+                        picture_refs.extend(tm.pop("images") or [])
                     sanitized.append(tm)
                     found_ids.add(tid)
                 i += 1
             for tid in expected_ids:
                 if tid not in found_ids:
                     sanitized.append({"role": "tool", "tool_call_id": tid, "content": "[Tool execution completed or interrupted]"})
+            if tool_images and picture_refs:
+                from axon.providers.base import load_image_refs
+                parts: list[dict[str, Any]] = [{"type": "image_url", "image_url": {"url": f"data:{mt};base64,{b64}"}}
+                                               for mt, b64 in load_image_refs(picture_refs)]
+                if parts:
+                    sanitized.append({"role": "user", "content": [{"type": "text", "text": "Image(s) returned by the tool call(s) above:"}, *parts]})
         elif role == "tool":
             i += 1  # orphaned tool message
         elif role == "assistant" and not m.get("content") and not m.get("tool_calls"):
@@ -549,7 +566,8 @@ class OpenAICompatProvider:
         raw_messages.extend(messages)
         strict = self._strict()
         passback = not strict and ("reasoning_passback" in self._rejected(model) or needs_reasoning_passback(model, messages))
-        chat_messages = sanitize_openai_messages(raw_messages, strict=strict, reasoning_passback=passback)
+        chat_messages = sanitize_openai_messages(raw_messages, strict=strict, reasoning_passback=passback,
+                                                 tool_images=self.supports("tool_images") and not self._prompt_tools_mode())
 
         prompt_mode = self._prompt_tools_mode() and bool(tools)
         if prompt_mode:
@@ -678,6 +696,7 @@ class OpenAICompatProvider:
                     status = int(getattr(resp, "status_code", 0) or 0)
                     outcome.status = status
                     outcome.headers = getattr(resp, "headers", None)
+                    note_rate_limits(outcome.headers, self.name)
                     if 200 <= status < 300:
                         parser = self._parse_responses if responses else self._parse_chat
                         for ev in parser(resp, state, acc, stop, thinking, outcome):
@@ -992,7 +1011,10 @@ class OpenAICompatProvider:
             content = r.content
             if r.is_error and not content.startswith("Error"):
                 content = f"Error: {content}"
-            out.append({"role": "tool", "tool_call_id": r.tool_use_id, "content": content})
+            msg: dict[str, Any] = {"role": "tool", "tool_call_id": r.tool_use_id, "content": content}
+            if r.images:
+                msg["images"] = [i.to_dict() for i in r.images]   # by reference; see sanitize_openai_messages
+            out.append(msg)
         return out
 
     def supports(self, feature: str) -> bool:
@@ -1002,6 +1024,9 @@ class OpenAICompatProvider:
             return True
         if feature == "responses_api":
             return not self._azure
+        if feature == "tool_images":
+            # Only endpoints known to take image_url parts; everything else keeps the text-only result.
+            return getattr(self._preset, "id", "") in ("openai", "gemini")
         return False
 
 

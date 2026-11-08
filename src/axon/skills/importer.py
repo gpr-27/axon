@@ -1,5 +1,7 @@
 """
-Safe skill importer: installs a SKILL.md from a GitHub repository.
+Safe skill importer: installs a whole skill folder (SKILL.md, scripts/, references/, assets/) from a
+GitHub repository as one tarball (see :mod:`axon.skills.bundle` for the path, symlink and size checks).
+A source that names a single ``.md`` file installs just that file.
 
 Safety checks:
 - only github.com / raw.githubusercontent.com sources (also after redirects);
@@ -16,6 +18,7 @@ import re
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 MAX_SKILL_BYTES = 500_000
@@ -109,6 +112,90 @@ def _download(url: str) -> str:
     return text
 
 
+TAR_HOSTS = {"codeload.github.com", "github.com"}
+
+
+def _download_bytes(url: str, limit: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Axon-Skill-Importer/4.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - host validated below
+        final_host = (urlparse(resp.geturl()).hostname or "").lower()
+        if final_host not in TAR_HOSTS:
+            raise ValueError(f"Redirected to untrusted host {final_host}")
+        data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"download is larger than {limit // 1_000_000} MB")
+    return data
+
+
+def tarball_url(owner: str, repo: str, ref: str) -> str:
+    return f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}"
+
+
+def fetch_skill_bundle(url_or_repo: str, sha: str = "", fetch: "Callable[[str], bytes] | None" = None):
+    """Download the whole skill folder of a GitHub source into memory (nothing is written or run).
+    ``sha`` pins the commit; ``fetch(url) -> bytes`` replaces the network (tests)."""
+    from axon.skills import bundle as bundle_mod
+    owner, repo, ref, subpath = parse_github_skill_url(url_or_repo)
+    if subpath.lower().endswith(".md"):
+        subpath = str(Path(subpath).parent) if "/" in subpath else ""
+    if sha:
+        if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+            raise ValueError(f"Invalid commit sha: {sha!r}")
+        ref = sha
+    getter = fetch or (lambda u: _download_bytes(u, bundle_mod.MAX_ARCHIVE_BYTES))
+    explicit = "tree" in url_or_repo or "blob" in url_or_repo
+    try:
+        data = getter(tarball_url(owner, repo, ref))
+    except ValueError:
+        raise
+    except Exception as e:
+        if ref == "main" and not explicit and not sha:
+            try:
+                data = getter(tarball_url(owner, repo, "master"))
+            except Exception:
+                raise ConnectionError(f"Could not download {owner}/{repo}: {e}") from e
+        else:
+            raise ConnectionError(f"Could not download {owner}/{repo}@{ref}: {e}") from e
+    try:
+        bundle = bundle_mod.read_tarball(data, subpath, url_or_repo)
+    except bundle_mod.BundleError as e:
+        raise ValueError(f"Skill rejected: {e}") from e
+    if sha and bundle.commit and not bundle.commit.startswith(sha.lower()) and not sha.lower().startswith(bundle.commit):
+        raise ValueError(f"Skill rejected: archive is commit {bundle.commit[:12]}, expected {sha[:12]}")
+    if not bundle.commit and re.fullmatch(r"[0-9a-fA-F]{40}", sha or ""):
+        bundle.commit = sha.lower()
+    return bundle
+
+
+def bundle_skill_name(bundle, fallback: str) -> str:
+    from axon.skills.manager import parse_frontmatter
+    fm, _ = parse_frontmatter(bundle.skill_md)
+    name = fm.get("name") if isinstance(fm.get("name"), str) and fm["name"].strip() else fallback
+    return sanitize_skill_name(str(name)) or "imported-skill"
+
+
+def import_skill_bundle(bundle, workspace: Path, *, target_root: Path | None = None, overwrite: bool = False,
+                        fallback_name: str = "") -> ImportedSkill:
+    """Write an already-fetched (and already reviewed) bundle to ``target_root/<name>/``."""
+    from axon.skills.bundle import write_bundle
+    from axon.skills.manager import parse_frontmatter
+    fm, body = parse_frontmatter(bundle.skill_md)
+    if not body.strip() and not fm:
+        raise ValueError("Downloaded SKILL.md is empty")
+    try:
+        owner_repo = "/".join(parse_github_skill_url(bundle.source)[:2]) if bundle.source else "skill"
+    except ValueError:                      # a local folder from a marketplace you added
+        owner_repo = "local"
+    name = bundle_skill_name(bundle, sanitize_skill_name(fallback_name) or f"{owner_repo.split('/')[-1]}-skill")
+    root = target_root or (Path(workspace) / ".axon" / "skills")
+    write_bundle(bundle, root / name, overwrite=overwrite)
+    from axon.session.library import record_saved
+    record_saved(root / name / "SKILL.md", action="imported", source=f"import {owner_repo}", workspace=workspace)
+    desc = fm.get("description") if isinstance(fm.get("description"), str) else ""
+    return ImportedSkill(name=name, description=str(desc or f"Imported from {owner_repo}"),
+                         instructions=bundle.skill_md, target_path=root / name / "SKILL.md")
+
+
 def sanitize_skill_name(name: str) -> str:
     clean = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-_").lower()
     return clean[:64]
@@ -148,7 +235,18 @@ def fetch_skill_text(url_or_repo: str) -> str:
 
 def import_skill_from_url(url_or_repo: str, workspace: Path, *, target_root: Path | None = None,
                           overwrite: bool = False) -> ImportedSkill:
-    """Fetch a SKILL.md and install it into ``target_root`` (default <ws>/.axon/skills)."""
+    """Fetch a skill and install it into ``target_root`` (default <ws>/.axon/skills): the whole folder for a
+    folder source, only the file for a source that names a ``.md`` file."""
+    if not parse_github_skill_url(url_or_repo)[3].lower().endswith(".md"):
+        bundle = fetch_skill_bundle(url_or_repo)
+        imported = import_skill_bundle(bundle, workspace, target_root=target_root, overwrite=overwrite,
+                                       fallback_name=skill_raw_location(url_or_repo)[1])
+        try:
+            from axon.marketplace.skill_tools import write_origin
+            write_origin(imported.target_path.parent, url_or_repo, bundle.skill_md, bundle)
+        except Exception:  # noqa: BLE001 - the origin note is a convenience
+            pass
+        return imported
     raw_url, skill_name, owner, repo = skill_raw_location(url_or_repo)
     ref = parse_github_skill_url(url_or_repo)[2]
     try:

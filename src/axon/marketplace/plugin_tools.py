@@ -34,8 +34,9 @@ def create_new_plugin(name: str, workspace: Path, scope: str = "user") -> Path:
     return folder
 
 
-def install_plugin(entry: PluginEntry, workspace: Path, scope: str = "user") -> Path:
-    """Fetch the plugin from its git source, copy it into the plugins folder and enable it."""
+def install_plugin(entry: PluginEntry, workspace: Path, scope: str = "user", review=None) -> Path:
+    """Fetch the plugin from its git source, copy it into the plugins folder and enable it.
+    ``review(lines) -> bool`` sees what the plugin would run (hooks, MCP commands) before it is copied in."""
     root = plugin_market.install_root(workspace, "user" if scope == "user" else "project")
     destination = root / entry.name
     if destination.exists():
@@ -45,10 +46,18 @@ def install_plugin(entry: PluginEntry, workspace: Path, scope: str = "user") -> 
     try:
         source_dir = _fetch(entry, work)
         _check_safe(source_dir)
+        commit = plugin_market.read_commit(work)
+        lines = plugin_market.install_review_lines(entry.id, plugin_market.plugin_runs(source_dir, workspace, entry.name), commit)
+        if review is not None and not review(lines):
+            raise PluginInstallError("installation cancelled; nothing was installed")
+        from axon.hooks import trust
+        was_ok = scope != "user" and trust.status(workspace) in ("none", "trusted")
         shutil.copytree(source_dir, destination)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    _write_install_record(entry, destination, scope)
+    _write_install_record(entry, destination, scope, commit)
+    if was_ok:
+        trust.trust(workspace)
     try:
         plugin_core.set_enabled_in_settings(workspace, f"{entry.name}@{MARKETPLACE_NAME}", True, scope)
     except ValueError as e:  # settings.json cannot be updated: leave nothing half-installed
@@ -72,9 +81,10 @@ def _check_safe(source_dir: Path) -> None:
             raise PluginInstallError("Plugin rejected: " + error)
 
 
-def _write_install_record(entry: PluginEntry, destination: Path, scope: str) -> None:
+def _write_install_record(entry: PluginEntry, destination: Path, scope: str, commit: str = "") -> None:
     record = {"name": entry.name, "marketplace": MARKETPLACE_NAME, "scope": scope,
-              "source": entry.source, "installed_at": int(time.time())}
+              "source": entry.source, "installed_at": int(time.time()), "commit": commit,
+              "content_hash": plugin_market.content_hash(destination)}
     text = json.dumps(record, indent=2) + "\n"
     (destination / plugin_core.INSTALL_RECORD).write_text(text, encoding="utf-8")
 

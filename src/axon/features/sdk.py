@@ -104,7 +104,7 @@ _TYPE_NAMES = {
     "LLMRequestInfo": "llm_request", "LLMCallEnd": "llm_call_end", "ToolExecutionStart": "tool_use",
     "ToolExecutionResult": "tool_result", "ToolBatchStart": "tool_batch", "ToolTiming": "tool_timing",
     "PermissionDecisionEvent": "permission", "HookEvent": "hook", "RetryEvent": "retry",
-    "ProviderRetry": "retry", "CompactionEvent": "compaction", "SubagentEvent": "subagent",
+    "ProviderRetry": "retry", "CompactionEvent": "compaction", "LargeInputEvent": "large_input", "SubagentEvent": "subagent",
     "ToolRationale": "tool_rationale", "CacheStatus": "cache_status", "BudgetEvent": "budget",
     "MemoryLoadedEvent": "memory_loaded",
 }

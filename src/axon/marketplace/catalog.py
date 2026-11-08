@@ -74,6 +74,7 @@ class SkillEntry:
     license: str = ""
     verified: bool = False
     note: str = ""
+    sha: str = ""             # commit the entry is pinned to (checked when it was added)
 
 
 @dataclass
@@ -88,6 +89,11 @@ class PluginEntry:
     source: dict[str, Any] = field(default_factory=dict)
     docs_url: str = ""
     verified: bool = False
+
+    @property
+    def pinned_sha(self) -> str:
+        """Commit the entry is pinned to (``source.sha``), '' when it follows a branch."""
+        return str(self.source.get("sha") or "") if isinstance(self.source, dict) else ""
 
 
 # ─── Validation ──────────────────────────────────────────────────────────────
@@ -149,6 +155,9 @@ def skill_problems(raw: dict[str, Any]) -> list[str]:
         problems.append("kind must be 'github' or 'builtin'")
     if raw.get("kind") == "github" and not raw.get("source"):
         problems.append("github skill needs a 'source'")
+    sha = raw.get("sha")
+    if sha is not None and not (isinstance(sha, str) and len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)):
+        problems.append("sha must be a full 40-character lowercase commit id")
     if raw.get("docs_url"):
         problems.append(_url_problem(raw["docs_url"], "docs_url", must_be_https=True))
     return [p for p in problems if p]
@@ -160,10 +169,15 @@ def plugin_problems(raw: dict[str, Any]) -> list[str]:
         problems.append("kind must be 'git' or 'builtin'")
     if raw.get("kind") == "git":
         source = raw.get("source")
-        if not isinstance(source, dict) or not source.get("url") or not source.get("path"):
-            problems.append("git plugin needs source.url and source.path")
+        if not isinstance(source, dict) or not source.get("url"):
+            problems.append("git plugin needs source.url")
         else:
             problems.append(_url_problem(source["url"], "source.url", must_be_https=True))
+            if source.get("source") == "git-subdir" and not source.get("path"):
+                problems.append("git-subdir plugin needs source.path")
+            sha = source.get("sha")
+            if sha is not None and not (isinstance(sha, str) and len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)):
+                problems.append("source.sha must be a full 40-character lowercase commit id")
     if raw.get("docs_url"):
         problems.append(_url_problem(raw["docs_url"], "docs_url", must_be_https=True))
     return [p for p in problems if p]

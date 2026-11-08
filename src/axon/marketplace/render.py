@@ -31,6 +31,8 @@ class Row:
     type_label: str = ""       # "Web" / "Local" for connectors
     status: str = ""           # shown in the Yours table
     note: str = ""
+    update: bool = False       # installed, and the catalog pins a different version
+    tokens: int | None = None  # prompt tokens per turn (skills: the listing line the model sees every turn)
 
 
 def unicode_ok() -> bool:
@@ -77,6 +79,10 @@ def card_lines(row: Row, width: int) -> list[str]:
     if row.type_label:
         facts.append(row.type_label)
     facts.append("free" if row.free else "account or paid plan needed")
+    if row.tokens is not None:
+        facts.append(f"~{row.tokens} tokens/turn")
+    if row.update:
+        facts.append("update available")
     lines.append(f"      {SLATE}{' · '.join(facts)}{RST}")
     return lines
 
@@ -150,6 +156,10 @@ def info_lines(row: Row, extra: list[tuple[str, str]], width: int | None = None)
     if row.type_label:
         facts.append(("type", row.type_label))
     facts.append(("installed", "yes" if row.installed else "no"))
+    if row.update:
+        facts.append(("update", "available: /marketplace update " + row.id))
+    if row.tokens is not None:
+        facts.append(("cost", f"~{row.tokens} tokens in every prompt while installed (more when the skill is loaded)"))
     facts.extend(extra)
     for label, value in facts:
         if value:

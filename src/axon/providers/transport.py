@@ -198,6 +198,15 @@ def _header(headers: Any, name: str) -> str | None:
     return val if isinstance(val, str) else None
 
 
+def note_rate_limits(headers: Any, provider: str = "") -> None:
+    """Pass a response's rate-limit headers to the usage screen. Accounting must never break a request."""
+    try:
+        from axon.features.quota import record_rate_limits
+        record_rate_limits(headers, provider=provider)
+    except Exception:
+        pass
+
+
 def parse_retry_after(headers: Any) -> float | None:
     """Seconds to wait according to retry-after-ms / retry-after (seconds or HTTP-date)."""
     ms = _header(headers, "retry-after-ms")

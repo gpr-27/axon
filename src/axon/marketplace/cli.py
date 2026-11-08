@@ -3,11 +3,13 @@ The ``/marketplace`` command (also ``axon marketplace``): browse, install and cr
 skills and plugins.
 
     marketplace list [connectors|skills|plugins] [--installed|--discover] [--free] [--category C] [--json]
-    marketplace search <words> [--tab T] [--free] [--category C]
+    marketplace search <words> [--tab T] [--free] [--category C] [--sort name|category|installed|tokens|updates]
     marketplace info <id>            marketplace categories [tab]
     marketplace install <id> [--scope user|project|local] [--env NAME=VALUE] [--keep] [--no-check] [--timeout S]
     marketplace remove <id>          marketplace enable <id>      marketplace disable <id>
     marketplace add <url|command> --name N [--transport http|sse]    (custom connector)
+    marketplace add <git url|owner/repo|path>     add your own marketplace: plugins and/or skill folders
+    marketplace sources | refresh [name] | remove-source <name>    the marketplaces you added
     marketplace create-skill [--name N --description D --trigger T --instructions TEXT]
     marketplace create-plugin <name> [--scope user|project]
 
@@ -46,8 +48,9 @@ from axon.marketplace.render import (
 
 VALUE_OPTIONS = {
     "scope", "tab", "category", "env", "timeout", "name", "transport", "description",
-    "trigger", "instructions", "instructions-file", "script", "unset", "from",
+    "trigger", "instructions", "instructions-file", "script", "unset", "from", "sort",
 }
+SORTS = ("name", "category", "installed", "tokens", "updates")
 TAB_ALIASES = {
     "connector": "connectors", "connectors": "connectors", "mcp": "connectors",
     "skill": "skills", "skills": "skills",
@@ -151,14 +154,21 @@ class Marketplace:
         return self.outcome
 
     def entries(self, tab: str) -> list[Any]:
-        return catalog.load_tab(tab, self.data_dir)
+        """The built-in catalog plus the skills and plugins of marketplaces you added."""
+        built_in = catalog.load_tab(tab, self.data_dir)
+        if tab == "connectors":
+            return built_in
+        from axon.marketplace import sources
+        return built_in + sources.user_entries(tab, {e.id for e in built_in})
 
     def installed_ids(self, tab: str) -> set[str]:
         if tab == "connectors":
             return set(self.connector_specs())
         if tab == "skills":
             return set(skill_tools.installed_skills(self.workspace))
-        return set(plugin_tools.installed_plugins(self.workspace))
+        names = set(plugin_tools.installed_plugins(self.workspace))
+        # a catalog plugin whose id would clash with a connector (github, slack...) is listed as "<id>-plugin"
+        return names | {f"{n}-plugin" for n in names}
 
     def connector_specs(self) -> dict[str, Any]:
         specs = installer.installed_names(self.workspace)
@@ -180,6 +190,7 @@ class Marketplace:
             "remove": self.cmd_remove, "uninstall": self.cmd_remove, "rm": self.cmd_remove,
             "enable": self.cmd_enable, "disable": self.cmd_disable, "add": self.cmd_add_custom,
             "create-skill": self.cmd_create_skill, "create-plugin": self.cmd_create_plugin,
+            "sources": self.cmd_sources, "remove-source": self.cmd_remove_source, "refresh": self.cmd_refresh_source,
             "help": self.cmd_help,
         }
         handler = handlers.get(verb)
@@ -206,10 +217,35 @@ class Marketplace:
         row = Row(id=entry.id, name=entry.name, publisher=entry.publisher, description=entry.description,
                   category=entry.category, verified=entry.verified, installed=installed,
                   free=getattr(entry, "free", True))
+        if tab == "skills" and entry.kind == "github":
+            row.tokens = self.skill_tokens().get(entry.id)
+            if row.tokens is None:
+                row.tokens = skill_tools.listing_tokens(entry.id, entry.description)
+            row.update = installed and self.skill_has_update(entry)
+        elif tab == "plugins" and installed:
+            row.update = self.plugin_has_update(entry)
         if tab == "connectors":
             row.type_label = entry.type_label
             row.note = entry.free_note
         return row
+
+    def skill_tokens(self) -> dict[str, int]:
+        if not hasattr(self, "_skill_tokens"):
+            self._skill_tokens = skill_tools.installed_listing_tokens(self.workspace)
+        return self._skill_tokens
+
+    def skill_has_update(self, entry: Any) -> bool:
+        found = skill_tools.installed_skills(self.workspace).get(entry.id)
+        if found is None or not entry.sha:
+            return False
+        commit = str(skill_tools.read_origin(found[1].parent).get("commit") or "")
+        return bool(commit) and not commit.startswith(entry.sha[:12])
+
+    def plugin_has_update(self, entry: Any) -> bool:
+        plugin = plugin_tools.installed_plugins(self.workspace).get(entry.name)
+        sha = getattr(entry, "pinned_sha", "")
+        commit = str((plugin.record if plugin else {}).get("commit") or "")
+        return bool(sha and commit and not commit.startswith(sha[:12]))
 
     def yours_rows(self, tab: str) -> list[Row]:
         if tab == "connectors":
@@ -269,6 +305,10 @@ class Marketplace:
         state = True if wants_yours else (False if wants_new else None)
         shown = catalog.filter_entries(entries, query, args.option("category"), "free" in args.flags,
                                        installed, state)
+        sort = args.option("sort", "name").lower()
+        if sort not in SORTS:
+            return self.fail(f"--sort must be one of: {', '.join(SORTS)}")
+        shown = self.sorted_entries(tab, shown, sort, installed)
         if "json" in args.flags:
             self.say(json.dumps([dataclasses.asdict(e) for e in shown], indent=2))
             return self.outcome
@@ -277,6 +317,22 @@ class Marketplace:
         else:
             self.say(discover_lines(tab, self.rows_for(tab, shown), len(entries), hint=not self.can_ask()))
         return self.outcome
+
+    def sorted_entries(self, tab: str, entries: list[Any], sort: str, installed: set[str]) -> list[Any]:
+        """name (default), category, installed first, cheapest tokens first, or updates first."""
+        def name_key(e: Any) -> str:
+            return e.name.lower()
+        if sort == "category":
+            return sorted(entries, key=lambda e: (e.category.lower(), name_key(e)))
+        if sort == "installed":
+            return sorted(entries, key=lambda e: (e.id not in installed, name_key(e)))
+        if sort == "updates":
+            flags = {e.id: self._row(tab, e, e.id in installed).update for e in entries}
+            return sorted(entries, key=lambda e: (not flags[e.id], name_key(e)))
+        if sort == "tokens":
+            cost = {e.id: self._row(tab, e, e.id in installed).tokens for e in entries}
+            return sorted(entries, key=lambda e: (cost[e.id] is None, cost[e.id] or 0, name_key(e)))
+        return sorted(entries, key=name_key)
 
     def _filter_yours(self, tab: str, shown: list[Any]) -> list[Row]:
         wanted = {entry.id for entry in shown}
@@ -410,25 +466,116 @@ class Marketplace:
         if entry.kind == "builtin":
             return self.cmd_create_skill(args, [])
         try:
-            path = skill_tools.install_skill(entry, self.workspace, args.option("scope", "user"), "force" in args.flags)
+            bundle = skill_tools.fetch_skill(entry)
+        except Exception as e:  # noqa: BLE001 - network and parse errors become one clear line
+            return self.fail(f"could not download skill '{entry.id}': {e}")
+        pin = bundle.commit[:10] if bundle.commit else "unpinned"
+        self.say(f"  {entry.name} from {entry.source} ({pin}): {len(bundle.files)} file(s), "
+                 f"{bundle.total_bytes() // 1000} KB")
+        self.say(bundle.listing())
+        scripts = bundle.executables()
+        if scripts:
+            self.say(f"  {len(scripts)} file(s) are executable scripts. Axon never runs them by itself; the skill's "
+                     "instructions may ask the model to, and each run goes through your permission prompts.")
+        if self.can_ask() and "yes" not in args.flags and not self.confirm("Install this skill?"):
+            self.say("  Cancelled. Nothing was installed.")
+            return self.outcome
+        try:
+            path = skill_tools.install_skill(entry, self.workspace, args.option("scope", "user"),
+                                             "force" in args.flags, bundle=bundle)
         except FileExistsError as e:
             self.say(f"  Already installed: {e}")
             return self.outcome
-        except Exception as e:  # noqa: BLE001 - network and parse errors become one clear line
+        except Exception as e:  # noqa: BLE001
             return self.fail(f"could not install skill '{entry.id}': {e}")
-        self.say(f"  OK: Installed skill '{entry.id}' at {path}. {entry.note}".rstrip())
+        self.say(f"  OK: Installed skill '{entry.id}' at {path.parent} ({len(bundle.files)} files). {entry.note}".rstrip())
         return self.outcome
+
+    def confirm(self, question: str) -> bool:
+        if self.ask_line is None:
+            return True
+        return self.ask_line(f"  {question} [y/N]: ").strip().lower() in ("y", "yes")
 
     def install_plugin(self, entry: PluginEntry, args: Args) -> Outcome:
         if entry.kind == "builtin":
             return self.cmd_create_plugin(args, [])
+        if entry.kind == "marketplace":
+            return self.install_from_added_marketplace(entry, args)
         try:
-            path = plugin_tools.install_plugin(entry, self.workspace, args.option("scope", "user"))
+            def review(lines: list[str]) -> bool:
+                self.say(lines)
+                return "yes" in args.flags or not self.can_ask() or self.confirm("Install and enable it?")
+            path = plugin_tools.install_plugin(entry, self.workspace, args.option("scope", "user"), review)
         except plugin_tools.PluginInstallError as e:
             return self.fail(str(e))
         except Exception as e:  # noqa: BLE001
             return self.fail(f"could not install plugin '{entry.id}': {e}")
         self.say(f"  OK: Installed plugin '{entry.id}' at {path}. Run /reload-plugins to load it.")
+        return self.outcome
+
+    def install_from_added_marketplace(self, entry: PluginEntry, args: Args) -> Outcome:
+        from axon.commands import marketplace as plugin_market
+        spec = f"{entry.name}@{entry.source.get('marketplace')}"
+
+        def review(lines: list[str]) -> bool:
+            self.say(lines)
+            return "yes" in args.flags or not self.can_ask() or self.confirm("Install and enable it?")
+        try:
+            plugin, deps = plugin_market.install(spec, self.workspace, args.option("scope", "user"), review=review)
+        except plugin_market.MarketplaceError as e:
+            return self.fail(str(e))
+        self.say(f"  OK: Installed plugin '{plugin.name}' at {plugin.path}. Run /reload-plugins to load it.")
+        return self.outcome
+
+    # ── marketplaces you add ─────────────────────────────────────────────────
+    def cmd_add_source(self, args: Args, rest: list[str]) -> Outcome:
+        """``/marketplace add <git url | owner/repo | path | marketplace.json URL>``: a plugin marketplace or a
+        folder / repository of skills. Nothing is installed; its entries appear in list, search and install."""
+        from axon.commands import marketplace as plugin_market
+        from axon.marketplace import sources
+        target = " ".join(rest)
+        try:
+            name, state = plugin_market.add_marketplace(target)
+        except plugin_market.MarketplaceError as e:
+            return self.fail(str(e))
+        skills = len([e for e in sources.user_skill_entries() if e.publisher == name])
+        plugins = 0 if state.get("skillsOnly") else len(plugin_market.marketplace_plugins(name))
+        self.say(f"  OK: Added marketplace '{name}': {plugins} plugin(s), {skills} skill(s). "
+                 f"It is not trusted like the built-in catalog (no verified mark): review what you install. "
+                 f"Browse: /marketplace list skills --category Custom")
+        return self.outcome
+
+    def cmd_sources(self, args: Args, rest: list[str]) -> Outcome:
+        from axon.commands import marketplace as plugin_market
+        rows = plugin_market.list_marketplaces()
+        if not rows:
+            self.say("  No marketplaces added. /marketplace add <git url | owner/repo | path>")
+        for name, state in rows:
+            where = state.get("path") or state.get("url") or state.get("repo") or ""
+            kind = "skills only" if state.get("skillsOnly") else "plugins"
+            self.say(f"  {name}  ({state.get('kind')}, {kind})  {where}")
+        return self.outcome
+
+    def cmd_remove_source(self, args: Args, rest: list[str]) -> Outcome:
+        from axon.commands import marketplace as plugin_market
+        if not rest:
+            return self.fail("usage: /marketplace remove-source <name>")
+        try:
+            removed = plugin_market.remove_marketplace(rest[0], self.workspace)
+        except plugin_market.MarketplaceError as e:
+            return self.fail(str(e))
+        self.say(f"  OK: Removed marketplace '{rest[0]}'" + (f" and its plugins: {', '.join(removed)}" if removed else "."))
+        return self.outcome
+
+    def cmd_refresh_source(self, args: Args, rest: list[str]) -> Outcome:
+        from axon.commands import marketplace as plugin_market
+        names = rest or [n for n, _ in plugin_market.list_marketplaces()]
+        for name in names:
+            try:
+                count = plugin_market.update_marketplace(name)
+            except plugin_market.MarketplaceError as e:
+                return self.fail(str(e))
+            self.say(f"  OK: refreshed '{name}' ({count} plugin(s)).")
         return self.outcome
 
     # ── remove / enable / disable ────────────────────────────────────────────
@@ -481,6 +628,8 @@ class Marketplace:
                 self.outcome.reconnect.append(name)
             return self.report_simple(result.ok, result.message)
         if tab == "plugins":
+            if enabled and not self.review_plugin_enable(name, args):
+                return self.outcome
             done = plugin_tools.set_plugin_enabled(name, self.workspace, enabled)
             return self.report_simple(done, f"{'Enabled' if enabled else 'Disabled'} plugin '{name}'.")
         if tab == "skills":
@@ -489,11 +638,29 @@ class Marketplace:
             return self.report_simple(result.ok, result.message)
         return self.fail(f"'{name}' is not installed.")
 
+    def review_plugin_enable(self, name: str, args: Args) -> bool:
+        """Before a plugin is switched on: list the hooks and MCP commands it runs."""
+        from axon.commands import marketplace as plugin_market
+        plugin = plugin_tools.installed_plugins(self.workspace).get(name)
+        if plugin is None or plugin.enabled:
+            return True
+        self.say(plugin_market.install_review_lines(plugin.id, plugin_market.plugin_runs(plugin.path, self.workspace, name),
+                                                    str(plugin.record.get("commit") or "")))
+        if self.can_ask() and "yes" not in args.flags and not self.confirm("Enable it?"):
+            self.say("  Not enabled.")
+            return False
+        return True
+
     # ── custom connector ─────────────────────────────────────────────────────
     def cmd_add_custom(self, args: Args, rest: list[str]) -> Outcome:
         if not rest:
-            return self.fail("usage: /marketplace add <https://url | command args...> --name <name>")
+            return self.fail("usage: /marketplace add <https://url | command args...> --name <name>  (a connector)\n"
+                             "       /marketplace add <git url | owner/repo | path> [--marketplace]  (plugins and skills)")
         target = " ".join(rest)
+        from axon.marketplace import sources
+        if "marketplace" in args.flags or "source" in args.flags or (
+                "connector" not in args.flags and sources.looks_like_source(target)):
+            return self.cmd_add_source(args, rest)
         name = args.option("name") or catalog_name_from(target)
         try:
             entry = installer.custom_connector(name, target, args.option("transport"))

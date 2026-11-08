@@ -298,13 +298,48 @@ def cmd_update(shop: "Marketplace", args: "Args", rest: list[str]) -> "Outcome":
         return shop.outcome
     tab = shop.installed_tab(args, name)
     if tab == "skills":
+        declined = review_skill_update(shop, name, args)
+        if declined is not None:
+            return declined
         return apply_update(shop, lambda: updates.apply_skill_update(shop.workspace, name))
     if tab == "plugins":
-        return apply_update(shop, lambda: updates.apply_plugin_update(shop.workspace, name))
+        def review(info) -> bool:
+            shop.say(info.lines)
+            if info.runs_changed:
+                shop.say("  This update changes what the plugin runs (see above).")
+            if "yes" in args.flags:
+                return True
+            if not shop.can_ask():
+                shop.say("  Not applied: run again with --yes to apply it without a prompt.")
+                return False
+            return shop.confirm("Apply this update?")
+        return apply_update(shop, lambda: updates.apply_plugin_update(shop.workspace, name, review))
     if tab == "connectors":
         return shop.fail("Connectors are never updated automatically. See /marketplace updates, "
                          "then remove and install the connector again.")
     return shop.fail(f"'{name}' is not installed.")
+
+
+def review_skill_update(shop: "Marketplace", name: str, args: "Args") -> "Outcome | None":
+    """Show what an update to a skill folder changes and ask. None means: go ahead."""
+    try:
+        pending = updates.preview_skill_update(shop.workspace, name)
+    except Exception as e:  # noqa: BLE001 - network, parse or safety errors become one clear line
+        return shop.fail(str(e))
+    if pending is None:
+        return None
+    shop.say(pending.lines)
+    if pending.scripts_changed:
+        shop.say("  This update adds or changes executable scripts.")
+    if shop.can_ask() and "yes" not in args.flags and not shop.confirm("Apply this update?"):
+        updates._PENDING_SKILLS.pop(name, None)
+        shop.say("  Cancelled. Nothing was changed.")
+        return shop.outcome
+    if not shop.can_ask() and "yes" not in args.flags:
+        updates._PENDING_SKILLS.pop(name, None)
+        shop.say("  Not applied: run again with --yes to apply it without a prompt.")
+        return shop.outcome
+    return None
 
 
 def apply_update(shop: "Marketplace", action: Callable[[], str]) -> "Outcome":
