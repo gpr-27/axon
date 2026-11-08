@@ -1013,6 +1013,33 @@ class MarkdownStream:
             rows.extend(self._close_fence())
         return self._join(rows)
 
+    def preview(self) -> str:
+        """The unfinished line as one display row, for the live area: never part of the printed output, so
+        the row that replaces it can differ. Empty when nothing is pending or the syntax is still ambiguous."""
+        partial = self._partial
+        stripped = partial.lstrip()
+        if not stripped or self._table or self._math is not None or stripped.startswith(("|", "```", "~~~", "$$")):
+            return ""
+        base = " " * self.indent
+        if self._fence is not None:
+            return self._fit_preview(base, partial, self.width - self.indent)
+        if stripped.startswith(("#", ">")):
+            return self._fit_preview(base, stripped, self.width - self.indent)
+        layout = self._para or self._para_layout(partial)
+        first_prefix, cont_prefix, avail, offset = layout
+        return self._fit_preview(first_prefix if not self._para_rows else cont_prefix, partial[offset:], avail)
+
+    @staticmethod
+    def _fit_preview(prefix: str, text: str, room: int) -> str:
+        """*prefix* and *text* within *room* columns: the newest words stay visible when it is too long."""
+        text = text.lstrip()
+        if display_width(text) > room:
+            text = "…" + text[-max(1, room - 1):]
+            while display_width(text) > room:
+                text = "…" + text[2:]
+            return prefix + text
+        return prefix + (_style_inline(text) if _inline_closed(text) else text)
+
     @property
     def in_code_block(self) -> bool:
         return self._fence is not None

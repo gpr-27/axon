@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable
 
 from axon import platform as plat
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, LBLUE, OUTPUT_LOCK, RST, sanitize, strip_ansi, truncate
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, LBLUE, OUTPUT_LOCK, RST, sanitize, strip_ansi, truncate
 
 
 def _plain(text: object) -> str:
@@ -174,6 +174,10 @@ class PinnedFooter:
         try:
             from axon.ui.statusline import agent_panel_rows
             rows.append(truncate(self._status_line(w), w))
+            from axon.ui.statusbar import agent_autocompact_warning
+            warn = agent_autocompact_warning(self.agent)
+            if warn:
+                rows.append(truncate(f"  {GOLD}! {warn}{RST}", w))
             if target is not None:
                 rows += self._peek_rows(target, w)
             else:

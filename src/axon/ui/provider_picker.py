@@ -138,6 +138,14 @@ def _hook_verdict(result: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def print_endpoint_notice(preset: ProviderPreset) -> None:
+    """One muted line when the chosen provider's endpoint is a staging host."""
+    from axon.providers.catalog import endpoint_notice
+    note = endpoint_notice(preset)
+    if note:
+        print(f"  {SLATE}{note}{RST}")
+
+
 def apply_provider(agent: Agent, preset: ProviderPreset, model: str, api_key: str | None) -> bool:
     """Switch the running agent to preset+model, persist the choice and print a summary."""
     from axon.providers.registry import provider_for
@@ -168,6 +176,7 @@ def apply_provider(agent: Agent, preset: ProviderPreset, model: str, api_key: st
     print(f"  {SLATE}Active Model: {BOLD}{WHITE}{model}{RST} · {SLATE}Endpoint: {preset.base_url}{RST}")
     if cfg:
         print(f"  {DARK_SLATE}Saved as default in {cfg}{RST}")
+    print_endpoint_notice(preset)
     if preset.id == "ollama":
         try:
             from axon.providers.catalog import fetch_local_ollama_models

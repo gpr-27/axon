@@ -48,7 +48,7 @@ OPERATING_RULES = """## How you work
 ## Axon configuration locations
 
 - Project instructions: `AXON.md` (also `AGENTS.md`, `CLAUDE.md`, `.axon/AXON.md`); user instructions: `~/.axon/AXON.md`.
-- Memories: `.axon/memory/*.md` (project) and `~/.axon/memory/*.md` (user).
+- Memories: see Memory below (scopes global, project, repo).
 - Skills: `.axon/skills/<name>/SKILL.md` or `~/.axon/skills/<name>/SKILL.md`. Custom commands: `.axon/commands/*.md`.
 - Subagents: `.axon/agents/*.md`, `~/.axon/agents/*.md` (also `.claude/agents/*.md`). Hooks and settings: `.axon/settings.json`."""
 
@@ -191,17 +191,23 @@ def env_preamble(settings: Settings) -> str:
     }
     if settings.mode in mode_notes:
         lines.append(mode_notes[settings.mode])
-    if getattr(settings, "auto_memory", True) and os.environ.get("AXON_DISABLE_AUTO_MEMORY", "") not in ("1", "true"):
-        try:
-            from axon.agent.memory import auto_memory_dir
-            mem_dir = auto_memory_dir(settings.workspace)
-            lines += [
-                "",
-                f"Auto memory: `{mem_dir}`. When the user asks you to remember something durable (not derivable from "
-                "the code or git), save a topic file there and add one short line to `MEMORY.md` (keep it under 200 lines).",
-            ]
-        except Exception:
-            pass
+    try:
+        from axon.agent.memory import auto_memory_dir
+        from axon.storage import axon_home
+        auto_on = getattr(settings, "auto_memory", True) and os.environ.get("AXON_DISABLE_AUTO_MEMORY", "") not in ("1", "true")
+        dirs = [f"global `{axon_home() / 'memory'}` (all projects)"]
+        if auto_on:
+            dirs.insert(0, f"project `{auto_memory_dir(settings.workspace)}`")
+        lines += [
+            "",
+            "Memory: each folder holds one file per memory plus a `MEMORY.md` index (loaded above): " + "; ".join(dirs) + ". "
+            "When asked to remember something durable that code/git won't show, Write `<slug>.md` with frontmatter "
+            "`name`, `description` (one line), `type` (user|feedback|project|reference), then add `- [name](slug.md) — description` "
+            "to that folder's MEMORY.md. Update an existing file instead of duplicating; never store secrets. "
+            "To recall, Read the file an index line points to.",
+        ]
+    except Exception:
+        pass
     if settings.mode == "plan":
         lines += [
             "",

@@ -37,6 +37,7 @@ ACTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "chat:stash": ("Stash / restore the draft", ("ctrl-s",)),
     "chat:externalEditor": ("Edit the prompt in $EDITOR", ("ctrl-g", "ctrl-x ctrl-e")),
     "chat:paste": ("Paste image or text from the clipboard", ("ctrl-v", "alt-v")),
+    "chat:expandPaste": ("Expand a [Pasted text] chip in place, or edit a large one in $EDITOR", ("alt-e",)),
     "history:search": ("Reverse-search prompt history", ("ctrl-r",)),
     "history:prev": ("Previous prompt from history", ()),
     "history:next": ("Next prompt from history", ("ctrl-n",)),

@@ -106,7 +106,7 @@ UNDER  = _sgr("4")
 STRIKE = _sgr("9")
 
 # ─── Palettes ──────────────────────────────────────────────────────────────
-# name -> ((r, g, b), xterm-256 index). "dark" is the default "Axon dusk" palette (teal primary,
+# name -> ((r, g, b), xterm-256 index). "dark" is the base "Axon dusk" palette (teal primary,
 # violet accent); other themes override some entries. Backgrounds end in _BG.
 _DARK: dict[str, tuple[tuple[int, int, int], int]] = {
     "PRIMARY": ((94, 210, 200), 80), "ACCENT": ((180, 160, 255), 183), "SUCCESS": ((134, 222, 140), 114),
@@ -146,15 +146,38 @@ _HIGH_CONTRAST = {
     "CYAN": ((0, 255, 255), 51), "AMBER": ((255, 175, 0), 214), "SKY": ((95, 215, 255), 81),
     "DIFF_ADD_WORD_BG": ((0, 150, 0), 28), "DIFF_DEL_WORD_BG": ((175, 0, 0), 124), "MATCH_BG": ((135, 95, 0), 94),
 }
-THEMES: tuple[str, ...] = ("auto", "dark", "light", "high-contrast", "mono")
-_THEME_SPECS = {"dark": {}, "light": _LIGHT, "high-contrast": _HIGH_CONTRAST}
+# The Axon theme: a firing neuron. Signal aqua carries the impulse, synapse pink marks where it lands.
+_AXON = {
+    "PRIMARY": ((56, 232, 198), 79), "ACCENT": ((255, 111, 181), 205), "SUCCESS": ((143, 227, 110), 113),
+    "WARNING": ((255, 200, 87), 221), "ERROR": ((255, 107, 122), 203), "INFO": ((111, 183, 255), 75),
+    "TEXT": ((230, 234, 240), 254), "MUTED": ((140, 150, 168), 246), "SUBTLE": ((98, 108, 124), 242),
+    "BORDER": ((58, 68, 82), 238), "CODE_FG": ((165, 232, 220), 152), "CODE_BG": ((20, 28, 36), 234),
+    "DIFF_ADD": ((143, 227, 110), 113), "DIFF_DEL": ((255, 107, 122), 203),
+    "DIFF_ADD_BG": ((16, 56, 44), 22), "DIFF_DEL_BG": ((72, 24, 38), 52), "LINK": ((111, 183, 255), 75),
+    "CYAN": ((92, 222, 240), 80), "EMERALD": ((60, 220, 150), 42), "CORAL": ((255, 128, 160), 204),
+    "LAVENDER": ((216, 190, 255), 183), "INDIGO": ((170, 130, 255), 141), "SKY": ((111, 183, 255), 75),
+    "BLUE_PILL_BG": ((16, 72, 92), 24), "GREEN_PILL_BG": ((14, 92, 72), 23), "GOLD_PILL_BG": ((96, 76, 18), 58),
+    "GRAY_PILL_BG": ((38, 46, 58), 236), "GRAY_PILL_FG": ((200, 206, 216), 251),
+    "DIFF_ADD_WORD_BG": ((30, 104, 80), 29), "DIFF_DEL_WORD_BG": ((130, 38, 62), 89), "MATCH_BG": ((96, 76, 18), 58),
+}
+_AXON_LIGHT = {
+    **_LIGHT,
+    "PRIMARY": ((0, 124, 104), 30), "ACCENT": ((190, 24, 108), 162), "SUCCESS": ((38, 116, 28), 28),
+    "WARNING": ((150, 92, 0), 130), "ERROR": ((190, 30, 54), 161), "INFO": ((20, 90, 200), 26),
+    "TEXT": ((22, 28, 38), 234), "MUTED": ((84, 94, 110), 242), "SUBTLE": ((120, 130, 145), 245),
+    "BORDER": ((190, 198, 208), 251), "CODE_FG": ((0, 104, 94), 23), "CODE_BG": ((234, 240, 242), 255),
+    "DIFF_ADD": ((38, 116, 28), 28), "DIFF_DEL": ((190, 30, 54), 161), "LINK": ((20, 90, 200), 26),
+}
+THEMES: tuple[str, ...] = ("auto", "axon", "axon-light", "dark", "light", "high-contrast", "mono")
+_THEME_SPECS = {"axon": _AXON, "axon-light": _AXON_LIGHT, "dark": {}, "light": _LIGHT, "high-contrast": _HIGH_CONTRAST}
+LIGHT_THEMES = frozenset({"light", "axon-light"})
 _ALIASES = {
     "WHITE": "TEXT", "LBLUE": "INFO", "MINT": "SUCCESS", "GOLD": "WARNING", "ROSE": "ERROR", "SLATE": "MUTED",
     "PURPLE": "ACCENT", "TEAL": "PRIMARY", "GREEN": "DIFF_ADD", "RED": "DIFF_DEL", "GRAY_BG": "CODE_BG",
     "DARK_SLATE": "SUBTLE", "DARK_BORDER": "BORDER",
 }
 _PALETTE_NAMES: tuple[str, ...] = ()
-_current_theme = "dark"
+_current_theme = "axon"
 
 
 def _palette_values(theme: str) -> dict[str, str]:
@@ -203,10 +226,12 @@ def detect_background(env: dict[str, str] | None = None) -> str:
 def resolve_theme(name: str | None) -> str:
     n = str(name or "auto").strip().lower().replace("_", "-")
     n = {"highcontrast": "high-contrast", "contrast": "high-contrast", "hc": "high-contrast",
-         "monochrome": "mono", "none": "mono", "default": "dark"}.get(n, n)
+         "monochrome": "mono", "none": "mono", "default": "axon"}.get(n, n)
     if n not in THEMES:
         raise ValueError(f"unknown theme {name!r}; choose one of: {', '.join(THEMES)}")
-    return detect_background() if n == "auto" else n
+    if n == "auto":
+        return "axon-light" if detect_background() == "light" else "axon"
+    return n
 
 
 def current_theme() -> str:
@@ -236,8 +261,8 @@ def set_theme(name: str | None) -> str:
     return resolved
 
 
-globals().update(_palette_values("dark"))
-_PALETTE_NAMES = tuple(_palette_values("dark"))
+globals().update(_palette_values("axon"))
+_PALETTE_NAMES = tuple(_palette_values("axon"))
 if os.environ.get("AXON_THEME"):
     try:
         set_theme(os.environ["AXON_THEME"])
@@ -728,3 +753,137 @@ def hyperlink(target: str, label: str) -> str:
     if not target or not supports_hyperlinks():
         return label
     return f"\x1b]8;;{target}\x1b\\{label}\x1b]8;;\x1b\\"
+
+
+# ─── Prompt colours (/color): one xterm-256 index per theme background ─────
+# name -> (index on a dark background, index on a light background). The dark indices are pale
+# (221, 215...) and nearly vanish on white, so the light theme gets darker ones.
+PROMPT_COLOR_256: dict[str, tuple[int, int]] = {
+    "red": (203, 160), "orange": (215, 166), "yellow": (221, 136), "green": (114, 28), "cyan": (80, 30),
+    "blue": (75, 26), "purple": (141, 98), "pink": (211, 161), "gray": (245, 240),
+}
+
+
+def prompt_color_256(name: str) -> int | None:
+    """xterm-256 index of the named prompt colour for the active theme (None: unknown / default)."""
+    pair = PROMPT_COLOR_256.get(str(name or "").strip().lower().replace("grey", "gray"))
+    if pair is None:
+        return None
+    return pair[1] if _current_theme in LIGHT_THEMES else pair[0]
+
+
+def prompt_color_sgr(name: str) -> str:
+    idx = prompt_color_256(name)
+    return f"\033[38;5;{idx}m" if idx is not None and COLOR_ENABLED else ""
+
+
+# ─── Width-aware text fitting ──────────────────────────────────────────────
+
+def middle_ellipsis(s: str, width: int) -> str:
+    """*s* cut to at most *width* columns with the middle replaced by an ellipsis (plain text)."""
+    if display_width(s) <= width:
+        return s
+    ell = glyph("ellipsis")
+    room = width - display_width(ell)
+    if room <= 0:
+        return truncate(ell, width, "")
+    left_w, right_w = (room + 1) // 2, room // 2
+    left, used = [], 0
+    for ch in s:
+        w = char_width(ch)
+        if used + w > left_w:
+            break
+        left.append(ch)
+        used += w
+    right, used = [], 0
+    for ch in reversed(s):
+        w = char_width(ch)
+        if used + w > right_w:
+            break
+        right.append(ch)
+        used += w
+    return "".join(left) + ell + "".join(reversed(right))
+
+
+def shorten_path(path: str, width: int, home: str | None = None) -> str:
+    """A path that fits *width* columns: home becomes ``~``, then whole middle directories are
+    replaced by an ellipsis (``~/code/…/app/src``), and as a last resort the name is cut in the middle."""
+    text = str(path)
+    home = home if home is not None else os.path.expanduser("~")
+    if home and home not in ("/", "") and (text == home or text.startswith(home.rstrip("/") + "/")):
+        text = "~" + text[len(home.rstrip("/")):]
+    if display_width(text) <= width:
+        return text
+    parts = text.split("/")
+    ell = glyph("ellipsis")
+    if len(parts) > 3:
+        head = parts[0] if parts[0] in ("~", "") else parts[0]
+        first = parts[1] if parts[0] in ("~", "") else ""
+        lead = "/".join(p for p in (head, first) if p is not None) if first else head
+        lead = lead or "/"
+        for keep in range(len(parts) - 2, 0, -1):
+            tail = "/".join(parts[-keep:])
+            cand = f"{lead}/{ell}/{tail}" if lead != "/" else f"/{ell}/{tail}"
+            if display_width(cand) <= width:
+                return cand
+        tail = parts[-1]
+        cand = f"{ell}/{tail}"
+        if display_width(cand) <= width:
+            return cand
+    return middle_ellipsis(text, width)
+
+
+def kv_lines(label: str, value: str, width: int, label_w: int = 16, indent: int = 4, max_rows: int = 3) -> list[str]:
+    """``label  value`` rows for a report: the value is wrapped at word breaks (paths at ``/``) and the
+    continuation rows are aligned under the first value row; nothing is wider than *width*."""
+    lead = " " * indent
+    avail = max(10, width - indent - label_w - 1)
+    plain_value = str(value)
+    pieces: list[str] = []
+    for para in plain_value.split("\n"):
+        if display_width(para) <= avail:
+            pieces.append(para)
+            continue
+        cur = ""
+        for tokn in re.split(r"(?<=/)|(?<=\s)", para):      # break after a space or a "/", never inside a word
+            if cur and display_width((cur + tokn).rstrip()) > avail:
+                pieces.append(cur.rstrip())
+                cur = ""
+            cur += tokn
+            if display_width(cur) > avail:                     # one unbreakable piece wider than the column
+                rows = hard_wrap_ansi(cur, avail)
+                pieces.extend(rows[:-1])
+                cur = rows[-1]
+        pieces.append(cur.rstrip()) if cur.strip() else None
+    if len(pieces) > 3 and "\n" not in plain_value and max_rows:   # a very long path: shorten it rather than fill the screen
+        head, _, rest = plain_value.partition(" ")
+        if "/" in head:
+            room = avail * max_rows - (display_width(rest) + 1 if rest else 0)
+            short = shorten_path(head, max(12, room))
+            if short != head:
+                return kv_lines(label, short + (" " + rest if rest else ""), width, label_w, indent, max_rows=0)
+    out = []
+    for i, piece in enumerate(pieces or [""]):
+        shown = label if i == 0 else ""
+        out.append(f"{lead}{pad(shown, label_w)} {piece}")
+    return out
+
+
+def closed_box(rows: list[str], width: int, color: str = "", title: str = "") -> str:
+    """A rounded box whose four borders are always intact: *width* columns in total (2-space margin
+    included), each row wrapped or cut to fit, and padded so the right border lines up."""
+    width = max(20, width)
+    h, v = glyph("h"), glyph("v")
+    inner = width - 2 - 4                     # margin(2) + "│ " + " │"
+    body: list[str] = []
+    for r in rows:
+        for piece in (wrap_ansi(r, inner) if r else [""]):
+            body.append(truncate(piece, inner))
+    title_part = f" {title} " if title else ""
+    top_fill = max(0, width - 2 - 2 - display_width(title_part) - 1)
+    c, rs = color, RST
+    out = [f"  {c}{glyph('tl')}{h}{rs}{title_part}{c}{h * top_fill}{glyph('tr')}{rs}"]
+    for r in body:
+        out.append(f"  {c}{v}{rs} {pad(r, inner)}{rs} {c}{v}{rs}")
+    out.append(f"  {c}{glyph('bl')}{h * (width - 2 - 2)}{glyph('br')}{rs}")
+    return "\n".join(out)

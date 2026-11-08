@@ -28,6 +28,40 @@ def generate_sparkline(history: list[int], max_val: int | None = None) -> str:
         out.append(_SPARKLINE_CHARS[idx])
     return "".join(out)
 
+AUTOCOMPACT_WARNING = ("Autocompact will trigger soon, older messages will be summarized. "
+                       "/compact now to choose what's kept.")
+
+
+def autocompact_warning(used_tokens: float, window: float, compact_at: float) -> str:
+    """The warning text once the context is at or past 80% of the auto-compact threshold, else "".
+
+    *compact_at* is the threshold itself: a share of *window* (0 < x <= 1, the ``compact_at`` setting)
+    or an absolute token count (> 1)."""
+    try:
+        used, win, at = float(used_tokens), float(window), float(compact_at)
+    except (TypeError, ValueError):
+        return ""
+    if win <= 0 or at <= 0 or used <= 0:
+        return ""
+    threshold = at * win if at <= 1.0 else at
+    return AUTOCOMPACT_WARNING if used >= 0.8 * threshold else ""
+
+
+def agent_autocompact_warning(agent: object) -> str:
+    """:func:`autocompact_warning` for a live agent (its real threshold when known); "" on any failure."""
+    try:
+        from axon.ui.statusline import context_usage
+        used, window = context_usage(agent)
+        settings = getattr(agent, "settings", None)
+        try:
+            at = float(agent.context.threshold(settings.model))      # type: ignore[attr-defined]
+        except Exception:
+            at = float(getattr(settings, "compact_at", 0.75) or 0.75)
+        return autocompact_warning(used, window, at)
+    except Exception:
+        return ""
+
+
 def format_tokens(n: int) -> str:
     """Format token count into readable format (e.g. 4.2k, 1.2M)."""
     if n >= 1_000_000:

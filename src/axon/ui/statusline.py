@@ -277,6 +277,8 @@ def default_status_line(agent: Any, width: int | None = None, include_mode: bool
     branch = git_branch(getattr(settings, "workspace", None) or os.getcwd())
     if branch:
         line += f" {MUTED}{glyph('dot')}{RST} {MUTED}{glyph('git')} {branch}{RST}"
+    if getattr(settings, "workbench_hint", False):
+        line += f" {MUTED}{glyph('dot')} /workbench{RST}"
     return truncate(line, (width or term_width()) - 1)
 
 
@@ -294,9 +296,15 @@ def prompt_status_rows(agent: Any, width: int | None = None) -> list[str]:
         w = (width or term_width()) - 1
         return [truncate("  " + r, w) for r in custom.split("\n")]
     try:
-        return [default_status_line(agent, width)]
+        rows = [default_status_line(agent, width)]
     except Exception:
         return []
+    from axon.ui.statusbar import agent_autocompact_warning
+    from axon.ui.theme import GOLD, RST, term_width, truncate
+    warn = agent_autocompact_warning(agent)
+    if warn:
+        rows.append(truncate(f"  {GOLD}! {warn}{RST}", (width or term_width()) - 1))
+    return rows
 
 
 def ordered_tasks(agent: Any) -> list[Any]:

@@ -387,7 +387,22 @@ def match_slash_commands(query: str, cwd: Path | None = None) -> list[tuple[str,
     prefix = sorted((c for c in cmds if c[0][1:].lower().startswith(q)), key=lambda c: c[0][1:].lower() != q)
     sub = [c for c in cmds if c not in prefix and q in c[0].lower()]
     desc = [c for c in cmds if c not in prefix and c not in sub and q in c[3].lower()]
-    return prefix + sub + desc
+    return _alias_match(q, cmds) + prefix + sub + desc
+
+
+def _alias_match(q: str, cmds: list[tuple[str, str, str, str, bool]]) -> list[tuple[str, str, str, str, bool]]:
+    """Typing an exact alias offers that alias first, so Enter runs the command it names rather than whichever
+    command merely mentions the word in its description."""
+    if any(c[0][1:].lower() == q for c in cmds):
+        return []
+    try:
+        from axon.commands.registry import resolve_builtin
+        cmd = resolve_builtin(q)
+    except Exception:
+        return []
+    if cmd is None or q not in cmd.aliases:
+        return []
+    return [(f"/{q}", "builtin", "Aliases", str(cmd.description or "")[:90], True)]
 
 
 _res_cache: dict[str, Any] = {"t": 0.0, "items": []}
@@ -456,6 +471,22 @@ def match_files(query: str, cwd: Path | None = None, limit: int = 50) -> list[st
     return ranked
 
 
+EXPAND_INLINE_CHARS = 20_000       # a chip larger than this is edited in $EDITOR instead of expanded in the prompt
+
+
+from axon.agent.large_input import expand_for_send, paste_notice  # noqa: E402,F401  (plain functions, shared with the web app)
+
+
+def _prompt_limit(agent: Any) -> int | None:
+    """Tokens one message may use before it is spilled, from the attached agent's model and settings."""
+    try:
+        from axon.agent import large_input
+        window = agent.context.context_window(agent.settings.model)
+        return large_input.inline_limit(window, int(getattr(agent.settings, "large_input_tokens", 0) or 0))
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Editor state (pure logic; rendering and I/O are separate so it is testable)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -506,6 +537,8 @@ class EditorState:
     vim: Any = None            # axon.ui.vim.VimState when vim mode is on
     status_rows: list[str] = field(default_factory=list)  # custom / built-in status line
     ghost: str = ""            # suggested next prompt shown dim in the empty bar (never part of the buffer)
+    window_tokens: int = 200_000     # the model's context window, for the paste-size notice
+    large_input_setting: int = 0     # settings.large_input_tokens
 
     # -- editing primitives -------------------------------------------------------------------
     def _snapshot(self) -> None:
@@ -534,6 +567,8 @@ class EditorState:
         is the same paste split by the terminal: it is merged into that chip instead of starting a new one."""
         if self._merge_into_last_chip(text):
             return
+        if self._insert_drop(text):
+            return
         lines = text.count("\n") + 1
         if len(text) >= LARGE_PASTE_CHARS or lines > LARGE_PASTE_LINES:
             n = max(self.pastes, default=0) + 1
@@ -541,8 +576,26 @@ class EditorState:
             _save_paste(text)
             self.insert(f"[Pasted text #{n} +{lines} lines]")
             self._last_chip = (n, time.monotonic())
+            self.notice = paste_notice(text, self.window_tokens, self.large_input_setting)
         else:
             self.insert(text)
+
+    def _insert_drop(self, text: str) -> bool:
+        """A paste that is nothing but existing file paths is a drag and drop: save the files now, since they
+        may be temporary, and show chips in the prompt."""
+        try:
+            from axon.agent.attachments import ingest_drop
+            dropped = ingest_drop(text)
+        except Exception:
+            return False
+        if dropped is None:
+            return False
+        chips, notice = dropped
+        if chips:
+            self.insert(chips + " ")
+        if notice:
+            self.notice = notice
+        return True
 
     def _merge_into_last_chip(self, text: str) -> bool:
         last = getattr(self, "_last_chip", None)
@@ -552,9 +605,10 @@ class EditorState:
         chip = self._chip_text(n)
         if not chip or not self.buf[:self.pos].endswith(chip):
             return False
-        merged = self.pastes[n] + text
+        previous = self.pastes[n]
+        merged = previous + text
         self.pastes[n] = merged
-        _save_paste(merged)
+        _save_paste(merged, replaces=previous)
         new_chip = f"[Pasted text #{n} +{merged.count(chr(10)) + 1} lines]"
         start = self.pos - len(chip)
         self.buf = self.buf[:start] + new_chip + self.buf[self.pos:]
@@ -569,6 +623,21 @@ class EditorState:
     def expanded(self) -> str:
         """Buffer with paste chips replaced by their full content (what gets submitted)."""
         return PASTE_CHIP_RE.sub(lambda m: self.pastes.get(int(m.group(1)), m.group(0)), self.buf)
+
+    def chip_at_cursor(self) -> "re.Match[str] | None":
+        """The paste chip the cursor is in, at the end of, or at the start of, else the only chip in the prompt."""
+        found = [m for m in PASTE_CHIP_RE.finditer(self.buf) if int(m.group(1)) in self.pastes]
+        for m in found:
+            if m.start() <= self.pos <= m.end():
+                return m
+        return found[0] if len(found) == 1 else None
+
+    def expand_chip(self, m: "re.Match[str]") -> None:
+        self._snapshot()
+        text = self.pastes[int(m.group(1))]
+        self.buf = self.buf[:m.start()] + text + self.buf[m.end():]
+        self.pos = m.start() + len(text)
+        self._changed()
 
     def backspace(self) -> None:
         if self.pos > 0:
@@ -821,13 +890,20 @@ class EditorState:
         return False
 
 
-def _save_paste(text: str) -> None:
-    """Keep large pastes in the active session's folder (sessions/<id>/pastes) so it can be inspected later."""
+def _paste_file_name(text: str) -> str:
+    import hashlib
+    return f"{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}.txt"
+
+
+def _save_paste(text: str, replaces: str | None = None) -> None:
+    """Keep large pastes in the active session's folder (sessions/<id>/pastes) so it can be inspected later.
+    *replaces* is the earlier part of a paste the terminal split, whose copy this one supersedes."""
     try:
-        import hashlib
         from axon.storage import active_session_subdir
         d = active_session_subdir("pastes")
-        (d / f"{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}.txt").write_text(text, encoding="utf-8")
+        (d / _paste_file_name(text)).write_text(text, encoding="utf-8")
+        if replaces is not None:
+            (d / _paste_file_name(replaces)).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1173,8 +1249,8 @@ def set_prompt_color(name: str | None) -> str:
     elif n.startswith("\033[") or n.startswith("\x1b["):
         _PROMPT_COLOR = n
     elif n in _NAMED_PROMPT_COLORS:
-        from axon.ui.theme import colors_enabled
-        _PROMPT_COLOR = f"\033[38;5;{_NAMED_PROMPT_COLORS[n]}m" if colors_enabled() else ""
+        from axon.ui.theme import prompt_color_sgr    # darker indices on the light theme
+        _PROMPT_COLOR = prompt_color_sgr(n)
     else:
         raise ValueError(f"unknown prompt colour {name!r}")
     return n
@@ -1392,6 +1468,15 @@ class PromptEditor:
             elif st.stash:
                 st.set_text(st.stash)
                 st.stash = ""
+        elif action == "chat:expandPaste":
+            m = st.chip_at_cursor()
+            if m is None:
+                st.notice = "no pasted text here to expand"
+            elif len(st.pastes[int(m.group(1))]) <= EXPAND_INLINE_CHARS:
+                st.expand_chip(m)
+            else:
+                st.pos = m.end()
+                return ("ui", "pasteedit")
         elif action == "chat:paste":
             pasted = _clipboard_insert()
             if pasted:
@@ -1526,6 +1611,11 @@ def read_input(
     if vim_on if vim_on is not None else _VIM_ENABLED:
         from axon.ui.vim import VimState
         st.vim = VimState()
+    try:
+        st.window_tokens = int(agent.context.context_window(agent.settings.model))
+        st.large_input_setting = int(getattr(agent.settings, "large_input_tokens", 0) or 0)
+    except Exception:
+        pass
     st.status_rows = _status_rows(agent)
     initial = kwargs.get("initial") or prompt
     try:  # keys typed while the previous turn was finishing are not lost
@@ -1561,7 +1651,7 @@ def read_input(
 
     def submit() -> tuple[str, str | None, int]:
         shown = st.buf.strip()
-        text = st.expanded().strip()
+        text = expand_for_send(st.buf, st.pastes, _prompt_limit(agent)).strip()
         frame.clear()
         if text:
             try:
@@ -1790,6 +1880,12 @@ def _run_ui_action(name: str, st: EditorState, frame: LiveFrame) -> LiveFrame:
             st.set_text(edited)
             st._changed()
         return LiveFrame()
+    if name == "pasteedit":
+        frame.clear()
+        m = st.chip_at_cursor()
+        if m is not None:
+            _edit_chip(st, int(m.group(1)))
+        return LiveFrame()
     if name == "finder":
         frame.clear()
         from axon.ui.fuzzy_picker import run_fuzzy_file_finder
@@ -1803,6 +1899,26 @@ def _run_ui_action(name: str, st: EditorState, frame: LiveFrame) -> LiveFrame:
             os.kill(os.getpid(), signal.SIGTSTP)
         return LiveFrame()
     return frame
+
+
+def _edit_chip(st: EditorState, n: int) -> None:
+    """Open chip *n*'s full text in $EDITOR; the edited text replaces the paste and the chip's line count follows."""
+    old = st.pastes.get(n)
+    if old is None:
+        return
+    edited = _edit_externally(old)
+    if edited is None:
+        st.notice = f"could not start editor ({' '.join(plat.editor_command())}); set $EDITOR"
+        return
+    if edited == old:
+        return
+    old_chip = st._chip_text(n)
+    st.pastes[n] = edited
+    _save_paste(edited, replaces=old)
+    st._snapshot()
+    st.buf = st.buf.replace(old_chip, st._chip_text(n), 1)
+    st.pos = min(st.pos, len(st.buf))
+    st._changed()
 
 
 def _echo_submitted(text: str, chrome: PromptChrome) -> None:

@@ -56,6 +56,7 @@ class LLMCallEnd:
     cache_miss_cause: str = ""
     context_used: int = 0
     context_window: int = 0
+    cache_miss_detail: str = ""   # " · 41k tokens re-sent · +$0.11" (empty when unknown)
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,8 @@ class PermissionDecisionEvent:
     reason: str
     source: str                    # mode | rule | hook | user | invariant | no-approver | delegation
     approval: str | None = None    # once | always | deny (when the user was asked)
+    rule: str = ""                 # the permission rule that decided, when one did
+    mode: str = ""                 # permission mode in force when it was decided
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,20 @@ class RetryEvent:
     delay_s: float
     error: str
     iteration: int = 0
+
+
+@dataclass(frozen=True)
+class LargeInputEvent:
+    """An input big enough to mention: ``spilled`` means only its ends were sent, the rest is at ``path``."""
+    lines: int
+    tokens_full: int
+    tokens_sent: int
+    limit: int
+    path: str = ""
+    spilled: bool = False
+    model: str = ""
+    cost_full: float = 0.0
+    cost_sent: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -197,6 +214,8 @@ class CacheStatus:
     context_tokens: int
     context_window: int
     context_pct: float
+    resent_tokens: int = 0         # tokens re-sent because the cache missed (0 = unknown)
+    source: str = ""               # api | local: where the cause came from
 
 
 @dataclass(frozen=True)
@@ -221,7 +240,7 @@ class MemoryLoadedEvent:
 
 TRACE_EVENT_TYPES = (
     LLMRequestInfo, LLMCallEnd, ToolTiming, PermissionDecisionEvent, HookEvent, RetryEvent,
-    CompactionEvent, SubagentEvent, ToolRationale, CacheStatus, BudgetEvent, MemoryLoadedEvent,
+    CompactionEvent, LargeInputEvent, SubagentEvent, ToolRationale, CacheStatus, BudgetEvent, MemoryLoadedEvent,
     SubagentStep, ThinkingBoost, SteerEvent, GoalCheckEvent,
 )
 
@@ -278,9 +297,20 @@ class CacheTracker:
         self.prev: dict[str, Any] | None = None
         self.ever_hit = False
         self.misses: list[dict[str, Any]] = []
+        self.prev_read = 0            # cache_read of the previous finished request
+        self.last_prev_read = 0       # ... as it was before the request observed last
+        self.manifests: list[dict[str, Any]] = []   # per call: prompt blocks + cache outcome (for /ctxdiff)
+        self._calls = 0
 
     def fingerprint(self, model: str, effort: str, system: list[dict[str, Any]], tools: list[dict[str, Any]],
                     messages: list[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            from axon.features.insights import MAX_MANIFESTS, build_manifest
+            self._calls += 1
+            self.manifests.append({"n": self._calls, "model": model, "entries": build_manifest(system, tools, messages)})
+            del self.manifests[:-MAX_MANIFESTS]
+        except Exception:
+            pass
         mem = [b for b in system if isinstance(b, dict) and str(b.get("text", "")).startswith("## Memory")]
         core = [b for b in system if b not in mem]
         return {
@@ -310,6 +340,8 @@ class CacheTracker:
             return "conversation history rewritten (compaction, rewind or trimming)"
         if fp["t"] - prev["t"] > self.TTL_S:
             return f"cache TTL expired ({int(fp['t'] - prev['t'])}s since the previous request)"
+        if self.prev_read > 0:
+            return "nothing in the request changed: provider-side eviction"
         return "prefix below the provider's minimum cacheable size, or provider-side eviction"
 
     def observe(self, fp: dict[str, Any], usage: Any, provider: str = "") -> tuple[bool, str]:
@@ -317,8 +349,13 @@ class CacheTracker:
         inp = int(getattr(usage, "input", 0) or 0)
         read = int(getattr(usage, "cache_read", 0) or 0)
         miss, cause = False, ""
+        self.last_prev_read = self.prev_read
+        from axon.features.insights import sharp_drop
+        dropped = read > 0 and sharp_drop(self.prev_read, read)
         if read > 0:
             self.ever_hit = True
+        if read > 0 and not dropped:
+            pass
         elif inp > 0:
             miss = True
             if not self.ever_hit and provider != "anthropic" and self.prev is not None:
@@ -326,6 +363,11 @@ class CacheTracker:
             else:
                 cause = self.miss_cause(fp)
             self.misses.append({"t": fp["t"], "cause": cause, "input_tokens": inp})
+        if self.manifests:
+            self.manifests[-1].update(usage={"input": inp, "cache_read": read, "cache_write": int(getattr(usage, "cache_write", 0) or 0)},
+                                      miss=miss, cause=cause)
+        if inp > 0:
+            self.prev_read = read
         stored = dict(fp)
         stored.pop("messages_ref", None)
         self.prev = stored
@@ -428,7 +470,7 @@ class TurnTrace:
                 step.data.update({
                     "stop_reason": event.stop_reason, "cost": event.cost, "duration_s": event.duration_s,
                     "cost_breakdown": dict(event.cost_breakdown or {}),
-                    "cache_miss_cause": event.cache_miss_cause,
+                    "cache_miss_cause": event.cache_miss_cause, "cache_miss_detail": event.cache_miss_detail,
                     "context_used": event.context_used, "context_window": event.context_window,
                     "outcome": event.outcome, "error": event.error, "tool_use_count": event.tool_use_count,
                     "usage": _jsonable(u),

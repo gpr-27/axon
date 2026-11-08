@@ -498,6 +498,7 @@ class SubagentTask:
     color: str = ""
     isolation: str = ""
     worktree_note: str = ""   # where its edits went when they were not merged back
+    call_id: str = ""         # tool_use id of the Task call in the parent that started it (links the parent step to this run)
 
     def add_log(self, msg: str) -> None:
         self.live_logs.append(msg)
@@ -551,6 +552,7 @@ class SubagentManager:
                 start_time=time.time(),
                 agent_type=agent_type,
                 name=name.strip(),
+                call_id=call_id or "",
             )
             self._tasks.append(task)
             self._notify()
@@ -995,6 +997,7 @@ def _persist_subagent_run(parent: Any, task: Any, agent_type: str, model: str, p
             "input_tokens": int(getattr(usage, "input", 0) or 0), "output_tokens": int(getattr(usage, "output", 0) or 0),
             "cost": round(float(cost or 0), 8), "iterations": int(iterations or 0), "elapsed_s": round(elapsed, 2),
             "sub_session_id": f"{parent_sess}_sub_{task.index}",
+            "call_id": str(getattr(task, "call_id", "") or ""),
         }, agent=parent)
     except Exception:
         pass

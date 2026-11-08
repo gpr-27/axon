@@ -27,10 +27,12 @@ from axon.config import Settings
 from axon.errors import ToolError
 from axon.agent import filechanges
 from axon.agent.state import Conversation, FileState, TodoState, record_usage
-from axon.agent import suggest
+from axon.agent import large_input, suggest
+from axon.tools import diagnostics
 from axon.agent.prompt import build_system
 from axon.agent.context import ContextManager
 from axon.agent.trace import (
+    LargeInputEvent,
     BudgetEvent,
     CacheStatus,
     CacheTracker,
@@ -122,6 +124,14 @@ def detect_thinking_keyword(text: str) -> tuple[str, str] | None:
         if re.search(r"(?<![\w-])" + re.escape(kw) + r"(?![\w-])", low):
             return kw, effort
     return None
+
+
+MAX_OVERFLOW_RETRIES = 2
+TITLE_RECENT_PROMPTS = 5
+TITLE_SNIPPET_CHARS = 300
+TITLE_REFRESH_INSTRUCTION = ("Write a 3-6 word title for this coding session, saying what it is about now. Weigh recent "
+                             "work most. If the current title still fits, repeat it exactly. Reply with the title only, "
+                             "no quotes or punctuation.")
 
 
 def heuristic_title(prompt: str, limit: int = 50) -> str:
@@ -447,8 +457,11 @@ class Agent:
         self._prompt_id: str = ""
         self._post_compact_context: str = ""        # files re-read after a compaction
         self._repo_map: str | None = None
+        self.started_at = time.time()
         self._titled: bool | None = None            # None = unknown (check the transcript once)
         self._title: str | None = None
+        self._title_auto: bool | None = None        # True: Axon wrote the name, so later turns may rewrite it
+        self._title_turns = 0
         self.goal: str | None = getattr(settings, "goal", None)   # /goal (P-CMD sets it)
         self.pending_input: str | None = None       # prefilled into the next prompt (rewind, /diff "a")
         self.title_provider: Any = None             # optional provider for LLM titles (small_model)
@@ -859,6 +872,8 @@ class Agent:
         self._repo_map = None
         self._titled = None
         self._title = None
+        self._title_auto = None
+        self._title_turns = 0
         self.reload_memory()
         self.traces = []
         self._cache = CacheTracker()
@@ -1075,8 +1090,15 @@ class Agent:
         self._titled = titled
         return titled
 
+    def reload_title(self) -> str:
+        """Read the name back from the transcript (after a resume), keeping whether Axon or the user chose it."""
+        self._titled = self._title = self._title_auto = None
+        return self.session_title
+
     def mark_titled(self, title: str | None = None) -> None:
+        """The user named the session: automatic titles leave it alone from now on."""
         self._titled = True
+        self._title_auto = False
         if title:
             self._title = title
 
@@ -1085,6 +1107,7 @@ class Agent:
         """The session's name (/rename, -n or auto title); "" when untitled."""
         if self._title is None:
             title = ""
+            auto = False
             try:
                 from axon.session.store import iter_records
                 path = getattr(self.session, "active_file", None)
@@ -1092,9 +1115,11 @@ class Agent:
                     for r in iter_records(path):
                         if r.get("type") == "session_rename" and isinstance(r.get("data"), dict):
                             title = str(r["data"].get("title") or "")
+                            auto = bool(r["data"].get("auto"))
             except Exception:
                 title = ""
             self._title = title
+            self._title_auto = auto
             if title:
                 self._titled = True
         return self._title
@@ -1108,25 +1133,26 @@ class Agent:
         if self.title_provider is not None:
             title = self._llm_title(prompt)
         title = title or heuristic_title(prompt)
-        return self._apply_title(title)
+        return self._apply_title(title, auto=True)
 
-    def _apply_title(self, title: str) -> str | None:
+    def _apply_title(self, title: str, auto: bool = False) -> str | None:
         """Save *title* as the session's name and show it in the terminal title."""
         if not title:
             return None
         try:
-            title = self.session.rename_session(title)
+            title = self.session.rename_session(title, auto=auto)
         except Exception:
             return None
         self._titled = True
         self._title = title
+        self._title_auto = auto
         set_terminal_title(title)
         return title
 
     def _title_in_two_steps(self, prompt: str) -> None:
         """Name the session now from the first words of the prompt, then let the model write a better title in
         the background. The first title is saved at once, so a process that ends early still leaves a title."""
-        first = self._apply_title(heuristic_title(prompt))
+        first = self._apply_title(heuristic_title(prompt), auto=True)
         if first is None:
             return
         threading.Thread(target=self._upgrade_title, args=(prompt, first), daemon=True, name="axon-title").start()
@@ -1134,7 +1160,40 @@ class Agent:
     def _upgrade_title(self, prompt: str, first: str) -> None:
         better = self._llm_title(prompt)
         if better and better != first and self._title == first:      # the user has not renamed it meanwhile
-            self._apply_title(better)
+            self._apply_title(better, auto=True)
+
+    def _title_refresh_due(self) -> bool:
+        """Automatic titles are rewritten on turn 3 and then every ``title_refresh_turns`` turns."""
+        every = int(getattr(self.settings, "title_refresh_turns", 5) or 0)
+        if every <= 0 or self.is_subagent or self.title_provider is None:
+            return False
+        if not getattr(self.settings, "auto_title", True) or not self.session_title or not self._title_auto:
+            return False
+        return self._title_turns == 3 or self._title_turns % every == 0
+
+    def _refresh_title(self, current: str, prompts: list[str], answer: str) -> None:
+        """Rewrite an automatic title so it says what the session is about now."""
+        lines = [f"Current title: {current}", "Recent user messages, oldest first:"]
+        lines += [f"- {' '.join(p[:TITLE_SNIPPET_CHARS].split())}" for p in prompts[-TITLE_RECENT_PROMPTS:]]
+        lines.append(f"Latest answer: {' '.join(str(answer)[:TITLE_SNIPPET_CHARS].split())}")
+        better = self._llm_title("\n".join(lines), instruction=TITLE_REFRESH_INSTRUCTION)
+        if better and better != current and self._title == current and self._title_auto:
+            self._apply_title(better, auto=True)
+
+    def _after_turn_title(self, user_input: str, result: TurnResult) -> None:
+        """Name a new session, or keep an automatic name up to date with the work."""
+        if self.is_subagent or not getattr(self.settings, "auto_title", True) or user_input.lstrip().startswith("/"):
+            return
+        self._title_turns += 1
+        if not self._has_title():
+            if self.title_provider is not None:
+                self._title_in_two_steps(user_input)
+            else:
+                self.maybe_auto_title(user_input)
+        elif self._title_refresh_due():
+            prompts = suggest.earlier_user_messages(self.conversation.messages) + [user_input]
+            threading.Thread(target=self._refresh_title, args=(self.session_title, prompts, result.final_text),
+                             daemon=True, name="axon-title").start()
 
     def _current_title_provider(self, model: str, cached: Any) -> Any:
         """The cached title provider was built at startup; rebuild it so it follows a provider switch."""
@@ -1143,17 +1202,17 @@ class Agent:
         except Exception:
             return cached
 
-    def _llm_title(self, prompt: str) -> str:
+    def _llm_title(self, prompt: str, instruction: str = "") -> str:
         prov = self.title_provider
-        model = self.settings.small_model or self.settings.model
+        model = self.settings.model
         if type(prov).__module__.startswith("axon.providers"):
             prov = self._current_title_provider(model, prov)
-        system = [{"type": "text", "text": "Write a 3-6 word title for a coding session that starts with the user "
+        system = [{"type": "text", "text": instruction or "Write a 3-6 word title for a coding session that starts with the user "
                                            "message below. Reply with the title only, no quotes or punctuation."}]
         try:
             with _provider_lock(prov):
                 for _ in prov.stream(model=model, system=system, messages=[{"role": "user", "content": prompt[:2000]}],
-                                     tools=[], max_tokens=24, effort="reflex", thinking=False):
+                                     tools=[], max_tokens=48, effort="reflex", thinking=False):
                     pass
                 turn = prov.finalize()
             if getattr(turn, "usage", None) is not None:
@@ -1407,6 +1466,8 @@ class Agent:
         before = len(self.conversation.messages)
         tokens_before = self.conversation.token_estimate()
         usage, cost, model = None, 0.0, ""
+        if summary is None and trigger != "manual" and self.context.split_point(self.conversation) <= 0:
+            return False    # no older turns to summarize: a paid summary call would change nothing
         if summary is None:
             summary, usage, model = self._generate_summary(instructions)
             if usage is not None:
@@ -1414,6 +1475,8 @@ class Agent:
                 self._log_usage(model, usage, cost, "compact")
         self.context._summarize_older_turns(self.conversation, summary_text=summary)
         changed = len(self.conversation.messages) != before
+        if changed and isinstance(getattr(self.context, "last_receipt", None), dict):
+            self.context.last_receipt["trigger"] = trigger
         self._emit(CompactionEvent(
             trigger=trigger,
             messages_before=before,
@@ -1499,6 +1562,12 @@ class Agent:
         self._turn_counter += 1
         if not self.is_subagent:
             self.suggestions.clear()               # last turn's guess is stale now
+        if not self.is_subagent:
+            try:
+                from axon.features.insights import sync_pins
+                sync_pins(self)                    # pins of a resumed session, before anything is trimmed
+            except Exception:
+                pass
         trace = TurnTrace(
             turn=len(self.traces) + 1,
             prompt=user_input,
@@ -1591,15 +1660,10 @@ class Agent:
             return
         if result.stop_reason in ("blocked", "budget_exceeded"):
             return
+        if str(result.final_text or "").strip():
+            self._hook("MessageDisplay", {"message": str(result.final_text)[:4000]})
         self._maybe_suggest(user_input, result)
-        if self._has_title():
-            return
-        if self.is_subagent or not getattr(self.settings, "auto_title", True):
-            return
-        if self.title_provider is not None:
-            self._title_in_two_steps(user_input)
-        else:
-            self.maybe_auto_title(user_input)
+        self._after_turn_title(user_input, result)
 
     def drain_steer_messages(self) -> list[str]:
         """Messages typed mid-turn (queue items flagged steer=True), removed from the queue."""
@@ -1638,7 +1702,7 @@ class Agent:
             return results
         last = results[-1]
         return results[:-1] + [ToolResultBlock(tool_use_id=last.tool_use_id, content=f"{last.content}\n\n{note}",
-                                               is_error=last.is_error)]
+                                               is_error=last.is_error, images=last.images)]
 
     def _merge_user_note(self, note: str) -> Callable[[], None]:
         """Add *note* as user text after the last message without breaking provider rules: merged into a trailing
@@ -1674,7 +1738,9 @@ class Agent:
         t0, t1 = self._last_call_window
         cache_status = None
         if turn is not None and fingerprint is not None:
-            cache_status = self._cache_status(fingerprint, turn.usage, iteration, context_tokens)
+            cache_status = self._cache_status(fingerprint, turn.usage, iteration, context_tokens,
+                                              getattr(turn, "diagnostics", None))
+        self._annotate_manifest(cost, cache_status, call_model, turn)
         if turn is not None:
             self._log_usage(call_model, turn.usage, cost, self.agent_name if self.is_subagent else "main", t1 - t0)
         self._emit(LLMCallEnd(
@@ -1692,6 +1758,7 @@ class Agent:
             error=str(err) if err else "",
             cost_breakdown=cost_breakdown(call_model, turn.usage) if turn is not None else {},
             cache_miss_cause=cache_status.cause if cache_status is not None else "",
+            cache_miss_detail=self._cache_detail(call_model, turn, cache_status),
             context_used=context_tokens,
             context_window=self.context.context_window(self.settings.model),
         ))
@@ -1758,6 +1825,48 @@ class Agent:
         self.journal("step_limit", {"limit": limit, "report_chars": len(text), "dropped_tool_calls": len(turn.tool_uses)})
         return text, usage
 
+    def _fit_large_input(self, text: str) -> str:
+        """Shrink an input too large to send whole, and any oversized message left from a resumed session.
+        Tells the user what happened and what it saves, before the request goes out."""
+        window = self.context.context_window(self.settings.model)
+        limit = large_input.inline_limit(window, int(getattr(self.settings, "large_input_tokens", 0) or 0))
+        if limit is None:
+            return text
+        large_input.shrink_messages(self.conversation.messages, limit)
+        fitted, path = large_input.fit(text, limit)
+        full = large_input.estimate_tokens(text)
+        if path is None and full < large_input.COST_NOTICE_TOKENS:
+            return text
+        sent = large_input.estimate_tokens(fitted)
+        self._emit(LargeInputEvent(lines=text.count("\n") + 1, tokens_full=full, tokens_sent=sent, limit=limit,
+                                   path=str(path or ""), spilled=path is not None, model=self.settings.model,
+                                   cost_full=self._input_cost(full), cost_sent=self._input_cost(sent)))
+        return fitted
+
+    def _input_cost(self, tokens: int) -> float:
+        try:
+            from axon.providers.pricing import cost_for
+            return float(cost_for(self.settings.model, Usage(input=tokens)))
+        except Exception:
+            return 0.0
+
+    def _recover_from_overflow(self, attempt: int) -> bool:
+        """The provider refused the request as too large, or the context filled mid-reply. Shrink oversized
+        messages and tool results, and summarize older turns, each attempt harder. True if anything shrank."""
+        before = self.conversation.token_estimate()
+        # Sized from the request that failed, not the window on record: a provider's real limit can be lower.
+        limit = max(large_input.MIN_RECOVERY_LIMIT, before // (4 if attempt == 1 else 16))
+        large_input.shrink_messages(self.conversation.messages, limit)
+        self.context._trim_large_results(self.conversation)
+        self.context._evict_stale_results(self.conversation)
+        try:
+            self.compact(trigger="overflow")
+        except Exception as e:
+            self.journal("error", {"error": f"compaction after overflow failed: {type(e).__name__}: {e}"[:2000]})
+        after = self.conversation.token_estimate()
+        self.journal("context_overflow", {"attempt": attempt, "tokens_before": before, "tokens_after": after})
+        return after < before
+
     def _drop_from(self, message: dict[str, Any]) -> None:
         """Remove *message* and everything after it. Found by identity: compaction or the history window
         may have shortened the list since the message was added."""
@@ -1807,6 +1916,7 @@ class Agent:
         if pending:
             user_input = f"{pending}\n\n{user_input}" if user_input.strip() else pending
         self.conversation.repair()
+        user_input = self._fit_large_input(user_input)
         # A subagent's prompt is written by the model: paths in it are files to read, not images to attach.
         self.conversation.append_user(user_input, attach_images=not self.is_subagent)
         prompt_message = self.conversation.messages[-1]
@@ -1824,6 +1934,7 @@ class Agent:
         tool_schemas = self.tool_schemas()
         limit = max(1, int(self.settings.max_iterations))
         step_warned = False
+        overflow_retries = 0
 
         while iterations < limit:
             if iterations > 0:
@@ -1854,6 +1965,8 @@ class Agent:
                 try:
                     if self.compact(trigger="auto"):
                         system_blocks = self.system_blocks()
+                    else:
+                        self._consecutive_compactions = 0      # nothing older to compact, so this is not thrashing
                 except Exception as e:
                     self.journal("error", {"error": f"auto-compaction failed: {type(e).__name__}: {e}"[:2000], "iteration": iterations})
             else:
@@ -1900,9 +2013,15 @@ class Agent:
             cost, call_model = self._record_call(turn, outcome, err, iterations, fingerprint, context_tokens)
             t0, t1 = self._last_call_window
 
+            if outcome == "error" and overflow_retries < MAX_OVERFLOW_RETRIES and large_input.is_context_overflow(err):
+                overflow_retries += 1
+                if self._recover_from_overflow(overflow_retries):
+                    system_blocks = self.system_blocks()
+                    continue
+
             if outcome == "error":
                 msg = f"Provider error: {err}"
-                if iterations == 1:
+                if iterations - overflow_retries <= 1:
                     # Nothing happened this turn: roll the prompt back so the next request stays valid.
                     self._drop_from(prompt_message)
                     hint = "Your message was not answered and is not in the history; /retry sends it again."
@@ -1938,6 +2057,15 @@ class Agent:
                 return self._stop_result(final_text or INTERRUPTED_NOTE, "interrupted", iterations, total_tool_calls, total_usage)
 
             tool_uses = turn.tool_uses
+            if (not tool_uses and turn.stop_reason == "model_context_window_exceeded"
+                    and overflow_retries < MAX_OVERFLOW_RETRIES):
+                overflow_retries += 1
+                self._recover_from_overflow(overflow_retries)
+                follow = "[The context filled up during your reply, so older content was shortened. Continue from where you stopped.]"
+                self.conversation.append_user(follow)
+                self.session.append_user(follow)
+                system_blocks = self.system_blocks()
+                continue
             if not tool_uses:
                 event = "SubagentStop" if self.is_subagent else "Stop"
                 res = self._hook(event, {"stop_hook_active": stop_hook_forced, "last_assistant_message": final_text})
@@ -1976,7 +2104,7 @@ class Agent:
             except Exception:
                 self._rationales = {}
             self._prev_round_tools = list(tool_uses)
-            if turn.stop_reason == "max_tokens":
+            if turn.stop_reason in ("max_tokens", "model_context_window_exceeded"):
                 results = [
                     ToolResultBlock(
                         tool_use_id=tu.id,
@@ -2080,11 +2208,21 @@ class Agent:
         except Exception:
             pass
 
-    def _cache_status(self, fingerprint: dict[str, Any], usage: Usage, iteration: int, context_tokens: int) -> CacheStatus | None:
+    def _cache_status(self, fingerprint: dict[str, Any], usage: Usage, iteration: int, context_tokens: int,
+                      diagnostics: Any = None) -> CacheStatus | None:
         try:
+            from axon.features.insights import api_cause
             miss, cause = self._cache.observe(fingerprint, usage, str(getattr(self.provider, "name", "")))
             inp = int(usage.input or 0)
             read = int(usage.cache_read or 0)
+            resent, source = 0, ""
+            if miss and self._cache.last_prev_read > 0:
+                resent, source = max(0, self._cache.last_prev_read - read), "local"
+            api = api_cause(diagnostics)
+            if api is not None and (api[1] > 0 or miss):    # the API's own answer wins over the local comparison
+                miss, cause, source = True, api[0], "api"
+                if api[1] > 0:
+                    resent = api[1]
             window = self.context.context_window(self.settings.model)
             return CacheStatus(
                 iteration=iteration,
@@ -2097,9 +2235,36 @@ class Agent:
                 context_tokens=context_tokens,
                 context_window=window,
                 context_pct=round(100.0 * context_tokens / window, 1) if window else 0.0,
+                resent_tokens=resent,
+                source=source if miss else "",
             )
         except Exception:
             return None
+
+    def _annotate_manifest(self, cost: float, status: CacheStatus | None, model: str, turn: AssistantTurn | None) -> None:
+        """Attach the cost and the cache verdict to the prompt manifest of this call (read by /ctxdiff)."""
+        try:
+            if turn is None or not self._cache.manifests:
+                return
+            m = self._cache.manifests[-1]
+            m["cost"] = float(cost)
+            if status is not None:
+                from axon.features.insights import extra_cost
+                m.update(miss=status.miss, cause=status.cause, resent=status.resent_tokens,
+                         extra_cost=extra_cost(model, status.resent_tokens, turn.usage) if status.miss else None)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _cache_detail(model: str, turn: AssistantTurn | None, status: CacheStatus | None) -> str:
+        """` · 41k tokens re-sent · +$0.11` for a cache miss whose size is known; empty otherwise."""
+        if turn is None or status is None or not status.miss or status.resent_tokens <= 0:
+            return ""
+        try:
+            from axon.features.insights import extra_cost, miss_detail
+            return miss_detail(status.resent_tokens, extra_cost(model, status.resent_tokens, turn.usage))
+        except Exception:
+            return ""
 
     def _projected_request_cost(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> float:
         tokens = self.context.projected_tokens(self.conversation, system_blocks, tool_schemas)
@@ -2425,8 +2590,11 @@ class Agent:
         self._emit(ToolExecutionResult(id=block.id, name=block.name, input=block.input, content=content, is_error=True))
         return res
 
-    def _perm_event(self, block: ToolUseBlock, outcome: str, reason: str, source: str, approval: str | None = None) -> None:
-        self._emit(PermissionDecisionEvent(id=block.id, tool=block.name, outcome=outcome, reason=reason, source=source, approval=approval))
+    def _perm_event(self, block: ToolUseBlock, outcome: str, reason: str, source: str, approval: str | None = None,
+                    rule: str = "") -> None:
+        self._emit(PermissionDecisionEvent(id=block.id, tool=block.name, outcome=outcome, reason=reason, source=source,
+                                           approval=approval, rule=str(rule or ""),
+                                           mode=str(getattr(self.settings, "mode", "") or "")))
         try:
             self.session.append_permission(block.id, block.name, outcome, reason, source=source, approval=approval)
         except Exception:
@@ -2638,7 +2806,7 @@ class Agent:
         elif tool.name == "Task" and outcome == "deny" and not getattr(decision, "rule", None) and self.settings.mode == "plan":
             outcome, source, reason = "allow", "delegation", "Plan mode: subagents receive read-only tools only."
         if outcome == "deny":
-            self._perm_event(block, "deny", reason, source)
+            self._perm_event(block, "deny", reason, source, rule=getattr(decision, "rule", None) or "")
             return self._error_result(block, f"Permission Denied: {decision.reason}")
         if hook_perm == "allow" and outcome == "ask":
             outcome, source, reason = "allow", "hook", "Allowed by PreToolUse hook."
@@ -2661,7 +2829,7 @@ class Agent:
                 self._perm_event(block, "deny", f"PermissionRequest hook: {why}", "hook")
                 return self._error_result(block, f"Permission denied by PermissionRequest hook: {why}")
         if outcome == "allow":
-            self._perm_event(block, "allow", reason, source)
+            self._perm_event(block, "allow", reason, source, rule=getattr(decision, "rule", None) or "")
         else:
             if self.on_approval is None:
                 self._perm_event(block, "deny", "Approval required but no interactive approver is available.", "no-approver")
@@ -2673,7 +2841,8 @@ class Agent:
             self.notify(f"Axon needs your permission to use {tool.name}", "permission_prompt")
             with self._approval_lock, _pause_input():
                 approval = self.on_approval(tool.name, tool_input, decision)
-            self._perm_event(block, "deny" if approval == "deny" else "allow", reason, "user", approval=str(approval))
+            self._perm_event(block, "deny" if approval == "deny" else "allow", reason, "user", approval=str(approval),
+                             rule=getattr(decision, "rule", None) or "")
             if approval == "deny":
                 return self._error_result(block, "User declined this action.")
             if approval == "always":
@@ -2707,6 +2876,7 @@ class Agent:
 
         if not is_error:
             content = self._after_file_access(tool.name, tool_input, content)
+            content = diagnostics.after_edit(tool.name, tool_input, content, ctx)
 
         duration_ms = int((time.monotonic() - t_tool) * 1000)
         post = self._hook(
@@ -2740,7 +2910,8 @@ class Agent:
                 content = f"{content}\n\n[PostToolUseFailure hook feedback]\n{fail.message}"
             if fail is not None and getattr(fail, "additional_context", ""):
                 content = f"{content}\n\n[PostToolUseFailure hook context]\n{fail.additional_context}"
-        res = ToolResultBlock(tool_use_id=block.id, content=content, is_error=is_error)
+        res = ToolResultBlock(tool_use_id=block.id, content=content, is_error=is_error,
+                              images=() if is_error else tuple(ctx.images))
         self._emit(ToolExecutionResult(id=block.id, name=block.name, input=tool_input, content=res.content,
                                        is_error=res.is_error, changes=tuple(changes)))
         return res

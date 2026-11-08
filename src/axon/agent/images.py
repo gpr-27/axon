@@ -254,9 +254,7 @@ def unescape_path(raw: str) -> str:
     if (clean.startswith('"') and clean.endswith('"')) or (clean.startswith("'") and clean.endswith("'")):
         clean = clean[1:-1].strip()
     # Strip drag-and-drop file:// prefix
-    if clean.startswith("file:///"):
-        clean = clean[8:]
-    elif clean.startswith("file://"):
+    if clean.startswith("file://"):
         clean = clean[7:]
     # Unquote URL-encoded characters (%20, %E2%80%AF, etc.)
     import urllib.parse
@@ -308,6 +306,8 @@ def resolve_fuzzy_image_path(raw_str: str) -> Path | None:
                         return item.resolve()
 
     return None
+
+MAX_PATH_SCAN_CHARS = 64_000
 
 # Global cache of ingested image attachments across turns
 _INGESTED_IMAGES: dict[str, ImageAttachment] = {}
@@ -362,6 +362,8 @@ def ingest_image_file(raw_path: str, custom_index: int | None = None) -> ImageAt
             ocr_text="",
         )
 
+        from axon.agent.attachments import record_attachment
+        record_attachment("image", p.name, cached_file, str(p), len(data), hashlib.sha256(data).hexdigest(), mime, idx)
         _INGESTED_IMAGES[att.label] = att
         _INGESTED_IMAGES[str(p)] = att
         _INGESTED_IMAGES[str(cached_file)] = att
@@ -392,9 +394,10 @@ def compact_image_paths(text: str) -> tuple[str, list[ImageAttachment]]:
         if lbl in _INGESTED_IMAGES:
             attachments.append(_INGESTED_IMAGES[lbl])
 
-    # 3. Match raw and relative paths with image extensions
+    # 3. Match raw and relative paths with image extensions. Long text is pasted content, not a prompt naming
+    # files: scanning it would touch the disk hundreds of times per match and attach whatever a log mentions.
     candidates: list[tuple[str, str]] = []
-    for ext in IMAGE_EXTENSIONS:
+    for ext in IMAGE_EXTENSIONS if len(text) <= MAX_PATH_SCAN_CHARS else ():
         for m in re.finditer(re.escape(ext), text, re.IGNORECASE):
             end_idx = m.end()
             start_idx = end_idx - len(ext)

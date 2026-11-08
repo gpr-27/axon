@@ -450,7 +450,21 @@ class SessionStore:
         else:
             self.active_session_id = self._generate_session_id()
         self._activate(self.active_session_id)
+        self._take_lease()
         return self.active_session_id
+
+    def _take_lease(self) -> None:
+        """Note who else is writing this session (``conflict``); the caller decides what to do about it.
+        A subagent's store (explicit dir) writes its own transcript under its parent's lease."""
+        if self._explicit_dir:
+            return
+        from axon.session import lease
+        previous = getattr(self, "_lease", None)
+        if previous is not None:
+            previous.release()
+        folder = self.active_file.parent
+        self._lease = lease.acquire(folder)
+        self.conflict = lease.holder(folder) if self._lease is None else None
 
     # ── writing ──
     def _encode(self, entry: dict[str, Any]) -> str:
@@ -519,6 +533,7 @@ class SessionStore:
         ``full_outputs`` maps tool_use_id -> file holding the untruncated output."""
         self.append("tool_results", [
             {"tool_use_id": r.tool_use_id, "content": r.content, "is_error": r.is_error,
+             **({"images": [i.to_dict() for i in r.images]} if getattr(r, "images", ()) else {}),
              **({"duration_s": round(timings[r.tool_use_id], 3)} if timings and r.tool_use_id in timings else {}),
              **({"full_output": full_outputs[r.tool_use_id]} if full_outputs and r.tool_use_id in full_outputs else {})}
             for r in results
@@ -567,9 +582,10 @@ class SessionStore:
         sid = session_id or self.active_session_id
         self._write_record(self._file(sid), record_type, data)
 
-    def rename_session(self, new_title: str, session_id: str | None = None) -> str:
+    def rename_session(self, new_title: str, session_id: str | None = None, auto: bool = False) -> str:
+        """Save the session's name. ``auto`` marks a name Axon wrote, which later turns may rewrite."""
         clean_title = " ".join(new_title.split())[:64]
-        self._meta_record("session_rename", {"title": clean_title}, session_id)
+        self._meta_record("session_rename", {"title": clean_title, **({"auto": True} if auto else {})}, session_id)
         _journal("rename", {"title": clean_title, "session": session_id or self.active_session_id}, self)
         return clean_title
 
@@ -666,6 +682,7 @@ class SessionStore:
                             "tool_use_id": r["tool_use_id"],
                             "content": r.get("content", ""),
                             **({"is_error": True} if r.get("is_error") else {}),
+                            **({"images": r["images"]} if r.get("images") else {}),
                         }
                         for r in data if isinstance(r, dict) and "tool_use_id" in r
                     ]

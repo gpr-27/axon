@@ -67,6 +67,8 @@ from axon.ui.markdown import (
     render_table,  # noqa: F401  (re-exported for callers)
     )
 from axon.ui.theme import (
+    closed_box,
+    shorten_path,
     ACCENT,
     AMBER,
     BOLD,
@@ -2031,8 +2033,10 @@ class _SpinnerAwareStdout:
 
     def write(self, s: str) -> int:
         with OUTPUT_LOCK:
-            self._spinner._erase_locked()
-            n = self._real.write(s)
+            erase = self._spinner._erase_str_locked()
+            # the erase and the new text go out as ONE write (inside a synchronized-output frame where the
+            # terminal supports it), so the screen never shows the spinner gone and the text not there yet
+            n = self._real.write(_sync_frame(erase + s) if erase else s)
             if s:
                 self._spinner._at_line_start = s.endswith("\n")
             return n if isinstance(n, int) else len(s)
@@ -2042,6 +2046,29 @@ class _SpinnerAwareStdout:
 
 
 _ACTIVE_SPINNERS: "set[Spinner]" = set()
+
+_SYNC_TERMS = ("kitty", "foot", "alacritty", "ghostty", "wezterm", "contour", "mintty", "rio")
+_SYNC_PROGRAMS = ("iTerm.app", "WezTerm", "ghostty", "vscode", "WarpTerminal", "Hyper", "rio", "kitty")
+
+
+def sync_output_supported() -> bool:
+    """Whether to wrap frames in synchronized output (DECSET 2026) so a redraw lands atomically.
+
+    Terminals that do not know the mode ignore it, but only the ones known to support it are asked, so an
+    unknown one never risks a stray character. ``AXON_SYNC_OUTPUT=1`` forces it on, ``0`` off."""
+    forced = os.environ.get("AXON_SYNC_OUTPUT", "").strip().lower()
+    if forced in ("0", "off", "false", "no"):
+        return False
+    if forced in ("1", "on", "true", "yes"):
+        return True
+    term = os.environ.get("TERM", "").lower()
+    return os.environ.get("TERM_PROGRAM", "") in _SYNC_PROGRAMS or any(t in term for t in _SYNC_TERMS) \
+        or bool(os.environ.get("KITTY_WINDOW_ID") or os.environ.get("WT_SESSION"))
+
+
+def _sync_frame(text: str) -> str:
+    """*text* as one atomic frame when the terminal supports synchronized output, else unchanged."""
+    return f"\033[?2026h{text}\033[?2026l" if text and sync_output_supported() else text
 
 
 class pause_spinners:
@@ -2077,6 +2104,8 @@ class Spinner:
         self._label = ""
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._last_frame = ""
         self._visible = False
         self._at_line_start = True
         self._real: Any = None
@@ -2088,6 +2117,7 @@ class Spinner:
         self.prefix = "  "
         self.started_at = 0.0
         self.live: Any = None   # axon.ui.live_status.LiveStatus: the "now" and tip rows (set by the Renderer)
+        self.preview_provider: Callable[[], str] | None = None   # the response's unfinished line
 
     @staticmethod
     def enabled() -> bool:
@@ -2142,15 +2172,27 @@ class Spinner:
     def reset_clock(self) -> None:
         self.started_at = time.time()
 
+    def _erase_str_locked(self) -> str:
+        """The escape sequence that clears the visible spinner rows (empty when none are shown)."""
+        if not (self._visible and self._real is not None):
+            return ""
+        # the hint row sits under the spinner row: clear it, then go back up and clear the spinner
+        seq = "\r\033[2K" + "\033[A\r\033[2K" * (self._rows - 1)
+        self._visible = False
+        self._rows = 1
+        return seq
+
     def _erase_locked(self) -> None:
-        if self._visible and self._real is not None:
+        seq = self._erase_str_locked()
+        if seq:
             try:
-                # the hint row sits under the spinner row: clear it, then go back up and clear the spinner
-                self._real.write("\r\033[2K" + "\033[A\r\033[2K" * (self._rows - 1))
+                self._real.write(seq)
             except Exception:
                 pass
-            self._visible = False
-            self._rows = 1
+
+    def nudge(self) -> None:
+        """New response text arrived: redraw the live row soon (within ~30 ms) instead of at the next tick."""
+        self._wake.set()
 
     def status_rows(self) -> list[str]:
         """Rows under the spinner line: what is happening now, then a tip. The plain tip row when live status is off."""
@@ -2193,25 +2235,55 @@ class Spinner:
         lead = self._row_lead()
         return truncate(f"{lead}{SUBTLE}{glyph('result')} {RST}{MUTED}Tip: {sanitize(tip)}{RST}", max(10, term_width() - 1))
 
+    MIN_REDRAW = 0.04       # text-driven redraws are at most ~33 per second; the glyph still turns every interval
+
     def _run(self) -> None:
         frames = glyph("spinner")
-        while not self._stop.wait(self._interval):
+        last_draw = 0.0
+        last_glyph = time.monotonic()
+        while True:
+            woke = self._wake.wait(self._interval)
+            self._wake.clear()
+            if self._stop.is_set():
+                break
+            if woke:
+                gap = self.MIN_REDRAW - (time.monotonic() - last_draw)
+                if gap > 0 and self._stop.wait(gap):
+                    break
+                self._wake.clear()
             with OUTPUT_LOCK:
                 if self._stop.is_set() or sys.stdout is not self._proxy:
                     break
                 if not self._at_line_start or self._paused:
                     continue
-                self._frame = (self._frame + 1) % len(frames)
-                line = self.render_line(frames[self._frame])
-                extra = self.status_rows()
+                now = time.monotonic()
+                if not woke or now - last_glyph >= self._interval:
+                    self._frame = (self._frame + 1) % len(frames)
+                    last_glyph = now
+                text, rows = self.frame_text(frames[self._frame])
+                if self._visible and text == self._last_frame:
+                    continue                # nothing changed since what is on screen: write nothing
+                self._last_frame = text
                 try:
-                    self._erase_locked()
-                    self._real.write("\r\033[2K" + line + "".join(f"\n\033[2K{row}" for row in extra))
+                    # erase the old rows and draw the new ones in a single write: no half-drawn frame is ever visible
+                    self._real.write(_sync_frame(self._erase_str_locked() + "\r\033[2K" + text))
                     self._real.flush()
                     self._visible = True
-                    self._rows = 1 + len(extra)
+                    self._rows = rows
+                    last_draw = now
                 except Exception:
                     break
+
+    def frame_text(self, frame: str = "") -> tuple[str, int]:
+        """One frame of the live area and its row count: the response's unfinished line, the spinner, its status."""
+        preview = ""
+        if self.preview_provider is not None:
+            try:
+                preview = truncate(self.preview_provider() or "", max(10, term_width() - 1))
+            except Exception:
+                preview = ""
+        rows = ([preview] if preview else []) + [self.render_line(frame)] + self.status_rows()
+        return "\n\033[2K".join(rows), len(rows)
 
     def render_line(self, frame: str = "") -> str:
         elapsed = max(0.0, time.time() - (self.started_at or time.time()))
@@ -2311,6 +2383,7 @@ class Renderer:
         self.live = _live.LiveStatus(agent_of=lambda: getattr(self, "_agent", None), provider_of=self._provider_for)
         self.live.fallback_tip = self._generic_tip
         self.spinner.live = self.live
+        self.spinner.preview_provider = self._stream_preview
         _live.set_current(self.live)
         self._tail = "\n\n"
         self._md: MarkdownStream | None = None
@@ -2522,32 +2595,56 @@ class Renderer:
         model = model or "(no model)"
         provider = _provider_label(model, base_url)
         dot = glyph("dot")
+        width = term_width()
+        box_w = max(40, min(width - 2, 84))        # the whole box, margin included; never wider than the window
+        inner = box_w - 6                          # columns between "│ " and " │", less the 2-space margin
+        logo = [f"{PRIMARY}{glyph('logo_top')}{RST}", f"{CYAN}{glyph('logo_mid')}{RST}", f"{ACCENT}{glyph('logo_bot')}{RST}"]
+        try:   # the brand logo (equal-width coloured rows) when the brand module is there
+            from axon.ui.brand import logo_rows
+            rows3 = list(logo_rows())
+            if len(rows3) == 3:
+                logo = rows3
+        except Exception:
+            pass
+        lw = max(display_width(x) for x in logo)
+        text_w = max(8, inner - lw - 2)
         project, data_row = "", ""
         try:   # which project this is and where its data (sessions, memory, logs) is kept
             from axon.session.layout import project_info
             info = project_info(Path(workspace) if workspace else Path.cwd())
-            data = hyperlink(Path(info["data_dir"]).as_uri(), str(info["data_dir_display"]))
-            project = f"{TEXT}{info['name']}{RST} {MUTED}{dot} {w_path}{RST}"
+            name = str(info["name"])
+            path_room = max(8, text_w - display_width(name) - 3)
+            project = f"{TEXT}{name}{RST} {MUTED}{dot} {shorten_path(w_path, path_room)}{RST}"
+            shown = shorten_path(str(info["data_dir_display"]), max(8, inner - len("project data: ")))
+            data = hyperlink(Path(info["data_dir"]).as_uri(), shown)
             data_row = f"{MUTED}project data: {data}{RST}"
         except Exception:
-            project = f"{MUTED}{w_path}{RST}"
+            project = f"{MUTED}{shorten_path(w_path, text_w)}{RST}"
         lines = [
-            (f"{PRIMARY}{glyph('logo_top')}{RST}", f"{BOLD}{TEXT}Axon{RST} {MUTED}{v_str}{RST}"),
-            (f"{CYAN}{glyph('logo_mid')}{RST}", f"{TEXT}{model}{RST}" + (f" {MUTED}{dot} {effort} effort{RST}" if effort else "") + f" {MUTED}{dot} {provider}{RST}"),
-            (f"{ACCENT}{glyph('logo_bot')}{RST}", project),
+            (logo[0], f"{BOLD}{TEXT}Axon{RST} {MUTED}{v_str}{RST}"),
+            (logo[1], [f"{TEXT}{model}{RST}"] + ([f"{MUTED}{effort} effort{RST}"] if effort else []) + [f"{MUTED}{provider}{RST}"]),
+            (logo[2], project),
         ]
         mode_s = f"{WARNING}{mode}{RST} {MUTED}mode{RST}" if mode else ""
         trace_s = f"{MUTED}trace {self.trace_level} (ctrl+o){RST}"
         tips = f"{MUTED}/help commands {dot} ! shell {dot} @ files {dot} ? shortcuts{RST}"
-        width = term_width()
-        if width < 52:
-            out = [""]
-            for logo, text in lines:
-                rows = wrap_ansi(text, max(10, width - 8))
-                out += [f"  {logo} {rows[0]}"] + [f"      {r}" for r in rows[1:]]
-            out.append(f"  {mode_s}" if mode_s else "")
-            return "\n".join(truncate(r, width - 1) for r in out) + "\n"
-        rows = [f"{logo}  {text}" for logo, text in lines]
+        rows: list[str] = []
+        for lg, text in lines:                     # logo column + text; long text wraps under itself
+            if isinstance(text, list):             # "a · b · c": break between the pieces, not inside one
+                sep, parts, cur = f" {MUTED}{dot}{RST} ", [], ""
+                for piece in text:
+                    trial = piece if not cur else cur + sep + piece
+                    if cur and display_width(trial) > text_w:
+                        parts.append(cur + f" {MUTED}{dot}{RST}")
+                        cur = piece
+                    else:
+                        cur = trial
+                parts.append(cur)
+                parts = [x if display_width(x) <= text_w else truncate(x, text_w) for x in parts]
+            else:
+                parts = wrap_ansi(text, text_w) or [""]
+            rows.append(f"{lg}  {parts[0]}")
+            rows += [" " * (lw + 2) + r for r in parts[1:]]
         if data_row:
             rows.append(data_row)
         rows.append("")
@@ -2567,7 +2664,7 @@ class Renderer:
                 tip = ""
         if tip:
             rows += ["", f"{INFO}{glyph('info')} Tip:{RST} {MUTED}{tip}{RST}"]
-        return "\n" + box("", rows, min(width - 2, 84), color=BORDER, wrap=True) + "\n"
+        return "\n" + closed_box(rows, box_w, color=BORDER) + "\n"
 
     def render_user_message(self, text: str) -> None:
         """Echo the user's message as a shaded bar (wraps long / multi-line input)."""
@@ -2772,7 +2869,7 @@ class Renderer:
             gauge = context_gauge(*context, compact=True)
         self._line(stats + (sep + gauge if gauge else ""), "  ", atomic=True)
         if miss_cause and self.level >= 2:
-            self._line(f"{WARNING}{glyph('warn')} cache miss: {miss_cause}{RST}", "    ")
+            self._line(f"{MUTED}{glyph('warn')} cache miss: {miss_cause}{RST}", "    ")
         if self.level >= 2:
             split = _cost_split(self._step_model, usage)
             if split:
@@ -2911,16 +3008,24 @@ class Renderer:
         self._resp_raw.append(e.text)
         self._turn_text = True
         self._md_out(self._md.feed(e.text))
+        self.spinner.nudge()            # show the unfinished line now, not at the next 100 ms tick
 
     def _md_out(self, chunk: str) -> None:
         """Write rendered markdown rows, behind the timeline rail when the response is on it."""
         if chunk and getattr(self, "_md_railed", False):
-            # rail + an accent bar: what the model *says* is easy to tell apart from trace rows
-            bar = f"{BORDER}{glyph('v')}{RST}"
-            says = f"{ACCENT}{glyph('quote')}{RST}"
-            chunk = "".join(f"{bar} {says} {row[2:] if row.startswith('  ') else row}" + "\n"
-                            for row in chunk.split("\n")[:-1])
+            chunk = "".join(self._railed_row(row) + "\n" for row in chunk.split("\n")[:-1])
         self._out(chunk)
+
+    @staticmethod
+    def _railed_row(row: str) -> str:
+        # rail + an accent bar: what the model *says* is easy to tell apart from trace rows
+        return f"{BORDER}{glyph('v')}{RST} {ACCENT}{glyph('quote')}{RST} {row[2:] if row.startswith('  ') else row}"
+
+    def _stream_preview(self) -> str:
+        """The response's unfinished line, styled like the rows it will become."""
+        md = self._md
+        row = md.preview() if md is not None else ""
+        return self._railed_row(row) if row and getattr(self, "_md_railed", False) else row
 
     @staticmethod
     def _md_pending_text(text: str) -> bool:
@@ -3414,7 +3519,8 @@ class Renderer:
         if e.stop_reason == "max_tokens":
             self._line(f"{WARNING}{glyph('warn')} response truncated: output token limit reached{RST}", "  ")
         elif e.stop_reason == "refusal":
-            self._line(f"{WARNING}{glyph('warn')} the model declined to answer{RST}", "  ")
+            from axon.features.insights import refusal_detail
+            self._line(f"{WARNING}{glyph('warn')} the model declined to answer{refusal_detail(getattr(e, 'stop_details', None))}{RST}", "  ")
 
     # Extended trace events (axon.agent.trace, duck-typed) ----------------
     def _on_trace_event(self, e: Any) -> None:
@@ -3432,7 +3538,8 @@ class Renderer:
                 self.last_context = (used, window)
             self._close_step_stats(usage, str(_get(e, "stop_reason", default="") or ""), _get(e, "cost", default=None),
                                    _get(e, "duration_s", "duration", default=None),
-                                   str(_get(e, "cache_miss_cause", "cache_miss", default="") or ""),
+                                   (str(_get(e, "cache_miss_cause", "cache_miss", default="") or "")
+                                    + str(_get(e, "cache_miss_detail", default="") or "")),
                                    (used, window) if used and window else None)
             if str(_get(e, "outcome", default="ok")) == "error" and self.level >= 0:
                 self._line(f"{ERROR}{glyph('fail')} model call failed: {_one_line(_get(e, 'error', default='unknown error'), 160)}{RST}", "  ")
@@ -3494,6 +3601,18 @@ class Renderer:
                                     summary=f"{err} · retry {_get(e, 'attempt', default='?')} of {_get(e, 'max_attempts', default='?')}"))
             self._line(f"{WARNING}{glyph('warn')} {err} {dot} retrying in {float(_get(e, 'delay_s', default=0) or 0):.1f}s "
                        f"(retry {_get(e, 'attempt', default='?')} of {_get(e, 'max_attempts', default='?')}){RST}", "  ")
+        elif kind == "LargeInputEvent":
+            self._finish_stream()
+            lines, full, sent = int(_get(e, "lines", default=0) or 0), int(_get(e, "tokens_full", default=0) or 0), int(_get(e, "tokens_sent", default=0) or 0)
+            cost_full, cost_sent = float(_get(e, "cost_full", default=0.0) or 0.0), float(_get(e, "cost_sent", default=0.0) or 0.0)
+            if bool(_get(e, "spilled", default=False)):
+                self._line(f"{INFO}{glyph('info')} large input: {lines:,} lines, ~{_fmt_tokens(full)} tokens{RST} {MUTED}{dot} sending the start and end "
+                           f"(~{_fmt_tokens(sent)}); the model reads the rest as needed"
+                           + (f" {dot} ~${cost_full:.2f} {glyph('arrow')} ~${cost_sent:.2f} input" if cost_full else "") + RST, "  ")
+                self._line(f"{MUTED}full text saved: {_get(e, 'path', default='')}{RST}", "  ")
+            else:
+                self._line(f"{INFO}{glyph('info')} large input: {lines:,} lines, ~{_fmt_tokens(full)} tokens{RST}"
+                           + (f" {MUTED}{dot} ~${cost_full:.2f} per request{RST}" if cost_full else ""), "  ")
         elif kind == "CompactionEvent":
             self._finish_stream()
             if bool(_get(e, "blocked_by_hook", default=False)):
@@ -3838,7 +3957,7 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
                 out.append(f"{v}  {SUBTLE}{glyph('wrap')}{RST} {MUTED}" + (f"replied in {float(d['duration_s']):.1f}s {dot} " if d.get("duration_s") is not None else "") + f"{_usage_line(d['usage'], cost=d.get('cost'), stop=str(d.get('stop_reason', '')) if lvl >= 2 else '')}{RST}"
                            + (f" {MUTED}{dot}{RST} {gauge}" if gauge else ""))
                 if d.get("cache_miss_cause") and lvl >= 2:
-                    out.append(f"{v}    {WARNING}{glyph('warn')} cache miss: {_one_line(d['cache_miss_cause'], 100)}{RST}")
+                    out.append(f"{v}    {MUTED}{glyph('warn')} cache miss: {_one_line(d['cache_miss_cause'], 100)}{_one_line(d.get('cache_miss_detail', ''), 60)}{RST}")
             if d.get("error"):
                 out.append(f"{v}  {ERROR}{glyph('fail')} {_one_line(d['error'], 160)}{RST}")
         elif kind == "tool":

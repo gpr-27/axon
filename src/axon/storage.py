@@ -415,9 +415,9 @@ def _is_home_or_above(folder: Path) -> bool:
 
 
 def store_paste(text: str) -> str:
-    """Keep a large pasted text once, by content, under cache/pastes/. Returns its id (a hash prefix)."""
+    """Keep a large pasted text once, by content, under pastes/. Returns its id (a hash prefix)."""
     paste_id = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
-    target = ensure_dir(axon_home() / "cache" / "pastes") / f"{paste_id}.txt"
+    target = ensure_dir(axon_home() / "pastes") / f"{paste_id}.txt"
     if not target.exists():
         try:
             fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -432,17 +432,19 @@ def load_paste(paste_id: str) -> str | None:
     """The text stored by :func:`store_paste`, or None when it is gone."""
     if not re.fullmatch(r"[0-9a-f]{16}", paste_id or ""):
         return None
-    try:
-        return (axon_home() / "cache" / "pastes" / f"{paste_id}.txt").read_text(encoding="utf-8")
-    except OSError:
-        return None
+    for folder in (axon_home() / "pastes", axon_home() / "cache" / "pastes"):   # cache/: where older versions kept them
+        try:
+            return (folder / f"{paste_id}.txt").read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return None
 
 
 def record_history(workspace: Path, text: str, session_id: str = "", pastes: dict[int, str] | None = None) -> None:
     """Global prompt history (~/.axon/history.jsonl), tagged with the project root.
 
     *text* is what was typed, with ``[Pasted text #N +M lines]`` chips; *pastes* maps each chip number to its
-    full text, which is stored once under cache/pastes/ and only referenced from the history record."""
+    full text, which is stored once under pastes/ and only referenced from the history record."""
     if not text.strip():
         return
     record: dict[str, Any] = {"ts": _now(), "project": str(history_project(workspace)),
@@ -468,6 +470,7 @@ HOME_ENTRIES: dict[str, str] = {
     "commands": "user slash commands", "skills": "user skills", "plugins": "installed plugins",
     "plugin-data": "per-plugin data", "output-styles": "output styles", "prompts": "prompt snippets",
     "agent-memory": "subagent memory", "bin": "helper binaries", "history.jsonl": "every prompt typed",
+    "pastes": "large pasted text from prompt history",
     "usage.jsonl": "every model call: tokens and cost", "logs": "axon and MCP logs",
     "cache": "regenerable scratch data", "state": "small remembered choices",
     "bug-reports": "saved bug reports", "backup": "originals kept by migrations",
@@ -490,6 +493,8 @@ SESSION_ENTRIES: dict[str, str] = {
     "session.jsonl": "full transcript", "subagents": "subagent transcripts and traces",
     "screen.log": "terminal copy", "trace.jsonl": "per-turn traces", "outputs": "full tool/shell outputs",
     "checkpoints": "file snapshots for /rewind", "images": "pasted images", "pastes": "large pastes",
+    "attachments": "files dropped into the prompt, with index.jsonl listing everything kept",
+    "writer.lease": "which process is writing this session",
     "todos.json": "todo list", "exports": "/export files", "debug.log": "--debug log",
     "legacy": "files kept by relayout when names clashed",
 }

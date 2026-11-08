@@ -281,7 +281,9 @@ here (or under `AXON_HOME`). Nothing is deleted automatically.
 | `settings.json`, `settings.local.json`, `config.toml`, `keybindings.json`, `statusline.py` | your settings, provider/model/endpoint config, key bindings |
 | `.env`, `mcp-auth.json`, `settings.local.json` | **secrets** (API keys, MCP OAuth tokens): owner-only (0600), never shared or exported; this folder is 0700 |
 | `mcp.json`, `mcp-state.json` | MCP servers and their enable/disable state |
-| `AXON.md`, `memory/`, `rules/` | user-wide instructions and memory (intentionally global) |
+| `AXON.md`, `memory/`, `rules/` | user-wide instructions and global memory: `memory/<slug>.md` files plus a `memory/MEMORY.md` index loaded in every project |
+| `memory-trash/` | every overwritten or deleted global memory (`/memory restore`); never pruned |
+| `exports/` | `/memory export` files |
 | `agents/`, `commands/`, `skills/`, `plugins/`, `output-styles/`, `prompts/` | your extensions |
 | `agent-memory/`, `plugin-data/`, `bin/` | subagent memory, per-plugin data, helper binaries (OCR) |
 | `history.jsonl` | every prompt you typed, tagged with its project |
@@ -310,10 +312,12 @@ character replaced by `-`. Each project folder has its own `README.md`.
 | `sessions/<id>/outputs/` | complete tool and shell outputs that were truncated for the model, background shell logs |
 | `sessions/<id>/checkpoints/` | file snapshots for `/rewind`; `rewound/` keeps what a rewind replaced |
 | `sessions/<id>/images/`, `pastes/` | pasted images and large pasted text (the text stays in the transcript too) |
+| `sessions/<id>/attachments/` | files dropped into the prompt; `index.jsonl` lists everything kept, images included |
 | `sessions/<id>/todos.json`, `exports/`, `debug.log` | todo list, `/export` files, `--debug` log |
 | `sessions/_unattached/` | images/pastes made while no session was active (rare) |
 | `library/<type>/<name>/` | a copy of every version of every skill, agent, command, memory, rule, prompt and AXON.md, kept even after the original is edited or deleted (`/library`, `axon library`) |
-| `memory/` | auto memory for this project |
+| `memory/` | project memory (private): `<slug>.md` files + `MEMORY.md` index, saved by you or the model (`/memory`) |
+| `memory-trash/<scope>/` | overwritten or deleted project/repo memories (`/memory restore`); never pruned |
 | `plans/` | plan-mode files |
 | `trash/` | deleted sessions: the whole session folder (`/restore` lists and restores them) |
 | `tips.json` | cached usage tips |
@@ -323,7 +327,7 @@ character replaced by `-`. Each project folder has its own `README.md`.
 | You did | Stored in |
 |---|---|
 | typed a prompt | `history.jsonl`, the project's `activity.jsonl`, the session transcript |
-| pasted text / an image | `sessions/<id>/pastes/`, `sessions/<id>/images/` |
+| pasted text / an image / a dropped file | `sessions/<id>/pastes/`, `sessions/<id>/images/`, `sessions/<id>/attachments/` |
 | a tool printed a lot | `sessions/<id>/outputs/` (the model saw a truncated copy) |
 | an edit you can rewind / undo | `sessions/<id>/checkpoints/` (`/rewind`) |
 | planned, todo list | `plans/`, `sessions/<id>/todos.json` |

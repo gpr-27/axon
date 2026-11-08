@@ -222,6 +222,17 @@ def _now_iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="milliseconds")
 
 
+MAX_JOURNAL_TEXT = 16_000     # a journal line records what happened; large pastes are kept in pastes/
+
+
+def bounded(data: Any) -> Any:
+    """*data* with very long top-level strings cut, so one huge prompt does not bloat the journal."""
+    if not isinstance(data, dict):
+        return data
+    return {k: f"{v[:MAX_JOURNAL_TEXT]}... [{len(v) - MAX_JOURNAL_TEXT:,} more characters]"
+            if isinstance(v, str) and len(v) > MAX_JOURNAL_TEXT else v for k, v in data.items()}
+
+
 def record(kind: str, data: Any = None, *, agent: Any = None, workspace: Path | str | None = None,
            session_id: str | None = None, sync: bool = False) -> dict[str, Any] | None:
     """Append one event to the project's journal. Returns the written entry (None on failure)."""
@@ -230,7 +241,7 @@ def record(kind: str, data: Any = None, *, agent: Any = None, workspace: Path | 
         ws, sid = _resolve(agent, workspace, session_id)
         t = time.time()
         entry = {"ts": _now_iso(t), "t": round(t, 3), "session_id": sid, "kind": str(kind),
-                 "data": redact(data if data is not None else {}), "pid": os.getpid()}
+                 "data": redact(bounded(data) if data is not None else {}), "pid": os.getpid()}
         line = json.dumps(entry, ensure_ascii=False, default=str)
         path = storage.activity_path(ws)
         with _LOCK:

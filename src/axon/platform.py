@@ -654,13 +654,13 @@ def _keycode_name(code: int, mod: int) -> str:
 # newline would act as Enter.
 PASTE_END = "\x1b[201~"
 PASTE_IDLE_SECONDS = 5.0      # give up only after this long with no data at all
-PASTE_MAX_SECONDS = 120.0     # hard stop for a terminal that never sends the end marker
 
 
 def _read_bracketed_paste(getc: Callable[[float], str | None]) -> str:
+    """Read until the end marker. There is no limit on total time: cutting off a long paste would deliver
+    the rest as typed keys, where each newline acts as Enter and submits a fragment."""
     buf: list[str] = []
-    deadline = time.monotonic() + PASTE_MAX_SECONDS
-    while time.monotonic() < deadline:
+    while True:
         c = getc(PASTE_IDLE_SECONDS)
         if c is None:
             break
@@ -745,6 +745,14 @@ def _looks_like_paste(text: str) -> bool:
     return "\r" in body or "\n" in body or len(text) >= _PASTE_MIN_CHARS
 
 
+def _is_typed_drop(text: str) -> bool:
+    try:
+        from axon.agent.attachments import looks_like_typed_drop
+        return looks_like_typed_drop(text, os.getcwd())
+    except Exception:
+        return False
+
+
 def _posix_fill(timeout: float) -> bool:
     fd = _stdin_fd()
     if fd is None or _select is None:
@@ -770,6 +778,11 @@ def _posix_fill(timeout: float) -> bool:
     if not _inside_bracketed_paste and _looks_like_paste(text):
         # Non-bracketed multi-line chunk: treat as a paste so it does not submit line by line.
         _events.append(PASTE_PREFIX + normalize_newlines(text))
+        return True
+    if not _inside_bracketed_paste and len(text) > 2 and _is_typed_drop(text):
+        # A dropped file path arriving as plain keys (no bracketed paste): hand it over as a paste so it is
+        # attached like any drop instead of being typed into the prompt.
+        _events.append(PASTE_PREFIX + text)
         return True
     if len(text) > 1 and text.endswith("\n") and "\x1b" not in text:
         # Type-ahead completed while the tty was still in cooked mode (ICRNL turned Enter into

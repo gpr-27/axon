@@ -3,6 +3,7 @@ State management: Conversation, FileState, TodoState.
 """
 from __future__ import annotations
 import hashlib
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,7 +153,8 @@ class Conversation:
                     "type": "tool_result",
                     "tool_use_id": r.tool_use_id,
                     "content": r.content,
-                    **({"is_error": True} if r.is_error else {})
+                    **({"is_error": True} if r.is_error else {}),
+                    **({"images": [i.to_dict() for i in r.images]} if getattr(r, "images", ()) else {}),
                 }
                 for r in results
             ]
@@ -250,6 +252,24 @@ def _sha256_of(p: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+_PATH_LOCKS: dict[str, "threading.RLock"] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def path_lock(p: Path) -> "threading.RLock":
+    """One re-entrant lock per resolved path, shared by every FileState in the process (parallel tool calls and
+    subagents), so a check-read-modify-write sequence on a file cannot interleave with another one."""
+    try:
+        key = os.path.normcase(str(Path(p).resolve()))
+    except (OSError, RuntimeError):
+        key = os.path.normcase(os.path.abspath(str(p)))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = _PATH_LOCKS[key] = threading.RLock()
+        return lock
 
 
 class FileState:

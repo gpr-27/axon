@@ -13,8 +13,10 @@ Load order (broadest first; files are concatenated, never overridden):
                    in the chain (setting ``instruction_files``).
 4. On demand       AXON.md files in subdirectories below the workspace and path-scoped rules
                    (frontmatter ``paths:``) load the first time a tool touches a matching file.
-5. Auto memory     first 200 lines / 25 KB of ~/.axon/projects/<project>/memory/MEMORY.md
-6. Saved items     ~/.axon/memory/*.md and <ws>/.axon/memory/*.md
+5. Saved memory    first 200 lines / 25 KB of each scope's MEMORY.md index: ~/.axon/memory (global, every
+                   project), <ws>/.axon/memory (repo) and ~/.axon/projects/<project>/memory (project/auto).
+                   Files in the old format (``title``/``category``, no ``type``) are inlined instead.
+                   See axon.features.memory_files for the file format, trash and index tools (/memory).
 
 ``@path`` imports (relative to the importing file, ``~`` and absolute allowed, ``\\ `` escapes a
 space, quoted paths and code spans/fences are ignored) are followed up to 4 hops. Block-level
@@ -439,6 +441,15 @@ class MemoryLoader:
                         self._take(d / name, "project")
                 for name in LOCAL_FILES:
                     self._take(d / name, "project")
+        if include_user:
+            # Global memory loads in every project (it is not tied to auto memory); the repo's own
+            # .axon/memory index loads too, so what /memory shows is what the model gets.
+            for scope, idx in (("global-memory", axon_home / "memory" / "MEMORY.md"),
+                               ("repo-memory", self.workspace / ".axon" / "memory" / "MEMORY.md")):
+                text = load_index_file(idx)
+                if text and not self._excluded(idx):
+                    self.seen.add(_file_key(idx))
+                    self.loaded.append(InstructionFile(path=idx, scope=scope, content=text))
         if self.auto_memory:
             idx = auto_memory_dir(self.workspace) / "MEMORY.md"
             text = load_auto_memory_index(self.workspace)
@@ -514,7 +525,11 @@ def _axon_home() -> Path:
 
 
 def load_auto_memory_index(workspace: Path) -> str:
-    idx = auto_memory_dir(workspace) / "MEMORY.md"
+    return load_index_file(auto_memory_dir(workspace) / "MEMORY.md")
+
+
+def load_index_file(idx: Path) -> str:
+    """First 200 lines / 25 KB of a MEMORY.md ("" when missing)."""
     try:
         if not idx.is_file():
             return ""
@@ -523,6 +538,8 @@ def load_auto_memory_index(workspace: Path) -> str:
         return ""
     text = raw.decode("utf-8", errors="ignore")
     lines = text.splitlines()[:AUTO_MEMORY_MAX_LINES]
+    if all(not ln.strip() or ln.lstrip().startswith("#") for ln in lines):
+        return ""    # a heading with no pointers costs tokens and says nothing
     return "\n".join(lines).strip()
 
 
@@ -548,22 +565,18 @@ class AutoMemory:
     TYPES = ("user", "feedback", "project", "reference")
 
     def __init__(self, workspace: Path) -> None:
+        self.workspace = Path(workspace)
         self.dir = auto_memory_dir(workspace)
         self.index = self.dir / "MEMORY.md"
 
     def save(self, title: str, body: str, mem_type: str = "project") -> tuple[Path, str | None]:
+        """Save (or update) one project memory: standard frontmatter, secrets redacted, old text trashed, indexed."""
+        from axon.features import memory_files as mf
         mem_type = mem_type if mem_type in self.TYPES else "project"
-        self.dir.mkdir(parents=True, exist_ok=True)
-        from axon.session.store import atomic_write_text
-        slug = _generate_clean_slug(title) or f"memory-{int(time.time())}"
-        topic = self._topic_path(slug, title)
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        atomic_write_text(topic, f"---\ntype: {mem_type}\nmodified: {stamp}\n---\n\n# {title.strip()}\n\n{body.strip()}\n")
-        line = f"- [{title.strip()}]({topic.name}): {' '.join(body.split())[:120]}"
-        existing = self.index.read_text(encoding="utf-8", errors="replace") if self.index.is_file() else "# Memory index\n"
-        kept = [ln for ln in existing.splitlines() if f"]({topic.name})" not in ln]
-        atomic_write_text(self.index, "\n".join(kept + [line]).rstrip() + "\n")
-        return topic, check_memory_index(self.index)
+        topic = self._topic_path(_generate_clean_slug(title) or f"memory-{int(time.time())}", title)
+        res = mf.write_memory(self.workspace, "project", name=title.strip(), body=f"# {title.strip()}\n\n{body.strip()}",
+                              description=" ".join(body.split())[:120], type_=mem_type, file=topic.name)
+        return res.path, res.warning or check_memory_index(self.index)
 
     def _topic_path(self, slug: str, title: str) -> Path:
         """The file this title already owns, else a free name: different titles can share a slug."""
@@ -598,7 +611,8 @@ def _display_path(p: Path, workspace: Path) -> str:
             return str(p)
 
 
-_SCOPE_LABEL = {"managed": "Managed policy", "user": "User instructions", "project": "Project instructions", "auto": "Auto memory"}
+_SCOPE_LABEL = {"managed": "Managed policy", "user": "User instructions", "project": "Project instructions", "auto": "Auto memory",
+                "global-memory": "Global memory", "repo-memory": "Repo memory"}
 
 
 def _render_instruction(node: InstructionFile, workspace: Path, level: int = 0) -> list[str]:
@@ -685,10 +699,18 @@ class MemoryStore:
         custom_title: str | None = None,
     ) -> MemoryItem:
         """Save a learned rule or pattern to persistent memory (project or global)."""
-        scope = "global" if scope in ("global", "user") else "project"
+        # "project" is the repo's .axon/memory (the long-standing default); "auto" is the private per-project
+        # folder under ~/.axon/projects/<key>/memory where the model saves.
+        scope = "global" if scope in ("global", "user") else "auto" if scope in ("auto", "private") else "project"
+        from axon.features import memory_files as _mf
+        labels = _mf.scan_secrets(f"{custom_title or ''}\n{text}")
+        if labels:      # redact before anything is derived from the text: the title and file name would leak it
+            text = _mf.redact(text)
+            custom_title = _mf.redact(custom_title) if custom_title else custom_title
         slug = _generate_clean_slug(custom_title or text)
         title = custom_title.strip() if custom_title else _generate_clean_title(text)
-        target_dir = self.global_memory_dir if scope == "global" else self.project_memory_dir
+        target_dir = (self.global_memory_dir if scope == "global"
+                      else auto_memory_dir(self.workspace) if scope == "auto" else self.project_memory_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         # Avoid clobbering a different memory that happens to share a slug.
@@ -709,21 +731,15 @@ class MemoryStore:
             scope=scope,
             created_at=time.time(),
         )
-        file_content = (
-            "---\n"
-            f"title: {json.dumps(item.title, ensure_ascii=False)}\n"
-            f"category: {json.dumps(item.category, ensure_ascii=False)}\n"
-            f"scope: {json.dumps(item.scope)}\n"
-            f"created_at: {item.created_at}\n"
-            "---\n\n"
-            f"# {item.title}\n\n"
-            f"{item.content}\n"
-        )
-        from axon.session.store import atomic_write_text
-        atomic_write_text(target, file_content)
-        from axon.session.library import record_saved
-        record_saved(target, action="created", source="memory", workspace=self.workspace,
-                     item={"type": "memory", "name": target.stem, "scope": scope})
+        from axon.features import memory_files as mf
+        fresh = not target.exists()
+        res = mf.write_memory(
+            self.workspace, {"global": "global", "auto": "project"}.get(scope, "repo"), name=title, body=item.content,
+            description=mf.derive_description(item.content),
+            type_=mf._CATEGORY_TYPE.get(category, "project" if scope != "global" else "user"),
+            file=target.name,
+            extra={"title": title, "category": category, "created_at": item.created_at} if fresh else None)
+        item.redaction = sorted(set(res.redacted) | set(labels))    # type: ignore[attr-defined]
         return item
 
     def add(self, text: str, scope: str = "project") -> MemoryItem:
@@ -731,7 +747,7 @@ class MemoryStore:
         clean = text.strip().lstrip("#").strip()
         if not clean:
             raise ValueError("Memory text is empty.")
-        scope = "global" if scope in ("global", "user") else "project"
+        scope = "global" if scope in ("global", "user") else "auto" if scope in ("auto", "private") else "project"
         return self.learn(clean, category="preferences" if scope == "global" else "conventions", scope=scope)
 
     def list_all(self) -> list[MemoryItem]:
@@ -742,7 +758,7 @@ class MemoryStore:
                 continue
             if not directory.is_dir():
                 continue
-            files = sorted(directory.glob("*.md"), key=lambda f: (f.stat().st_mtime, f.name))
+            files = sorted((f for f in directory.glob("*.md") if f.name != "MEMORY.md"), key=lambda f: (f.stat().st_mtime, f.name))
             for p in files:
                 item = self._load_file(p, scope=scope)
                 if item:
@@ -764,7 +780,7 @@ class MemoryStore:
                             continue
                         key, val = line.split(":", 1)
                         key = key.strip()
-                        if key == "title":
+                        if key in ("title", "name"):
                             title = _fm_value(val) or title
                         elif key == "category":
                             cat = _fm_value(val) or cat
@@ -791,11 +807,12 @@ class MemoryStore:
         for directory in (self.project_memory_dir, self.global_memory_dir):
             target = directory / f"{item_id}.md"
             if target.is_file():
-                from axon.session.library import record_saved
-                record_saved(target, action="deleted", source="memory", workspace=self.workspace,
-                             item={"type": "memory", "name": target.stem,
-                                   "scope": "global" if directory == self.global_memory_dir else "project"})
-                target.unlink()
+                from axon.features import memory_files as mf
+                scope = "global" if directory == self.global_memory_dir else "repo"
+                mem = mf.parse_memory(target, scope)
+                if mem is None:
+                    return False
+                mf.delete_memory(self.workspace, mem)    # the text stays in the trash: /memory restore
                 return True
         return False
 
@@ -805,38 +822,62 @@ class MemoryStore:
         return [it for it in self.list_all() if q in it.title.lower() or q in it.content.lower() or q in it.category.lower()]
 
     def clear(self) -> None:
-        """Clear all project memory items."""
+        """Clear all project (repo) memory items; each one is kept in the trash."""
         if not self.project_memory_dir.is_dir():
             return
-        from axon.session.library import record_saved
-        for p in self.project_memory_dir.glob("*.md"):
+        from axon.features import memory_files as mf
+        for p in sorted(self.project_memory_dir.glob("*.md")):
+            if p.name == "MEMORY.md":
+                continue
+            mem = mf.parse_memory(p, "repo")
             try:
-                record_saved(p, action="deleted", source="memory clear", workspace=self.workspace,
-                             item={"type": "memory", "name": p.stem, "scope": "project"})
-                p.unlink()
+                if mem is not None:
+                    mf.delete_memory(self.workspace, mem)
             except OSError:
                 pass
 
 
-def render_saved_memories(workspace: Path) -> str:
-    """Learned items from ~/.axon/memory and <ws>/.axon/memory (stable ordering)."""
+def _legacy_items(workspace: Path) -> list[tuple[MemoryItem, Path]]:
+    """Saved items still in the old format (no name/description/type): they are inlined, the rest load via indexes."""
+    from axon.features import memory_files as mf
     try:
-        items = MemoryStore(workspace).list_all()
+        store = MemoryStore(workspace)
+        out = []
+        for it in store.list_all():
+            path = (store.global_memory_dir if it.scope == "global" else store.project_memory_dir) / f"{it.id}.md"
+            mem = mf.parse_memory(path, "global" if it.scope == "global" else "repo")
+            if mem is not None and not mem.modern:
+                out.append((it, path))
+        return out
     except Exception:
-        items = []
+        return []
+
+
+def _render_legacy_line(it: MemoryItem) -> str:
+    prefix = "user" if it.scope == "global" else "project"
+    body = " ".join(it.content.split())
+    if len(body) > 600:
+        body = body[:597] + "..."
+    title = it.title.strip()
+    if title and not body.lower().startswith(title.lower()[: max(10, len(title) // 2)]):
+        return f"- [{prefix}] {title}: {body}"
+    return f"- [{prefix}] {body}"
+
+
+def load_saved_legacy_items(workspace: Path) -> list[tuple[Path, str, str]]:
+    """(path, scope, rendered line) of the inlined old-format items, for ``/memory why``."""
+    return [(path, it.scope, _render_legacy_line(it)) for it, path in _legacy_items(workspace)]
+
+
+def render_saved_memories(workspace: Path) -> str:
+    """Old-format learned items from ~/.axon/memory and <ws>/.axon/memory (stable ordering).
+    Items with the standard frontmatter are loaded through their scope's MEMORY.md instead."""
+    items = [it for it, _ in _legacy_items(workspace)]
     if not items:
         return ""
     lines = ["### Saved memories"]
     for it in sorted(items, key=lambda i: (i.scope != "global", i.id)):
-        prefix = "user" if it.scope == "global" else "project"
-        body = " ".join(it.content.split())
-        if len(body) > 600:
-            body = body[:597] + "..."
-        title = it.title.strip()
-        if title and not body.lower().startswith(title.lower()[: max(10, len(title) // 2)]):
-            lines.append(f"- [{prefix}] {title}: {body}")
-        else:
-            lines.append(f"- [{prefix}] {body}")
+        lines.append(_render_legacy_line(it))
     return "\n".join(lines)
 
 

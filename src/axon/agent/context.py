@@ -11,6 +11,7 @@ from its tool_use.
 """
 from __future__ import annotations
 import json
+import re
 from typing import Any
 from axon.agent.state import Conversation, estimate_content_tokens, is_turn_start
 from axon.config import Settings
@@ -70,9 +71,31 @@ def _render_for_summary(messages: list[dict[str, Any]], limit_chars: int = 400_0
     return text
 
 
+PIN_MARK = "\n\n[Pinned results kept verbatim]\n"
+_PINNED_BLOCK = re.compile(r'<pinned id="([^"]*)" label="[^"]*">\n(.*?)\n</pinned>', re.S)
+
+
+def result_id(message: dict[str, Any], block: dict[str, Any] | None = None) -> str:
+    """tool_use id a tool result answers (a tool_result block, or an OpenAI-style ``tool`` message)."""
+    if block is not None:
+        return str(block.get("tool_use_id") or "")
+    return str(message.get("tool_call_id") or "")
+
+
+def result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return str(content or "")
+
+
 class ContextManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # tool_use id -> {"label", "tokens"}: results the user pinned (/pin). Never trimmed, evicted or summarised away.
+        self.pins: dict[str, dict[str, Any]] = {}
+        self.last_receipt: dict[str, Any] | None = None   # the last summary split: sizes, summary, replaced messages (/compact --last)
 
     # ── budgeting ───────────────────────────────────────────────────
     def context_window(self, model: str | None = None) -> int:
@@ -197,10 +220,11 @@ class ContextManager:
         for m in conv.messages:
             content = m.get("content")
             if m.get("role") == "tool" and isinstance(content, str) and len(content) > TRIM_THRESHOLD_CHARS:
-                m["content"] = trim(content)
+                if result_id(m) not in self.pins:
+                    m["content"] = trim(content)
             elif isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and result_id(m, block) not in self.pins:
                         inner = block.get("content", "")
                         if isinstance(inner, str) and len(inner) > TRIM_THRESHOLD_CHARS:
                             block["content"] = trim(inner)
@@ -212,10 +236,11 @@ class ContextManager:
             m = conv.messages[idx]
             content = m.get("content")
             if m.get("role") == "tool":
-                m["content"] = STALE_PLACEHOLDER
+                if result_id(m) not in self.pins:
+                    m["content"] = STALE_PLACEHOLDER
             elif isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and result_id(m, block) not in self.pins:
                         block["content"] = STALE_PLACEHOLDER
 
     # ── rung 3 ──────────────────────────────────────────────────────
@@ -257,6 +282,7 @@ class ContextManager:
             "role": "user",
             "content": (
                 f"[Summary of the earlier conversation ({len(old_msgs)} messages compacted)]\n\n{summary_text.strip()}"
+                f"{self._carried_pins(old_msgs)}"
             ),
         }
         if recent and recent[0].get("role") == "user":
@@ -264,7 +290,32 @@ class ContextManager:
             conv.messages = [summary_msg, {"role": "assistant", "content": [{"type": "text", "text": "Understood. Continuing from the summary."}]}] + recent
         else:
             conv.messages = [summary_msg] + recent
+        try:
+            from axon.features.insights import build_receipt
+            self.last_receipt = build_receipt(old_msgs, recent, conv.messages, summary_text)
+        except Exception:
+            pass
         return True
+
+    def _carried_pins(self, old_msgs: list[dict[str, Any]]) -> str:
+        """Pinned results from the messages about to be summarised, verbatim, so the summary never loses them."""
+        if not self.pins:
+            return ""
+        found: dict[str, str] = {}
+        for m in old_msgs:
+            content = m.get("content")
+            if isinstance(content, str) and PIN_MARK in content:      # carried by an earlier summary
+                for pid, body in _PINNED_BLOCK.findall(content.split(PIN_MARK, 1)[1]):
+                    found.setdefault(pid, body)
+            elif m.get("role") == "tool" and result_id(m) in self.pins:
+                found[result_id(m)] = result_text(content)
+            elif isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result" and result_id(m, b) in self.pins:
+                        found[result_id(m, b)] = result_text(b.get("content"))
+        blocks = [f'<pinned id="{pid}" label="{str(self.pins[pid].get("label", "")).replace(chr(34), chr(39))}">\n{body}\n</pinned>'
+                  for pid, body in found.items() if pid in self.pins]
+        return PIN_MARK + "\n".join(blocks) if blocks else ""
 
     def generate_summary(
         self,
