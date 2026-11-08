@@ -4,6 +4,7 @@ and FileState registration for the read-before-edit invariant.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import zlib
 from pathlib import Path
@@ -13,26 +14,52 @@ from axon.errors import ToolError
 from axon.tools.base import (
     Tool, ToolContext, cap_text, default_summary, display_path, human_size, int_arg, output_cap, plural, resolve_path,
 )
-from axon.tools.textio import IMAGE_EXTENSIONS, decode_bytes, is_binary_bytes, MAX_TEXT_BYTES
+from axon.tools import file_formats as ff
+from axon.tools.textio import is_binary_bytes, MAX_TEXT_BYTES
 
 DEFAULT_LIMIT = 2000
 MAX_LINE_CHARS = 2000
 
 
-def _image_notice(p: Path, data: bytes, rel: str) -> str:
-    dims = ""
+def _attach_image(p: Path, data: bytes, rel: str, size: int, ctx: ToolContext) -> str | None:
+    """Carry the picture itself with the result when the provider takes images; None keeps the text notice.
+    Formats a provider cannot take (BMP, TIFF, HEIC, AVIF, ICO) or files that are too big go through macOS sips."""
+    from axon.providers.base import MAX_TOOL_IMAGE_BYTES, ImageRef
+    provider = getattr(ctx.agent, "provider", None)
     try:
-        if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
-            w, h = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
-            dims = f", {w}x{h}"
-        elif data[:6] in (b"GIF87a", b"GIF89a"):
-            dims = f", {int.from_bytes(data[6:8], 'little')}x{int.from_bytes(data[8:10], 'little')}"
+        ok = bool(provider is not None and provider.supports("tool_images"))
     except Exception:
-        dims = ""
-    return (
-        f"[Image file: {rel} ({len(data):,} bytes{dims}). Image content cannot be shown as text. "
-        f"To let the model see it, the user can reference the image path in their prompt.]"
-    )
+        ok = False
+    if not ok:
+        return None
+    prep = ff.prepare_model_image(p, size, MAX_TOOL_IMAGE_BYTES)
+    if prep is None:
+        return None
+    path, media, note = prep
+    ctx.images.append(ImageRef(str(path.resolve()), media))
+    return f"[Image file: {rel} ({size:,} bytes{_image_dims(data)}{', ' + note if note else ''}). The picture is attached to this result.]"
+
+
+def _image_dims(data: bytes) -> str:
+    info = ff.image_info(data)
+    fmt = f", {info['format']}" if info.get("format") else ""
+    return f"{fmt}, {info['width']}x{info['height']}" if info.get("width") else fmt
+
+
+def _image_notice(p: Path, data: bytes, rel: str) -> str:
+    ocr = ""
+    try:
+        from axon.agent.images import _extract_ocr_text
+        ocr = _extract_ocr_text(p).strip()
+    except Exception:
+        ocr = ""
+    why = ("A tool result cannot carry the picture itself; to let the model see it, the user can reference the image path in their prompt."
+           if p.suffix.lower() in ff.MODEL_IMAGE_MEDIA else
+           f"{p.suffix.upper().lstrip('.')} is not a format the model takes and no converter (macOS sips) is available.")
+    head = f"[Image file: {rel} ({len(data):,} bytes{_image_dims(data)}). {why}"
+    if ocr:
+        return head + f" Text found in the image by OCR:]\n{ocr[:20_000]}"
+    return head + " No OCR engine found text in it (macOS Vision or tesseract).]"
 
 
 _PDF_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
@@ -126,8 +153,9 @@ class ReadTool(Tool):
     description: ClassVar[str] = (
         "Read a file. Output is numbered like `cat -n` (\"     12→text\"); the number prefix is not part of the file, "
         "so never include it in Edit old_string. Reads up to 2000 lines from `offset` by default — use offset/limit "
-        "to page through large files. Lines over 2000 chars are truncated. Handles .ipynb notebooks (cells + outputs), "
-        "PDFs (text extraction), images (metadata notice) and detects binary files. You must Read a file before "
+        "to page through large files. Lines over 2000 chars are truncated. Also reads notebooks, PDFs, "
+        "images, Word/Excel/PowerPoint/OpenDocument/RTF/EPUB, CSV, SQLite, archives, audio/video and fonts as extracted text; "
+        "other binaries get a hex preview. You must Read a file before "
         "you Edit/Write it; reading many files in parallel in one turn is encouraged."
     )
     schema: ClassVar[dict[str, Any]] = {
@@ -136,6 +164,8 @@ class ReadTool(Tool):
             "path": {"type": "string", "description": "Absolute or workspace-relative file path"},
             "offset": {"type": "integer", "minimum": 1, "description": "1-based line to start reading from (default 1)"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20000, "description": f"Maximum number of lines to read (default {DEFAULT_LIMIT})"},
+            "pages": {"type": "string", "description": "PDF pages, slides or EPUB chapters: \"3\", \"2-5\" or \"4-\""},
+            "part": {"type": "string", "description": "Sheet name, SQLite table or archive member path"},
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -156,8 +186,8 @@ class ReadTool(Tool):
             raise ToolError(f"Path is a directory, not a file: {raw_path}. Use Ls or Glob to list it.")
 
         rel = display_path(p, ctx.workspace)
-        offset = int_arg(args, "offset", 1, lo=1)
-        limit = int_arg(args, "limit", DEFAULT_LIMIT, lo=1, hi=20000)
+        offset = int_arg(args, "offset", 1, lo=1, strict=True)
+        limit = int_arg(args, "limit", DEFAULT_LIMIT, lo=1, hi=20000, strict=True)
         cap = output_cap(ctx, 100_000)
 
         try:
@@ -168,48 +198,49 @@ class ReadTool(Tool):
             ctx.file_state.record_read(p)
             return f"[{rel} exists but is empty (0 bytes).]"
 
-        suffix = p.suffix.lower()
         try:
             with open(p, "rb") as f:
-                data = f.read(MAX_TEXT_BYTES + 1)
+                head = f.read(512)
+                kind = ff.detect_kind(p, head)
+                if kind in ff.EXTRACT_KINDS and kind != "image":
+                    data = head
+                else:
+                    f.seek(0)
+                    data = f.read(MAX_TEXT_BYTES + 1)
         except OSError as e:
             raise ToolError(f"Failed to read file {raw_path}: {e}") from e
 
-        if suffix in IMAGE_EXTENSIONS:
+        if kind == "image":
             ctx.file_state.record_read(p)
-            return _image_notice(p, data, rel)
+            attached = _attach_image(p, data, rel, size, ctx)
+            return attached if attached is not None else _image_notice(p, data, rel)
 
-        if suffix == ".pdf" or data[:5] == b"%PDF-":
+        if kind == "pdf" or data[:5] == b"%PDF-":
             ctx.file_state.record_read(p)
-            text, pages = extract_pdf_text(data)
-            if _looks_readable(text):
-                lines = text.splitlines()
-                body = _number_lines(lines[offset - 1 : offset - 1 + limit], offset)
-                return cap_text(f"[PDF: {rel}, ~{pages} page(s), extracted text]\n{body}", cap)
-            return (
-                f"[PDF: {rel} ({size:,} bytes, ~{pages} page(s)). Text could not be extracted (compressed fonts or "
-                f"scanned images). If poppler is installed, try Bash: pdftotext \"{rel}\" -]"
-            )
+            return self._read_pdf(p, data, rel, size, offset, limit, cap, args.get("pages"))
 
-        if suffix == ".ipynb":
+        if kind == "ipynb":
             try:
                 from axon.tools.notebook import load_notebook, render_notebook
                 nb = load_notebook(p)
                 ctx.file_state.record_read(p)
-                return cap_text(render_notebook(nb, p.name), cap, "Use NotebookEdit to modify cells.")
+                out = cap_text(render_notebook(nb, p.name), cap, "Use NotebookEdit to modify cells.")
+                self._attach_notebook_images(nb, ctx)
+                return out
             except ToolError:
                 pass  # malformed notebook JSON: fall through and show raw text
 
-        if len(data) > MAX_TEXT_BYTES:
-            raise ToolError(
-                f"{rel} is larger than {MAX_TEXT_BYTES // 1_048_576} MB. Use Grep to find the relevant region, "
-                f"or Bash (head/tail/sed -n) to extract a range."
-            )
-        if is_binary_bytes(data):
+        if kind in ff.EXTRACT_KINDS:
             ctx.file_state.record_read(p)
-            return f"[Binary file: {rel} ({size:,} bytes). Not displayed as text.]"
+            return self._read_extracted(p, kind, rel, size, offset, limit, cap, args)
 
-        text, encoding = decode_bytes(data)
+        if len(data) > MAX_TEXT_BYTES:
+            return self._read_huge(p, rel, size, offset, limit, cap)
+        if is_binary_bytes(data) and not ff.sniff_utf16(data):
+            ctx.file_state.record_read(p)
+            return self._read_extracted(p, "binary", rel, size, offset, limit, cap, args)
+
+        text, encoding = ff.decode_text(data)
         ctx.file_state.record_read(p)
 
         lines = split_lines(text)
@@ -223,11 +254,119 @@ class ReadTool(Tool):
             notes.append(f"decoded as {encoding}")
         if "\r\n" in text:
             notes.append("CRLF line endings (preserved on edit)")
+        if kind in ff.TEXT_FORMAT_KINDS and offset == 1:
+            note = ff.text_note(kind, text, p)
+            if note:
+                notes.append(note)
         if end < total:
             result += f"\n\n[... {total - end} more lines. Continue with offset={end + 1} ...]"
         if notes:
             result = f"[{rel}: {', '.join(notes)}]\n" + result
         return cap_text(result, cap, f"Use offset/limit to read a smaller range (file has {total} lines)")
+
+    @staticmethod
+    def _attach_notebook_images(nb: dict[str, Any], ctx: ToolContext) -> None:
+        """Show up to three picture outputs of a notebook to a model that takes images."""
+        try:
+            provider = getattr(ctx.agent, "provider", None)
+            if provider is None or not provider.supports("tool_images"):
+                return
+            from axon.providers.base import MAX_TOOL_IMAGE_BYTES, ImageRef
+            _cells, images = ff.notebook_cells(nb)
+            for im in images[:3]:
+                if len(im.data) > MAX_TOOL_IMAGE_BYTES:
+                    continue
+                f = ff._cache_dir() / (hashlib.sha1(im.data).hexdigest()[:20] + (".png" if im.mime == "image/png" else ".jpg"))
+                if not f.exists():
+                    f.write_bytes(im.data)
+                ctx.images.append(ImageRef(str(f), im.mime))
+        except Exception:
+            return
+
+    def _read_extracted(self, p: Path, kind: str, rel: str, size: int, offset: int, limit: int, cap: int, args: dict[str, Any]) -> str:
+        ex = ff.extract(p, pages=args.get("pages"), sheet=args.get("part"), limit=limit, offset=offset - 1, kind=kind)
+        if not ex.ok:
+            return ex.text
+        m = ex.meta
+        unit = m.get("unit", "")
+        bits = [kind, f"{size:,} bytes"]
+        for k, v in (m.get("props") or {}).items():
+            if k in ("title", "creator"):
+                bits.append(f"{k} {v!r}")
+        if m.get("total") and unit:
+            bits.append(f"{m['total']:,} {unit}s")
+        bits.extend(m.get("notes") or []) if kind not in ("zip", "tar") else None
+        head = f"[{rel}: {'; '.join(str(b) for b in bits)}]"
+        tail = ""
+        if m.get("next"):
+            tail = f"\n\n[... more {unit or 'item'}s. Continue with offset={m['next']} ...]"
+        elif m.get("next_pages"):
+            tail = f"\n\n[... more. Continue with pages=\"{m['next_pages']}\" ...]"
+        if m.get("sheets") and kind in ("xlsx", "ods", "sqlite") and len(m["sheets"]) > 1:
+            tail += f"\n[Switch with part=<{'table' if kind == 'sqlite' else 'sheet'} name>]"
+        body = ex.text
+        if kind in ("zip", "tar") and not args.get("part"):
+            body = body + "\n[Read a file inside with part=<path inside the archive>]"
+        return cap_text(f"{head}\n{body}{tail}", cap, "Use offset/limit or pages to read a smaller range")
+
+    def _read_huge(self, p: Path, rel: str, size: int, offset: int, limit: int, cap: int) -> str:
+        """Files above the in-memory limit are paged line by line from disk; very long lines are cut, never loaded whole."""
+        import itertools
+        out: list[str] = []
+        n = 0
+        cut = 0
+        with open(p, "rb") as f:
+            for text, dropped in itertools.islice(ff.iter_lines_bounded(f, MAX_LINE_CHARS), offset - 1, offset - 1 + limit):
+                n += 1
+                out.append(f"{offset - 1 + n:6d}→{text}" + (f" ...[line truncated, {dropped} more chars]" if dropped else ""))
+                cut += 1 if dropped else 0
+        if not out:
+            return f"[{rel} ({size:,} bytes) has no line {offset}: offset is beyond the end of the file.]"
+        more = f"\n\n[... more lines may follow. Continue with offset={offset + n} ...]" if n == limit else ""
+        head = (f"[{rel}: {size // 1_048_576} MB, too large to load whole, so lines {offset}-{offset + n - 1} are read from disk; "
+                f"use Grep to find a region]")
+        return cap_text(head + "\n" + "\n".join(out) + more, cap, "Use a smaller limit")
+
+    def _read_pdf(self, p: Path, data: bytes, rel: str, size: int, offset: int, limit: int, cap: int,
+                  pages: Any) -> str:
+        from axon.tools import pdfread
+        total_pages = pdfread.page_count(p)
+        if pages not in (None, ""):
+            first, last = pdfread.parse_pages(pages)
+            if total_pages is not None and first > total_pages:
+                return f"[PDF {rel} has {total_pages} page(s); pages={pages!r} is beyond the end.]"
+            if last is None or last - first + 1 > pdfread.MAX_PAGES_PER_CALL:
+                last = first + pdfread.MAX_PAGES_PER_CALL - 1
+            if total_pages is not None:
+                last = min(last, total_pages)
+        else:
+            first, last = 1, None
+            if total_pages is not None and total_pages > pdfread.MAX_PAGES_PER_CALL:
+                last = pdfread.MAX_PAGES_PER_CALL
+        got = pdfread.extract_pages(p, first, last)
+        if got is not None:
+            text, engine = got
+            span = f"page {first}" if last == first else f"pages {first}-{last if last else (total_pages or '?')}"
+            of = f" of {total_pages}" if total_pages else ""
+            body = _number_lines(text.splitlines()[offset - 1 : offset - 1 + limit], offset) if text.strip() else \
+                "(no text on these pages; the PDF may be scanned images)"
+            more = ""
+            if total_pages and last is not None and last < total_pages:
+                more = f"\n\n[... {total_pages - last} more page(s). Continue with pages=\"{last + 1}-\" ...]"
+            return cap_text(f"[PDF: {rel}, {span}{of}, text via {engine}]\n{body}{more}", cap)
+        if pages not in (None, "") or (total_pages or 0) > pdfread.MAX_PAGES_PER_CALL:
+            raise ToolError(
+                "Reading PDF page ranges needs poppler's pdftotext on PATH (brew install poppler / apt install "
+                "poppler-utils) or the optional pypdf package (pip install pypdf)."
+            )
+        text, n = extract_pdf_text(data)
+        if _looks_readable(text):
+            body = _number_lines(text.splitlines()[offset - 1 : offset - 1 + limit], offset)
+            return cap_text(f"[PDF: {rel}, ~{n} page(s), basic text extraction]\n{body}", cap)
+        return (
+            f"[PDF: {rel} ({size:,} bytes, ~{n} page(s)). Text could not be extracted (compressed fonts or scanned "
+            f"images). Install poppler (pdftotext) or pypdf for better extraction.]"
+        )
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
         if is_error:
