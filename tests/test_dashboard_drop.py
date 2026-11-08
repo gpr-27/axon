@@ -72,7 +72,7 @@ def test_a_folder_is_a_short_flat_listing_with_a_limit(c, env, llm):
     [it] = _items(c, "many")
     assert it["kind"] == "folder" and it["chip"].startswith("[Folder #") and it["entries"] == 151
     sent = _send_and_wait(c, llm, f"look at {it['chip']}")
-    assert "many/ at " in sent and str(big.resolve()) in sent                       # the path is told to the model
+    assert "many/ at " in sent and json.dumps(str(big.resolve()))[1:-1] in sent                       # the path is told to the model
     assert "sub/" in sent and "hidden_inner" not in sent                            # one level, not a recursive dump
     assert "f000.txt" in sent and "f149.txt" not in sent                            # capped
     assert f"only the first {dash_attach.LIST_SHOWN} are listed" in sent
@@ -188,8 +188,8 @@ def _run(body: str, *needs: str, consts: tuple[str, ...] = ()) -> dict:
     code = FAKE + "\n".join(_const(n) for n in consts) + "\n" + "\n".join(_fn(n) for n in needs) + "\nconst out = {};\n" + body + "\nconsole.log(JSON.stringify(out));\n"
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "t.js"
-        f.write_text(code)
-        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(code, encoding="utf-8")
+        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout.strip().splitlines()[-1])
 
@@ -199,8 +199,8 @@ def test_page_script_still_parses():
         pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "app.js"
-        f.write_text(APP_JS)
-        assert subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=30).returncode == 0
+        f.write_text(APP_JS, encoding="utf-8")
+        assert subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30).returncode == 0
 
 
 def test_the_drop_overlay_and_old_handlers(c):
@@ -346,8 +346,8 @@ axReadFolder(root).then(r => console.log(JSON.stringify({ n: r.names.length, tru
 """
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "t.js"
-        f.write_text(code)
-        res = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(code, encoding="utf-8")
+        res = subprocess.run([NODE, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert res.returncode == 0, res.stderr
     r = json.loads(res.stdout.strip().splitlines()[-1])
     assert r["n"] == 120 and r["truncated"] is True and r["head"] == ["sub/", "sub/l2/", "sub/inner.txt"]
@@ -356,7 +356,7 @@ axReadFolder(root).then(r => console.log(JSON.stringify({ n: r.names.length, tru
 
 def test_search_rows_the_viewer_button_the_menu_and_the_keyboard_way():
     files = APP_JS
-    assert files.count("axDragProps([") == 2 and "draggable: 'true'" in files            # names and contents results
+    assert files.count("axDragProps([") >= 4 and "draggable: 'true'" in files            # names and contents results, in the old search tab code and in the Files panel (the left tabs are gone)
     assert "onclick: () => axAddToChat([f.path])" in files and "'Add to chat'" in files  # viewer toolbar
     for label in ("'Open'", "'Copy path'", "IS_MAC ? 'Reveal in Finder'"):
         assert label in files

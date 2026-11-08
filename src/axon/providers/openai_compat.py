@@ -337,7 +337,7 @@ class _ToolAcc:
 
 class _Outcome:
     """Result of one HTTP attempt (kept outside `with` so mocked context managers can't swallow it)."""
-    __slots__ = ("status", "text", "headers", "events_yielded", "stream_error", "transport_exc")
+    __slots__ = ("status", "text", "headers", "events_yielded", "stream_error", "transport_exc", "complete")
 
     def __init__(self) -> None:
         self.status: int | None = None
@@ -346,6 +346,7 @@ class _Outcome:
         self.events_yielded = False
         self.stream_error: Any = None
         self.transport_exc: BaseException | None = None
+        self.complete = False   # the stream reached its own end ([DONE], a finish_reason or a completed response)
 
 
 CHARS_PER_TOKEN = 3.7
@@ -702,6 +703,11 @@ class OpenAICompatProvider:
                         for ev in parser(resp, state, acc, stop, thinking, outcome):
                             outcome.events_yielded = True
                             yield ev
+                        if outcome.stream_error is None and not outcome.complete:
+                            # The connection ended without the model's own end marker: a cut stream, not an answer.
+                            if not outcome.events_yielded:
+                                _reset_stream(state, acc, stop)
+                            raise httpx.RemoteProtocolError("the stream ended before the model finished its reply")
                         if outcome.stream_error is not None and not outcome.events_yielded:
                             # An error sent in place of the first chunk (OpenRouter / gateways answer 200, then
                             # `{"error": {"code": 502}}`): nothing was shown yet, so it is retried like a 5xx.
@@ -745,6 +751,8 @@ class OpenAICompatProvider:
     @staticmethod
     def _sse(resp: Any) -> Iterator[tuple[str, Any]]:
         event = ""
+        seen_data = False
+        stray: list[str] = []   # a gateway that ignores stream=true answers with one plain JSON body
         for line in resp.iter_lines():
             if isinstance(line, bytes):
                 line = line.decode("utf-8", "replace")
@@ -757,15 +765,27 @@ class OpenAICompatProvider:
                 event = line[6:].strip()
                 continue
             if not line.startswith("data:"):
+                if not seen_data and len(stray) < 20000:
+                    stray.append(line)
                 continue
+            seen_data = True
             raw = line[5:].strip()
             if raw == "[DONE]":
+                yield "__done__", {}
                 return
             try:
                 chunk = json.loads(raw)
             except ValueError:
                 continue
             yield event, chunk
+        if not seen_data and stray:
+            try:
+                whole = json.loads("\n".join(stray))
+            except ValueError:
+                return
+            if isinstance(whole, dict):
+                yield "", whole
+                yield "__done__", {}
 
     @staticmethod
     def _usage_from(u: dict[str, Any]) -> Usage:
@@ -788,6 +808,9 @@ class OpenAICompatProvider:
     def _parse_chat(self, resp: Any, state: StreamState, acc: dict[int, _ToolAcc], stop: list[StopReason], thinking: bool, outcome: _Outcome) -> Iterator[StreamEvent]:
         for _event, chunk in self._sse(resp):
             if not isinstance(chunk, dict):
+                continue
+            if _event == "__done__":
+                outcome.complete = True
                 continue
             if chunk.get("error"):
                 outcome.stream_error = chunk
@@ -848,6 +871,7 @@ class OpenAICompatProvider:
 
             fr = choice.get("finish_reason")
             if fr:
+                outcome.complete = True
                 if fr in ("tool_calls", "function_call"):
                     stop[0] = "tool_use"
                 elif fr == "length":
@@ -875,6 +899,9 @@ class OpenAICompatProvider:
             if not isinstance(chunk, dict):
                 continue
             et = chunk.get("type") or event
+            if et == "__done__":
+                outcome.complete = True
+                continue
             if et == "error" or (et == "" and chunk.get("error")):
                 outcome.stream_error = chunk
                 return
@@ -928,6 +955,7 @@ class OpenAICompatProvider:
                 if entry is not None and isinstance(chunk.get("arguments"), str):
                     entry.arguments = chunk["arguments"]
             elif et in ("response.completed", "response.done", "response.incomplete"):
+                outcome.complete = True
                 st = resp_obj.get("status", "") if resp_obj else ""
                 if et == "response.incomplete" or st == "incomplete":
                     stop[0] = "max_tokens"

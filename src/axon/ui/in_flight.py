@@ -450,7 +450,12 @@ class InFlightInputListener:
         if queue is not None:
             item = push_queued(queue, line, steer=steer)
             how = "will be shown to the model at the next step" if steer else "runs next"
-            _say(f"\n  {CYAN}📥 Queued #{item.id} ({len(queue)} pending, {how}):{RST} {WHITE}{line}{RST}\n")
+            if footer is not None and footer.height():
+                # the pinned footer lists the queue under the input box: nothing is printed into the reply
+                # that is streaming above it
+                footer.notice(f"queued #{item.id}", 2.0)
+            else:
+                _say(f"\n  {CYAN}📥 Queued #{item.id} ({len(queue)} pending, {how}):{RST} {WHITE}{line}{RST}\n")
 
     def _run_instant(self, line: str) -> None:
         """Run a read-only slash command right now, beside the running turn, instead of queueing it."""

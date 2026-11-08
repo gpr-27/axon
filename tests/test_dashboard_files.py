@@ -175,8 +175,8 @@ def test_client_script_has_the_viewer_and_parses():
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "files.js"
-            p.write_text(JS_FILES)
-            r = subprocess.run([node, "--check", str(p)], capture_output=True, text=True)
+            p.write_text(JS_FILES, encoding="utf-8")
+            r = subprocess.run([node, "--check", str(p)], capture_output=True, text=True, encoding="utf-8")
             assert r.returncode == 0, r.stderr
 
 

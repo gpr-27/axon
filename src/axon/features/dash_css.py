@@ -98,13 +98,13 @@ a.plink{color:var(--info);text-decoration:underline dotted;text-underline-offset
 .fhead{padding:8px 12px 10px;border-bottom:1px solid var(--line)}
 .fhead .cur{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fhead .full{color:var(--muted);font:11.5px ui-monospace,Menlo,monospace;overflow-wrap:anywhere;margin:2px 0 8px}
-.node{display:flex;align-items:center;gap:6px;padding:2px 10px 2px calc(10px + var(--d,0)*14px);font-size:13px;cursor:pointer;white-space:nowrap;border:0;background:none;width:100%;text-align:left}
+.node{display:flex;align-items:center;gap:6px;padding:2px 10px 2px calc(10px + min(var(--d,0),8)*14px + max(var(--d,0) - 8,0)*3px);font-size:13px;cursor:pointer;white-space:nowrap;border:0;background:none;width:100%;text-align:left}
 .node:hover{background:var(--raised)}.node.sel{background:var(--raised);box-shadow:inset 2px 0 0 var(--primary)}
 .node .nm{overflow:hidden;text-overflow:ellipsis;flex:1}.node .g{font:11px ui-monospace,monospace;color:var(--accent);width:12px;text-align:center}
 .node .ar{width:10px;color:var(--muted);font-size:10px}.node.ign{opacity:.5}.node.dir .nm{color:var(--ink)}
 .fview{display:flex;flex-direction:column;min-width:0;min-height:0}
 .ftoolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line)}
-.ftoolbar .p{font:12.5px ui-monospace,Menlo,monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ftoolbar .p{font:12.5px ui-monospace,Menlo,monospace;flex:1 1 240px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .code{flex:1;overflow:auto;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code-bg)}
 .code .ln{display:flex}.code .ln:hover{background:color-mix(in srgb,var(--raised) 60%,transparent)}
 .code .no{flex:none;width:56px;text-align:right;padding-right:12px;color:var(--muted);user-select:none}
@@ -207,7 +207,11 @@ a.plink{color:var(--info);text-decoration:underline dotted;text-underline-offset
 .panes.split .pane.on{flex:1 1 50%;border-left:1px solid var(--line)}.panes.split .pane.on:first-of-type{border-left:0}
 .bpanel{display:flex;flex-direction:column;min-height:0;background:var(--surface);border-top:1px solid var(--line)}
 .bpanel .pbody{display:block}
-.bpanel .sh-side{height:100%}
+.bpanel .sh-side{height:100%;grid-template-columns:minmax(0,1fr)}
+.bpanel .phead{flex-wrap:wrap;gap:2px 10px}.bpanel .phead .hint{flex:1 1 200px;min-width:0}
+.bpanel .sh-hist{display:none}                                  /* the dock is narrow: history stays one ArrowUp away */
+.bpanel .shell .ftoolbar{flex-wrap:nowrap;overflow:hidden}.bpanel .shell .ftoolbar>.muted:not(#shcwd){display:none}
+.bpanel .shell #shcwd{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
 .statusbar{display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;padding:4px 14px;border-top:1px solid var(--line);background:var(--surface);font-size:12px;color:var(--ink2)}
 .statusbar .sb b{color:var(--ink);font-weight:600}.statusbar .live b{color:var(--primary)}.statusbar .warn b{color:var(--warn)}.statusbar .bad b{color:var(--bad)}
 .psec{padding:12px 14px;border-bottom:1px solid var(--line)}.psec h3{margin:0 0 8px}
@@ -419,6 +423,7 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 .mg-chartbar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin-bottom:10px}
 .chart h2 .mg-chartbtn{margin-left:10px;font-size:12px;font-weight:400}
 .mg-sech{display:flex;align-items:baseline;gap:10px}
+.mg-memadd textarea,.mg-mem textarea{font:inherit;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px;resize:vertical}.mg-memadd .formrow{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}.mg-mem .acts{display:flex;gap:8px;margin:8px 0}.mg-mem .out{white-space:pre-wrap}
 .mg-th{background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer;white-space:nowrap}.mg-th:hover{color:var(--ink)}
 .mg-sortable>.btn{margin-top:8px}
 .mg-bt{grid-column:1/-1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -427,4 +432,7 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 .mg-clear .acts{display:flex;flex-wrap:wrap;gap:8px}
 @media (max-width:860px){.mg-row{grid-template-columns:22px 22px minmax(0,1fr) 70px 30px}.mg-row .hide-s{display:none}.mg-brow{grid-template-columns:1fr}}
 /* <<< sessions-usage controls */
+/* Jump to latest (a style element added by script is blocked by the page's content policy) */
+.jump-latest{position:absolute;left:50%;transform:translateX(-50%);z-index:5;border:1px solid var(--line);background:var(--raised);color:var(--ink);border-radius:999px;padding:5px 14px;font:inherit;font-size:12.5px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.jump-latest[hidden]{display:none}
 """

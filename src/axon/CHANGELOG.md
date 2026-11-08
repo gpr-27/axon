@@ -10,6 +10,10 @@ Work in progress; not a release yet.
 - Web app controls: drag files, folders and images into chat, paste images, delete and restore chats, usage per project
   with CSV export, budgets, command result cards, and an Appearance tab with a serif response font.
 - Streaming: replies render incrementally with paced text, follow only at the bottom, and resume after a reconnect.
+- Extensions page: every action works from the page (approve, enable, reconnect, install, update, remove, trust),
+  the Marketplace tab includes marketplaces you added, chats in the app connect MCP servers and ask for their input
+  on the page, and a folder's hooks, plugins and servers wait for "Trust this folder". Installing or removing a
+  plugin or marketplace item applies hooks and plugin servers in the running chat.
 - Terminal: `/diff` is a working-tree screen; `/worktree`, `/context` legend, `/mcp servers` and `/workbench`.
 - Files: Read and the app share one reader for Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, notebooks, SQLite,
   archives and binaries. `@file` mentions give readable text, and credential files are refused.

@@ -784,7 +784,7 @@ def _posix_fill(timeout: float) -> bool:
         # attached like any drop instead of being typed into the prompt.
         _events.append(PASTE_PREFIX + text)
         return True
-    if len(text) > 1 and text.endswith("\n") and "\x1b" not in text:
+    if len(text) > 1 and text.endswith("\n") and "\x1b" not in text and not _inside_bracketed_paste:
         # Type-ahead completed while the tty was still in cooked mode (ICRNL turned Enter into
         # LF): it is an Enter, not Ctrl+J.
         text = text[:-1] + "\r"
@@ -1157,6 +1157,42 @@ def _detect_shell(override: str, windows: bool) -> ShellInfo:
     return ShellInfo("sh", "sh", "sh")
 
 
+def rmtree(path: Any, ignore_errors: bool = False) -> None:
+    """``shutil.rmtree`` that also removes read-only files. Git marks its object files read-only, and Windows
+    refuses to delete those (PermissionError), which left half-removed clones and worktrees behind."""
+    def make_writable_and_retry(func: Any, target: Any, *_exc: Any) -> None:
+        try:
+            os.chmod(target, 0o700)
+            func(target)
+        except OSError:
+            if not ignore_errors:
+                raise
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=make_writable_and_retry)
+        else:
+            shutil.rmtree(path, onerror=make_writable_and_retry)
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
+def split_words(text: str) -> list[str]:
+    """Split a typed command line into words, honouring quotes. On Windows a backslash is a path
+    separator, not an escape, so C:\\Users\\me stays whole (POSIX splitting would turn it into C:Usersme).
+    Raises ValueError on an unbalanced quote, like shlex."""
+    import shlex
+    if not IS_WINDOWS:
+        return shlex.split(text)
+    out = []
+    for tok in shlex.split(text, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
 def shell_info() -> ShellInfo:
     """The shell used for tool commands. AXON_SHELL overrides (bash|pwsh|powershell|cmd|<path>)."""
     return _detect_shell(os.environ.get("AXON_SHELL", "").strip(), IS_WINDOWS)
@@ -1186,6 +1222,17 @@ def powershell_encoded(script: str) -> str:
     return base64.b64encode((_PS_PRELUDE + "\n" + script).encode("utf-16-le")).decode("ascii")
 
 
+_PS_OPERATORS = (r"-(?:f|eq|ne|gt|lt|ge|le|ceq|cne|like|notlike|match|notmatch|replace|split|join|contains|notcontains|in|notin|"
+                 r"is|isnot|as|and|or|xor|band|bor|bxor|shl|shr)\b")
+_PS_QUOTED_COMMAND_RE = re.compile(r"^(\s*)(\"[^\"\r\n]*\"|'[^'\r\n]*')([ \t]+)(?!(?i:" + _PS_OPERATORS + r")|[|;&)])(?=\S)")
+
+
+def ps_call_operator(command: str) -> str:
+    """PowerShell reads a line that starts with a quoted string as an expression, so ``"C:\\Program Files\\x.exe" -v``
+    is a parse error. Put the call operator in front, the way every other shell treats a quoted program."""
+    return _PS_QUOTED_COMMAND_RE.sub(lambda m: f"{m.group(1)}& {m.group(2)}{m.group(3)}", command, count=1)
+
+
 def shell_command_argv(command: str, info: ShellInfo | None = None) -> list[str] | str:
     """Full argv (or, for cmd.exe, a command line string) that runs `command` robustly.
 
@@ -1197,7 +1244,7 @@ def shell_command_argv(command: str, info: ShellInfo | None = None) -> list[str]
         argv = [info.path, "-NoLogo", "-NoProfile", "-NonInteractive"]
         if IS_WINDOWS:
             argv += ["-ExecutionPolicy", "Bypass"]
-        return argv + ["-EncodedCommand", powershell_encoded(command)]
+        return argv + ["-EncodedCommand", powershell_encoded(ps_call_operator(command))]
     if info.kind == "cmd":
         one_line = " & ".join(line for line in command.splitlines() if line.strip()) or command
         return f'"{info.path}" /d /s /c "chcp 65001>nul & {one_line}"'

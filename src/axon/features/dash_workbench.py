@@ -74,11 +74,12 @@ def branches(ws: Path) -> dict[str, Any]:
 def checkout(ws: Path, name: str) -> dict[str, Any]:
     if name not in {b["name"] for b in branches(ws)["branches"]}:
         raise DashError("no such local branch", 404)
-    r = dash_fs._git(ws, "checkout", name, timeout=30)
+    r = dash_fs._git(ws, "checkout", name, "--", timeout=30)
     if r is None or r.returncode != 0:
         msg = (r.stderr or r.stdout).decode("utf-8", "replace").strip() if r is not None else "git is not available"
         raise DashError("git refused the switch: " + msg[:400], 409)
     dash_fs.git_info(ws, fresh=True)
+    worktree_view._COUNT_CACHE.clear()
     return {"ok": True, "branch": name}
 
 
@@ -100,6 +101,8 @@ def create_pr(ws: Path, body: dict[str, Any]) -> dict[str, Any]:
         raise DashError("The GitHub CLI (gh) is not installed.", 409)
     if body.get("confirm") is not True:
         raise DashError("Creating a pull request needs your confirmation.", 400)
+    if plan["base"] and plan["branch"] == plan["base"]:
+        raise DashError(f"You are on {plan['base']}, the branch a pull request would go into. Switch to another branch first.", 409)
     if plan["needs_push"]:
         if body.get("push") is not True:
             raise DashError("The branch has commits that are not on the remote. Confirm the push to continue.", 409)
@@ -197,6 +200,10 @@ def connector_action(ws: Path, name: str, action: str) -> dict[str, Any]:
             except Exception:
                 pass
         else:
+            now = cfg.load_specs().get(name)
+            if now is not None and now.disabled:
+                raise DashError(f"{name} is switched off inside the shared MCP file itself (\"disabled\": true). "
+                                "Remove that line from the file to turn it on.", 409)
             _reconnect(ws, cfg, name)
         return {"ok": True}
     if action == "reconnect":
@@ -224,8 +231,12 @@ def _reconnect(ws: Path, cfg: Any, name: str) -> None:
 def file_diff(ws: Path, mode: str, ref: str, rel: str, code: str) -> dict[str, Any]:
     from axon.features.dashboard import redact_text
     d = worktree_view.file_diff(ws, rel, mode, ref, code)
+    rows = [r for r in d["rows"] if r["kind"] in ("add", "del", "ctx")]
+    for r, text in zip(rows, dash_fs.redact_lines([r["text"] for r in rows], dash_fs.is_secret_file(Path(rel).name))):
+        r["text"] = text
     for r in d["rows"]:
-        r["text"] = redact_text(r["text"])
+        if r["kind"] not in ("add", "del", "ctx"):
+            r["text"] = redact_text(r["text"])
     return d
 
 
@@ -244,6 +255,7 @@ def stage_action(ws: Path, body: dict[str, Any]) -> dict[str, Any]:
     if not ok:
         raise DashError(msg[:300], 409)
     dash_fs.git_info(ws, fresh=True)
+    worktree_view._COUNT_CACHE.clear()
     return {"ok": True, "message": msg}
 
 

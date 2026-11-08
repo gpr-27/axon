@@ -497,6 +497,40 @@ class Runtime:
         slot.value = labels
         slot.event.set()
 
+    def elicit(self, server: str, params: dict[str, Any]) -> dict[str, Any]:
+        """An MCP server asks for input mid-task: the page shows a form (or a link to open) and waits for the answer."""
+        eid = secrets.token_hex(6)
+        slot = _Slot()
+        self.pending[eid] = slot
+        schema = params.get("requestedSchema") if isinstance(params.get("requestedSchema"), dict) else {}
+        required = set(schema.get("required") or [])
+        fields = []
+        for key, f in list((schema.get("properties") or {}).items())[:30]:
+            f = f if isinstance(f, dict) else {}
+            fields.append({"key": str(key), "label": str(f.get("title") or key)[:120], "type": str(f.get("type") or "string"),
+                           "description": str(f.get("description") or "")[:300], "enum": [str(e) for e in (f.get("enum") or [])][:50],
+                           "default": f.get("default"), "required": key in required})
+        url = str(params.get("url") or "")
+        self.hub.emit("elicit_request", {"id": eid, "server": server, "message": str(params.get("message") or "")[:2000],
+                                         "mode": str(params.get("mode") or "form"), "url": url if url.startswith(("http://", "https://")) else "",
+                                         "fields": fields})
+        ok = slot.event.wait(APPROVAL_TIMEOUT_S)
+        self.pending.pop(eid, None)
+        val = slot.value if ok and isinstance(slot.value, dict) else {"action": "cancel"}
+        action = val.get("action") if val.get("action") in ("accept", "decline", "cancel") else "cancel"
+        self.hub.emit("elicit_resolved", {"id": eid, "action": action})
+        out: dict[str, Any] = {"action": action}
+        if action == "accept" and fields and isinstance(val.get("content"), dict):
+            out["content"] = {k: v for k, v in val["content"].items() if k in {f["key"] for f in fields}}
+        return out
+
+    def answer_elicit(self, eid: str, action: str, content: Any) -> None:
+        slot = self.pending.get(eid)
+        if slot is None:
+            raise DashError("no pending request with that id", 404)
+        slot.value = {"action": action, "content": content}
+        slot.event.set()
+
     def install_web_tools(self) -> None:
         """Interactive tools ask through the page instead of the terminal's pickers."""
         try:
@@ -605,7 +639,23 @@ def _small_args(args: dict[str, Any]) -> dict[str, Any]:
 TERMINAL_ONLY: dict[str, str] = {
     "exit": "Ends the terminal session. Close the terminal (or press Ctrl+C there); the page keeps running.",
     "quit": "Ends the terminal session. Close the terminal (or press Ctrl+C there); the page keeps running.",
+    "paste": "Not needed here: paste straight into the message box (Ctrl+V or Cmd+V). /paste is for the terminal prompt.",
+    "terminal-setup": "This sets up key bindings for the terminal prompt, so it only applies in a terminal. The page needs no setup.",
 }
+# Commands that run here but only change the terminal prompt: the answer says so after the output.
+TERMINAL_NOTES: dict[str, str] = {
+    "vim": "This changes the terminal prompt only; the message box in the page is not affected.",
+    "statusline": "This is the terminal's status line; the page shows its own status bar.",
+    "statusbar": "This is the terminal's status bar; the page shows its own status bar.",
+    "color": "This colours the terminal prompt only.",
+    "keybindings": "These are the terminal's shortcuts; the page has its own (press ? for them).",
+}
+
+
+class _PageOut(io.StringIO):
+    """Captured command output. It reports UTF-8 (a bare StringIO reports none, so the terminal screens fell back to
+    ASCII and drew '?' for every dot and '|' for bars)."""
+    encoding = "utf-8"
 _RUN_LOCK = threading.Lock()
 
 
@@ -718,7 +768,7 @@ class CommandRunner:
         line = line.strip()
         if not line.startswith(("/", "#")):
             raise DashError("a slash command starts with /")
-        name = line[1:].split(None, 1)[0].lower() if line.startswith("/") else ""
+        name = (line[1:].split(None, 1) or [""])[0].lower() if line.startswith("/") else ""
         from axon.commands.registry import resolve_builtin
         cmd = resolve_builtin(name) if name else None
         key = cmd.name if cmd else name
@@ -736,6 +786,15 @@ class CommandRunner:
         if key in ("provider", "providers") or (key == "model" and not rest):
             return self._quick(job, {"ok": True, "open": "#/settings/providers",
                                      "message": f"{('/' + key)} opens Settings > Providers: that is where you choose a provider and model."})
+        if key in ("resume", "delete") and not rest:
+            # In the terminal these open a picker. Here that picker is the Sessions page; with no keyboard to answer a
+            # prompt the command would otherwise take its default (resume the newest session / delete nothing).
+            verb = "open" if key == "resume" else "delete"
+            return self._quick(job, {"ok": True, "open": "#/sessions",
+                                     "message": f"Choose the session to {verb} in Sessions. You can also give its id: /{key} <id>."})
+        if key == "setup":
+            return self._quick(job, {"ok": True, "open": "#/settings/providers",
+                                     "message": "Setup is a terminal wizard. In the page, Settings > Providers does the same: choose a provider, add its key and pick a model."})
         if key in ("open", "dash", "web"):
             # This page IS the app: starting another server (on the default port, with a fresh link) is never wanted.
             port = getattr(self.srv, "port", 0)
@@ -750,7 +809,7 @@ class CommandRunner:
 
         def work() -> None:
             t0 = time.time()
-            buf = io.StringIO()
+            buf = _PageOut()
             ok, message, exit_req = True, "", False
             captured: list[str] = []
             if not _RUN_LOCK.acquire(timeout=5):
@@ -819,6 +878,8 @@ class CommandRunner:
             if m and not captured and len(plain) < 1500:
                 result.update(html="", needs_arg=m.group(1).strip().splitlines()[0][:300],
                               message=message if message and not message.startswith("Usage") else "")
+            if key in TERMINAL_NOTES and not result.get("message"):
+                result["message"] = TERMINAL_NOTES[key]
             sw = self._switched(rt, before, line)
             if sw:
                 result["switched"] = sw
@@ -1099,9 +1160,11 @@ class Attachments:
         safe = re.sub(r"[^\w.\- ]+", "_", Path(name or "file").name).strip(" .")[:80] or "file"
         from axon.features import dash_fs
         if dash_fs.is_secret_file(Path(name or "file").name):
-            raise DashError(f"{safe} is a credential file, so Axon does not attach it", 403)
+            raise DashError(f'{Path(name or "file").name[:80]} is a credential file, so Axon does not attach it', 403)
         tmpdir = storage.cache_dir("dash-uploads")
-        tmp = tmpdir / f"{secrets.token_hex(6)}_{safe}"
+        updir = tmpdir / secrets.token_hex(6)           # its own folder, so the file keeps its real name for the model to see
+        updir.mkdir(mode=0o700, exist_ok=True)
+        tmp = updir / safe
         tmp.write_bytes(data)
         try:
             os.chmod(tmp, 0o600)
@@ -1114,7 +1177,7 @@ class Attachments:
             try:
                 a = att.ingest_file(tmp)
             except att.ProtectedFile:
-                raise DashError(f"{safe} is a credential or system file, so Axon does not attach it", 403) from None
+                raise DashError(f'{Path(name or "file").name[:80]} is a credential or system file, so Axon does not attach it', 403) from None
             except OSError as e:
                 raise DashError(f"could not save the file: {e.strerror or e}", 500) from None
             return {"kind": "file", "chip": a.chip.replace(tmp.name, safe), "name": safe, "size": len(data),
@@ -1122,6 +1185,7 @@ class Attachments:
         finally:
             try:
                 tmp.unlink()
+                updir.rmdir()
             except OSError:
                 pass
 

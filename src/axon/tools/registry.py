@@ -151,6 +151,12 @@ class ToolRegistry:
         canonical = self._resolve_name(name)
         if canonical:
             return self._tools[canonical]
+        deferred = getattr(self._tools.get("ToolSearch"), "deferred", None)
+        if isinstance(deferred, dict) and any(str(k).lower() == name.lower() for k in deferred):
+            raise ToolError(
+                f"Tool '{name}' is deferred and its schema is not loaded yet. Call ToolSearch with "
+                f"query 'select:{name}' first, then call it again."
+            )
         raise ToolError(
             f"Unknown tool '{name}'. Available tools: {', '.join(sorted(self.visible_names()))}"
         )

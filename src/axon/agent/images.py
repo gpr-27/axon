@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Raster formats only: SVG is XML text that vision APIs cannot decode (the Read tool reads it as text).
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif", ".heic", ".heif")
+# What every vision API takes. A BMP, TIFF or HEIC is converted to PNG before it is stored, so the model never gets a format it refuses.
+MODEL_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+MAX_MODEL_IMAGE_BYTES = 4_500_000
 
 @dataclass
 class ImageAttachment:
@@ -334,9 +337,20 @@ def ingest_image_file(raw_path: str, custom_index: int | None = None) -> ImageAt
 
     try:
         data = p.read_bytes()
+        ext = p.suffix.lower() if p.suffix else ".png"
+        if ext not in MODEL_IMAGE_EXTENSIONS:
+            from axon.tools.file_formats import convert_image
+            conv = convert_image(p, min(4096, max(_get_image_dimensions(p)) or 4096), "png")     # sips -Z would also enlarge a small one
+            if conv is None:
+                return None                      # no converter here: better to say so than to send a picture the model rejects
+            data, ext = conv[0].read_bytes(), ".png"
+        elif len(data) > MAX_MODEL_IMAGE_BYTES or max(_get_image_dimensions(p)) > 7500:
+            from axon.tools.file_formats import convert_image    # vision APIs refuse pictures over about 5 MB or 8000 px
+            conv = convert_image(p, min(4096, max(_get_image_dimensions(p)) or 4096), "jpeg")
+            if conv is not None and conv[0].stat().st_size < len(data):
+                data, ext = conv[0].read_bytes(), ".jpg"
         digest = hashlib.sha256(data).hexdigest()[:12]
         cache_dir = get_images_cache_dir()
-        ext = p.suffix.lower() if p.suffix else ".png"
         cached_file = cache_dir / f"img_{digest}_{p.stem[:20]}{ext}"
 
         if not cached_file.exists() or cached_file.stat().st_size != len(data):
@@ -371,6 +385,9 @@ def ingest_image_file(raw_path: str, custom_index: int | None = None) -> ImageAt
         return att
     except Exception:
         return None
+
+_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./~\\:")
+
 
 def compact_image_paths(text: str) -> tuple[str, list[ImageAttachment]]:
     """
@@ -410,14 +427,26 @@ def compact_image_paths(text: str) -> tuple[str, list[ImageAttachment]]:
                 cand = text[start_idx:end_idx].strip("\"' ")
                 resolved = resolve_fuzzy_image_path(cand)
                 if resolved:
-                    candidates.append((text[start_idx:end_idx], str(resolved)))
+                    # "./shot.png" and "/dir/shot.png" resolve as soon as the bare name does: take the whole path.
+                    while start_idx > floor and text[start_idx - 1] in _PATH_CHARS:
+                        start_idx -= 1
+                    longer = text[start_idx:end_idx]
+                    while longer and resolve_fuzzy_image_path(longer.strip("\"' ")) != resolved:
+                        start_idx += 1
+                        longer = text[start_idx:end_idx]
+                    candidates.append((longer or cand, str(resolved)))
                     break
 
+    done: dict[str, ImageAttachment] = {}      # one picture named twice (e.g. an @mention echoed in its own file block) is one attachment
     for raw_str, clean_str in candidates:
-        att = ingest_image_file(clean_str)
+        if raw_str in done:
+            continue
+        att = done.get(clean_str) or ingest_image_file(clean_str)
         if att:
+            done[raw_str] = done[clean_str] = att
             attachments.append(att)
-            text = text.replace(raw_str, att.label)
+    for raw_str, att in sorted(((k, v) for k, v in done.items() if k in {c[0] for c in candidates}), key=lambda kv: -len(kv[0])):
+        text = text.replace(raw_str, att.label)
 
     # Deduplicate attachments while preserving order
     seen: set[str] = set()

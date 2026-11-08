@@ -66,6 +66,9 @@ def _cancel_later(agent: Any, delay: float) -> None:
 
 
 def _alive(pid: int) -> bool:
+    if os.name == "nt":                      # os.kill(pid, 0) is not a liveness probe on Windows
+        from axon.session.lease import _pid_alive
+        return _pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

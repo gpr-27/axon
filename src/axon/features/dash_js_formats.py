@@ -11,7 +11,7 @@ function extUrl(f, o) {
   return '/api/file/extract?path=' + encodeURIComponent(f.path) + (o.sheet ? '&sheet=' + encodeURIComponent(o.sheet) : '') + (o.pages ? '&pages=' + encodeURIComponent(o.pages) : '') + '&offset=' + (o.offset || 0) + '&limit=' + (o.limit || EXT_LIMIT);
 }
 function askAxonBtn(f) {
-  return h('button', { class: 'btn', type: 'button', title: 'Reference this file in the chat', onclick: () => { lsSet('axon-prefill', '@' + f.path + ' '); location.hash = '#/chat'; } }, 'Ask Axon');
+  return h('button', { class: 'btn', type: 'button', title: 'Reference this file in the chat', onclick: () => axAsk(f.path) }, 'Ask Axon');
 }
 function extNotes(meta) {
   const n = (meta && meta.notes) || [];

@@ -192,6 +192,7 @@ input[type=text],input[type=search],input[type=password],.formrow input[type=tex
 .top .btn[aria-pressed=true]{color:var(--ink)}
 .ide-body{padding:0 8px 0 0;column-gap:0}
 .side-nav{background:transparent;border:0;padding:2px 6px;gap:2px}
+@media (min-width:901px){:root{--rail:82px}}   /* "Commands" and "Extensions" are wider than the old 64px rail */
 .side-nav a{padding:7px 2px 6px;border-radius:10px;color:var(--ink2)}
 .side-nav a:hover{background:var(--raised);color:var(--ink)}
 .side-nav a[aria-current=page]{background:var(--raised);color:var(--ink);box-shadow:none}
@@ -200,13 +201,17 @@ input[type=text],input[type=search],input[type=password],.formrow input[type=tex
 .rz{background:transparent;border-radius:4px}
 .rz:hover,.resizing .rz{background:color-mix(in srgb,var(--primary) 60%,transparent)}
 .statusbar{background:transparent;border:0;height:28px;padding:0 14px;font-size:12px;color:var(--ink2);gap:14px}
-.statusbar b{font-weight:500;color:var(--ink2)}.statusbar .muted{opacity:.8}
+.statusbar b{font-weight:500;color:var(--ink2)}.statusbar .muted{opacity:1}
 .tabstrip{background:transparent;border-bottom:1px solid var(--line);padding:6px 8px;gap:4px}
 .tabscroll{gap:4px}
+/* a tab cut by the strip's edge fades out instead of showing half a title with its menu and close buttons */
+.tabscroll.fade-l{-webkit-mask-image:linear-gradient(to right,transparent 0,#000 26px);mask-image:linear-gradient(to right,transparent 0,#000 26px)}
+.tabscroll.fade-r{-webkit-mask-image:linear-gradient(to left,transparent 0,#000 26px);mask-image:linear-gradient(to left,transparent 0,#000 26px)}
+.tabscroll.fade-l.fade-r{-webkit-mask-image:linear-gradient(to right,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%);mask-image:linear-gradient(to right,transparent 0,#000 26px,#000 calc(100% - 26px),transparent 100%)}
 .tab{border-radius:8px}
 .tab.on{background:var(--raised);box-shadow:none}.tab.split:not(.on){box-shadow:inset 0 0 0 1px var(--line2)}
 .tab:not(.on):hover{background:color-mix(in srgb,var(--raised) 60%,transparent)}
-.tab .tl{padding:4px 2px 4px 10px;font-size:13px}.tab .tx{opacity:.6;padding:2px 8px}.tab .tx:hover{opacity:1}
+.tab .tl{padding:4px 2px 4px 10px;font-size:13px}.tab .tx{padding:2px 8px}.tab .tx:hover{color:var(--ink)}
 .tabstrip>.mini{margin:0 0 0 4px}
 
 /* ── side panels ── */
@@ -222,7 +227,7 @@ input[type=text],input[type=search],input[type=password],.formrow input[type=tex
 .node:hover{background:var(--raised);color:var(--ink)}
 .node.sel{background:var(--raised);color:var(--ink);box-shadow:none}
 .node.dir .nm{color:inherit}
-.node .ar{width:12px;font-size:12px;opacity:.8}
+.node .ar{width:12px;font-size:12px;opacity:1}
 .ftree{background:transparent;border-right:1px solid var(--line)}
 .psec{padding:14px 16px;border:0;border-bottom:1px solid var(--line)}
 .psec:last-child{border-bottom:0}
@@ -302,6 +307,7 @@ pre.out,.tool pre{background:var(--code-bg);border:0;border-radius:8px;padding:1
 .composer:focus-within{border-color:color-mix(in srgb,var(--primary) 65%,transparent);box-shadow:var(--shadow),0 0 0 3px var(--soft)}
 .composer textarea,.composer textarea:focus{background:transparent;border:0;outline:0;box-shadow:none;padding:2px 2px 0;min-height:30px;font-size:15px;line-height:1.5;border-radius:0}
 .composer textarea.shellmode{border:0;color:var(--warn)}
+.composer .ghost{padding:2px 2px 0;border:0;font-size:15px;line-height:1.5}
 .composer.drag{border-color:var(--primary);box-shadow:0 0 0 3px var(--soft)}
 .composer.drag textarea{box-shadow:none}
 .composer .notice,.composer .heldbox{background:var(--raised2);margin:0 0 8px}
@@ -321,6 +327,11 @@ h2{letter-spacing:0}
 .card h3{font-weight:600}
 details.adv{border:0;background:var(--raised);border-radius:12px;padding:8px 14px}
 details.adv .card{background:var(--page)}
+/* a provider's open card is raised, so its fields and buttons sit one step off it instead of vanishing into it */
+details.provider>summary .ta{font-family:var(--font-ui)}
+details.provider>summary .tn,details.provider>summary .gbadge,details.provider>summary .ts{white-space:nowrap;flex:none}
+details.provider input[type=text],details.provider input[type=password],details.adv .card input[type=text],details.adv .card input[type=password]{background:var(--page);border-color:var(--line2)}
+details.provider .btn:not(.primary){background:var(--raised2);color:var(--ink)}
 .strip{border:0;gap:8px;display:grid}
 .kpi,.kpi:first-child{border:0;background:var(--raised);border-radius:12px;padding:12px 14px}
 .kpi .v{font-family:inherit;font-size:21px}
@@ -511,6 +522,9 @@ body.dock-open .drawer-scrim{display:block;position:fixed;inset:0;background:rgb
 /* parallel group */
 .pgroup{margin:2px 0}
 .phead{display:grid;grid-template-columns:18px minmax(0,1fr) 56px;column-gap:8px;align-items:center;min-height:24px;padding:0 8px 0 4px;font:500 12px/1.4 var(--font-ui);color:var(--ink2)}
+/* the Shell dock's own header shares the class with a step group's header above: keep it a plain row */
+.bpanel>.phead{display:flex;grid-template-columns:none;gap:2px 12px;align-items:center;padding:8px 14px;min-height:44px;font:inherit;color:var(--ink)}
+.bpanel>.phead .hint{font-size:12px;color:var(--ink2)}
 .prows{position:relative}
 .prows::after{content:"";position:absolute;left:35px;top:1px;bottom:1px;width:2px;border-radius:2px;background:var(--line2);pointer-events:none}
 .prows .xrow .tn{flex-basis:108px;width:108px;padding-left:12px}

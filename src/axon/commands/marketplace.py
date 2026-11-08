@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+from axon.platform import rmtree as _rmtree
 import subprocess
 import sys
 import tempfile
@@ -118,7 +119,7 @@ def git_clone(url: str, dest: Path, ref: str = "", sha: str = "") -> None:
         raise MarketplaceError(f"not a commit sha: {sha!r}")
 
     def fail(message: str) -> None:
-        shutil.rmtree(dest, ignore_errors=True)
+        _rmtree(dest, ignore_errors=True)
         raise MarketplaceError(message)
 
     if sha and len(sha) == 40:
@@ -128,7 +129,7 @@ def git_clone(url: str, dest: Path, ref: str = "", sha: str = "") -> None:
             ["checkout", "-q", "FETCH_HEAD"]))
         if ok and head_sha(dest) == sha:
             return
-        shutil.rmtree(dest, ignore_errors=True)          # the server would not serve the bare commit
+        _rmtree(dest, ignore_errors=True)          # the server would not serve the bare commit
     cmd = ["clone"] + ([] if sha else ["--depth", "1"])
     if ref and not sha:
         cmd += ["--branch", ref]
@@ -320,7 +321,7 @@ def add_marketplace(source: str) -> tuple[str, dict[str, Any]]:
             entry["skillsOnly"] = True
         dest = clone_root() / name
         if spec["kind"] in ("github", "git"):
-            shutil.rmtree(dest, ignore_errors=True)
+            _rmtree(dest, ignore_errors=True)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(root), str(dest))
         elif spec["kind"] == "url":
@@ -332,7 +333,7 @@ def add_marketplace(source: str) -> tuple[str, dict[str, Any]]:
         return name, entry
     finally:
         if tmp_clone is not None:
-            shutil.rmtree(tmp_clone, ignore_errors=True)
+            _rmtree(tmp_clone, ignore_errors=True)
 
 
 def _fetch_hosted(url: str) -> dict[str, Any]:
@@ -396,7 +397,7 @@ def remove_marketplace(name: str, workspace: Path) -> list[str]:
             uninstall(p, workspace)
             removed.append(p.id)
     if entry.get("kind") != "path":
-        shutil.rmtree(marketplace_dir(name, entry), ignore_errors=True)
+        _rmtree(marketplace_dir(name, entry), ignore_errors=True)
     save_state(state)
     return removed
 
@@ -465,7 +466,7 @@ def materialize(marketplace: str, entry: dict[str, Any], workdir: Path) -> Path:
         out = workdir / "plugin"
         git_clone(_github_url(str(src.get("repo"))), out, ref, sha)
         (workdir / COMMIT_SIDECAR).write_text(head_sha(out), encoding="utf-8")
-        shutil.rmtree(out / ".git", ignore_errors=True)
+        _rmtree(out / ".git", ignore_errors=True)
         return out
     if kind in ("url", "git-subdir"):
         url = str(src.get("url") or "")
@@ -488,7 +489,7 @@ def materialize(marketplace: str, entry: dict[str, Any], workdir: Path) -> Path:
             out = workdir / "plugin"
             _copy_plugin(target, out)
             return out
-        shutil.rmtree(clone / ".git", ignore_errors=True)
+        _rmtree(clone / ".git", ignore_errors=True)
         return clone
     raise MarketplaceError(f"Plugin source type '{kind}' is not supported by Axon (use a path, github, git-subdir or url source)")
 
@@ -580,7 +581,7 @@ def install(spec: str, workspace: Path, scope: str = "user", _depth: int = 0,
             raise MarketplaceError("installation cancelled; nothing was installed")
         _copy_plugin(src_root, dest)
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        _rmtree(work, ignore_errors=True)
     mp = pl._manifest_path(dest)
     manifest = pl._read_json_dict(mp) if mp else {}
     manifest = manifest or {}
@@ -644,7 +645,7 @@ def uninstall(plugin: pl.Plugin, workspace: Path) -> None:
         except (OSError, ValueError):   # a settings file we must not rewrite: the stale entry is harmless
             pass
     pl.remove_plugin(plugin)
-    shutil.rmtree(pl.plugin_data_dir(plugin), ignore_errors=True)
+    _rmtree(pl.plugin_data_dir(plugin), ignore_errors=True)
 
 
 @dataclass
@@ -699,17 +700,17 @@ def update_plugin(plugin: pl.Plugin, workspace: Path, review: Any = None) -> boo
         record["updated_at"] = int(time.time())
         record["commit"] = new_commit
         backup = plugin.path.with_name(plugin.path.name + ".old")
-        shutil.rmtree(backup, ignore_errors=True)
+        _rmtree(backup, ignore_errors=True)
         plugin.path.rename(backup)
         try:
             _copy_plugin(src_root, plugin.path)
             record["content_hash"] = content_hash(plugin.path)
             (plugin.path / pl.INSTALL_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         except Exception:
-            shutil.rmtree(plugin.path, ignore_errors=True)
+            _rmtree(plugin.path, ignore_errors=True)
             backup.rename(plugin.path)
             raise
-        shutil.rmtree(backup, ignore_errors=True)
+        _rmtree(backup, ignore_errors=True)
         return True
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        _rmtree(work, ignore_errors=True)

@@ -147,7 +147,7 @@ def create_axon_env(tmp_path: Path, llm: FakeLLMServer, git: bool = False) -> Ax
     for d in (home, axon_home, ws):
         d.mkdir(parents=True, exist_ok=True)
     if git:
-        subprocess.run(["git", "init", "-q", str(ws)], check=False, capture_output=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(ws)], check=False, capture_output=True)
     env = make_env(home, axon_home, llm.url)
     if not IS_WINDOWS:  # never overwrite the developer's real clipboard (/copy, /export clipboard, ...)
         shims = tmp_path / "bin-shims"

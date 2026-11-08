@@ -103,7 +103,8 @@ def test_shell_fenced_block_and_output_not_rescanned(workspace: Path) -> None:
 def test_shell_failure_aborts_but_search_exit_one_is_a_result(workspace: Path) -> None:
     with pytest.raises(SkillShellError, match="Shell command failed"):
         expand_shell_injections("!`exit 3`", workspace, lambda c: True)
-    assert expand_shell_injections("x !`grep -q zzz /dev/null`", workspace, lambda c: True) == "x "   # grep exit 1
+    if os.name != "nt":                                                    # grep and /dev/null are POSIX
+        assert expand_shell_injections("x !`grep -q zzz /dev/null`", workspace, lambda c: True) == "x "   # grep exit 1
     out = expand_shell_injections("x !`echo out; echo err 1>&2`", workspace, lambda c: True)
     assert "out" in out and "err" in out                                   # stderr merged into stdout
 

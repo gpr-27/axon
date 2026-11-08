@@ -1,4 +1,8 @@
 """Long pastes: a pause inside the paste must not end it, and split pieces merge into one chip."""
+import os
+
+import pytest
+
 from axon import platform as plat
 from axon.ui.input import EditorState
 
@@ -49,6 +53,7 @@ def test_separate_pastes_typed_apart_stay_separate():
     assert ed.buf.count("[Pasted text #") == 2
 
 
+@pytest.mark.skipif(os.name == "nt", reason="feeds the POSIX reader through a pipe; Windows reads the console through msvcrt")
 def test_paste_larger_than_one_read_chunk_stays_one_paste(monkeypatch):
     """A 200 KB bracketed paste arrives in several chunks; none of them may become typed keys or a second paste."""
     import os
@@ -73,5 +78,34 @@ def test_paste_larger_than_one_read_chunk_stays_one_paste(monkeypatch):
     first = plat.read_key(timeout=10)
     assert first == plat.PASTE_PREFIX + plat.normalize_newlines(body)
     assert plat.read_key(timeout=0.3) is None        # nothing is left over to be typed as Enter
+    os.close(read_fd)
+    os.close(write_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="feeds the POSIX reader through a pipe; Windows reads the console through msvcrt")
+def test_crlf_paste_split_between_cr_and_lf_gets_no_extra_blank_line(monkeypatch):
+    """A read chunk of a Windows-style paste can end right after the LF of a CRLF. The type-ahead rule that turns a
+    trailing LF into Enter must not run inside a paste: it made `\\r\\n` into `\\r\\r` (a blank line in the pasted code)."""
+    import os
+    import threading
+    import time
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(plat, "_stdin_fd", lambda: read_fd)
+    monkeypatch.setattr(plat, "_stdin_eof", False)
+    plat._pending_chars.clear()
+    plat._events.clear()
+    first, middle, last = "alpha\r\nbeta", "\r\ngamma\r\n", "delta"
+
+    def feed():
+        os.write(write_fd, b"\x1b[200~" + first.encode())
+        time.sleep(0.2)                                  # each chunk is a separate read
+        os.write(write_fd, middle.encode())              # ends in LF, holds no escape: looks like type-ahead
+        time.sleep(0.2)
+        os.write(write_fd, last.encode() + b"\x1b[201~")
+
+    threading.Thread(target=feed, daemon=True).start()
+    got = plat.read_key(timeout=10)
+    assert got == plat.PASTE_PREFIX + "alpha\nbeta\ngamma\ndelta"
     os.close(read_fd)
     os.close(write_fd)

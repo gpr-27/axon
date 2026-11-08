@@ -186,12 +186,12 @@ def test_delete_all_projects_session_goes_to_its_own_trash(c, env):
     assert OTHER in {x["id"] for x in listing(c, scope="all", fresh="1")["rows"]}
 
 
-def test_delete_refuses_a_session_held_by_another_process(c, env):
+def test_delete_refuses_a_session_held_by_another_process(c, env, other_live_pid):
     sid = env.ids["refactor"]
     lease = sess_dir(env) / sid / "writer.lease"
-    lease.write_text(json.dumps({"pid": os.getppid(), "host": socket.gethostname(), "owner": "terminal", "started": time.time()}))
+    lease.write_text(json.dumps({"pid": other_live_pid, "host": socket.gethostname(), "owner": "terminal", "started": time.time()}))
     st, r = post(c, "/api/manage/sessions/delete", {"ids": [sid]})
-    assert st == 200 and not r["deleted"] and "terminal" in r["refused"][0]["reason"] and str(os.getppid()) in r["refused"][0]["reason"]
+    assert st == 200 and not r["deleted"] and "terminal" in r["refused"][0]["reason"] and str(other_live_pid) in r["refused"][0]["reason"]
     assert (sess_dir(env) / sid / "session.jsonl").is_file()
     st, r = post(c, "/api/manage/sessions/update", {"id": sid, "title": "nope"})
     assert st == 409 and "terminal" in r["error"]
@@ -203,9 +203,9 @@ def test_delete_refuses_a_session_held_by_another_process(c, env):
     assert r["deleted"] and not (sess_dir(env) / sid).exists()
 
 
-def test_batch_delete_reports_who_has_the_busy_one(c, env):
+def test_batch_delete_reports_who_has_the_busy_one(c, env, other_live_pid):
     ok, busy = env.ids["short"], env.ids["xss"]
-    (sess_dir(env) / busy / "writer.lease").write_text(json.dumps({"pid": os.getppid(), "host": socket.gethostname(), "owner": "terminal"}))
+    (sess_dir(env) / busy / "writer.lease").write_text(json.dumps({"pid": other_live_pid, "host": socket.gethostname(), "owner": "terminal"}))
     st, r = post(c, "/api/manage/sessions/delete", {"ids": [ok, busy], "confirm_count": 2})
     assert [x["id"] for x in r["deleted"]] == [ok] and [x["id"] for x in r["refused"]] == [busy]
     assert (sess_dir(env) / busy).exists()
@@ -345,7 +345,7 @@ def test_clear_usage_for_this_project_keeps_a_backup_and_other_projects(c, env):
     assert prev["records"] == 42 and prev["phrase"] == "" and "usage-backups" in prev["backup_dir"]
     assert post(c, "/api/manage/usage/clear", {"scope": "project"})[0] == 400 and f.read_text() == before          # needs confirm
     st, r = post(c, "/api/manage/usage/clear", {"scope": "project", "confirm": True})
-    assert st == 200 and r["removed"] == 42 and r["backup"].startswith(("~", "/"))
+    assert st == 200 and r["removed"] == 42 and (r["backup"].startswith(("~", "/")) or Path(r["backup"]).is_absolute())
     left = f.read_text()
     assert other in left and "not json at all" in left and storage.project_key(env.ws) not in left
     backups = list((storage.axon_home() / "usage-backups").glob("usage-*.jsonl"))
@@ -413,5 +413,5 @@ def test_page_script_parses_and_has_the_controls(tmp_path):
         pytest.skip("node is not installed")
     js = tmp_path / "app.js"
     js.write_text(APP_JS, encoding="utf-8")
-    p = subprocess.run([node, "--check", str(js)], text=True, capture_output=True)
+    p = subprocess.run([node, "--check", str(js)], text=True, encoding="utf-8", capture_output=True)
     assert p.returncode == 0, p.stderr[:600]

@@ -6,7 +6,7 @@ Slash commands: ``/activity`` (alias ``/journal``), ``/restore`` (alias ``/trash
 """
 from __future__ import annotations
 
-import shlex
+from axon import platform
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,7 +57,7 @@ def _parse_since(v: str) -> float | None:
 def parse_activity_args(arg: str | list[str]) -> ActivityQuery:
     """Parse /activity and `axon activity` arguments (pure; easy to test)."""
     try:
-        toks = shlex.split(arg) if isinstance(arg, str) else list(arg)
+        toks = platform.split_words(arg) if isinstance(arg, str) else list(arg)
     except ValueError:
         toks = str(arg).split()
     q = ActivityQuery()

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+
+import pytest
 from pathlib import Path
 
 from axon import platform as plat
@@ -33,6 +35,7 @@ def test_not_a_drop(tmp_path: Path) -> None:
     assert not looks_like_typed_drop(str(outside) + "\r", ws)               # carries its own Enter: normal submit
 
 
+@pytest.mark.skipif(os.name == "nt", reason="_posix_fill reads a file descriptor with select; Windows reads the console through msvcrt")
 def test_posix_fill_turns_a_dropped_path_burst_into_a_paste_event(tmp_path: Path, monkeypatch) -> None:
     outside = tmp_path / "doc.txt"
     outside.write_text("hello")

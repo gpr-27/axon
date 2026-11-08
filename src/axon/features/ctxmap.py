@@ -132,6 +132,9 @@ def drop_result(agent: Any, result_id_: str) -> dict[str, Any]:
         return {"ok": False, "message": f"Could not save the result to disk, so it was not dropped: {e}"}
     freed = _tok(old)
     stub = f"{DROPPED_MARK} (about {freed:,} tokens). The full text is saved at {path}; Read that file if it is needed again.]"
+    if _tok(stub) >= freed:
+        path.unlink(missing_ok=True)
+        return {"ok": False, "message": f"{rid} is only about {freed:,} tokens, less than the note that would replace it, so it was kept."}
     holder[key] = stub
     return {"ok": True, "path": str(path), "tokens_freed": max(0, freed - _tok(stub)),
             "message": f"Dropped {rid} from context (about {freed:,} tokens). Full text kept at {path}."}

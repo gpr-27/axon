@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any, Literal
 
 from axon import platform as plat
@@ -64,6 +65,9 @@ def _detail_lines(tool_name: str, args: dict[str, Any], reason: str) -> list[str
     return lines
 
 
+_SETTLE_SECONDS = 0.35
+
+
 def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> ApprovalResult:
     """Ask the user to allow a tool call. Non-interactive sessions are denied (safe default)."""
     try:
@@ -110,6 +114,11 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
 
             sys.stdout.write("\n" + "\n".join(header) + "\n")
             sys.stdout.flush()
+            # Keys typed while the model was working (the next message) must never answer a permission prompt:
+            # a "y" or "1" in that text would allow the call. Anything that arrives before a person could have read
+            # the question is dropped.
+            time.sleep(_SETTLE_SECONDS)
+            plat.flush_input()
             with decision_help.shown(explain):
                 chosen = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key,
                                   footer=f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny").run()

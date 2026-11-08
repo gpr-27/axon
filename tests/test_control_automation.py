@@ -243,8 +243,11 @@ def dropped_connection(spec: ServerSpec, **options: Any) -> tuple[MCPServerConne
     return conn, loops
 
 
-def test_a_dropped_local_server_is_not_reconnected_by_default() -> None:
+def test_a_dropped_local_server_is_reconnected_by_default_unless_auto_reconnect_is_off() -> None:
+    # Since the crash-budget change (tests/test_ext_mcp_recovery.py) local servers reconnect like remote ones.
     _, loops = dropped_connection(server())
+    assert len(loops) == 1
+    _, loops = dropped_connection(server(), auto_reconnect=False)
     assert loops == []
 
 

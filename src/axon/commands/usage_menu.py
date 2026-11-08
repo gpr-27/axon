@@ -38,7 +38,7 @@ OWN_MENU = {
     "provider": "provider picker", "release-notes": "version picker", "restore": "trash picker",
     "resume": "session picker", "rewind": "checkpoint menu", "sessions": "session switcher",
     "settings": "settings hub", "skills": "skill browser", "theme": "theme picker", "color": "colour picker",
-    "trace": "level picker", "usage": "tabbed usage screen", "transcript": "full-screen viewer", "copy": "code block picker",
+    "trace": "level picker", "workbench": "workbench screen", "worktree": "worktree picker", "usage": "tabbed usage screen", "transcript": "full-screen viewer", "copy": "code block picker",
     "new": "template picker", "tips": "tip list", "tools": "tool browser",
 }
 

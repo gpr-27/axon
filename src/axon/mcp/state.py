@@ -36,6 +36,17 @@ def is_interactive() -> bool:
     return bool(_session["interactive"])
 
 
+def set_page_mode(flag: bool) -> None:
+    """The web app is the interactive surface (approvals and questions appear on the page): same decisions as
+    the REPL, but nothing may wait on the terminal's stdin."""
+    _session["page"] = bool(flag)
+
+
+def can_prompt() -> bool:
+    """May a question be asked on the terminal (input())? Only in the REPL, never behind the web app."""
+    return bool(_session["interactive"]) and not _session.get("page")
+
+
 def terminal_attached() -> bool:
     try:
         return bool(sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty())

@@ -8,7 +8,7 @@ check fails the config is rolled back, unless the caller asked to keep it.
 from __future__ import annotations
 
 import os
-import shlex
+from axon import platform
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +75,7 @@ def custom_connector(name: str, target: str, transport: str = "") -> Connector:
         return Connector(id=name, name=name, publisher="custom", description="Custom connector",
                          category="Custom", transport=kind, auth="none", docs_url="https://modelcontextprotocol.io",
                          url=target)
-    words = shlex.split(target)
+    words = platform.split_words(target)
     if not words:
         raise ValueError("Give a URL (https://...) or a command to run.")
     return Connector(id=name, name=name, publisher="custom", description="Custom connector",

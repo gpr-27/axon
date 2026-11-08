@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
+from axon.platform import rmtree as _rmtree
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,7 +197,7 @@ def remove_skill(name: str, workspace: Path, scope: str | None = None) -> bool:
     for each in scopes:
         folder = skills_root(workspace, each) / name
         if (folder / "SKILL.md").is_file():
-            shutil.rmtree(folder)
+            _rmtree(folder)
             return True
     return False
 

@@ -615,7 +615,8 @@ def _session_in_use(agent: Any, say: Callable[[str], None]) -> bool | None:
         return False
     who = f"the {holder.get('owner', 'terminal')} (process {holder.get('pid', '?')})"
     if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
-        say(f"Warning: this session is also open in {who}. Both will write to it.")
+        # stderr, not `say`: the json output formats mute `say`, and a script should still see the warning.
+        sys.stderr.write(f"Warning: this session is also open in {who}. Both will write to it.\n")
         return False
     say(f"This session is open in {who}. Writing from two places would mix their histories.")
     try:
@@ -1879,6 +1880,8 @@ def main(argv: list[str] | None = None) -> int:
         from axon.ui.render import Renderer
         renderer = Renderer(show_thinking=settings.thinking)
         on_event = renderer.on_event
+        if headless:
+            renderer.show_tips = False  # a script's output holds the turn, not usage tips for a person at the prompt
 
     interactive = sys.stdin.isatty() if sys.stdin else False
     try:  # approval prompts and elicitation dialogs only in the REPL; -p and SDK runs never block on one

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,8 @@ def test_export_with_secrets_is_owner_only(workspace: Path, tmp_path: Path) -> N
     build_setup(workspace)
     path = transfer.write_export(workspace, tmp_path / "full.json", include_secrets=True)
     assert "sk-literal-secret" in path.read_text()
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":                                   # Windows has no mode bits; the profile folder's ACL is private
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_export_command_default_file_and_message(workspace: Path) -> None:

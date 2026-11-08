@@ -102,11 +102,11 @@ def test_the_transcript_is_only_read(c, parent):
     assert (f.read_bytes(), f.stat().st_mtime_ns) == before
 
 
-def test_a_session_held_by_a_terminal_marks_unrecorded_runs_as_running_elsewhere(c, parent):
-    _hold(parent.folder, 1)
+def test_a_session_held_by_a_terminal_marks_unrecorded_runs_as_running_elsewhere(c, parent, other_live_pid):
+    _hold(parent.folder, other_live_pid)
     v = c.json(f"/api/subagents?session={parent.sid}")
     r2 = v["subagents"][1]
-    assert r2["status"] == "running elsewhere" and r2["held_elsewhere"] and v["lease"]["pid"] == 1
+    assert r2["status"] == "running elsewhere" and r2["held_elsewhere"] and v["lease"]["pid"] == other_live_pid
     assert v["subagents"][0]["status"] == "completed"                           # a recorded result still wins
     st, _, _ = c.post("/api/subagent/stop", {"session": parent.sid, "task": "sub-2"})
     assert st == 404                                                           # nothing of it runs in this server
@@ -165,8 +165,8 @@ def test_the_page_script_is_valid_and_reuses_the_chat_components(tmp_path):
     node = shutil.which("node")
     if node:
         f = tmp_path / "app.js"
-        f.write_text(js)
-        res = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+        f.write_text(js, encoding="utf-8")
+        res = subprocess.run([node, "--check", str(f)], capture_output=True, text=True, encoding="utf-8")
         assert res.returncode == 0, res.stderr
 
 

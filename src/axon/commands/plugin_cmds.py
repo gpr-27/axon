@@ -15,7 +15,7 @@ dependencies and install scopes, ``userConfig`` options and ``validate``. Text b
 """
 from __future__ import annotations
 
-import shlex
+from axon import platform
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,7 +31,7 @@ SCOPES = ("user", "project", "local")
 def _split(arg: str) -> tuple[list[str], dict[str, str], set[str]]:
     """(positional words, --key value options, bare flags)."""
     try:
-        words = shlex.split(arg)
+        words = platform.split_words(arg)
     except ValueError:
         words = arg.split()
     pos: list[str] = []

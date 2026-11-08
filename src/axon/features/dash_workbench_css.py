@@ -52,7 +52,7 @@ WORKBENCH_CSS = r"""
 .wbmenu button:hover:not(:disabled),.wbmenu button:focus-visible{background:var(--raised2)}
 .wbmenu button:disabled{color:var(--muted);cursor:default}
 .wbmenu button.on .mt::before{content:"\2713\00a0"}
-.wbmenu .mk{color:var(--muted);font-size:12px;white-space:nowrap}
+.wbmenu .mhint{color:var(--muted);font-size:12px;white-space:nowrap}
 .wbmenu .mh{padding:6px 10px 3px;font-size:11.5px;color:var(--muted);letter-spacing:.02em}
 .wbmenu hr{border:0;border-top:1px solid var(--line);margin:5px 4px}
 .wbmenu button.danger{color:var(--bad)}
@@ -108,6 +108,7 @@ button.rrow:hover,a.rrow:hover{color:var(--ink);background:var(--raised);box-sha
 .cadd{color:var(--add)}.cdel{color:var(--del)}
 .pr-btn{padding:4px 12px;font-size:13px;flex:none}
 .rfoot{display:flex;justify-content:space-between;gap:10px;padding:10px 18px 4px;font-size:11.5px;color:var(--muted);border-top:1px solid var(--line);margin-top:6px}
+.rfoot>span{flex:none;white-space:nowrap}.rfoot .rfid{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rfid{background:none;border:0;padding:0;color:inherit;font:11.5px ui-monospace,Menlo,monospace;cursor:copy;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;text-align:left}
 .rfid:hover{color:var(--ink2)}
 /* composer footer */
@@ -197,4 +198,13 @@ button.rrow:hover,a.rrow:hover{color:var(--ink);background:var(--raised);box-sha
  .top .ctitle{max-width:34vw}.wbmenu{max-width:94vw}
 }
 @media (max-width:420px){.tbi{width:30px;height:30px}.top .brand span{display:none}}
+/* Files panel: project controls and the shared virtual tree */
+.fp-ctl{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:8px 12px 0}.fp-ctl .btn{padding:4px 10px;font-size:12.5px}.fp-ign{font-size:12px;display:flex;gap:4px;align-items:center}
+.wp-files .wp-body{display:flex;flex-direction:column;min-height:0}.wp-files .vlist{flex:1;min-height:0}.wp-files .fp-res{flex:1;min-height:0;overflow:auto}
+.node .fp-dir{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;max-width:45%}
+/* the line Shell inside the Terminal panel (where there is no PTY) */
+.wp-terminal .sh-side{height:100%;grid-template-columns:minmax(0,1fr)}.wp-terminal .sh-hist{display:none}.wp-terminal .wterms{display:flex;flex-direction:column}.wp-terminal .wterms>.sh-side{flex:1;min-height:0}
+/* the rail labels must fit their column */
+.side-nav a .lbl{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;letter-spacing:-.01em}
+@media (max-width:720px){.top .ctitle .ct-t{display:none}}
 """

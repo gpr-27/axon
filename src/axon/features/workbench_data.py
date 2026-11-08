@@ -164,9 +164,10 @@ def connectors(ws: Path | str) -> dict[str, Any]:
             status = "pending-approval" if s.approval == "pending" else "rejected"
         rows.append({"name": name, "status": status, "tools": lv.get("tools"), "tool_names": sorted(names.get(name, [])),
                      "scope": s.scope, "error": redact_text(str(lv.get("error") or ""))[:300],
-                     "needs_reconnect": status in NEEDS_ACTION, "needs_auth": status == "needs-auth"})
+                     "needs_reconnect": status in NEEDS_ACTION and status != "pending-approval", "needs_auth": status == "needs-auth",
+                     "needs_approval": status == "pending-approval"})
     return {"servers": rows, "reconnect": sum(1 for r in rows if r["needs_reconnect"]),
-            "connected": sum(1 for r in rows if r["status"] == "connected")}
+            "connected": sum(1 for r in rows if r["status"] == "connected"), "approval": sum(1 for r in rows if r["needs_approval"])}
 
 
 def usage_limits(agent: Any | None) -> dict[str, Any]:

@@ -31,6 +31,13 @@ in the project. Shell runs single commands line by line (no full-screen programs
 Sessions, Memory, Extensions and Settings give browser views of the matching slash commands, usage data, saved
 sessions, memory files, installed extensions and settings. Secret-looking settings are masked.
 
+Extensions has tabs for MCP servers, skills, plugins, hooks, agents and slash commands, plus a Marketplace tab. Each
+button runs the same slash command as in the terminal (`/mcp approve`, `/plugin update`, `/marketplace install`...)
+and shows its output under the list; destructive ones ask first. Chats started in the app connect your MCP servers.
+Servers from a project's `.mcp.json` wait for Approve. Hooks, plugins and `.axon/mcp.json` servers that a folder
+brings stay off until you press "Trust this folder" on that page, after reading the list of what would run. An MCP
+server that asks for input shows a form in the chat. `@file`, `@agent-name` and `@server:uri` work in the composer.
+
 ## Security model
 
 The server is meant for you alone on your own machine.

@@ -64,9 +64,15 @@ def tool_paths(tool_name: str, args: dict[str, Any], keep_prefixed: bool = False
         if isinstance(v, str) and v.strip():
             out.append(v.strip())
     if tool_name == "Git":
-        folder = git_call(args)[2]
+        _sub, git_args, folder = git_call(args)
         if folder and folder not in out:
             out.append(folder)
+        for a in git_args:
+            if a == "--":
+                continue
+            val = a.split("=", 1)[1] if a.startswith("-") and "=" in a else a
+            if val.startswith(("/", "~", "../")) and val not in out:
+                out.append(val)         # a file named in the arguments (--flag=/path, or a path after --) is a path the call reads
     if tool_name == "Glob":
         base = _glob_pattern_base(args.get("pattern"))
         if base:

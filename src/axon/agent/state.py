@@ -109,6 +109,10 @@ def estimate_content_tokens(content: Any) -> int:
         return total
     return max(1, int(len(str(content)) / 3.7))
 
+# A session that ended between a tool call and its saved result (a crash, a kill): the call may well have run.
+INTERRUPTED_RESULT = ("Tool call was interrupted before its result was saved. It may or may not have run: "
+                      "check the current state before repeating it.")
+
 class Conversation:
     """Encapsulates the provider-encodable message list."""
     def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
@@ -229,10 +233,10 @@ class Conversation:
             fixes += len(missing)
             if openai_style:
                 for i in missing:
-                    out.append({"role": "tool", "tool_call_id": i, "content": "Tool call was interrupted and did not run."})
+                    out.append({"role": "tool", "tool_call_id": i, "content": INTERRUPTED_RESULT})
             else:
                 blocks = [
-                    {"type": "tool_result", "tool_use_id": i, "content": "Tool call was interrupted and did not run.", "is_error": True}
+                    {"type": "tool_result", "tool_use_id": i, "content": INTERRUPTED_RESULT, "is_error": True}
                     for i in missing
                 ]
                 nxt = self.messages[idx + 1] if idx + 1 < len(self.messages) else None

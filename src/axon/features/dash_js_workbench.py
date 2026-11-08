@@ -32,24 +32,24 @@ function wbLoad() {
   const ok = (a) => (Array.isArray(a) ? a.filter(id => WB_DEF[id]) : []);
   if (typeof p.wN === 'number') WB.wN = Math.max(240, Math.min(720, p.wN)); if (typeof p.wW === 'number') WB.wW = Math.max(320, Math.min(1100, p.wW));
   if (p.h && typeof p.h === 'object') for (const k of Object.keys(p.h)) if (WB_DEF[k] && typeof p.h[k] === 'number') WB.h[k] = Math.max(0.2, Math.min(6, p.h[k]));
-  if (innerWidth > 900) { WB.narrow = ok(p.narrow); WB.wide = ok(p.wide); }
+  if (innerWidth > 900) { WB.narrow = ok(p.narrow); WB.wide = ok(p.wide); if (!lsGet(wbKey())) WB.narrow = ['files']; }   // first run: the project tree is there from the start
 }
 function wbOpenIds() { return [...WB.narrow, ...WB.wide]; }
 function wbWidth() { const L = rightLayout(); return L.wn + L.ww; }
+function wbRefreshFiles() { const n = WB.nodes.files; if (n && n.P && n.P.refresh) n.P.refresh(); }
 function wbIsOpen(id) { return WB.narrow.includes(id) || WB.wide.includes(id); }
 function wbOpen(id) {
   const d = WB_DEF[id]; if (!d) return; if (wbIsOpen(id)) { wbRender(); return; }
   const col = d.kind === 'wide' ? WB.wide : WB.narrow; col.push(id); wbRender(); wbSave(); if (innerWidth <= 900) document.body.classList.add('drawer-wb');
   wbKeepChatRoom(id);
 }
-// The chat is the point of the page. Opening a panel folds the left panel, then Progress, then the oldest other panel,
+// The chat is the point of the page. Opening a panel folds Progress, then the oldest other panel,
 // until the chat has room again; each stays one click away on its button.
 const WB_CHAT_MIN = 560;
 function wbKeepChatRoom(keep) {
-  if (innerWidth <= 900) return;
-  const center = document.getElementById('center'); if (!center) return;
+  if (innerWidth <= 900 || WB.max) return;
+  const center = document.getElementById('center'); if (!center || !center.offsetParent) return;
   for (let i = 0; i < 8 && center.getBoundingClientRect().width < WB_CHAT_MIN; i++) {
-    if (UI.leftOpen) { togglePanel('left', false); continue; }
     if (UI.rightOpen) { togglePanel('right', false); continue; }
     const other = wbOpenIds().find(x => x !== keep); if (!other) return;
     wbClose(other);
@@ -86,7 +86,7 @@ function wbRender() {
     list.forEach((id, i) => {
       const n = wbNode(id); const P = n.P;
       n.el.style.flex = (WB.h[id] || 1) + ' 1 0'; n.el.classList.toggle('max', WB.max === id); n.el.hidden = !!(WB.max && WB.max !== id);
-      P.maxBtn.replaceChildren(wbIco(WB.max === id ? 'min' : 'max')); P.maxBtn.title = WB.max === id ? 'Restore the size' : 'Expand this panel';
+      P.maxBtn.replaceChildren(wbIco(WB.max === id ? 'min' : 'max')); P.maxBtn.title = WB.max === id ? 'Restore the size' : 'Expand this panel'; P.maxBtn.setAttribute('aria-label', (WB.max === id ? 'Restore ' : 'Expand ') + P.def.title);
       if (i > 0) kids.push(wbDivider(list[i - 1], id));
       kids.push(n.el);
       if (!n.mounted) { n.mounted = true; try { const r = d_mount(id, P); if (r && r.then) r.catch(e => P.body.append(errorBox(e.message))); } catch (e) { P.body.append(errorBox(e.message)); } }
@@ -142,7 +142,7 @@ function wbMenu(anchor, items, opts) {
     if (it.head) { menu.append(h('div', { class: 'mh' }, it.head)); continue; }
     if (it.node) { menu.append(it.node); continue; }
     menu.append(h('button', { type: 'button', role: 'menuitem', class: (it.cls || '') + (it.on ? ' on' : ''), disabled: !!it.disabled, title: it.title || '', onclick: () => { if (!it.keep) close(); if (it.run) it.run(); } },
-      h('span', { class: 'mt' }, it.label), it.hint ? h('span', { class: 'mk' }, it.hint) : null));
+      h('span', { class: 'mt' }, it.label), it.hint ? h('span', { class: 'mhint' }, it.hint) : null));
   }
   document.body.append(menu);
   const r = anchor.getBoundingClientRect();
@@ -161,7 +161,8 @@ function wbConfirm(title, text, okLabel, danger) {
     scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape') done(false); });
     scrim.append(h('div', { class: 'modal wbconfirm' }, h('h3', null, title), ...[].concat(text).map(t => (typeof t === 'string' ? h('p', { class: 'muted' }, t) : t)),
       h('div', { class: 'acts' }, h('button', { class: 'btn ' + (danger ? 'danger' : 'primary'), onclick: () => done(true) }, okLabel || 'Confirm'), h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'))));
-    document.body.append(scrim); const b = scrim.querySelector('.btn:last-child'); if (b) b.focus();
+    document.body.append(scrim); const inp = scrim.querySelector('input[type=text]'); const b = scrim.querySelector('.btn:last-child');
+    if (inp) { inp.focus(); inp.select(); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); done(true); } }); } else if (b) b.focus();
   });
 }
 // ----- toolbar (top right) -----
@@ -177,7 +178,7 @@ function wbToolbar() {
 }
 async function wbMoreMenu(anchor) {
   const C = UI.chat; const st = (C && C.st) || {};
-  const items = [{ label: 'Search', hint: IS_MAC_WB() ? '⌘K' : 'Ctrl+K', run: () => openPalette() }, { label: 'Commands', run: () => { location.hash = '#/commands'; } },
+  const items = [{ label: 'Search commands and pages', hint: IS_MAC_WB() ? '⌘K' : 'Ctrl+K', run: () => openPalette() },
     { label: 'Theme: switch light or dark', run: () => toggleTheme() }, { label: 'Keyboard shortcuts', hint: '?', run: () => helpModal() }];
   const panels = [];
   if ((st.background || []).length) panels.push({ label: 'Background tasks', hint: String(st.background.length), run: () => wbOpen('tasks') });
@@ -194,8 +195,9 @@ function wbTitleSync() {
   const b = document.getElementById('chat-title'); if (!b) return;
   const t = UI.active; const C = UI.chat;
   const isChat = !!(t && t.route === 'chat' && C);
-  const title = isChat ? ((C.meta && C.meta.title) || (C.sid ? 'Chat' : 'New chat')) : (t ? t.title : 'Axon');
-  b.replaceChildren(h('span', { class: 'ct-t' }, title), isChat ? wbIco('chevd') : null); b.disabled = !isChat; b.title = isChat ? 'Chat options' : title;
+  if (isChat && C.meta && C.meta.title && t.title !== C.meta.title.slice(0, 26)) { t.title = C.meta.title.slice(0, 26); drawTabs(); }   // the tab carries the chat's name
+  b.hidden = !isChat; b.disabled = !isChat; b.title = 'Chat options: rename, fork, share, delete'; b.setAttribute('aria-label', 'Chat options');
+  b.replaceChildren(h('span', { class: 'ct-t' }, 'Chat options'), wbIco('chevd'));
 }
 function wbTitleMenu(anchor) {
   const C = UI.chat; if (!C) return; const sid = C.sid;
@@ -204,7 +206,7 @@ function wbTitleMenu(anchor) {
   wbMenu(anchor, [
     { label: 'New chat', run: () => newChat(C) },
     '-', { label: 'Rename…', disabled: !sid, run: () => wbRename(C) },
-    { label: 'Fork into a new chat', disabled: !sid, run: async () => { try { const st = await api('/api/chat/fork', { session: sid }); location.hash = '#/chat/' + encodeURIComponent(st.session); } catch (e) { toast(e.message); } } },
+    { label: 'Fork into a new chat', disabled: !sid, run: async () => { try { toast('Forking this chat…'); const st = await api('/api/chat/fork', { session: sid }); location.hash = '#/chat/' + encodeURIComponent(st.session); } catch (e) { toast(e.message); } } },
     { label: 'Share…', disabled: !(C.meta && C.meta.share !== false && sid), run: () => shareModal({ kind: 'session', id: sid }) },
     '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace', v); C.feed.className = 'feed t-' + v; document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
     '-', { label: can ? (notifyOn ? 'Notifications: on (turn off)' : 'Notify me when a turn finishes') : 'Notifications unavailable here', disabled: !can, title: 'A desktop notification when a turn ends or Axon needs permission while this tab is in the background',
@@ -231,7 +233,7 @@ async function wbSwitchFolder(path) {
 async function wbBranchMenu(anchor) {
   let b, w; try { [b, w] = await Promise.all([api('/api/workbench/branches'), api('/api/workbench/worktrees')]); } catch (e) { toast(e.message); return; }
   if (!b.repo) { toast('This folder is not a git repository.'); return; }
-  const dirty = Object.keys(GIT_CACHE.files || {}).length;
+  const dirty = (state.ws && state.ws.git && state.ws.git.changed) || Object.keys(GIT_CACHE.files || {}).length;   // the same count as the header and the Changes panel
   const items = [{ head: 'Branches' }, ...b.branches.slice(0, 40).map(x => ({ label: x.name, hint: x.current ? 'current' : x.when, on: x.current, disabled: x.current,
     run: async () => { if (dirty && !(await wbConfirm('Switch to ' + x.name + '?', dirty + ' uncommitted change' + (dirty > 1 ? 's' : '') + ' stay in your working tree. git refuses the switch if they would be overwritten.', 'Switch'))) return;
       try { await api('/api/workbench/checkout', { branch: x.name }); toast('Now on ' + x.name); state.ws = await api('/api/ws'); drawChip(); GIT_CACHE.t = 0; renderRight(); wbRefreshChanges(true); } catch (e) { toast(e.message); } } }))];
@@ -240,7 +242,7 @@ async function wbBranchMenu(anchor) {
     items.push('-', { head: 'Worktrees' });
     for (const t of others) items.push({ label: (t.branch || 'worktree') + (t.main ? ' (main)' : ''), hint: t.current ? 'open' : (t.changes ? t.changes + ' changes' : 'clean'), title: t.path, disabled: t.current || t.missing, keep: false,
       run: () => { wbMenu(anchor, [{ head: t.path.replace(/^\/Users\/[^/]+/, '~') }, { label: 'Switch to this worktree', run: () => wbSwitchFolder(t.path) },
-        t.main ? null : { label: t.changes ? 'Remove (has ' + t.changes + ' uncommitted changes: not allowed)' : 'Remove…', cls: 'danger', disabled: !!t.changes, run: async () => { if (await wbConfirm('Remove this worktree?', t.path + ' will be deleted from disk. Its branch is kept.', 'Remove', true)) { try { await api('/api/workbench/worktree_remove', { path: t.path }); toast('Worktree removed'); } catch (e) { toast(e.message); } } } }]); } });
+        t.main ? null : { label: t.changes ? 'Remove (has ' + t.changes + ' uncommitted change' + (t.changes > 1 ? 's' : '') + ': not allowed)' : 'Remove…', cls: 'danger', disabled: !!t.changes, run: async () => { if (await wbConfirm('Remove this worktree?', t.path + ' will be deleted from disk. Its branch is kept.', 'Remove', true)) { try { await api('/api/workbench/worktree_remove', { path: t.path }); toast('Worktree removed'); } catch (e) { toast(e.message); } } } }]); } });
   }
   items.push('-', { label: 'New worktree…', run: async () => { const input = h('input', { type: 'text', class: 'search', placeholder: 'name, for example fix-login', maxlength: 60, 'aria-label': 'Worktree name' });
     if (!(await wbConfirm('New worktree', ['A separate checkout on its own branch (axon/NAME), so a second task cannot disturb this one.', input], 'Create'))) return;
@@ -276,7 +278,10 @@ function wbTerminal(P) {
   };
   const empty = () => {
     if (host.querySelector('.wt-empty')) return;
-    if (!T.ok) { host.append(h('div', { class: 'wt-empty' }, h('strong', null, 'No real terminal on this system'), h('p', { class: 'muted' }, T.why || ''))); return; }
+    if (!T.ok) {   // no PTY here (Windows, say): the line-based Shell runs inside this same panel
+      if (!T.lineShell) { T.lineShell = true; host.append(h('p', { class: 'muted fp-note', title: T.why || '' }, 'A full terminal is not available on this system. This runs one command at a time.')); UI.building = { cleanup: [], pane: host, route: 'shell' }; mountShell(host); P.setHead(null, []); }
+      return;
+    }
     host.append(h('div', { class: 'wt-empty' }, h('strong', null, 'A shell on this computer'),
       h('p', { class: 'muted' }, 'This is a real shell in ', h('b', null, T.cwd || ''), '. What you type runs with your own permissions, with no shell guard and no approval step. Open one only if you want that.'),
       h('div', { class: 'formrow' }, h('button', { class: 'btn primary', onclick: () => start('shell') }, 'Open a shell'), h('button', { class: 'btn', onclick: () => start('axon') }, 'Axon in a terminal'))));
@@ -286,42 +291,32 @@ function wbTerminal(P) {
   head(); drawTabs();
   return api('/api/term/list').then(a => { T.ok = a.available; T.why = a.reason; T.cwd = a.cwd; empty(); }).catch(e => { P.body.append(errorBox(e.message)); });
 }
-// ---------- panel: files ----------
-const FP = { open: new Set(), cache: {}, mode: 'tree', q: '', hits: null };
+// ---------- panel: files (the one place for the project tree) ----------
+// Uses the virtual tree of dash_js_files (drag into the chat, multi-select, right-click menu, A key, git marks, huge folders).
 function wbFiles(P) {
-  const list = h('div', { class: 'fp-list', role: 'tree' });
   const input = h('input', { type: 'search', class: 'fp-q', placeholder: 'Filter, or ? to search in files', 'aria-label': 'Filter files' });
-  const colBtn = h('button', { class: 'wpb', type: 'button', title: 'Collapse all folders', 'aria-label': 'Collapse all', onclick: () => { FP.open = new Set(); draw(); } }, wbIco('collapse'));
-  const modeBtn = h('button', { class: 'wpb', type: 'button', title: 'Show a flat list or the tree', 'aria-label': 'List or tree', onclick: () => { FP.mode = FP.mode === 'tree' ? 'list' : 'tree'; draw(); } }, wbIco('list'));
-  const bar = h('div', { class: 'fp-bar' }, h('span', { class: 'fp-sp' }), colBtn, modeBtn);
-  P.body.append(bar, h('label', { class: 'fp-find' }, wbIco('search'), input), list);
-  const dotOf = (code) => (code ? h('span', { class: 'gdot g-' + (code === 'U' || code === 'A' ? 'new' : code === 'D' ? 'del' : 'mod'), title: GIT_LABEL[code] || 'changed' }) : null);
-  const load = async (path) => { if (FP.cache[path]) return; try { FP.cache[path] = (await api('/api/tree?path=' + encodeURIComponent(path))).entries; } catch (e) { FP.cache[path] = []; toast(e.message); } };
-  const rowEl = (e, depth, showDir) => {
-    const isDir = e.type === 'dir'; const open = FP.open.has(e.path);
-    const r = h('div', { class: 'fp-row g-' + (e.git ? (e.git === 'U' || e.git === 'A' ? 'new' : e.git === 'D' ? 'del' : 'mod') : 'none'), role: 'treeitem', style: 'padding-left:' + (8 + depth * 14) + 'px', tabindex: '0', draggable: 'false', title: e.path },
-      h('span', { class: 'fp-chev' + (open ? ' open' : '') }, isDir ? wbIco('chev') : null), h('span', { class: 'fp-name' }, e.name), showDir && e.path.includes('/') ? h('span', { class: 'fp-dir' }, e.path.slice(0, e.path.lastIndexOf('/'))) : null, dotOf(e.git));
-    const act = async () => { if (isDir) { if (open) FP.open.delete(e.path); else { FP.open.add(e.path); await load(e.path); } draw(); } else location.hash = '#/files/' + encodeURIComponent(e.path); };
-    r.addEventListener('click', act); r.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); act(); } });
-    r.addEventListener('contextmenu', (ev) => { ev.preventDefault(); axMenu(ev, [['Add to chat', () => axAddToChat([e.path])], ['Copy relative path', () => axCopy(e.path)], ['Copy path', () => axCopy(((state.ws || {}).workspace || '').replace(/\/$/, '') + '/' + e.path)]]); });
-    return r;
-  };
-  const walk = (path, depth, out) => { for (const e of (FP.cache[path] || [])) { out.push([e, depth]); if (e.type === 'dir' && FP.open.has(e.path) && FP.cache[e.path]) walk(e.path, depth + 1, out); } };
-  const draw = () => {
-    if (FP.hits) { list.replaceChildren(...(FP.hits.length ? FP.hits : [h('p', { class: 'muted fp-note' }, 'Nothing found.')])); return; }
-    const out = []; walk('', 0, out);
-    const q = FP.q.toLowerCase().trim();
-    let rows = out; if (q && !q.startsWith('?')) rows = out.filter(([e]) => e.path.toLowerCase().includes(q));
-    if (FP.mode === 'list') rows = rows.filter(([e]) => e.type === 'file').map(([e]) => [e, 0]);
-    list.replaceChildren(...rows.slice(0, 2500).map(([e, d]) => rowEl(e, d, FP.mode === 'list')), ...(rows.length ? [] : [h('p', { class: 'muted fp-note' }, FP.cache[''] ? 'No matching files in the folders opened so far. Press Enter to search the whole project.' : 'Loading…')]));
-  };
+  const colBtn = h('button', { class: 'wpb', type: 'button', title: 'Collapse all folders', 'aria-label': 'Collapse all', onclick: () => { TREE.open = new Set(); TREE.rows = treeFlatten(); treePaint(); } }, wbIco('collapse'));
+  const modeBtn = h('button', { class: 'wpb', type: 'button', title: 'Show a flat list or the tree', 'aria-label': 'List or tree', 'aria-pressed': 'false', onclick: () => { TREE.list = !TREE.list; modeBtn.setAttribute('aria-pressed', String(TREE.list)); TREE.rows = treeFlatten(); treePaint(); } }, wbIco('list'));
+  const vp = h('div', { class: 'vlist' }); const inner = h('div', { class: 'vinner' }); const win = h('div', { class: 'vwin' }); inner.append(win); vp.append(inner);
+  Object.assign(TREE, { vp, win, inner });
+  const res = h('div', { class: 'sres fp-res', hidden: true });
+  const ctl = h('div', { class: 'fp-ctl' }, h('button', { class: 'btn', type: 'button', onclick: () => folderChooser() }, 'Change folder'), h('button', { class: 'btn', type: 'button', title: 'Reload the tree', onclick: () => P.refresh() }, 'Reload'),
+    h('label', { class: 'muted fp-ign' }, h('input', { type: 'checkbox', checked: TREE.ignored, onchange: (e) => { TREE.ignored = e.target.checked; P.refresh(); } }), 'ignored files'));
+  P.body.append(ctl, h('label', { class: 'fp-find' }, wbIco('search'), input), vp, res);
+  vp.addEventListener('scroll', () => requestAnimationFrame(treePaint));
+  new ResizeObserver(() => treePaint()).observe(vp);
+  const showRes = (kids) => { res.replaceChildren(...kids); res.hidden = !kids.length; vp.hidden = !!kids.length; };
+  const hit = (f) => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(f), draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([f])), h('b', null, f.split('/').pop()), h('span', { class: 'muted' }, f));
   let tm = 0;
-  input.addEventListener('input', () => { FP.q = input.value; FP.hits = null; clearTimeout(tm); if (FP.q.trim().startsWith('?')) { tm = setTimeout(grep, 350); return; } draw(); });
-  input.addEventListener('keydown', async (e) => { if (e.key !== 'Enter' || FP.q.trim().startsWith('?') || !FP.q.trim()) return; try { const d = await api('/api/files/search?q=' + encodeURIComponent(FP.q.trim())); FP.hits = d.files.slice(0, 200).map(f => rowEl({ name: f.split('/').pop(), path: f, type: 'file', git: (GIT_CACHE.files || {})[f] || '' }, 0, true)); draw(); } catch (er) { toast(er.message); } });
-  const grep = async () => { const q = FP.q.trim().slice(1).trim(); if (q.length < 2) { FP.hits = null; draw(); return; } try { const d = await api('/api/files/grep?q=' + encodeURIComponent(q)); FP.hits = d.matches.slice(0, 200).map(m => h('a', { class: 'fp-hit', href: '#/files/' + encodeURIComponent(m.path), title: m.path + ':' + m.line }, h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text))); draw(); } catch (er) { toast(er.message); } };
-  P.refresh = async () => { FP.cache = {}; await load(''); for (const p of [...FP.open]) await load(p); draw(); };
-  P.onShow = () => { P.refresh(); };
-  P.setHead(null, []);
+  const grep = async () => {
+    const q = input.value.trim().slice(1).trim(); if (q.length < 2) { showRes([]); return; }
+    try { const d = await api('/api/files/grep?q=' + encodeURIComponent(q)); showRes(d.matches.length ? d.matches.slice(0, 200).map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path), draggable: 'true', title: m.path + ':' + m.line + '  (drag into the chat to attach the file)' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text))) : [h('p', { class: 'muted fp-note' }, 'Nothing found.')]); } catch (er) { toast(er.message); }
+  };
+  input.addEventListener('input', () => { clearTimeout(tm); const v = input.value; showRes([]); if (v.trim().startsWith('?')) { tm = setTimeout(grep, 350); return; } TREE.filter = v; TREE.rows = treeFlatten(); treePaint(); });
+  input.addEventListener('keydown', async (e) => { const v = input.value.trim(); if (e.key !== 'Enter' || v.startsWith('?') || !v) return; try { const d = await api('/api/files/search?q=' + encodeURIComponent(v)); showRes(d.files.length ? d.files.slice(0, 200).map(hit) : [h('p', { class: 'muted fp-note' }, 'No file matches.')]); } catch (er) { toast(er.message); } });
+  P.refresh = async () => { await treeReload(); };
+  P.onShow = () => { if (!TREE.cache['']) P.refresh(); else { TREE.rows = treeFlatten(); treePaint(); } };
+  P.setHead(null, [colBtn, modeBtn]);
   return P.refresh();
 }
 // ---------- panel: changes (working tree) ----------
@@ -425,12 +420,17 @@ function wbChanges(P) {
   return P.refresh(true);
 }
 let WB_CHG = null;
-function wbChangesSummary(d) { WB_CHG = d; if (UI.chat) drawRail(UI.chat); }
+function wbSyncGit(d) {   // keep the header chip's branch and count in step with the Changes figures
+  const g = state.ws && state.ws.git; if (!g || !g.repo || !d || !d.repo || d.target !== 'working') return;
+  const n = (d.files || []).length; if (g.changed !== n || (d.branch && g.branch !== d.branch)) { g.changed = n; if (d.branch) g.branch = d.branch; drawChip(); }
+}
+function wbChangesSummary(d) { WB_CHG = d; if (d.target === 'working') wbSyncGit(d); if (UI.chat) drawRail(UI.chat); }
 function wbRefreshChanges(force) { const n = WB.nodes.changes; if (n && n.P.refresh && wbIsOpen('changes')) n.P.refresh(force); }
 // ---------- panel: browser (preview of local dev servers) ----------
 const BR = { url: '', frame: null, ports: [] };
 function wbNormalizeUrl(raw) {
   let s = (raw || '').trim(); if (!s) return { err: 'Type an address, for example 3000 or localhost:5173.' };
+  if (/\s/.test(s)) return { err: 'That is not a web address.' };   // Chrome's URL() accepts a space in a host and encodes it
   if (/^:?\d{2,5}$/.test(s)) s = 'http://localhost:' + s.replace(':', '');
   else if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/.*)?$/i.test(s)) s = 'http://' + s;
   else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = (/^[\w-]+(\.[\w-]+)+/.test(s) ? 'https:' + '//' : 'http:' + '//') + s;
@@ -524,7 +524,7 @@ function wbRailData(C) {
     wbFetch('ctx', '/api/workbench/context?session=' + sidq, busy ? 2500 : 20000, (d) => { WB.ctx = d.none ? null : d; const n = WB.nodes.memory; if (n && n.P.redraw) n.P.redraw(); }, C);
     wbFetch('usage', '/api/workbench/usage?session=' + sidq, 45000, (d) => { WB.lim = d; }, C); }
   wbFetch('conn', '/api/workbench/connectors', 20000, (d) => { WB.conn = d; }, C);
-  wbFetch('chg', '/api/workbench/changes', busy ? 5000 : 15000, (d) => { WB_CHG = d; }, C);
+  wbFetch('chg', '/api/workbench/changes', busy ? 5000 : 15000, (d) => { WB_CHG = d; wbSyncGit(d); }, C);
   if (C.wbChgSig !== sig) { C.wbChgSig = sig; clearTimeout(C.wbT); C.wbT = setTimeout(() => wbRefreshChanges(true), 1200); for (const id of ['tasks', 'plan']) { const n = WB.nodes[id]; if (n && n.P.redraw && wbIsOpen(id)) n.P.redraw(); } }
 }
 function wbRail(C) {
@@ -575,7 +575,7 @@ function wbContextSection(C, sec) {
   const legend = d.rows.map(x => {
     const can = expandable[x.key] && (d.lists[x.key] || []).length;
     const el = h(can ? 'button' : 'div', { class: 'cx-row' + (can ? ' can' : ''), type: can ? 'button' : null, title: WB_CTX_HELP[x.key] + (x.key === 'messages' || x.key === 'free' || x.key === 'autocompact' ? '' : ' (estimate)'), onclick: can ? () => { WB_EXP.has(x.key) ? WB_EXP.delete(x.key) : WB_EXP.add(x.key); wbRail(C); } : null },
-      h('span', { class: 'sq' + (x.key === 'free' ? ' free' : ''), style: x.key === 'free' ? '' : 'background:' + WB_CTX_COLORS[x.key] }), h('span', { class: 'cl' }, x.label, can ? h('span', { class: 'cx-n' }, ' ' + d.lists[x.key].length) : null), h('span', { class: 'ct num' }, wbTok(x.tokens)), h('span', { class: 'cp num' }, wbPctTxt(x.pct)));
+      h('span', { class: 'sq' + (x.key === 'free' ? ' free' : ''), style: x.key === 'free' ? '' : 'background:' + WB_CTX_COLORS[x.key] }), h('span', { class: 'cl' }, x.label, can ? h('span', { class: 'cx-n' }, ' ' + (x.key === 'mcp_tools' ? d.lists.mcp_tools.reduce((a, g) => a + g.count, 0) : d.lists[x.key].length)) : null), h('span', { class: 'ct num' }, wbTok(x.tokens)), h('span', { class: 'cp num' }, wbPctTxt(x.pct)));
     return el;
   });
   const out = [head, bar, h('div', { class: 'cx-legend' }, ...legend)];
@@ -591,7 +591,7 @@ function wbMsgItems(C, items) {
   const post = async (name, id) => { try { await api('/api/insights/' + name, { session: C.sid, id: name === 'ctxmap_drop' ? id : undefined, target: id }); WB_BUSY.ctx.t = 0; wbRail(C); } catch (e) { toast(e.message); } };
   return [h('div', { class: 'cx-sub' }, 'Largest messages and tool results'), ...items.map(i => h('div', { class: 'cx-item', title: i.why }, h('span', { class: 'ci-n' }, i.label), h('span', { class: 'num ci-t' }, '~' + wbTok(i.tokens)),
     i.dropped ? h('span', { class: 'muted' }, 'dropped') : i.pinned ? h('button', { class: 'mini', type: 'button', onclick: () => post('unpin', i.id) }, 'Unpin') : null,
-    i.droppable ? h('button', { class: 'mini', type: 'button', title: 'Replace with a short stub. The full text is saved to disk.', onclick: () => post('ctxmap_drop', i.id) }, 'Drop') : null,
+    i.droppable && i.tokens > 150 ? h('button', { class: 'mini', type: 'button', title: 'Replace with a short stub. The full text is saved to disk.', onclick: () => post('ctxmap_drop', i.id) }, 'Drop') : null,
     i.droppable ? h('button', { class: 'mini', type: 'button', title: 'Keep this in full, always', onclick: () => post('pin', i.id) }, 'Pin') : null))];
 }
 function wbUsageSection(C, sec) {
@@ -613,7 +613,8 @@ function wbConnectorsSection(C, sec) {
   const tools = (name, sv) => { if (sv && sv.tool_names && sv.tool_names.length) return sv.tool_names.map(n => ({ name: n })); const g = ((WB.ctx && WB.ctx.lists.mcp_tools) || []).find(x => x.name.toLowerCase() === name.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase()); return g ? g.tools : []; };
   const rows = list.map(s => {
     const open = WB_EXP.has('conn:' + s.name); const needsAuth = s.status === 'needs-auth';
-    const act = needsAuth ? h('button', { class: 'cn-act warn', type: 'button', onclick: (e) => { e.stopPropagation(); openInTerminal('/mcp'); } }, 'Authenticate')
+    const act = s.needs_approval ? h('a', { class: 'cn-act warn', href: '#/extensions', title: 'This project server waits for your approval before it starts. Approve it on the Extensions page.', onclick: (e) => e.stopPropagation() }, 'Needs approval')
+      : needsAuth ? h('button', { class: 'cn-act warn', type: 'button', onclick: (e) => { e.stopPropagation(); openInTerminal('/mcp'); } }, 'Authenticate')
       : s.status === 'disabled' ? h('span', { class: 'rr muted' }, 'Off') : s.needs_reconnect ? h('button', { class: 'cn-act warn', type: 'button', onclick: async (e) => { e.stopPropagation(); try { await api('/api/workbench/connector', { name: s.name, action: 'reconnect' }); toast('Reconnecting ' + s.name); WB_BUSY.conn.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, 'Reconnect')
         : h('span', { class: 'rr muted' }, s.status === 'connecting' || s.status === 'reconnecting' ? 'connecting' : (s.tools != null ? s.tools + ' tools' : 'on'));
     const r = h('div', { class: 'cn' + (open ? ' open' : '') }, h('div', { class: 'cn-row', role: 'button', tabindex: '0', 'aria-expanded': String(open), title: s.error || s.status, onclick: () => { open ? WB_EXP.delete('conn:' + s.name) : WB_EXP.add('conn:' + s.name); wbRail(C); }, onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
@@ -628,7 +629,7 @@ function wbConnectorsSection(C, sec) {
     }
     return r;
   });
-  const right = d.reconnect ? h('span', { class: 'rh-note warn' }, d.reconnect + ' to reconnect') : h('span', { class: 'rh-note' }, d.connected + ' connected');
+  const right = d.approval && !d.reconnect ? h('span', { class: 'rh-note warn' }, d.approval + ' to approve') : d.reconnect ? h('span', { class: 'rh-note warn' }, d.reconnect + ' to reconnect') : h('span', { class: 'rh-note' }, d.connected + ' connected');
   return sec('Connectors', [...rows, all.length > 3 ? h('button', { class: 'cn-more', type: 'button', onclick: () => { showAll ? WB_EXP.delete('conn:all') : WB_EXP.add('conn:all'); wbRail(C); } }, showAll ? 'Show less' : 'Show more (' + (all.length - 3) + ')') : null], right);
 }
 function wbChangesSection(C, sec) {
@@ -651,6 +652,7 @@ async function wbCreatePr(C) {
   let p; try { p = await api('/api/workbench/pr'); } catch (e) { toast(e.message); return; }
   if (!p.repo) { toast('This folder is not a git repository.'); return; }
   if (!p.gh) { toast('The GitHub CLI (gh) is not installed.'); return; }
+  if (p.base && p.branch === p.base) { toast('You are on ' + p.base + ', the branch a pull request would go into. Switch to another branch first.'); return; }
   const title = h('input', { type: 'text', class: 'search', placeholder: 'Leave empty to use the commit messages', maxlength: 200, 'aria-label': 'Pull request title' });
   const push = h('input', { type: 'checkbox', id: 'pr-push' });
   const lines = [h('p', { class: 'muted' }, 'Branch ', h('b', null, p.branch), p.base ? ' into ' : '', p.base ? h('b', null, p.base) : null, '. ', p.dirty ? p.dirty + ' uncommitted change' + (p.dirty > 1 ? 's are' : ' is') + ' not part of it: commit them first.' : ''), title];

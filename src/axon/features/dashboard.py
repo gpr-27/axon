@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import errno
 import hashlib
 import hmac
 import html
@@ -675,7 +676,10 @@ class SessionIndex:
                 if SESSION_ID_RE.fullmatch(m.session_id) and m.session_id not in refs:
                     refs[m.session_id] = SessionRef(m.session_id, Path(m.path), key, _project_name(key, ws), ws, m)
 
-        add(SessionStore(self.workspace), cur_key, str(self.workspace))
+        try:
+            add(SessionStore(self.workspace), cur_key, str(self.workspace))
+        except OSError:
+            pass            # a full or read-only disk: the list is empty rather than the whole page failing
         if scope == "all":
             root = storage.axon_home() / "projects"
             try:
@@ -833,9 +837,10 @@ def extensions_data(workspace: Path, agent: Any = None) -> dict[str, Any]:
         rows = []
         for name, s in sorted(specs.items()):
             lv = live.get(name, {})
-            status = lv.get("status") or ("disabled" if s.disabled else "not connected")
+            status = lv.get("status") or ("disabled" if s.disabled else "not started")
             rows.append({"name": name, "type": s.type, "target": redact_text(s.describe_target()), "scope": s.scope,
-                         "status": status, "tools": lv.get("tools"), "error": redact_text(lv.get("error") or "")})
+                         "status": status, "tools": lv.get("tools"), "error": redact_text(lv.get("error") or ""),
+                         "disabled": bool(s.disabled), "approval": getattr(s, "approval", "") or ""})
         return rows
 
     def skills() -> list[dict[str, Any]]:
@@ -868,6 +873,11 @@ def extensions_data(workspace: Path, agent: Any = None) -> dict[str, Any]:
     for name, fn in (("mcp", mcp), ("skills", skills), ("plugins", plugins), ("hooks", hooks),
                      ("agents", agents), ("commands", commands)):
         guard(name, fn)
+    try:
+        from axon.features.dash_ext import trust_view
+        out["trust"] = trust_view(workspace)
+    except Exception as e:
+        out["trust"] = {"status": "unknown", "allowed": True, "items": [], "error": type(e).__name__}
 
     def settings() -> dict[str, Any]:
         s = getattr(agent, "settings", None) if agent is not None else None
@@ -1077,6 +1087,7 @@ def load_secrets() -> tuple[str, str]:
 class DashServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 256            # the default of 5 reset most of 200 simultaneous connections (two tabs and a few streams are plenty, a burst is not)
 
     def __init__(self, port: int, workspace: Path, agent: Any = None, token: str | None = None) -> None:
         stored_token, self.cookie = load_secrets()
@@ -1173,6 +1184,13 @@ class DashServer(ThreadingHTTPServer):
         except DashError:
             return []
 
+    def elicit(self, server: str, params: dict[str, Any]) -> dict[str, Any]:
+        """An MCP server asked for input: show it in the chat that is working (the bridge is shared by every chat)."""
+        rts = [rt for rt in self.all_runtimes() if getattr(rt, "busy", False)] or self.all_runtimes()
+        if not rts:
+            return {"action": "decline"}
+        return rts[-1].elicit(server, params)
+
     def _build_runtime(self, ws: Path, resume: str | None) -> Any:
         from axon import storage
         from axon.features.dash_runtime import Runtime
@@ -1186,9 +1204,18 @@ class DashServer(ThreadingHTTPServer):
                 raise DashError(f"This session is open in another terminal (pid {other['pid']}). Fork it into a new "
                                 "session to continue from here.", 423)
         rt = Runtime("", None, ws)
+        try:
+            from axon.mcp.bridge import get_bridge
+            from axon.mcp.elicit import with_hooks
+            bridge = get_bridge(ws)
+            if bridge.elicitation_handler is None and self.live is None:   # inside a terminal session the terminal asks
+                bridge.elicitation_handler = with_hooks(self.elicit)
+        except Exception:
+            pass
         pc = self.provider_choice or {}
         try:
-            agent = build_agent(AxonOptions(workspace=ws, mode="default", resume=resume, **pc), on_event=rt._tee)
+            agent = build_agent(AxonOptions(workspace=ws, mode="default", resume=resume, **{"connect_mcp": True, **pc}),
+                                  on_event=rt._tee)
         except SDKError as e:
             raise DashError(str(e), 409) from None
         rt.agent = agent
@@ -1376,6 +1403,15 @@ class DashServer(ThreadingHTTPServer):
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
 
+def _disk_message(e: OSError) -> str:
+    """What to tell the person when a file could not be read or written, without printing a path."""
+    if e.errno == errno.ENOSPC:
+        return "The disk is full, so this could not be saved. Free some space and try again."
+    if e.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+        return "A file Axon needs is read-only or not allowed, so this could not be saved."
+    return f"A file could not be read or written ({e.strerror or type(e).__name__})."
+
+
 def _split_host(value: str) -> tuple[str, int | None]:
     value = (value or "").strip()
     if value.startswith("["):
@@ -1398,6 +1434,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "axon-dash"
     protocol_version = "HTTP/1.1"
     disable_nagle_algorithm = True          # TCP_NODELAY: a small streamed frame leaves at once instead of waiting for an ACK
+    timeout = 120                           # a client that stalls mid-request (half a header, half a body) is dropped instead of holding a thread forever
 
     def log_message(self, fmt: str, *args: Any) -> None:
         pass
@@ -1445,6 +1482,18 @@ class _Handler(BaseHTTPRequestHandler):
     def _origin_ok(self) -> bool:
         origin = self.headers.get("Origin")
         if origin not in self.server.allowed_origins() or self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            self._err(403, "cross-origin request refused")
+            return False
+        return True
+
+    def _same_site_ok(self) -> bool:
+        """The API answers this page only. A request that a browser marks cross-site or same-site (another port on the
+        same host, such as a dev server shown in the Browser panel) carries the cookie but must not reach the API."""
+        if self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            self._err(403, "cross-origin request refused")
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in self.server.allowed_origins():
             self._err(403, "cross-origin request refused")
             return False
         return True
@@ -1502,6 +1551,8 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 if not self._cookie_ok():
                     page = (b"<!doctype html><meta charset=utf-8><title>Axon: signed out</title><meta name=viewport content='width=device-width'>"
+                            b"<meta name=color-scheme content='light dark'><style>body{font:15px/1.55 ui-sans-serif,-apple-system,system-ui,sans-serif;max-width:56ch;margin:14vh auto;padding:0 24px}"
+                            b"h1{font-size:22px;font-weight:600;margin:0 0 10px}code{font:13px ui-monospace,Menlo,monospace}</style>"
                             b"<h1>This tab is signed out</h1><p>Open the link that <code>axon open</code> printed in your terminal (it ends "
                             b"in <code>?t=...</code>), or type <code>/open</code> inside Axon. That signs this browser in again.</p>")
                     self._send(401, page, "text/html; charset=utf-8")
@@ -1516,6 +1567,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._cookie_ok():
                 self._err(401, "missing or invalid dashboard cookie")
                 return
+            if route.startswith("/api/") and not self._same_site_ok():
+                return
             if route.startswith("/static/"):
                 from axon.features import dashboard_web as web
                 asset = web.asset(route[len("/static/"):])
@@ -1529,6 +1582,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._err(e.status, str(e))
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except OSError as e:
+            self._err(507 if e.errno == errno.ENOSPC else 500, _disk_message(e))
         except Exception as e:
             self._err(500, f"internal error ({type(e).__name__})")
 
@@ -1581,7 +1636,14 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/session/([^/]+)(?:/(text))?", route)
             if not m:
                 raise DashError("not found", 404)
-            ref = srv.index.lookup(unquote(m.group(1)))
+            try:
+                ref = srv.index.lookup(unquote(m.group(1)))
+            except DashError as e:
+                if e.status == 404 and not m.group(2) and unquote(m.group(1)) in srv.rts:
+                    # a chat that was just opened has no file yet: an empty page, not a 404 the browser logs as an error
+                    self._json(200, {"entries": [], "total": 0, "first": 0, "has_before": False})
+                    return
+                raise
             tr = load_transcript(ref.path)
             if m.group(2) == "text":
                 self._json(200, field_text(tr, self._int(qs.get("entry"), -1, -1, 10**9), qs.get("field", ""),
@@ -1667,6 +1729,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._err(e.status, str(e))
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except OSError as e:
+            self._err(507 if e.errno == errno.ENOSPC else 500, _disk_message(e))
         except Exception as e:
             self._err(500, f"internal error ({type(e).__name__})")
 
@@ -1934,6 +1998,28 @@ def _announce(server: DashServer, opened: bool, out: Any) -> None:
     out.flush()
 
 
+def _configure_gates() -> Callable[[], None]:
+    """The page is an interactive place: an untrusted folder's hooks, plugins and .axon/mcp.json servers stay off
+    until the Extensions page trusts them, and .mcp.json servers wait for an Approve there (as in the terminal).
+    Returns a function that puts the previous settings back."""
+    try:
+        from axon.hooks import trust
+        from axon.mcp import state as mcp_state
+        before = (trust._state["interactive"], trust._state["require"], mcp_state._session["interactive"],
+                  mcp_state._session.get("page", False))
+        trust.configure(True)
+        mcp_state.set_interactive(True)
+        mcp_state.set_page_mode(True)
+    except Exception:
+        return lambda: None
+
+    def restore() -> None:
+        trust.configure(before[0], before[1])
+        mcp_state.set_interactive(before[2])
+        mcp_state.set_page_mode(before[3])
+    return restore
+
+
 def dash_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="axon dash", description="Open the Axon dashboard in your browser.")
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port (default {DEFAULT_PORT}, or a free one if busy; 0 = random)")
@@ -1949,6 +2035,7 @@ def dash_main(argv: list[str]) -> int:
     except OSError as e:
         sys.stderr.write(f"axon dash: cannot start the server: {e}\n")
         return 2
+    restore_gates = _configure_gates()
     opened = False if args.no_open else open_browser(server.open_url)
     _announce(server, opened, sys.stdout)
     sys.stdout.write("  Press Ctrl+C to stop.\n")
@@ -1960,6 +2047,7 @@ def dash_main(argv: list[str]) -> int:
     finally:
         server.shutdown_runs()
         server.server_close()
+        restore_gates()
     return 0
 
 

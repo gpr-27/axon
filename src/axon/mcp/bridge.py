@@ -905,7 +905,7 @@ class MCPToolBridge:
         if self.elicitation_handler is not None:
             return self.elicitation_handler
         from axon.mcp import state as mcp_state
-        if mcp_state.is_interactive():
+        if mcp_state.can_prompt():
             from axon.mcp.elicit import terminal_elicitation, with_hooks
             return with_hooks(terminal_elicitation)
         return None
@@ -1224,7 +1224,7 @@ def initialize_mcp_bridge(workspace: Path, registry: Any = None,
     if not specs:
         return []
     from axon.mcp import approval, state
-    if state.is_interactive() and approval.pending(specs):
+    if state.can_prompt() and approval.pending(specs):
         try:
             approval.review(Path(workspace), specs)
         except Exception:  # a prompt problem must never stop startup

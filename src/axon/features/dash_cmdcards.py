@@ -750,6 +750,25 @@ PICKERS = ("model", "effort", "mode", "theme", "trace")
 # ─── confirm before destructive commands ─────────────────────────────────────
 
 _ALSO_ASK = {"rewind", "restore"}
+# The terminal asks "are you sure?" for these on a keyboard; the page has no keyboard prompt (a command run here would
+# take its default, which is Yes for most of them), so the card asks first.
+_OWNS_DATA = {"memory", "plugin", "agents", "keys", "endpoint", "worktree", "permissions", "hooks", "mcp", "skills", "sessions",
+              "library", "todos", "plans", "tag", "pin"}
+_VERBS = {"remove", "rm", "delete", "del", "drop", "kill", "reset", "purge", "clear", "forget", "uninstall", "unset", "empty", "--all"}
+_INSTALL_VERBS = {"install", "add", "marketplace"}
+
+
+def _extra_confirm(name: str, words: str) -> str:
+    low = words.lower().split()
+    if name == "delete" and words:
+        return "This deletes saved session data: " + (words or "a session") + ". /restore can bring it back from the trash."
+    if name not in _OWNS_DATA or not low:
+        return ""
+    if name == "plugin" and low[0] in _INSTALL_VERBS and not (low[0] == "marketplace" and low[1:2] in (["list"], ["browse"])):
+        return "Plugins can add commands, skills, hooks and servers that run code on this machine. Continue?"
+    if low[0] in _VERBS or (len(low) > 1 and low[0] in ("marketplace", "global", "project", "user") and low[1] in _VERBS):
+        return f"/{name} {words}".strip() + " removes saved data."
+    return ""
 
 
 def needs_confirm(line: str) -> str:
@@ -763,6 +782,9 @@ def needs_confirm(line: str) -> str:
     if cmd is None:
         return ""
     words = parts[1].strip() if len(parts) > 1 else ""
+    extra = _extra_confirm(cmd.name, words)
+    if extra:
+        return extra
     if _needs_confirm(cmd.name, words) or (cmd.name in _ALSO_ASK and not words):
         return {"clear": "This clears the conversation shown here. The saved session stays in Sessions.",
                 "delete": "This deletes saved session data.", "retitle": "This makes one model call per chat, which costs money.",

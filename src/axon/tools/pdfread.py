@@ -32,7 +32,7 @@ def page_count(path: Path) -> int | None:
     exe = shutil.which("pdfinfo")
     if exe:
         try:
-            out = subprocess.run([exe, str(path)], capture_output=True, text=True, timeout=15, errors="replace").stdout
+            out = subprocess.run([exe, str(path)], capture_output=True, text=True, encoding="utf-8", timeout=15, errors="replace").stdout
             m = re.search(r"^Pages:\s+(\d+)", out, re.M)
             if m:
                 return int(m.group(1))

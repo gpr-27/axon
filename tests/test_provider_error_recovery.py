@@ -411,7 +411,7 @@ def test_context_command_reports_full_window_and_reply_reserve(workspace: Path, 
     assert threshold == agent.context.threshold("deepseek-v4-flash")
     dispatch_command("/context", agent)
     out = capsys.readouterr().out
-    assert "window 1.00M" in out and "872.0k" not in out.split("window", 1)[1].splitlines()[0]
+    assert "window 1M" in out and "872.0k" not in out.split("window", 1)[1].splitlines()[0]
     assert "Reply reserve" in out
 
 
@@ -421,7 +421,7 @@ def test_context_limit_default_and_command(workspace: Path, capsys: pytest.Captu
     assert agent.context.context_window("deepseek-v4-flash") == 1_000_000   # default: auto, the model's full window
     dispatch_command("/context", agent)
     out = capsys.readouterr().out
-    assert "window 1.00M" in out
+    assert "window 1M" in out
     dispatch_command("/context limit 256k", agent)
     assert agent.settings.context_limit == 256_000 and agent.context.context_window("deepseek-v4-flash") == 256_000
     assert "auto-compact at 192.0k (75%)" in capsys.readouterr().out

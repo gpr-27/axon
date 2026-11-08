@@ -221,7 +221,7 @@ const tick=()=>new Promise(r=>setTimeout(r,0));
 
 def node(body: str) -> object:
     src = HARNESS + JS_CMDCARDS + "\n(async () => {\n" + body + "\n})().catch(e => { console.error(e.stack); process.exit(1); });"
-    p = subprocess.run(["node", "-e", src], capture_output=True, text=True, timeout=30)
+    p = subprocess.run(["node", "-"], input=src, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout.strip().splitlines()[-1])
 
@@ -229,8 +229,8 @@ def node(body: str) -> object:
 @needs_node
 def test_page_script_is_valid_javascript(tmp_path):
     f = tmp_path / "app.js"
-    f.write_text(APP_JS)
-    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+    f.write_text(APP_JS, encoding="utf-8")
+    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True, encoding="utf-8")
     assert p.returncode == 0, p.stderr
     for hook in ("cmdCardShow(C, line, r)", "cmdCardInto(r, into)", "cmdSuggest(C.cmds, first, C.hist)", "cmdPopSelect(pop, sel)", "cmdCatalogRow(c"):
         assert hook in APP_JS, hook
@@ -407,3 +407,62 @@ def test_without_the_cards_flag_the_terminal_renderer_answers(c, env, llm):
     r = json.loads(c.post("/api/commands/run", {"line": "/status"})[2])
     assert "card" not in r and "Axon status" in r["html"]
     assert "card" not in json.loads(c.post("/api/commands/run", {"line": "/clear"})[2])
+
+
+@pytest.mark.parametrize("line", ["/delete session_x", "/delete --all", "/memory forget x", "/memory del x", "/plugin uninstall p", "/plugin install p@m",
+                                  "/plugin marketplace add some/repo", "/agents delete a", "/keys unset ANTHROPIC_API_KEY",
+                                  "/endpoint forget openai", "/worktree remove w"])
+def test_data_removing_or_code_installing_commands_ask_first(c, env, llm, line):
+    """The page has no keyboard prompt, so a non-terminal confirm() takes its default (Yes). The card must ask."""
+    r = run(c, line)
+    assert r["card"]["confirm"]["line"] == line, r
+
+
+@pytest.mark.parametrize("line", ["/memory list", "/plugin list", "/plugin marketplace list", "/keys list", "/worktree"])
+def test_read_only_forms_do_not_ask(c, env, llm, line):
+    r = run(c, line)
+    assert "confirm" not in (r.get("card") or {})
+
+
+def test_terminal_screens_get_unicode_not_question_marks(c, env, llm):
+    r = run(c, "/budget 5")
+    assert " ? " not in (r.get("html") or ""), r["html"]
+
+
+@pytest.mark.parametrize("line", ["/paste", "/terminal-setup"])
+def test_terminal_only_commands_say_so_plainly(c, env, llm, line):
+    r = run(c, line)
+    assert r["ok"] is False and r["terminal_only"] and "terminal" in r["message"].lower() and not r["html"]
+
+
+def test_setup_points_to_settings_providers(c, env, llm):
+    r = run(c, "/setup")
+    assert r["open"] == "#/settings/providers"
+
+
+@pytest.mark.parametrize("line", ["/", "/ ", "#", "/   "])
+def test_a_bare_slash_is_answered_not_a_server_error(c, env, llm, line):
+    st, _, body = c.post("/api/commands/run", {"line": line, "session": "", "cards": True})
+    assert st == 200, (st, body[:200])
+
+
+def test_slash_popup_ignores_a_command_list_that_arrives_after_the_box_changed():
+    """The first '/' fetches the command list. If the line was sent meanwhile, the late answer must not reopen the popup."""
+    i = APP_JS.index("async function suggest()")
+    body = APP_JS[i:i + 1800]
+    assert body.index("await api('/api/commands?") < body.index("!== first) return") < body.index("showPop(cmdSuggest(")
+
+
+def test_shell_output_is_added_in_batches_and_trimmed_in_both_places():
+    """A command printing megabytes used to freeze the page: every 32 KB piece forced a layout of the whole block."""
+    for name in ("function mountShell", "async function shellFromChat"):
+        body = APP_JS[APP_JS.index(name):]
+        body = body[:body.index("\n}\n")]
+        assert "setTimeout(" in body and "300000" in body, name
+    assert "api('/api/shell/kill'" in APP_JS[APP_JS.index("async function shellFromChat"):][:2500]
+
+
+@pytest.mark.parametrize("line", ["/resume", "/delete"])
+def test_resume_and_delete_without_an_id_open_sessions_instead_of_guessing(c, env, llm, line):
+    r = run(c, line)
+    assert r["open"] == "#/sessions" and "Sessions" in r["message"] and "card" not in r

@@ -9,7 +9,8 @@ import re
 import threading
 from typing import Any, Iterator
 
-from anthropic import Anthropic
+import inspect as _inspect
+
 
 from axon.errors import ProviderError
 from axon.providers.base import (
@@ -49,6 +50,18 @@ from axon.providers.transport import (
     max_retries_for,
     request_timeout_for,
 )
+
+def _load_sdk() -> tuple[Any, Any, bool]:
+    """The Anthropic SDK is the heaviest import in the app (about 0.6s), so it loads when a client is built,
+    not when Axon starts: `axon --version`, other providers and the menus never pay for it."""
+    from anthropic import Anthropic
+    try:
+        from anthropic import Omit
+    except ImportError:  # pragma: no cover - very old SDKs
+        from anthropic._types import Omit
+    # SDK 2.x added credentials=/config=/profile= and rejects api_key= together with auth_token=.
+    return Anthropic, Omit, "credentials" in _inspect.signature(Anthropic.__init__).parameters
+
 
 MAX_CACHE_BREAKPOINTS = 4
 
@@ -475,6 +488,7 @@ class AnthropicProvider:
             if base.rstrip("/").endswith(tail):
                 base = base.rstrip("/")[: -len(tail)]
                 break
+        Anthropic, Omit, _SDK_HAS_CREDENTIALS = _load_sdk()
         kwargs: dict[str, Any] = {
             "base_url": base,
             "max_retries": 0,  # retries are done here so each one is visible in the trace
@@ -483,14 +497,20 @@ class AnthropicProvider:
         if is_official_anthropic(base):
             self._official = True
             kwargs["api_key"] = key or None
+            if key and _SDK_HAS_CREDENTIALS:
+                # SDK 2.x sends api_key= as "Authorization: Bearer"; api.anthropic.com expects x-api-key.
+                kwargs["default_headers"] = {"x-api-key": key, "Authorization": Omit()}
         else:
             # Anthropic-compatible gateways (AgentRouter & co.) authenticate with a Bearer token.
             # Never None here: the SDK would then read ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the
             # shell and send the user's official Anthropic credentials to this third-party host.
             kwargs["auth_token"] = key or "none"
-            kwargs["api_key"] = key or "none"
+            if not _SDK_HAS_CREDENTIALS:
+                # SDK 1.x reads ANTHROPIC_API_KEY when api_key is None; SDK 2.x rejects api_key + auth_token together
+                # and does not read the environment once any credential is passed.
+                kwargs["api_key"] = key or "none"
         if is_agentrouter(base):
-            kwargs["default_headers"] = {k: v for k, v in default_headers(base).items() if k.startswith(("user-agent", "x-stainless"))}
+            kwargs["default_headers"] = {**kwargs.get("default_headers", {}), **{k: v for k, v in default_headers(base).items() if k.startswith(("user-agent", "x-stainless"))}}
         if http_client is not None:
             kwargs["http_client"] = http_client
         self._client = Anthropic(**kwargs)
@@ -640,8 +660,11 @@ class AnthropicProvider:
         stop_details: dict[str, Any] | None = None
         with self._canceller.open_stream(lambda: self._client.messages.stream(**kwargs)) as stream:
             note_rate_limits(getattr(getattr(stream, "response", None), "headers", None), self.name)
+            saw_stop = False
             for event in stream:
                 etype = getattr(event, "type", "")
+                if etype == "message_stop":
+                    saw_stop = True
                 if etype == "message_start":
                     # The prompt is billed from here on: keep its tokens so a stream cut short (Esc, a dropped
                     # connection) still reports them; message_delta only arrives at the very end.
@@ -712,6 +735,9 @@ class AnthropicProvider:
                     u = getattr(event, "usage", None)
                     if u is not None:
                         state.usage = self._usage(u, state.usage)
+            if not saw_stop:
+                # The connection ended without message_stop: a cut stream, not a finished reply.
+                raise ConnectionError("the stream ended before the model finished its reply")
             final_msg = stream.get_final_message()
 
         stop_reason: StopReason = getattr(final_msg, "stop_reason", None) or "end_turn"  # type: ignore[assignment]

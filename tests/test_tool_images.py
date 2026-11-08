@@ -93,7 +93,7 @@ def test_session_records_the_reference_not_base64_and_resume_restores_it(workspa
     agent = make_agent(FakeProvider(scripted(("Read", {"path": str(img)}), "seen")), workspace)
     agent.run_turn("look")
     text = agent.session.active_file.read_text(encoding="utf-8")
-    assert str(img.resolve()) in text and "iVBOR" not in text            # PNG base64 always starts "iVBOR"
+    assert json.dumps(str(img.resolve()))[1:-1] in text and "iVBOR" not in text   # the log is JSON: backslashes are doubled            # PNG base64 always starts "iVBOR"
     conv = agent.session.read_conversation(agent.session.active_session_id)
     blocks = [b for m in conv.messages if isinstance(m.get("content"), list)
               for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"]

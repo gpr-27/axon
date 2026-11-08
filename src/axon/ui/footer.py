@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable
 
 from axon import platform as plat
-from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, LBLUE, OUTPUT_LOCK, RST, sanitize, strip_ansi, truncate
+from axon.ui.theme import BOLD, CYAN, DARK_SLATE, GOLD, LBLUE, OUTPUT_LOCK, RST, display_width, sanitize, strip_ansi, truncate
 
 
 def _plain(text: object) -> str:
@@ -28,6 +28,31 @@ def _plain(text: object) -> str:
 
 _SAVE, _RESTORE = "\0337", "\0338"
 _MAX_ROWS = 16
+
+
+_ACTIVE: "PinnedFooter | None" = None
+
+
+def wrap_drift(cols: int) -> int:
+    """Rows the cursor moved down because the pinned rows below it re-wrapped after the window got narrower.
+
+    xterm.js (VS Code's terminal and its forks) re-wraps every line on a resize and moves the cursor down by the
+    rows that its lines BELOW the cursor gained, so a relative erase ("go up N rows") that was right a moment ago
+    lands N rows too low. The footer knows the widths it painted; this is the offset to move back up first.
+    Each resize is answered once (the live row that erases itself next takes it). 0 for terminals that keep the
+    cursor with the text."""
+    f = _ACTIVE
+    if f is None or cols <= 0 or not _xterm_js():
+        return 0
+    if f._height and f._widths and cols < f._size[0]:       # not repainted at the new width yet
+        return sum(max(0, -(-w // cols) - 1) for w in f._widths)
+    pending, f._pending_drift = f._pending_drift, 0         # the footer repainted first: it kept the number
+    return pending
+
+
+def _xterm_js() -> bool:
+    """VS Code, Cursor, Windsurf and other editors that embed xterm.js set TERM_PROGRAM=vscode."""
+    return os.environ.get("TERM_PROGRAM", "").lower() == "vscode"
 
 
 def enabled() -> bool:
@@ -41,6 +66,8 @@ class PinnedFooter:
         self._draft = draft
         self._interval = interval
         self._height = 0              # rows reserved at the bottom (0 = not installed)
+        self._widths: list[int] = []  # display width of each painted row (to know how they re-wrap)
+        self._pending_drift = 0       # rows the cursor drifted at the last narrowing, until a live row has used it
         self._size = (0, 0)
         self._active = False
         self._suspended = False
@@ -178,6 +205,11 @@ class PinnedFooter:
             warn = agent_autocompact_warning(self.agent)
             if warn:
                 rows.append(truncate(f"  {GOLD}! {warn}{RST}", w))
+            queued = [str(getattr(it, "text", it)) for it in list(getattr(getattr(self.agent, "message_queue", None), "items", []) or [])]
+            if queued:
+                shown = " · ".join(f"#{getattr(it, 'id', i + 1)} {_plain(getattr(it, 'text', it))}"
+                                   for i, it in enumerate(self.agent.message_queue.items))
+                rows.append(truncate(f"  {CYAN}📥 queued ({len(queued)}){RST} {DARK_SLATE}{shown}{RST}", w))
             if target is not None:
                 rows += self._peek_rows(target, w)
             else:
@@ -216,16 +248,21 @@ class PinnedFooter:
         if size[1] < 12:                       # too short a window: leave the terminal alone
             self._remove()
             return
+        if self._height and self._widths and size[0] < self._size[0] and _xterm_js():
+            self._pending_drift = sum(max(0, -(-w // size[0]) - 1) for w in self._widths)
         if len(rows) != self._height or size != self._size:
             self._remove()
             self._install(len(rows), size)
         cols, lines = self._size
+        self._widths = [display_width(strip_ansi(r)) for r in rows]
         body = "".join(f"\033[{lines - self._height + 1 + i};1H\033[2K{row}" for i, row in enumerate(rows))
         self._write(_SAVE + body + _RESTORE)
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self) -> None:
+        global _ACTIVE
         with OUTPUT_LOCK:
+            _ACTIVE = self
             self._active = True
             self._paint_locked()
         self._stop.clear()
@@ -235,8 +272,11 @@ class PinnedFooter:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        global _ACTIVE
         with OUTPUT_LOCK:
             self._active = False
+            if _ACTIVE is self:
+                _ACTIVE = None
             self._remove()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=1.0)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,8 @@ def report(tmp_path: Path) -> Path:
 
 
 def _escaped(p: Path) -> str:
-    return str(p).replace(" ", "\\ ")
+    # A backslash is a path separator on Windows, so a path with spaces arrives quoted there.
+    return f'"{p}"' if os.name == "nt" else str(p).replace(" ", "\\ ")
 
 
 @pytest.mark.parametrize("form", [_escaped, lambda p: f"'{p}'", lambda p: f'"{p}"', lambda p: p.as_uri()])

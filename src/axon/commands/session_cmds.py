@@ -633,6 +633,15 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
     else:
         from axon import storage
         out_path = storage.session_subdir(ws_of(agent), agent.session.active_session_id, "exports") / f"{agent.session.active_session_id}.{fmt}"
+    if out_path.exists() and not is_tty():
+        # No keyboard to ask "Overwrite?" (the web app): never overwrite; the default file gets a numbered name instead.
+        if fname:
+            err(f"{out_path} already exists. Give another file name, or remove that file first.")
+            return CommandResult(handled=True, success=False)
+        n = 2
+        while out_path.with_name(f"{out_path.stem}-{n}{out_path.suffix}").exists():
+            n += 1
+        out_path = out_path.with_name(f"{out_path.stem}-{n}{out_path.suffix}")
     if out_path.exists() and not confirm(f"{out_path} exists. Overwrite?", default=False):
         info("Export cancelled.")
         return CommandResult(handled=True)

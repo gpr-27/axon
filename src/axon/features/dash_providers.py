@@ -136,17 +136,58 @@ def test_key(preset_id: str, key: str, base_url: str, model: str) -> dict[str, A
     from axon.providers.catalog import find_api_key
     from axon.providers.verifier import verify_api_key
     p = _preset(preset_id)
-    k = (key or "").strip() or (find_api_key(list(p.env_vars)) or "")
-    if p.requires_key and not k:
+    k = (key or "").strip()
+    # The saved key belongs to this provider's own address: never send it to another host the person typed.
+    if not k and (not base_url or _same_host(base_url, p.base_url)):
+        k = find_api_key(list(p.env_vars)) or ""
+    local = _is_local(base_url or p.base_url)
+    if p.requires_key and not k and not local:
         return {"ok": False, "message": "No key to test. Enter one first."}
+    if local:
+        ok, msg = _probe_local(base_url or p.base_url, k)
+        return {"ok": ok, "message": _redact(msg, k)}
     ok, msg = verify_api_key(p, k, base_url or None, model or p.default_model)
     return {"ok": bool(ok), "message": _redact(msg or ("The key works." if ok else "The provider refused it."), k)}
+
+
+def _same_host(a: str, b: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(a).hostname or "").lower() == (urlparse(b).hostname or "").lower()
+    except Exception:
+        return False
+
+
+def _probe_local(base_url: str, key: str) -> tuple[bool, str]:
+    """Is a local server (Ollama, LM Studio, vLLM...) really answering at this address, and does it accept the key?
+    The shared key check skips local servers entirely, which made Test say "works" with nothing running."""
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        import httpx2 as httpx  # type: ignore[no-redef]
+    from axon.providers.transport import _api_root, default_headers
+    headers = default_headers(base_url)
+    if key:
+        headers["authorization"] = f"Bearer {key}"
+    try:
+        resp = httpx.get(f"{_api_root(base_url)}/models", headers=headers, timeout=4.0)
+    except httpx.TimeoutException:
+        return False, f"{base_url} did not answer in time. Is the server running?"
+    except Exception:
+        return False, f"Could not connect to {base_url}. Start the server (for example Ollama or LM Studio) and test again."
+    if resp.status_code in (401, 403):
+        if key:
+            return False, f"The server is running but refused the key (HTTP {resp.status_code})."
+        return False, f"The server is running but needs a key (HTTP {resp.status_code}). Enter it and test again."
+    if resp.status_code == 200:
+        return True, f"Connected to {base_url}."
+    return True, f"The server at {base_url} answered (HTTP {resp.status_code}), though it has no model list."
 
 
 def list_models(preset_id: str, base_url: str) -> dict[str, Any]:
     from axon.providers.catalog import fetch_provider_models, find_api_key, get_models_for_provider
     p = _preset(preset_id)
-    k = find_api_key(list(p.env_vars)) or ""
+    k = (find_api_key(list(p.env_vars)) or "") if (not base_url or _same_host(base_url, p.base_url)) else ""
     live, status = (None, None)
     if k or not p.requires_key:
         try:
@@ -155,6 +196,41 @@ def list_models(preset_id: str, base_url: str) -> dict[str, Any]:
             live, status = None, None
     models = list(live) if live else get_models_for_provider(p)
     return {"models": models[:400], "live": bool(live), "status": status, "default": p.default_model}
+
+
+def current_models(srv: "DashServer", rt: Any = None) -> dict[str, Any]:
+    """The models of the provider this chat is using (its own live list when it has one), never every provider's."""
+    from axon.providers.catalog import ProviderPreset, fetch_provider_models, find_preset_by_url, get_models_for_provider
+    s = rt.agent.settings if rt is not None else srv.settings_obj()
+    cur = getattr(s, "model", "") or ""
+    base = (getattr(s, "base_url", "") or "").strip()
+    preset = find_preset_by_url(base)
+    models: list[str] = []
+    live = False
+    try:
+        if preset is None and base:
+            preset = ProviderPreset(id="custom", name="Custom endpoint", description="", category="Custom", base_url=base.rstrip("/"),
+                                    default_model=cur, models=[cur] if cur else [], env_var="AXON_API_KEY", requires_key=False)
+            got, _st = fetch_provider_models(preset, _secret(s).strip(), base, timeout=3.0)
+        elif preset is not None:
+            got = None
+            if preset.requires_key or preset.id not in ("ollama", "lmstudio"):
+                got, _st = fetch_provider_models(preset, _secret(s).strip(), base or None, timeout=3.0)
+            if not got:
+                got = get_models_for_provider(preset)
+        else:
+            got = None
+        if got:
+            models = list(got)
+            live = True
+    except Exception:
+        models = []
+    if not models:
+        from axon.providers.registry import known_models
+        models = sorted(set(known_models()))
+    if cur and cur not in models:
+        models.insert(0, cur)
+    return {"models": models[:400], "current": cur, "live": live}
 
 
 def apply_choice(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
@@ -187,7 +263,7 @@ def apply_choice(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
         except ValueError as e:
             raise DashError(str(e), 400) from None
         _mask_everywhere(key)
-    effective_key = key or _saved_key(preset)
+    effective_key = key or (_saved_key(preset) if (pid == "custom" or not base or _same_host(base, _preset(pid).base_url)) else None)
     applied = 0
     out = io.StringIO()
     with srv.lock:

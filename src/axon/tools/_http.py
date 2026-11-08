@@ -32,8 +32,14 @@ def is_offline() -> bool:
 
 def _is_loopback(url: str) -> bool:
     from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    return host in ("localhost", "::1") or host.startswith("127.")
+    import ipaddress
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback   # a literal address only: "127.evil.com" is a name
+    except ValueError:
+        return False
 
 
 def ensure_online(tool: str, url: str = "") -> None:

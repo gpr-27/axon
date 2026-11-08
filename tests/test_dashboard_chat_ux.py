@@ -32,8 +32,8 @@ def _node(code: str) -> str:
         pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "t.js"
-        f.write_text(code)
-        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(code, encoding="utf-8")
+        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -43,8 +43,8 @@ def test_page_script_parses():
         pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "app.js"
-        f.write_text(APP_JS)
-        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(APP_JS, encoding="utf-8")
+        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
 
 
@@ -54,12 +54,11 @@ def test_phone_layout_keeps_rail_bar_and_composer_visible():
     m = re.search(r"@media \(max-width:900px\)\{\s*\.ide\{height:100vh.*?\n\}", css[css.index("clarity pass"):], re.S)
     assert m, "phone block"
     block = m.group(0)
-    assert ".bpanel{position:static" in block, "the Shell dock must not float over the page"
     assert "min(var(--bh,300px),42dvh)" in block
     assert "side-nav{grid-column:1;grid-row:2" in block
     small = css[css.index("@media (max-width:720px){\n .top{gap:6px"):]
     assert ".ws-chip{flex:1 1 0;min-width:0" in small and ".top .brand span:last-child{display:none}" in small
-    assert "tbicons" in APP_JS and "Close'))" in APP_JS  # the top bar is icon buttons (they fit a phone), the dock has a Close button
+    assert "tbicons" in APP_JS and True  # the top bar is icon buttons (they fit a phone); the bottom dock is gone
     assert css.count("/* ---- IDE frame") == 1, "the IDE styles must not be repeated"
 
 
@@ -163,9 +162,14 @@ def test_settings_hides_the_endpoint_under_advanced():
 
 
 def test_shell_terminal_commands_have_one_line_descriptions_and_nav_order():
+    # Owner decision: Files and Terminal are right-hand panels, Shell is the fallback inside the Terminal panel, so the rail
+    # no longer lists them; they stay one Cmd+K entry (NAV_PANELS) and one key away.
     nav = re.search(r"const NAV = \[(.*?)\];", APP_JS, re.S).group(1)
     ids = re.findall(r"\['(\w+)', '", nav)
-    assert ids[:5] == ["chat", "files", "commands", "shell", "terminal"]
+    assert ids == ["chat", "commands", "sessions", "usage", "insights", "memory", "extensions", "settings"]
+    panels = re.search(r"const NAV_PANELS = \[(.*?)\];", APP_JS, re.S).group(1)
+    assert re.findall(r"\['(\w+)', '", panels) == ["files", "terminal", "shell"]
+    assert "...NAV_PANELS.map(" in APP_JS            # Cmd+K reaches them
     for k in ("shell", "terminal", "commands"):
         assert re.search(k + r": ['\"].{20,}", APP_JS.split("const NAV_HELP")[1].split("};")[0]), k
         assert k in APP_JS.split("const PAGE_HINT")[1].split("};")[0] or k == "shell"
@@ -211,3 +215,48 @@ def test_terminal_colours_use_theme_tokens_and_dim_text_stays_readable():
     ansi = re.search(r"const ANSI16 = \[(.*?)\];", JS_TERM, re.S).group(1)
     assert set(re.findall(r"var\((--[a-z0-9]+)\)", ansi)) <= {"--muted", "--bad", "--ok", "--warn", "--info", "--accent", "--primary", "--ink", "--ink2"}
     assert ".td,.ad{opacity:.92}" in APP_LAYOUT_CSS
+
+
+# e2e round: Stop is not a failure, and idle hidden tabs must not hold a connection each
+def test_a_stopped_turn_is_not_drawn_as_a_failure():
+    fn = _fn("finishTurn")
+    assert "ev.stop_reason === 'interrupted'" in fn
+    assert "notice('Stopped', '')" in fn and "else if (ev && ev.is_error) cur.answer.append(turnError(" in fn
+
+
+def test_hidden_idle_chat_tabs_release_their_event_stream():
+    """A browser allows about six connections per site; each open stream takes one, so with six chat tabs every other
+    request (even Send) hung. A hidden, idle tab closes its stream; the state poll reopens it when it matters."""
+    fn = _fn("refreshState")
+    assert "C.feed.offsetParent === null" in fn and "C.es.close()" in fn and "connectEvents(C, st)" in fn
+    assert "if (s.none)" in _fn("connectEvents")        # a server that forgot the chat is not retried forever
+
+
+def test_retry_notice_rounds_the_delay():
+    assert "ev.delay_s + 's: '" not in APP_JS and "Math.round(Number(ev.delay_s || 0) * 10) / 10" in APP_JS
+
+
+def test_scrolling_up_on_a_feed_that_cannot_scroll_does_not_stop_following():
+    assert "e.deltaY < 0 && feed.scrollTop > 0" in APP_JS
+    assert "C.atBottom = true;" in _fn("buildComposer")
+
+
+def test_jump_to_latest_is_styled_by_the_stylesheet_not_a_script_made_style_element():
+    """The page's content policy blocks style elements added by script, which left the button an unstyled bar."""
+    assert "createElement('style')" not in APP_JS
+    assert ".jump-latest{position:absolute" in APP_LAYOUT_CSS
+
+
+@pytest.mark.skipif(not NODE, reason="node is not installed")
+def test_markdown_lists_nest_by_indent():
+    out = _node(_fn("mdEsc") + _fn("mdInline") + _fn("mdLite") + _fn("mdLiveTable") + """
+const r = (s) => mdLite(s, false);
+console.log(JSON.stringify([
+  r('- a\\n- b\\n  - c\\n  - d\\n- e'),
+  r('1. x\\n   - y\\n2. z'),
+  r('- one\\n- two'),
+]));""")
+    a, b, c = json.loads(out)
+    assert a == "<ul><li>a</li><li>b<ul><li>c</li><li>d</li></ul></li><li>e</li></ul>"
+    assert b == "<ol><li>x<ul><li>y</li></ul></li><li>z</li></ol>"
+    assert c == "<ul><li>one</li><li>two</li></ul>"

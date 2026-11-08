@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from axon.platform import rmtree as _rmtree
 import tempfile
 import time
 from pathlib import Path
@@ -54,14 +55,14 @@ def install_plugin(entry: PluginEntry, workspace: Path, scope: str = "user", rev
         was_ok = scope != "user" and trust.status(workspace) in ("none", "trusted")
         shutil.copytree(source_dir, destination)
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        _rmtree(work, ignore_errors=True)
     _write_install_record(entry, destination, scope, commit)
     if was_ok:
         trust.trust(workspace)
     try:
         plugin_core.set_enabled_in_settings(workspace, f"{entry.name}@{MARKETPLACE_NAME}", True, scope)
     except ValueError as e:  # settings.json cannot be updated: leave nothing half-installed
-        shutil.rmtree(destination, ignore_errors=True)
+        _rmtree(destination, ignore_errors=True)
         raise PluginInstallError(str(e)) from e
     return destination
 

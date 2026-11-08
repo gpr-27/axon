@@ -53,7 +53,11 @@ function treeFlatten() {
     if (!es.length) rows.push({ note: depth ? '(empty)' : 'This folder has no visible files.', depth });
     if (TREE.trunc[path]) rows.push({ note: 'Only the first entries are shown. Use search.', depth });
   };
-  walk('', 0); return rows;
+  walk('', 0);
+  const q = (TREE.filter || '').toLowerCase().trim();           // the Files panel's filter box and its list/tree switch
+  if (TREE.list) return rows.filter(r => r.e && r.e.type === 'file' && (!q || r.e.path.toLowerCase().includes(q))).map(r => ({ e: r.e, depth: 0, flat: true }));
+  if (q) return rows.filter(r => r.e && r.e.path.toLowerCase().includes(q)).map(r => ({ e: r.e, depth: 0, flat: true }));
+  return rows;
 }
 function treePaint() {
   if (!TREE.vp || !TREE.vp.isConnected) return;
@@ -80,7 +84,7 @@ function treeSelection(path) {
 function treeNode(r) {
   const e = r.e;
   const node = h('button', { class: 'node ' + e.type + (e.ignored ? ' ign' : '') + (e.path === TREE.sel ? ' sel' : '') + (TREE.multi.has(e.path) ? ' msel' : ''), type: 'button', style: '--d:' + r.depth, title: e.path + '  (drag into the chat, right-click for more, A adds it to the chat)', 'data-path': e.path, draggable: 'true' },
-    h('span', { class: 'ar' }, e.type === 'dir' ? (TREE.open.has(e.path) ? '▾' : '▸') : ''), h('span', { class: 'nm' }, e.name), h('span', { class: 'g', title: GIT_LABEL[e.git] || '' }, e.git === 'U' ? '?' : e.git || ''));
+    h('span', { class: 'ar' }, e.type === 'dir' ? (TREE.open.has(e.path) ? '▾' : '▸') : ''), h('span', { class: 'nm' }, e.name), r.flat && e.path.includes('/') ? h('span', { class: 'fp-dir' }, e.path.slice(0, e.path.lastIndexOf('/'))) : null, h('span', { class: 'g', title: GIT_LABEL[e.git] || '' }, e.git === 'U' ? '?' : e.git || ''));
   node.addEventListener('dragstart', (ev) => axSetDrag(ev, treeSelection(e.path)));
   node.addEventListener('click', async (ev) => {
     if (ev.metaKey || ev.ctrlKey) {
@@ -94,7 +98,7 @@ function treeNode(r) {
     }
     TREE.multi = new Set(); TREE.anchor = e.path;
     if (e.type === 'dir') { if (TREE.open.has(e.path)) TREE.open.delete(e.path); else { TREE.open.add(e.path); if (!TREE.cache[e.path]) { TREE.rows = treeFlatten(); treePaint(); await treeLoad(e.path); } } TREE.rows = treeFlatten(); treePaint(); }
-    else { TREE.sel = e.path; location.hash = '#/files/' + encodeURIComponent(e.path); treePaint(); if (innerWidth <= 900) togglePanel('left', false); }
+    else { TREE.sel = e.path; location.hash = '#/files/' + encodeURIComponent(e.path); treePaint(); if (innerWidth <= 900 && typeof wbClose === 'function') wbClose('files'); }
   });
   node.addEventListener('keydown', (ev) => { if ((ev.key === 'a' || ev.key === 'A') && !ev.metaKey && !ev.ctrlKey && !ev.altKey) { ev.preventDefault(); axAddToChat(treeSelection(e.path)); } });
   node.addEventListener('contextmenu', (ev) => {
@@ -132,7 +136,7 @@ function mountSearch(body) {
     res.append(h('p', { class: 'muted', style: 'padding:6px 14px' }, 'Searching...'));
     try {
       if (mode.value === 'names') { const d = await api('/api/files/search?q=' + encodeURIComponent(v)); res.replaceChildren(...d.files.map(f => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(f), draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([f])), h('b', null, f.split('/').pop()), h('span', { class: 'muted' }, f))), d.files.length ? '' : h('p', { class: 'muted', style: 'padding:6px 14px' }, 'No file matches.')); }
-      else { const d = await api('/api/files/grep?q=' + encodeURIComponent(v)); res.replaceChildren(h('p', { class: 'muted', style: 'padding:4px 14px;font-size:12px' }, d.matches.length + ' matches in ' + d.files + ' files searched' + (d.partial ? ' (stopped early; refine the search)' : '')), ...d.matches.map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path) + '?line=' + m.line, draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text)))); }
+      else { const d = await api('/api/files/grep?q=' + encodeURIComponent(v)); res.replaceChildren(h('p', { class: 'muted', style: 'padding:4px 14px;font-size:12px' }, d.matches.length + ' matches in ' + d.files + ' files searched' + (d.partial ? ' (stopped early; refine the search)' : '') + (d.skipped_large ? '; ' + d.skipped_large + ' file' + (d.skipped_large === 1 ? '' : 's') + ' over 1.5 MB not searched' : '')), ...d.matches.map(m => h('a', Object.assign({ class: 'hit', href: '#/files/' + encodeURIComponent(m.path) + '?line=' + m.line, draggable: 'true', title: 'Drag into the chat to attach' }, axDragProps([m.path])), h('b', null, m.path.split('/').pop() + ':' + m.line), h('span', { class: 'muted' }, m.text)))); }
     } catch (e) { res.replaceChildren(errorBox(e.message)); }
   };
   let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 200); }); mode.addEventListener('change', run);
@@ -287,7 +291,7 @@ async function viewFile(rest) {
       if (text) {
         if (f.git) bar.append(h('button', { class: 'btn', onclick: () => showDiff(f) }, 'Diff'));
         if (f.editable) bar.append(h('button', { class: 'btn', onclick: () => edit(f) }, 'Edit')); else bar.append(h('span', { class: 'muted', title: f.why_read_only || (f.total_lines == null ? 'Too large to edit here' : '') }, 'read-only'));
-        bar.append(h('button', { class: 'btn', title: 'Reference this file in the chat', onclick: () => { lsSet('axon-prefill', '@' + f.path + ' '); location.hash = '#/chat'; } }, 'Ask Axon'));
+        bar.append(h('button', { class: 'btn', title: 'Reference this file in the chat', onclick: () => axAsk(f.path) }, 'Ask Axon'));
       }
       if (/\.ipynb$/i.test(f.path)) { const raw = F.asText && F.asText.has(path); bar.append(h('button', { class: 'btn', type: 'button', title: 'Switch between the notebook cells and its JSON source, which you can edit', onclick: () => { F.asText = F.asText || new Set(); if (raw) F.asText.delete(path); else F.asText.add(path); load(); } }, raw ? 'View cells' : 'Edit source')); }
       bar.append(h('button', { class: 'btn', type: 'button', title: 'Attach this file to the chat', onclick: () => axAddToChat([f.path]) }, 'Add to chat'));
@@ -342,8 +346,8 @@ async function viewFile(rest) {
       const msg = h('span', { class: 'muted' }, 'Editing. Ctrl/Cmd+S saves.');
       const save = async (force) => {
         try {
-          let sha = full.sha; if (force) { const cur = await api('/api/file?path=' + encodeURIComponent(f.path) + '&limit=3000'); sha = cur.sha; }
-          const r = await api('/api/file/save', { path: f.path, content: ta.value, sha, lines: full.lines }); full.sha = r.sha; F.dirty = false; msg.textContent = 'Saved ' + new Date().toLocaleTimeString(); toast('Saved ' + f.path); GIT_CACHE.t = 0; api('/api/ws').then(w => { state.ws = w; drawChip(); });
+          let sha = full.sha, lines = full.lines; if (force) { const cur = await api('/api/file?path=' + encodeURIComponent(f.path) + '&limit=3000'); sha = cur.sha; lines = cur.lines; }
+          const r = await api('/api/file/save', { path: f.path, content: ta.value, sha, lines }); full.sha = r.sha; F.dirty = false; msg.textContent = 'Saved ' + new Date().toLocaleTimeString(); toast('Saved ' + f.path); GIT_CACHE.t = 0; api('/api/ws').then(w => { state.ws = w; drawChip(); });
         } catch (e) { if (/changed on disk/.test(e.message)) { msg.replaceChildren(h('span', { class: 'bad' }, 'This file changed on disk since you opened it. '), h('button', { class: 'btn', onclick: () => load() }, 'Reload (discard my edits)'), ' ', h('button', { class: 'btn danger', onclick: () => save(true) }, 'Overwrite anyway')); } else toast(e.message); }
       };
       ta.addEventListener('input', () => { F.dirty = true; msg.textContent = 'Unsaved changes. Ctrl/Cmd+S saves.'; });
@@ -421,6 +425,13 @@ function axAddToChat(paths) {
   if (UI.active !== t) location.hash = t.hash || '#/chat';
   t.C.addPaths(paths);
 }
+// "Ask Axon about this": put @path in the box of the open chat (or in the next new chat when none is open).
+function axAsk(path) {
+  const t = axChatTab();
+  if (!t || typeof t.C.prefill !== 'function') { lsSet('axon-prefill', '@' + path + ' '); location.hash = '#/chat'; return; }
+  if (UI.active !== t) location.hash = t.hash || '#/chat';
+  t.C.prefill('@' + path + ' ');
+}
 function axChipEl(chip, meta, onRemove) {
   const kind = meta.kind || 'file'; const name = meta.name || chip;
   const m = /^\[Image #(\d+)\]$/.exec(chip); const thumb = meta.thumb || (kind === 'image' && m ? '/api/attachment/image?n=' + m[1] : '');
@@ -469,6 +480,10 @@ function axComposerDrop(C, o) {
       if (bad.length) toast('Not attached. ' + bad.join('. ') + '.');
     } catch (e) { toast('Could not attach: ' + e.message); }
     tag.remove(); o.ta.focus();
+  };
+  C.prefill = (text) => {
+    const cur = o.ta.value; o.ta.value = cur + (cur && !/\s$/.test(cur) ? ' ' : '') + text;
+    o.ta.dispatchEvent(new Event('input', { bubbles: true })); o.ta.focus(); o.ta.setSelectionRange(o.ta.value.length, o.ta.value.length);
   };
   C.addFolder = async (entry) => {
     const tag = h('span', { class: 'chip' }, h('span', { class: 'spin' }), 'reading folder ' + entry.name); o.chips.append(tag);

@@ -159,5 +159,5 @@ def test_page_script_parses():
     from axon.features.dashboard_web import APP_JS
     p = Path(__import__("tempfile").mkdtemp()) / "app.js"
     p.write_text(APP_JS, encoding="utf-8")
-    res = subprocess.run([node, "--check", str(p)], capture_output=True, text=True)
+    res = subprocess.run([node, "--check", str(p)], capture_output=True, text=True, encoding="utf-8")
     assert res.returncode == 0, res.stderr[:600]

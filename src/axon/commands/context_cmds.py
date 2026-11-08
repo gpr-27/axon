@@ -437,7 +437,7 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
     if isinstance(getattr(ctx, "last_receipt", None), dict) and after_n != before_n:
         ctx.last_receipt["trigger"] = "manual"
     if after_n >= before_n and after_tok >= before_tok:
-        info("Nothing to compact yet (the conversation is a single turn).")
+        info("Nothing to compact yet: there are no older turns to summarize (the latest turn is always kept).")
         return CommandResult(handled=True)
     record: dict[str, Any] = {"messages": conv.messages, "instructions": arg}
     if u is not None and hasattr(u, "input"):

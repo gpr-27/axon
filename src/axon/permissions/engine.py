@@ -66,6 +66,7 @@ class RuleEntry:
 # ─── Hard invariants ────────────────────────────────────────────────────────
 
 _ROOT_TARGETS = {"/", "/*", "/.", "~", "~/", "~/*", "$HOME", "${HOME}", "$HOME/", "$HOME/*", "${HOME}/", "${HOME}/*"}
+_WHOLE_MACHINE_DIRS = {"/users", "/home", "/applications", "/library", "/usr", "/var", "/opt", "/private", "/volumes", "/system"}
 
 
 def _is_root_target(arg: str) -> bool:
@@ -76,6 +77,8 @@ def _is_root_target(arg: str) -> bool:
         return True  # C:  C:\  C:/  C:\*
     if a.startswith("/") and a.rstrip("/*") == "":
         return True
+    if "/" + a.strip("/*").lower().lstrip("/") in _WHOLE_MACHINE_DIRS and a.count("/") <= 2 and a.startswith("/"):
+        return True         # /Users, /home, /usr ...: every user's files or the whole system
     return False
 
 
@@ -196,8 +199,16 @@ def shell_credential_access(cmd: str, workspace: Path | None = None) -> str | No
             tok = raw.lstrip("<>0123456789&=").strip()
             if "=" in tok and not tok.startswith(("/", "~", ".")):
                 tok = tok.split("=", 1)[1]  # --key=~/.ssh/id_rsa
-            if not tok or tok.startswith("-") or not any(c in tok for c in "/\\~.$*?[{"):
+            if not tok or tok.startswith("-"):
                 continue
+            if not any(c in tok for c in "/\\~.$*?[{"):
+                # A bare word is a file in the current folder; it only matters when it is a symlink, which a cloned
+                # repository can point at ~/.ssh/id_rsa (``cat link``).
+                try:
+                    if not (cwd / tok).is_symlink():
+                        continue
+                except (OSError, ValueError):
+                    continue
             for variant in _expand_braces(expand(tok)):
                 candidates = [variant]
                 if any(c in variant for c in "*?["):
@@ -241,6 +252,16 @@ def catastrophic_command(cmd: str) -> str | None:
                 return "recursive removal of a root/home directory"
             if "--no-preserve-root" in long_flags:
                 return "rm --no-preserve-root"
+        elif prog == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok") for a in argv[1:]) and any(
+                _is_root_target(a) for a in argv[1:] if not a.startswith("-")):
+            if "-delete" in argv or any(x in ("rm", "shred", "unlink") for x in argv):
+                return "find that deletes everything below a root/home directory"
+        elif prog in ("chmod", "chown", "chgrp") and any(_is_root_target(a) for a in argv[1:] if not a.startswith("-")):
+            flags = "".join(a.lstrip("-") for a in argv[1:] if a.startswith("-") and not a.startswith("--"))
+            if "R" in flags or "--recursive" in argv:
+                return f"recursive {prog} of a root/home directory"
+        elif prog == "mv" and any(_is_root_target(a) for a in argv[1:-1] if not a.startswith("-")):
+            return "moving a root/home directory away"
         elif prog in ("mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.vfat", "diskpart", "format", "format.com"):
             return f"disk formatting command '{prog}'"
         elif prog == "dd" and any(a.startswith("of=/dev/") for a in argv[1:]):

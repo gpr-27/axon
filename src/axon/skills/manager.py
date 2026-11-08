@@ -418,7 +418,10 @@ def shell_argv(command: str, shell: str | None = None) -> list[str]:
             raise SkillShellError("This skill requires bash (`shell: bash` in frontmatter) but bash was not found")
         return [sh, "-c", command]
     try:
-        from axon.platform import default_shell  # type: ignore[import-not-found]
+        from axon.platform import default_shell, shell_command_argv  # type: ignore[import-not-found]
+        argv = shell_command_argv(command)         # PowerShell gets the command encoded: no quote mangling
+        if isinstance(argv, list):
+            return argv
         prefix = list(default_shell())
         if prefix:
             return prefix + [command]

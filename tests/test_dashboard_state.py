@@ -32,6 +32,15 @@ def test_review_with_an_empty_session_is_an_empty_result_not_an_error(c, env):
     assert st == 200
 
 
+def test_a_chat_just_opened_has_an_empty_page_not_a_404(c, env):
+    """The chat view asks for the history of a brand-new session before any file exists; a 404 shows up as a
+    console error on every new chat."""
+    sid = json.loads(c.post("/api/chat/new", {})[2])["session"]
+    st, _, body = c.get(f"/api/session/{sid}?limit=30")
+    assert st == 200 and json.loads(body)["entries"] == []
+    assert c.get("/api/session/session_20200101_000000_proj_000000?limit=30")[0] == 404
+
+
 def test_progress_cost_of_a_resumed_session_is_its_recorded_cost(c, env):
     """After a restart the ledger starts empty; the panel must show what the transcript recorded, not $0.00
     (unpriced models make a recomputed ledger zero)."""
@@ -62,7 +71,7 @@ def js_fn(name: str) -> str:
 
 
 def node(body: str) -> str:
-    p = subprocess.run(["node", "-e", body], capture_output=True, text=True, timeout=30)
+    p = subprocess.run(["node", "-"], input=body, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return p.stdout.strip()
 

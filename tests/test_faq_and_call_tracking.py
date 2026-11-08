@@ -116,6 +116,7 @@ def test_ledger_separate_call_tracking_and_breakdown():
 def test_faq_command_all_and_topics(capsys):
     """Test /faq command rendering full guide and specific topics."""
     agent = MagicMock()
+    agent.settings.base_url = "https://agentrouter.org"  # an unconfigured mock is not a URL; /faq picks its guide by host
 
     # 1. Full FAQ listing
     res = handle_faq(agent, "")

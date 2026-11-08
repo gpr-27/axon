@@ -582,7 +582,7 @@ def test_unknown_binary_hex_preview(ctx, workspace):
 
 
 def test_text_and_code_unchanged(ctx, workspace):
-    (workspace / "a.py").write_text("print('hi')\nx = 1\n")
+    (workspace / "a.py").write_bytes(b"print('hi')\nx = 1\n")        # LF on every platform (write_text would write CRLF on Windows)
     out = read(ctx, path="a.py")
     assert out == "     1→print('hi')\n     2→x = 1"
     (workspace / "empty.docx").write_bytes(b"")
@@ -633,8 +633,8 @@ def test_web_route_and_client_script(tmp_path):
     if node:
         import subprocess
         p = tmp_path / "f.js"
-        p.write_text(JS_FILES)
-        assert subprocess.run([node, "--check", str(p)], capture_output=True, text=True).returncode == 0
+        p.write_text(JS_FILES, encoding="utf-8")
+        assert subprocess.run([node, "--check", str(p)], capture_output=True, text=True, encoding="utf-8").returncode == 0
 
 
 def test_web_route_serves_extraction(c, env):
@@ -680,3 +680,14 @@ def test_mention_of_plain_text_is_unchanged(tmp_path):
     (tmp_path / "notes.txt").write_text("hello world", encoding="utf-8")
     out = expand_file_mentions("see @notes.txt", tmp_path)
     assert "[File: notes.txt]" in out and "hello world" in out
+
+
+def test_toml_falls_back_to_tomli_on_python_310(ctx, workspace, monkeypatch):
+    """Python 3.10 has no tomllib; the tomli backport must be used instead of reporting the file as invalid."""
+    import sys
+    import tomllib as real
+    monkeypatch.setitem(sys.modules, "tomllib", None)      # `import tomllib` now raises ModuleNotFoundError
+    monkeypatch.setitem(sys.modules, "tomli", real)        # what the backport provides
+    (workspace / "a.toml").write_text('[tool]\nname = "x"\n')
+    assert "valid TOML" in read(ctx, path="a.toml")
+    assert "Not valid TOML" not in read(ctx, path="a.toml")

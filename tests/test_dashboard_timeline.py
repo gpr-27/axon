@@ -31,8 +31,8 @@ def _node(code: str) -> str:
         pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "t.js"
-        f.write_text(code)
-        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(code, encoding="utf-8")
+        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -117,8 +117,8 @@ def test_the_page_script_parses():
     _node("")  # node itself works
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "app.js"
-        f.write_text(APP_JS)
-        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(APP_JS, encoding="utf-8")
+        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
 
 

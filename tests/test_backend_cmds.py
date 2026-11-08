@@ -53,7 +53,8 @@ def test_trail_timeline_ctxmap(workspace: Path, capsys) -> None:
     assert "Context map" in out and "tool_result" in out
     rid = next(l.split()[0] for l in out.splitlines() if "drop" in l.split()[-1:] and "Edit" in l)
     out = _run(agent, f"/ctxmap drop {rid}", capsys)
-    assert "Dropped" in out
+    # This Edit's result is smaller than the note a drop would leave, so it stays. tests/test_ctxmap.py drops a large one.
+    assert "so it was kept" in out
 
 
 def test_search_command(workspace: Path, capsys) -> None:

@@ -1,7 +1,7 @@
 """/marketplace (aliases /connectors, /store): browse and install connectors, skills and plugins."""
 from __future__ import annotations
 
-import shlex
+from axon import platform
 from typing import Any
 
 from axon.commands.common import ws_of
@@ -24,7 +24,7 @@ USAGE = """/marketplace                          browse (terminal) or list the c
 
 def split_words(text: str) -> list[str]:
     try:
-        return shlex.split(text)
+        return platform.split_words(text)
     except ValueError:
         return text.split()
 
@@ -45,12 +45,22 @@ def follow_in_session(agent: Any, outcome: Any) -> None:
             continue
 
 
+_CHANGES = {"install", "add-catalog", "remove", "uninstall", "rm", "enable", "disable", "update", "import", "remove-source", "refresh"}
+
+
 @command("marketplace", category=CAT, aliases=("connectors", "store"),
          description="Browse, install and control connectors (MCP), skills and plugins", usage=USAGE)
 def handle_marketplace(agent: Any, arg: str) -> CommandResult:
     from axon.marketplace.cli import run_command
-    outcome = run_command(split_words(arg), ws_of(agent), agent=agent)
+    words = split_words(arg)
+    outcome = run_command(words, ws_of(agent), agent=agent)
     follow_in_session(agent, outcome)
+    if words and words[0].lower() in _CHANGES and outcome.code == 0:     # new skills, hooks and plugin servers apply now
+        try:
+            from axon.commands.agent_cmds import _refresh_extensions
+            _refresh_extensions(agent)
+        except Exception:  # noqa: BLE001
+            pass
     return CommandResult(handled=True, success=outcome.code == 0)
 
 

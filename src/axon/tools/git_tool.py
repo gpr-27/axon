@@ -20,8 +20,18 @@ WRITE_SUBCOMMANDS = ("add", "restore", "commit", "checkout", "switch", "stash", 
 # Flags that make git run helper programs, write files, or read outside the repository.
 _BLOCKED_FLAG = re.compile(
     r"^(--config-env.*|--exec-path.*|--output.*|-O.*|--open-files-in-pager.*|--ext-diff|--no-index|"
-    r"--upload-pack.*|--receive-pack.*|--exec.*|--git-dir.*|--work-tree.*|--textconv|--paginate)$"
+    r"--upload-pack.*|--receive-pack.*|--exec.*|--git-dir.*|--work-tree.*|--textconv|--paginate|"
+    r"--contents.*|--ignore-revs-file.*)$"          # blame --contents FILE shows any file; --ignore-revs-file quotes its first bad line
 )
+_BLOCKED_LONG = ("--config-env", "--exec-path", "--output", "--open-files-in-pager", "--ext-diff", "--no-index", "--upload-pack",
+                 "--receive-pack", "--exec", "--git-dir", "--work-tree", "--textconv", "--paginate", "--contents", "--ignore-revs-file")
+
+
+def _abbreviates_blocked(name: str) -> bool:
+    """git takes any unambiguous prefix of a long flag, so ``--upl=cmd`` is ``--upload-pack=cmd``."""
+    return any(b.startswith(name) for b in _BLOCKED_LONG)
+
+
 _TEXT_SUBS = ("diff", "log", "show")
 
 
@@ -62,6 +72,11 @@ class GitTool(Tool):
                 raise ToolError("Git arguments must not contain newlines or NUL characters.")
             if a == "--":
                 break
+            if sub == "blame" and a.startswith("-S"):       # blame -S FILE reads a file of revisions and quotes it in its error
+                raise ToolError("git blame -S is not allowed through the Git tool (it reads an arbitrary file). Use Bash if you really need it.")
+            if a.startswith("--") and len(a) > 3 and _abbreviates_blocked(a.split("=", 1)[0]):
+                raise ToolError(f"git flag {a!r} is not allowed through the Git tool (git accepts shortened flag names, and this one "
+                                f"can run helper programs, write files or read outside the repository).")
             if a.startswith("-") and _BLOCKED_FLAG.match(a):
                 raise ToolError(f"git flag {a!r} is not allowed through the Git tool (it can run helper programs, "
                                 f"write files or read outside the repository). Use Bash if you really need it.")

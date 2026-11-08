@@ -177,7 +177,7 @@ function ccConfirm(card, root, ctx) {
   const no = h('button', { type: 'button', class: 'btn' }, 'Cancel');
   yes.addEventListener('click', async () => {
     yes.disabled = no.disabled = true;
-    try { await api('/api/cmdcard/confirm', { line: card.confirm.line }); const r = await ccRunLine(card.confirm.line, ctx.session); root.replaceWith(ccFromResult(r, card.confirm.line, ctx)); }
+    try { await api('/api/cmdcard/confirm', { line: card.confirm.line }); const r = await ccRunLine(card.confirm.line, ctx.session); root.replaceWith(ccFromResult(r, card.confirm.line, ctx)); document.dispatchEvent(new CustomEvent('axon-cmd-done', { detail: { line: card.confirm.line } })); }
     catch (e) { out.append(errorBox(e.message)); yes.disabled = no.disabled = false; }
   });
   no.addEventListener('click', () => { out.replaceChildren(h('p', { class: 'cc-p muted' }, 'Cancelled. Nothing was run.')); });

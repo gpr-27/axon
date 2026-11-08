@@ -13,7 +13,7 @@ keys typed on the command line are registered with the activity journal's redact
 from __future__ import annotations
 
 import os
-import shlex
+from axon import platform
 import stat
 import sys
 from pathlib import Path
@@ -52,7 +52,7 @@ def split_args(arg: str | Sequence[str]) -> list[str]:
     if not isinstance(arg, str):
         return [str(a) for a in arg]
     try:
-        return shlex.split(arg, posix=True)
+        return platform.split_words(arg)
     except ValueError:
         return arg.split()
 

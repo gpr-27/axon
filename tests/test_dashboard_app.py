@@ -10,11 +10,14 @@ import socket
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from axon.platform import shell_info
 
 sys.path.insert(0, str(Path(__file__).parent / "e2e"))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -98,7 +101,8 @@ def test_credential_stores_are_refused_everywhere(c, env, tmp_path):
     assert st == 403
     names = [d["name"] for d in c.json(f"/api/fs/dirs?path={home}&hidden=1")["dirs"]]
     assert ".aws" not in names and "project" in names                                      # never even listed
-    assert c.get("/api/fs/dirs?path=/etc")[0] == 403                                        # system directory
+    system_dir = os.environ.get("SystemRoot", r"C:\Windows") if os.name == "nt" else "/etc"
+    assert c.get("/api/fs/dirs?path=" + urllib.parse.quote(system_dir, safe=""))[0] == 403                                       # system directory
 
 
 def test_save_detects_a_file_changed_on_disk(c, env):
@@ -373,6 +377,10 @@ def test_event_log_spills_big_bodies_and_redacts(tmp_path):
 
 # ─── shell panel ────────────────────────────────────────────────────────────
 
+_POWERSHELL = shell_info().is_powershell
+_PWD = "(Get-Location).Path" if _POWERSHELL else "pwd"       # plain `pwd` prints a table in PowerShell
+
+
 def _run_shell(c: Client, command: str, **extra: Any) -> dict:
     r = c.post("/api/shell/run", {"command": command, **extra})
     assert r[0] == 200, r
@@ -387,7 +395,11 @@ def _shell_events(c: Client, jid: str) -> list[dict]:
 
 def test_shell_runs_streams_and_records(c, env, monkeypatch):
     monkeypatch.setenv("MY_SECRET_TOKEN", "super-secret-value-123456")
-    j = _run_shell(c, "echo out-line; echo err-line 1>&2; pwd; env | grep -c MY_SECRET_TOKEN; exit 3")
+    if _POWERSHELL:
+        cmd = "echo out-line; [Console]::Error.WriteLine('err-line'); (Get-Location).Path; if ($env:MY_SECRET_TOKEN) { 1 } else { 0 }; exit 3"
+    else:
+        cmd = "echo out-line; echo err-line 1>&2; pwd; env | grep -c MY_SECRET_TOKEN; exit 3"
+    j = _run_shell(c, cmd)
     evs = _shell_events(c, j["id"])
     out = "".join(e["html"] for e in evs if e["type"] == "out" and e["stream"] == "out")
     err = "".join(e["html"] for e in evs if e["type"] == "out" and e["stream"] == "err")
@@ -422,7 +434,10 @@ def test_shell_cwd_is_jailed_and_kill_works(c, env):
 
 
 def test_shell_output_is_capped_and_ansi_escaped(c, env):
-    j = _run_shell(c, "printf '\\033[31m<b>x</b>\\033[0m\\n'")
+    if _POWERSHELL:
+        j = _run_shell(c, "[Console]::Out.WriteLine([string][char]27 + '[31m<b>x</b>' + [char]27 + '[0m')")
+    else:
+        j = _run_shell(c, "printf '\\033[31m<b>x</b>\\033[0m\\n'")
     html = "".join(e["html"] for e in _shell_events(c, j["id"]) if e["type"] == "out")
     assert "&lt;b&gt;" in html and "<b>" not in html and "af1" in html
 
@@ -545,14 +560,14 @@ def _hold(session_dir: Path, pid: int) -> None:
     (session_dir / "writer.lease").write_text(json.dumps({"pid": pid, "host": socket.gethostname(), "owner": "terminal", "started": time.time()}))
 
 
-def test_a_session_held_by_another_process_is_read_only(c, env, llm):
+def test_a_session_held_by_another_process_is_read_only(c, env, llm, other_live_pid):
     sid = env.ids["refactor"]
     folder = Path(c.srv.index.lookup(sid).path).parent
     transcript = folder / "session.jsonl"
     before = transcript.read_bytes()
-    _hold(folder, 1)                                              # pid 1 is alive and is not this process
+    _hold(folder, other_live_pid)                                 # alive and not this process
     meta = c.json(f"/api/session/{sid}?limit=1")["meta"]
-    assert meta["held_by"]["pid"] == 1 and meta["held_by"]["owner"] == "terminal"
+    assert meta["held_by"]["pid"] == other_live_pid and meta["held_by"]["owner"] == "terminal"
     for route, body in (("/api/chat/send", {"session": sid, "text": "hello"}), (f"/api/session/{sid}/reply", {"text": "hello"}),
                         ("/api/commands/run", {"session": sid, "line": "/status"})):
         st, _, out = c.post(route, body)
@@ -574,7 +589,7 @@ def test_a_session_held_by_another_process_is_read_only(c, env, llm):
 def test_a_dead_holder_does_not_lock_a_session(c, env):
     sid = env.ids["short"]
     folder = Path(c.srv.index.lookup(sid).path).parent
-    p = __import__("subprocess").Popen(["sleep", "0"])
+    p = __import__("subprocess").Popen([sys.executable, "-c", "pass"])
     p.wait()
     _hold(folder, p.pid)                                           # a process that has ended
     assert c.json(f"/api/session/{sid}?limit=1")["meta"]["held_by"] is None
@@ -669,6 +684,10 @@ def test_terminal_reports_when_unavailable(c, monkeypatch):
 
 # ─── the shell panel remembers the folder ───────────────────────────────────
 
+def _slashes(text: str) -> str:
+    return text.strip().replace("\\", "/")
+
+
 def _shell_output(c: Client, command: str) -> str:
     j = _run_shell(c, command)
     wait_for(lambda: c.srv.shell.jobs[j["id"]].hub.closed, 20)
@@ -678,11 +697,11 @@ def _shell_output(c: Client, command: str) -> str:
 def test_cd_carries_over_to_the_next_command(c, env):
     (c.srv.workspace / "sub" / "deep").mkdir(parents=True)
     _shell_output(c, "cd sub")
-    assert _shell_output(c, "pwd").strip().endswith("/sub")
+    assert _slashes(_shell_output(c, _PWD)).endswith("/sub")
     _shell_output(c, "cd deep")
-    assert _shell_output(c, "pwd").strip().endswith("/sub/deep")
+    assert _slashes(_shell_output(c, _PWD)).endswith("/sub/deep")
     _shell_output(c, "cd ../..")
-    assert not _shell_output(c, "pwd").strip().endswith("deep")
+    assert not _slashes(_shell_output(c, _PWD)).endswith("deep")
 
 
 def test_failed_cd_stays_put_and_reports_failure(c, env):
@@ -691,7 +710,7 @@ def test_failed_cd_stays_put_and_reports_failure(c, env):
     j = _run_shell(c, "cd no-such-folder")
     wait_for(lambda: c.srv.shell.jobs[j["id"]].hub.closed, 20)
     assert c.srv.shell.jobs[j["id"]].code != 0
-    assert _shell_output(c, "pwd").strip().endswith("/sub")
+    assert _slashes(_shell_output(c, _PWD)).endswith("/sub")
 
 
 def test_exit_code_is_unchanged_by_folder_tracking(c, env):
@@ -704,15 +723,15 @@ def test_page_is_told_the_new_folder(c, env):
     (c.srv.workspace / "sub").mkdir()
     j = _run_shell(c, "cd sub")
     exit_event = [e for e in _shell_events(c, j["id"]) if e.get("type") == "exit"][0]
-    assert exit_event["cwd"].endswith("/sub")
-    assert c.json("/api/shell/history")["cwd"].endswith("/sub")
+    assert _slashes(exit_event["cwd"]).endswith("/sub")
+    assert _slashes(c.json("/api/shell/history")["cwd"]).endswith("/sub")
 
 
 def test_folder_that_disappears_falls_back_to_the_project(c, env):
     (c.srv.workspace / "gone").mkdir()
     _shell_output(c, "cd gone")
     (c.srv.workspace / "gone").rmdir()
-    assert _shell_output(c, "pwd").strip() == str(c.srv.workspace.resolve())
+    assert _slashes(_shell_output(c, _PWD)) == _slashes(str(c.srv.workspace.resolve()))
 
 
 def test_guard_sees_the_current_folder(c, env, monkeypatch, tmp_path):
@@ -759,7 +778,10 @@ def test_insights_review_trail_timeline_ctxmap_and_more(c, env, llm):
     cm = c.json(f"/api/insights/ctxmap?{q}")
     assert cm["total"] > 0 and any(i["droppable"] for i in cm["items"]) and any(i["kind"] == "system" and not i["droppable"] for i in cm["items"])
     victim = next(i for i in cm["items"] if i["droppable"])
-    assert json.loads(c.post("/api/insights/ctxmap_drop", {"session": sid, "id": victim["id"]})[2])["ok"]
+    # These results are a few tokens each, smaller than the note a drop leaves behind, so the page is told it was kept
+    # (the real drop of a large result is covered in tests/test_ctxmap.py).
+    dropped = json.loads(c.post("/api/insights/ctxmap_drop", {"session": sid, "id": victim["id"]})[2])
+    assert dropped["ok"] is False and "kept" in dropped["message"]
     assert json.loads(c.post("/api/insights/pin", {"session": sid, "target": "a.txt"})[2])["ok"] in (True, False)
     assert "pins" in c.json(f"/api/insights/pins?{q}")
     assert c.json(f"/api/insights/whatif?{q}")["rows"] and "ok" in c.json(f"/api/insights/ctxdiff?{q}")
@@ -805,7 +827,9 @@ def test_secret_is_kept_across_restarts_and_private(env):
         c2.cookie = c1.cookie                              # the tab opened before the restart
         assert c2.get("/api/info")[0] == 200
         f = env.home / "dashboard-secret.json"
-        assert f.exists() and (f.stat().st_mode & 0o777) == 0o600
+        assert f.exists()
+        if os.name != "nt":                                # Windows has no mode bits; the profile folder's ACL is private
+            assert (f.stat().st_mode & 0o777) == 0o600
         assert s1.cookie not in c2.get("/")[2].decode() and s1.token not in c2.get("/")[2].decode()
         f.write_text("not json")                           # a damaged file is replaced, never trusted
         s3 = dash.make_server(0, env.ws)
@@ -967,7 +991,12 @@ def test_raw_media_supports_ranges_and_downloads_are_never_active_documents(c, e
     assert kinds == {"README.md": "markdown", "clip.mp4": "video", "docs/data.csv": "csv", "doc.pdf": "pdf", "a.mp3": "audio", "src/app/auth.py": "code", "docs/dot.png": "image"}
     opened: list = []
     monkeypatch.setattr(dash_fs.subprocess, "Popen", lambda argv, *a, **k: opened.append(argv))
-    assert c.post("/api/file/reveal", {"path": "clip.mp4"})[0] == 200 and opened and str(env.ws.resolve() / "clip.mp4") in " ".join(map(str, opened[0]))
+    assert c.post("/api/file/reveal", {"path": "clip.mp4"})[0] == 200 and opened
+    target = env.ws.resolve() / "clip.mp4"
+    if sys.platform == "darwin" or sys.platform.startswith("win"):   # Finder / Explorer select the file itself
+        assert str(target) in " ".join(map(str, opened[0]))
+    else:                                                            # Linux has no "select": it opens the containing folder
+        assert opened[0] == ["xdg-open", str(target.parent)]
     assert c.post("/api/file/reveal", {"path": "../../etc/hosts"})[0] == 403
 
 

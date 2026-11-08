@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 from pathlib import Path
 
@@ -61,7 +62,8 @@ def test_whole_folder_is_installed_and_other_skills_are_not(workspace: Path):
     root = path.parent
     assert (root / "scripts" / "run.py").read_text() == "print('hi')\n"
     assert (root / "references" / "guide.md").is_file()
-    assert (root / "scripts" / "go.sh").stat().st_mode & 0o111
+    if os.name != "nt":                                   # Windows has no execute bit
+        assert (root / "scripts" / "go.sh").stat().st_mode & 0o111
     origin = skill_tools.read_origin(root)
     assert origin["commit"] == SHA and origin["content_hash"] == b.content_hash() and origin["files"] == 4
 

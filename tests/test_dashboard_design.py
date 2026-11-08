@@ -14,7 +14,7 @@ from axon.features.dashboard_web import asset
 
 def _md(text: str) -> str:
     src = JS_MD + f"\nconsole.log(mdLite({json.dumps(text)}))"
-    p = subprocess.run(["node", "-e", src], capture_output=True, text=True, timeout=30)
+    p = subprocess.run(["node", "-"], input=src, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return p.stdout.strip()
 

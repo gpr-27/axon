@@ -43,7 +43,7 @@ var lsGet=()=>null, lsSet=()=>{}, toast=()=>{}, usd=(x)=>'$'+x, onLeave=()=>{}, 
 
 def run_js(body: str) -> object:
     src = HARNESS + JS_CARDS + "\n" + body
-    p = subprocess.run(["node", "-e", src], capture_output=True, text=True, timeout=30)
+    p = subprocess.run(["node", "-"], input=src, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout)
 
@@ -54,8 +54,8 @@ def model(name, inp, content, err=False, dur=None):
 
 def test_page_script_is_valid_javascript(tmp_path):
     f = tmp_path / "app.js"
-    f.write_text(APP_JS)
-    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+    f.write_text(APP_JS, encoding="utf-8")
+    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True, encoding="utf-8")
     assert p.returncode == 0, p.stderr
     assert "function axCard(" in APP_JS and "axOnEvent(C, ev)" in APP_JS and "axGhost(C, ta)" in APP_JS and "axNotifyPill()" in APP_JS
 
@@ -63,7 +63,7 @@ def test_page_script_is_valid_javascript(tmp_path):
 def test_every_tool_has_a_sentence_and_unknown_and_mcp_fall_back():
     names = set()
     for f in (ROOT / "src/axon/tools").glob("*.py"):
-        names.update(re.findall(r'^\s+name: ClassVar\[str\] = "(\w+)"', f.read_text(), re.M))
+        names.update(re.findall(r'^\s+name: ClassVar\[str\] = "(\w+)"', f.read_text(encoding="utf-8"), re.M))
     assert len(names) >= 30
     got = run_js(f"console.log(JSON.stringify({json.dumps(sorted(names))}.map(n=>[n,axCardModel(n,{{}},'',false,null).sentence])))")
     bad = [n for n, s in got if not s or s.startswith("Used ")]
@@ -97,6 +97,9 @@ def test_edit_write_multiedit_count_added_and_removed():
     assert e["sentence"] == "Edited a/b/c.py: 2 lines added, 1 line removed"
     w = model("Write", {"file_path": "n.txt", "content": "x\ny\nz"}, "ok")
     assert w["data"]["added"] == 3 and w["data"]["removed"] == 0
+    # a trailing newline ends the last line, it does not start another one
+    assert model("Write", {"file_path": "n.txt", "content": "hello\n"}, "ok")["data"]["added"] == 1
+    assert model("Write", {"file_path": "n.txt", "content": "x\ny\n"}, "ok")["data"]["added"] == 2
     mu = model("MultiEdit", {"file_path": "f", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c\nd", "new_string": "c"}]}, "ok")
     assert (mu["data"]["added"], mu["data"]["removed"]) == (1, 2)
 
@@ -172,6 +175,19 @@ const accepted=ta.value;
 ta.value=''; C.st.busy=true; timers[0](); const hiddenBusy=g.hidden;
 console.log(JSON.stringify({shown,prevented,accepted,inputs,hiddenBusy}));""")
     assert r["shown"] and r["prevented"] and r["accepted"] == "run the tests" and r["inputs"] == 1 and r["hiddenBusy"] is True
+
+
+def test_ghost_suggestion_replaces_the_placeholder_instead_of_overlapping_it():
+    r = run_js("""
+const timers=[]; globalThis.setInterval=(f)=>timers.push(f)&&1; globalThis.clearInterval=()=>{};
+const box=new Node('div'); const ta=new Node('textarea'); ta.value=''; ta.placeholder='Message Axon'; ta.parentElement=box;
+ta.addEventListener=()=>{}; ta.dispatchEvent=()=>{}; ta.setSelectionRange=()=>{};
+const C={st:{suggestion:'run the tests', busy:false}};
+axGhost(C, ta); timers[0]();
+const during=ta.placeholder;
+ta.value='typing'; timers[0](); const whileTyping=ta.placeholder; const hidden=box.kids[0].hidden;
+console.log(JSON.stringify({during,whileTyping,hidden}));""")
+    assert r == {"during": "", "whileTyping": "Message Axon", "hidden": True}
 
 
 def test_state_carries_the_suggestion(c, env, llm):

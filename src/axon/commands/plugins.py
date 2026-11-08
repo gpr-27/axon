@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+from axon.platform import rmtree as _rmtree
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -898,10 +899,10 @@ def install_plugin(source: str, root: Path) -> Plugin:
         proc = subprocess.run([git, "clone", "--depth", "1", "--", source, str(dest)], capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=120, stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
-            shutil.rmtree(dest, ignore_errors=True)
+            _rmtree(dest, ignore_errors=True)
             raise RuntimeError(f"git clone failed: {(proc.stderr or proc.stdout).strip()[:300]}")
         if _manifest_path(dest) is None and not _has_standard_layout(dest):
-            shutil.rmtree(dest, ignore_errors=True)
+            _rmtree(dest, ignore_errors=True)
             raise ValueError("Repository has no plugin.json - not an Axon/Claude plugin")
     mp = _manifest_path(dest)
     manifest = json.loads(mp.read_text(encoding="utf-8-sig")) if mp else {}
@@ -910,4 +911,4 @@ def install_plugin(source: str, root: Path) -> Plugin:
 
 
 def remove_plugin(plugin: Plugin) -> None:
-    shutil.rmtree(plugin.path)
+    _rmtree(plugin.path)

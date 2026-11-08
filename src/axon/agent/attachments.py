@@ -67,15 +67,36 @@ def _as_path(token: str) -> Path:
     return Path(token).expanduser()
 
 
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _split_drop(text: str) -> list[str]:
+    """Split a drop into path tokens. On Windows a backslash is a separator, not an escape, so the POSIX
+    splitter would turn C:\\Users\\a into C:Usersa; quotes are kept apart from the separators there."""
+    if os.name != "nt":
+        return shlex.split(text, posix=True)
+    out = []
+    for tok in shlex.split(text, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
+def _looks_like_path_line(line: str) -> bool:
+    line = line.strip()
+    return line.startswith(("/", "~", "'", '"', "file://", "\\\\")) or bool(_WIN_DRIVE_RE.match(line))
+
+
 def parse_dropped_paths(text: str) -> list[Path]:
     """The paths in *text* when all of it is existing paths, which is how a terminal delivers a drop; else []."""
     text = text.strip()
     if not text or len(text) > MAX_DROP_CHARS:
         return []
-    if "\n" in text and not all(line.strip().startswith(("/", "~", "'", '"', "file://")) for line in text.splitlines()):
+    if "\n" in text and not all(_looks_like_path_line(line) for line in text.splitlines()):
         return []
     try:
-        tokens = shlex.split(text, posix=True)
+        tokens = _split_drop(text)
     except ValueError:
         return []
     if not tokens:

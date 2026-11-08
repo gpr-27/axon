@@ -102,12 +102,19 @@ async function mgPatch(sid, patch) {
   catch (e) { mgNotice('Could not change that: ' + e.message, { error: true }); return false; }
 }
 async function mgRestore(items, after) {
+  let prog = null;
   try {
-    const r = await api('/api/manage/trash/restore', { items: items.map(x => ({ project_key: x.project_key, name: x.name })) });
+    const r = { results: [], restored: [] };
+    for (let i = 0; i < items.length; i += 250) {       // a few hundred at a time so a big restore shows how far it got
+      if (items.length > 250) { if (prog) prog.remove(); prog = mgNotice('Restoring chats: ' + i.toLocaleString() + ' of ' + items.length.toLocaleString() + '...', { ttl: 600000 }); }
+      const rr = await api('/api/manage/trash/restore', { items: items.slice(i, i + 250).map(x => ({ project_key: x.project_key, name: x.name })) });
+      r.results.push(...rr.results); r.restored.push(...rr.restored);
+    }
+    if (prog) prog.remove();
     const bad = r.results.filter(x => !x.ok), part = r.results.filter(x => x.ok && x.partial);
     mgNotice(r.restored.length ? 'Restored ' + r.restored.length + (r.restored.length === 1 ? ' chat.' : ' chats.') + (part.length ? ' Some files could not go back because something new is there; they are still in Recently deleted.' : '') + (bad.length ? ' ' + bad.length + ' could not be restored: ' + bad[0].reason : '') : (bad[0] ? bad[0].reason : 'Nothing was restored.'), { error: !r.restored.length });
     if (after) after(r);
-  } catch (e) { mgNotice('Could not restore: ' + e.message, { error: true }); }
+  } catch (e) { if (prog) prog.remove(); mgNotice('Could not restore: ' + e.message, { error: true }); if (after) after({ results: [], restored: [] }); }
 }
 // Delete chats (to Recently deleted). One chat needs no question because Undo is offered; several ask first and say how many.
 async function mgDelete(ids, o) {
@@ -117,9 +124,22 @@ async function mgDelete(ids, o) {
     const ok = await mgConfirm('Delete ' + ids.length + ' chats?', 'This moves ' + ids.length + ' chats to Recently deleted. Nothing is erased yet: you can restore them from there, or delete them for good.', 'Delete ' + ids.length + ' chats', true);
     if (!ok) return null;
   }
-  let r;
-  try { r = await api('/api/manage/sessions/delete', ids.length > 1 ? { ids, confirm_count: ids.length } : { ids }); }
-  catch (e) { mgNotice('Could not delete: ' + e.message, { error: true }); return null; }
+  let r = { results: [], deleted: [], refused: [] }, prog = null;
+  try {
+    for (let i = 0; i < ids.length; i += 250) {       // a few hundred at a time so a big delete shows how far it got
+      const part = ids.slice(i, i + 250);
+      if (ids.length > 250) { if (prog) prog.remove(); prog = mgNotice('Deleting chats: ' + i.toLocaleString() + ' of ' + ids.length.toLocaleString() + '...', { ttl: 600000 }); }
+      const rr = await api('/api/manage/sessions/delete', part.length > 1 ? { ids: part, confirm_count: part.length } : { ids: part });
+      r.results.push(...rr.results); r.deleted.push(...rr.deleted); r.refused.push(...rr.refused);
+    }
+  } catch (e) {
+    if (prog) prog.remove();
+    if (r.deleted.length) mgCloseChatTabs(r.deleted.map(x => x.id));
+    mgNotice('Could not finish deleting' + (r.deleted.length ? ' (' + r.deleted.length.toLocaleString() + ' were moved to Recently deleted)' : '') + ': ' + e.message, { error: true });
+    if (opts.after) opts.after(r);
+    return null;
+  }
+  if (prog) prog.remove();
   if (r.deleted.length) mgCloseChatTabs(r.deleted.map(x => x.id));
   if (r.refused.length) mgNotice((r.refused.length === 1 ? 'Not deleted. ' : r.refused.length + ' chats were not deleted. ') + r.refused[0].reason + (r.refused.length > 1 ? ' (and others in use or missing)' : ''), { error: true });
   if (r.deleted.length) {
@@ -318,6 +338,70 @@ async function viewSessions() {
     await load(true);
     loadTrash();
   });
+}
+
+// ---------- Memory notes: every scope, add, edit, delete, search (dash_manage.py) ----------
+const MEMSC = [['', 'All'], ['global', 'Global'], ['project', 'This project (private)'], ['repo', 'This repo (shared)']];
+const MEM = { q: '', scope: '' };
+function mgMemoryPanel(host) {
+  const list = h('div', { class: 'mg-memlist' });
+  const search = h('input', { class: 'search', type: 'search', placeholder: 'Search memories', 'aria-label': 'Search memories', value: MEM.q });
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Memory scope' });
+  const addText = h('textarea', { rows: 3, placeholder: 'Write what Axon should remember, in your own words', 'aria-label': 'New memory', style: 'width:100%' });
+  const addScope = h('select', { 'aria-label': 'Where to keep it' }, [['project', 'This project (private)'], ['repo', 'This repo (shared if you commit .axon)'], ['global', 'Global (every project)']].map(([v, l]) => h('option', { value: v }, l)));
+  const note = h('div', { class: 'muted', 'aria-live': 'polite' });
+  let gen = 0, counts = {};
+  const drawSeg = () => seg.replaceChildren(...MEMSC.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': String(MEM.scope === v), onclick: () => { MEM.scope = v; drawSeg(); load(); } },
+    l + (v ? ' (' + (counts[v] || 0) + ')' : ''))));
+  async function load() {
+    const my = ++gen; let d;
+    try { d = await api('/api/manage/memory?' + mgQs({ q: MEM.q.trim(), scope: MEM.scope })); } catch (e) { list.replaceChildren(errorBox(e.message)); return; }
+    if (my !== gen) return;
+    if (!MEM.q.trim() && !MEM.scope) counts = d.counts; else if (!Object.keys(counts).length) counts = d.counts;
+    drawSeg();
+    list.replaceChildren();
+    if (!d.memories.length) { list.append(h('p', { class: 'muted' }, (MEM.q.trim() || MEM.scope) ? 'No memories match.' : 'No saved memories yet. Add one above, or type /memory add in a chat.')); return; }
+    list.append(h('p', { class: 'muted' }, d.total + (d.total === 1 ? ' memory' : ' memories') + (d.total > d.memories.length ? ', showing ' + d.memories.length : '')));
+    for (const m of d.memories) list.append(memRow(m));
+  }
+  function memRow(m) {
+    const out = h('pre', { class: 'out' }, m.body + (m.cut ? '\n... (shortened here)' : ''));
+    const box = h('details', { class: 'tool mg-mem', 'data-id': m.scope + ':' + m.id },
+      h('summary', null, h('span', { class: 'tn' }, m.name), h('span', { class: 'ta' }, m.description === m.name ? '' : m.description), h('span', { class: 'ts' }, m.scope + ' · ' + m.type + (m.updated ? ' · ' + m.updated : ''))), out,
+      h('div', { class: 'muted', title: 'Where the file is' }, m.path));
+    const acts = h('div', { class: 'acts' });
+    const edit = h('button', { class: 'btn', type: 'button', onclick: () => {
+      if (m.cut) { mgNotice('That memory is too long to edit here. Open the file instead.', { error: true }); return; }
+      const ta = h('textarea', { rows: 8, style: 'width:100%', 'aria-label': 'Edit ' + m.name }); ta.value = m.body;
+      const save = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+        try { const r = await api('/api/manage/memory/update', { scope: m.scope, id: m.id, body: ta.value }); mgNotice(r.action === 'unchanged' ? 'Nothing changed.' : 'Saved. The old version is kept.'); load(); }
+        catch (e) { mgNotice(e.message, { error: true }); } } }, 'Save');
+      const cancel = h('button', { class: 'btn', type: 'button', onclick: () => { ta.replaceWith(out); acts.replaceChildren(edit, del); } }, 'Cancel');
+      out.replaceWith(ta); acts.replaceChildren(save, cancel); ta.focus();
+    } }, 'Edit');
+    const del = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+      if (!await mgConfirm('Delete this memory?', '"' + m.name.slice(0, 80) + '" will no longer be given to Axon. A copy is kept, and /memory restore brings it back.', 'Delete', true)) return;
+      try { await api('/api/manage/memory/delete', { scope: m.scope, id: m.id }); mgNotice('Deleted "' + m.name.slice(0, 50) + '".'); load(); }
+      catch (e) { mgNotice(e.message, { error: true }); } } }, 'Delete');
+    acts.append(edit, del); box.append(acts);
+    return box;
+  }
+  let timer = null;
+  search.addEventListener('input', () => { MEM.q = search.value; clearTimeout(timer); timer = setTimeout(load, 200); });
+  onLeave(() => clearTimeout(timer));
+  const add = async () => {
+    if (!addText.value.trim()) { note.textContent = 'Write something first.'; return; }
+    try {
+      const r = await api('/api/manage/memory/save', { scope: addScope.value, body: addText.value });
+      addText.value = ''; note.textContent = (r.action === 'unchanged' ? 'Already saved.' : 'Saved.') + (r.notes && r.notes.length ? ' ' + r.notes[0] : '');
+      counts = {}; load();
+    } catch (e) { note.textContent = e.message; }
+  };
+  host.append(h('h2', { style: 'margin-top:22px' }, 'Memories'),
+    h('p', { class: 'muted' }, 'Notes Axon keeps and is given at the start of every chat. Global applies to every project; project is private to this one; repo is kept in the project folder so a team can share it. Secrets are removed before saving.'),
+    h('div', { class: 'mg-memadd' }, addText, h('div', { class: 'formrow' }, addScope, h('button', { class: 'btn primary', type: 'button', onclick: add }, 'Remember'))), note,
+    h('div', { class: 'filters' }, search, seg), list);
+  load();
 }
 
 // ---------- Usage ----------

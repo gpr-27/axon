@@ -148,6 +148,8 @@ html[data-ap-code] .md pre code{font-size:inherit}
 /* syntax colours of a chosen code theme (the panels in Settings carry the attribute themselves) */
 [data-code-theme] .tk-c{color:var(--tk-c)}[data-code-theme] .tk-s{color:var(--tk-s)}[data-code-theme] .tk-n{color:var(--tk-n)}
 [data-code-theme] .tk-k{color:var(--tk-k)}[data-code-theme] .tk-f{color:var(--tk-f)}
+/* a chosen code theme also paints the viewer and editor ground, so its colours sit on the background they were made for */
+[data-code-theme] .code,[data-code-theme] .editor{background:var(--code-bg)}
 html[data-motion=reduced] *,html[data-motion=reduced] *::before,html[data-motion=reduced] *::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
 /* high contrast: stronger text and borders in whichever scheme is showing */
 html[data-contrast=high]:not([data-theme=dark]){--page:#fff;--surface:#fff;--canvas:#fff;--raised:#EDEFF2;--raised2:#DDE1E6;--ink:#000;--ink2:#14171C;--muted:#14171C;--line:rgba(0,0,0,.55);--line2:#000;--primary:#004D3F;--code-bg:#fff;--info:#0A3D91;--accent:#8F0F52;--ok:#1B5C13;--warn:#6B4000;--bad:#9C1229}
@@ -162,7 +164,7 @@ html[data-contrast=high][data-theme=light]{--page:#fff;--surface:#fff;--canvas:#
 .ap-row:last-child{border-bottom:0}
 .ap-lab{min-width:0;flex:1 1 220px}
 .ap-lab b{display:block;font-weight:600}
-.ap-lab span{display:block;color:var(--ink2);font-size:12.5px;margin-top:2px}
+.ap-lab span{display:block;color:var(--ink2);font-size:13px;margin-top:2px}
 .ap-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end}
 .ap-ctl .seg button{display:inline-flex;align-items:center;gap:6px}
 .ap-ctl .seg .ico{width:15px;height:15px}
@@ -174,6 +176,6 @@ html[data-contrast=high][data-theme=light]{--page:#fff;--surface:#fff;--canvas:#
 .ap-code{margin:0;border-radius:10px;padding:8px 0;background:var(--code-bg);color:var(--ink);font-family:var(--font-code);font-size:var(--size-code);line-height:1.5;overflow:auto;border:1px solid var(--line)}
 .ap-code .ln{display:block;padding:0 12px;white-space:pre}
 .ap-code .ln.add{background:var(--add-bg)}.ap-code .ln.del{background:var(--del-bg)}
-.ap-code .cap{display:block;padding:0 12px 4px;color:var(--ink2);font:11.5px var(--font-ui)}
+.ap-code .cap{display:block;padding:0 12px 4px;color:inherit;opacity:.8;font:12px var(--font-ui)}
 .ap-foot{display:flex;gap:10px;align-items:center;margin-top:6px}
 """

@@ -48,7 +48,7 @@ global.h = function (tag, props, ...kids) { const el = new El(tag); for (const [
 
 def _run(body: str, fonts: list[str] | None = None, with_settings: bool = False) -> dict:
     src = f"const INSTALLED_FONTS = {json.dumps(fonts or [])};\n" + FAKE + APPEARANCE_JS + (JS_SETTINGS if with_settings else "") + "\n" + body
-    p = subprocess.run(["node", "-e", src], capture_output=True, text=True, timeout=30)
+    p = subprocess.run(["node", "-"], input=src, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout.strip().splitlines()[-1])
 

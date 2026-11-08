@@ -236,7 +236,11 @@ async function refreshState(C, quiet) {
     C.runtime = true;
     if (!C.sid) C.sid = st.session;
     settleSpinners(C, !!st.busy);
-    if (first || !C.es) connectEvents(C, st);
+    // A browser keeps about six connections per site, and every open stream takes one: with a handful of chat tabs open,
+    // every other request (even Send) waits forever. A tab that is hidden and idle lets its stream go; it is picked up
+    // again when the tab is shown or starts working (this poll runs every few seconds).
+    if (!st.busy && C.feed && C.feed.isConnected && C.feed.offsetParent === null) { if (C.es) { C.es.close(); C.es = null; } }
+    else if (first || !C.es) connectEvents(C, st);
     if (!quiet) { drawHead(C); }
     drawRail(C); drawHeadStatus(C); if (UI.chat === C || !UI.chat) { UI.chat = C; setStatus(st); }
   } catch (e) { if (!quiet) toast(e.message); }
@@ -257,7 +261,12 @@ function connectEvents(C, st) {
   es.addEventListener('gap', () => { refreshState(C); tailHistory(C); });
   es.onerror = async () => {
     if (C.closed) return;
-    if (es.readyState === 2 && C.es === es) setTimeout(() => { if (!C.closed && C.es === es) connectEvents(C, C.st || { busy: false, seq: C.lastSeq }); }, 1500);   // the browser gave up: resume from the last event id
+    if (es.readyState === 2 && C.es === es) setTimeout(async () => {   // the browser gave up: resume from the last event id
+      if (C.closed || C.es !== es) return;
+      // the server may have restarted and forgotten this chat: stop asking (each try is a logged 404) until a message wakes it
+      try { const s = await api('/api/chat/state?session=' + encodeURIComponent(C.sid) + '&create=0'); if (s.none) { C.es = null; C.runtime = false; C.st = null; C.offline = false; C.offlineSince = 0; drawHeadStatus(C); return; } } catch (e) { /* server down: keep trying */ }
+      if (!C.closed && C.es === es) connectEvents(C, C.st || { busy: false, seq: C.lastSeq });
+    }, 1500);
     C.offline = true; C.offlineSince = C.offlineSince || Date.now(); drawHeadStatus(C);
     try { const r = await fetch('/api/info', { credentials: 'same-origin' }); if (r.status === 401) authLost(); } catch (e) { /* server down: the pill says so */ }
   };
@@ -519,6 +528,8 @@ function applyEvent(C, ev) {
     case 'approval_request': approvalCard(C, ev, ts); break;
     case 'approval_resolved': approvalDone(C, ev, ts); break;
     case 'question_request': if (C.replaying) { hostOf(C).append(notice('Asked: ' + ev.question)); break; } questionCard(C, ev); break;
+    case 'elicit_request': if (C.replaying) { hostOf(C).append(notice('MCP server ' + ev.server + ' asked: ' + ev.message)); break; } elicitCard(C, ev); break;
+    case 'elicit_resolved': document.getElementById('el-' + ev.id)?.replaceWith(notice('Answered the MCP request: ' + ev.action, ev.action === 'accept' ? 'ok' : '')); break;
     case 'question_resolved': document.getElementById('q-' + ev.id)?.replaceWith(notice('Answered: ' + (ev.labels ? ev.labels.join(', ') : 'skipped'), 'ok')); break;
     case 'llm_call_end': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); const u = ev.usage || {};
       const st = cur.step || newStep(C, cur, { iteration: ev.iteration, model: ev.model }, ts);
@@ -535,7 +546,7 @@ function applyEvent(C, ev) {
     case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
     case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;
     case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), 'warn')); break;
-    case 'retry': hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + ev.delay_s + 's: ' + ev.error, 'warn')); break;
+    case 'retry': hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + (Math.round(Number(ev.delay_s || 0) * 10) / 10) + 's: ' + ev.error, 'warn')); break;
     case 'steer': hostOf(C).append(notice('Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
     case 'queued': if (C.replaying) break; C.feed.append(notice((ev.steer ? 'Sent into the running turn: ' : 'Queued for after the turn: ') + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
     case 'memory_loaded': hostOf(C).append(h('div', { class: 'steprow dtl' }, h('span', null, 'memory loaded'), h('span', null, ev.path), h('span', null, ev.reason))); break;
@@ -742,6 +753,35 @@ function approvalDone(C, ev, ts) {
   if (ev.choice === 'deny') { row.classList.add('denied'); setToolState(row, 'bad'); }
   else { setToolState(row, 'run'); if (ts != null) row.querySelector('.td').dataset.t0 = ts; }
 }
+function elicitCard(C, ev) {
+  ensureTurn(C);
+  const inputs = {};
+  const rows = (ev.fields || []).map((f) => {
+    let inp;
+    if (f.enum && f.enum.length) inp = h('select', { 'aria-label': f.label }, ...(f.required ? [] : [h('option', { value: '' }, '(none)')]), ...f.enum.map(e => h('option', { value: e, selected: String(f.default) === e }, e)));
+    else if (f.type === 'boolean') inp = h('input', { type: 'checkbox', checked: !!f.default, 'aria-label': f.label });
+    else inp = h('input', { type: f.type === 'integer' || f.type === 'number' ? 'number' : 'text', value: f.default == null ? '' : String(f.default), 'aria-label': f.label, placeholder: f.description || '' });
+    inputs[f.key] = [f, inp];
+    return h('div', { class: 'formrow' }, h('label', null, f.label + (f.required ? ' *' : '')), inp, f.description ? h('span', { class: 'muted' }, f.description) : null);
+  });
+  const read = () => {
+    const out = {};
+    for (const [k, [f, inp]] of Object.entries(inputs)) {
+      if (f.type === 'boolean' && !(f.enum && f.enum.length)) { out[k] = inp.checked; continue; }
+      const v = inp.value.trim(); if (v === '') { if (f.required) throw new Error(f.label + ' is required'); continue; }
+      out[k] = f.type === 'integer' ? parseInt(v, 10) : f.type === 'number' ? parseFloat(v) : f.type === 'array' ? v.split(',').map(x => x.trim()).filter(Boolean) : v;
+    }
+    return out;
+  };
+  const send = async (action, content) => { try { await api('/api/chat/elicit', { session: C.sid, id: ev.id, action, content }); } catch (e) { toast(e.message); } };
+  const msg = h('p', null, ev.message || 'The server needs more information.');
+  const link = ev.url ? h('p', null, h('a', { href: ev.url, target: '_blank', rel: 'noopener noreferrer' }, ev.url)) : null;
+  const card = h('div', { class: 'approve question', id: 'el-' + ev.id }, h('h4', null, 'MCP server ' + ev.server + ' asks for input'), msg, link, ...rows,
+    h('div', { class: 'acts' },
+      h('button', { class: 'btn primary', onclick: () => { try { send('accept', ev.fields && ev.fields.length ? read() : undefined); } catch (e) { toast(e.message); } } }, ev.mode === 'url' ? 'I opened it' : 'Submit'),
+      h('button', { class: 'btn', onclick: () => send('decline') }, 'Decline'), h('button', { class: 'btn', onclick: () => send('cancel') }, 'Cancel')));
+  hostOf(C).append(card);
+}
 function questionCard(C, ev) {
   const cur = ensureTurn(C); const picked = new Set();
   const opts = (ev.options || []).map((o, i) => { const inp = h('input', { type: ev.multi ? 'checkbox' : 'radio', name: 'q' + ev.id, onchange: () => { if (!ev.multi) picked.clear(); inp.checked ? picked.add(o.label) : picked.delete(o.label); } }); return h('label', null, inp, h('span', null, h('b', null, o.label), o.description ? h('div', { class: 'muted' }, o.description) : null)); });
@@ -767,7 +807,8 @@ async function tailHistory(C, adopt) {
   if (!C.sid) return;
   try {
     const p = await api('/api/session/' + encodeURIComponent(C.sid) + '?after=' + C.lastIdx + '&limit=200');
-    if (p.entries.length) { C.meta = p.meta; if (adopt) { C.lastIdx = p.entries[p.entries.length - 1].i; } else { historyNodes(p.entries, C).forEach(n => C.feed.append(n)); C.lastIdx = p.entries[p.entries.length - 1].i; } }
+    if (p.meta) { C.meta = p.meta; if (C.meta.title && C.tab) setTabTitle(C.tab, C.meta.title.slice(0, 26)); if (typeof wbTitleSync === 'function') wbTitleSync(); }   // the chat's name, once it has one
+    if (p.entries.length) { if (adopt) { C.lastIdx = p.entries[p.entries.length - 1].i; } else { historyNodes(p.entries, C).forEach(n => C.feed.append(n)); C.lastIdx = p.entries[p.entries.length - 1].i; } }
     return p.entries.length;
   } catch (e) { return 0; }
 }
@@ -779,10 +820,11 @@ async function finishTurn(C, ev, ts, how) {
     const secs = ev && ev.duration_s != null ? Math.max(0, ev.duration_s - cur.waited) : (ts != null && cur.t0 != null ? Math.max(0, ts - cur.t0 - cur.waited) : null);
     if (ev) { cur.cost = ev.cost_usd != null ? ev.cost_usd : cur.cost; cur.costKnown = ev.cost_usd != null || cur.cost > 0; }
     const word = ev ? turnWord(ev.stop_reason) : '';
+    const stopped = !!(ev && ev.stop_reason === 'interrupted');   // the user pressed Stop: not a failure, and not an error box
     cur.endNote = ev && !['Done'].includes(word) && !ev.is_error ? word : '';
-    cur.title.textContent = ev && !ev.is_error ? (secs != null ? 'Worked for ' + axDur(secs) : 'Worked') : (how === 'error' || (ev && ev.is_error) ? 'Failed' : 'Stopped') + (secs != null ? ' after ' + axDur(secs) : '');
+    cur.title.textContent = ev && !ev.is_error ? (secs != null ? 'Worked for ' + axDur(secs) : 'Worked') : (!stopped && (how === 'error' || (ev && ev.is_error)) ? 'Failed' : 'Stopped') + (secs != null ? ' after ' + axDur(secs) : '');
     cur.el.textContent = ''; cur.el.removeAttribute('data-t0');
-    setMk(cur.mk, ev && !ev.is_error ? 'ok' : 'bad');
+    setMk(cur.mk, ev && !ev.is_error ? 'ok' : stopped ? 'stop' : 'bad');
     cur.art.querySelectorAll('[data-t0]').forEach(e => { e.removeAttribute('data-t0'); e.textContent = ''; });
     cur.art.querySelectorAll('.step .mk.run, .step .mk.wait, .tool .mk.run, .tool .mk.wait').forEach(m => setMk(m, 'stop'));
     cur.art.querySelectorAll('.approve').forEach(a => a.remove());
@@ -790,7 +832,8 @@ async function finishTurn(C, ev, ts, how) {
     cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/ running together$/, ' tools').replace(/^(\d+) tools tools$/, '$1 tools'); });
     headMeta(cur, true);
     cur.art.dataset.done = '1';
-    if (ev && ev.is_error) cur.answer.append(turnError(ev.result || ev.error || 'The turn failed.'));
+    if (stopped) cur.answer.append(notice('Stopped', ''));
+    else if (ev && ev.is_error) cur.answer.append(turnError(ev.result || ev.error || 'The turn failed.'));
   }
   C.cur = null;
   settleSpinners(C, false);
@@ -889,7 +932,7 @@ function buildComposer(C) {
     const first = v.split('\n')[0];
     if (/^\/\S*$/.test(first) && pos <= first.length) {
       if (!C.cmds) { try { C.cmds = (await api('/api/commands?session=' + encodeURIComponent(C.sid))).commands; } catch (e) { C.cmds = []; } }
-      const q = first.toLowerCase();
+      if (ta.value.split('\n')[0] !== first) return;                     // the box changed (or was sent) while the list loaded
       showPop(cmdSuggest(C.cmds, first, C.hist), 'cmd'); return;       // fuzzy, grouped, recent first (dash_js_cmdcards.py)
     }
     const m = v.slice(0, pos).match(/@([^\s@]*)$/);
@@ -917,6 +960,7 @@ function buildComposer(C) {
     C.hist.push(text); C.hist = C.hist.slice(-80); lsSet(histKey, JSON.stringify(C.hist)); C.hpos = -1;
     if (text.startsWith('!') && text.length > 1) { ta.value = ''; auto(); closePop(); return shellFromChat(C, text.slice(1).trim()); }
     ta.value = ''; auto(); closePop(); redrawChips();
+    C.atBottom = true;                       // sending is a reason to look at the newest reply
     send.disabled = true;
     try {
       const r = await api('/api/chat/send', { session: C.sid, text, steer, cards: true });
@@ -954,18 +998,28 @@ function commandResultCard(C, line, r) {
   if (!r.done) { const poll = setInterval(async () => { try { const j = await api('/api/command/job?id=' + r.id); if (j.done) { clearInterval(poll); out.innerHTML = j.html || ''; card.append(out); decorate(card); } } catch (e) { clearInterval(poll); } }, 1000); onLeave(() => clearInterval(poll)); }
 }
 async function shellFromChat(C, cmd) {
-  const card = h('div', { class: 'cmd-card' }, h('div', { class: 'steprow' }, h('b', { class: 'sh-cmd' }, '$ ' + cmd), h('span', { class: 'sh-state' }, 'running...')));
+  const stop = h('button', { class: 'mini danger', type: 'button', title: 'Stop this command' }, 'Stop');
+  const card = h('div', { class: 'cmd-card' }, h('div', { class: 'steprow' }, h('b', { class: 'sh-cmd' }, '$ ' + cmd), h('span', { class: 'sh-state' }, 'running...'), stop));
   const out = h('pre', { class: 'cmd-out nolink', style: 'max-height:40vh' }); card.append(out);
   C.feed.querySelector('.empty-chat')?.remove(); C.feed.append(card); stick(C);
-  let job; try { job = await api('/api/shell/run', { command: cmd }); } catch (e) { out.textContent = e.message; return; }
-  const plain = [];
+  let job; try { job = await api('/api/shell/run', { command: cmd }); } catch (e) { out.textContent = e.message; stop.remove(); return; }
+  stop.addEventListener('click', () => { stop.disabled = true; api('/api/shell/kill', { id: job.id }).catch(e => toast(e.message)); });
+  const plain = []; let q = [], timer = 0, shown = 0, trimmed = false;
+  // Batched like the Shell page: one layout per 60 ms, and only the newest 300 KB is kept on screen.
+  const flush = () => {
+    timer = 0; const batch = q; q = []; if (!batch.length) return;
+    for (const ev of batch) { const s = document.createElement('span'); s.innerHTML = ev.html; out.append(s); const t = s.textContent; plain.push(t); shown += t.length; }
+    while (shown > 300000 && out.firstChild && out.childNodes.length > 1) { shown -= (out.firstChild.textContent || '').length; out.removeChild(out.firstChild); trimmed = true; }
+    if (trimmed && !out.dataset.cut) { out.dataset.cut = '1'; card.querySelector('.sh-state').textContent += ' (older output trimmed here; Axon still gets the end of it)'; }
+    stick(C);
+  };
   const es = new EventSource('/api/shell/stream?id=' + job.id + '&since=0');
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
-    if (ev.type === 'out') { const s = document.createElement('span'); s.innerHTML = ev.html; out.append(s); plain.push(s.textContent); stick(C); }
-    else if (ev.type === 'refused') { out.append(h('div', { class: 'refused' }, ev.message)); }
-    else if (ev.type === 'exit') { es.close(); card.querySelector('.sh-state').textContent = ev.refused ? 'not run' : 'exit ' + ev.code + ' · ' + dur(ev.duration || 0);
-      if (!ev.refused) { const text = 'I ran `' + cmd + '` (exit code ' + ev.code + '). Output:\n```\n' + plain.join('').slice(-20000) + '\n```'; api('/api/chat/send', { session: C.sid, text, steer: true }).then(r => { if (!C.runtime) refreshState(C); }).catch(() => { }); } }
+    if (ev.type === 'out') { q.push(ev); if (!timer) timer = setTimeout(flush, 60); }
+    else if (ev.type === 'refused') { out.append(h('div', { class: 'refused' }, ev.message)); stop.remove(); }
+    else if (ev.type === 'exit') { es.close(); clearTimeout(timer); flush(); stop.remove(); const st = card.querySelector('.sh-state'); st.textContent = ev.refused ? 'not run' : (ev.killed ? 'stopped' : 'exit ' + ev.code) + ' · ' + dur(ev.duration || 0);
+      if (!ev.refused) { let tail = plain.join('').slice(-20000); const text = 'I ran `' + cmd + '` (' + (ev.killed ? 'stopped by the user' : 'exit code ' + ev.code) + '). Output:\n```\n' + tail + '\n```'; api('/api/chat/send', { session: C.sid, text, steer: true }).then(r => { if (!C.runtime) refreshState(C); }).catch(() => { }); } }
   };
   es.onerror = () => es.close();
 }

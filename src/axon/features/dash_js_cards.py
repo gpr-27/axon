@@ -21,7 +21,7 @@ const AX_SENT = {
 function axQ(v) { const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return s ? '“' + (s.length > 70 ? s.slice(0, 70) + '…' : s) + '”' : 'something'; }
 function axPath(i, k) { const p = (i && (i[k || 'file_path'] || i.path || i.file_path || i.notebook_path)) || ''; return p ? String(p).split(/[\\/]/).slice(-3).join('/') : 'the project folder'; }
 function axPlural(n, w) { return n + ' ' + (n === 1 ? w : /(ch|sh|s|x)$/.test(w) ? w + 'es' : w + 's'); }
-function axLines(s) { return s ? String(s).split('\n').length : 0; }
+function axLines(s) { return s ? String(s).replace(/\n$/, '').split('\n').length : 0; }
 function axCount(oldS, newS) {   // added and removed lines between two texts, by multiset difference (cheap, no LCS)
   const A = {}; for (const l of String(oldS || '').split('\n')) A[l] = (A[l] || 0) + 1;
   let add = 0; for (const l of String(newS || '').split('\n')) { if (A[l] > 0) A[l]--; else add++; }
@@ -205,13 +205,19 @@ function axGhostSoon(C) { if (C.ghostRefresh) C.ghostRefresh(); }
 function axGhost(C, ta) {
   const box = ta.parentElement; if (!box) return;
   const ghost = h('div', { class: 'ghost', 'aria-hidden': 'true', hidden: true }); box.append(ghost);
-  let shown = '', dismissed = '';
+  let shown = '', dismissed = '', placeholder = null;
   const hint = h('span', { class: 'ghint' }, 'Tab');
+  // The suggestion takes the placeholder's place and its exact position, so the two never overlap.
+  const seat = (on) => {
+    if (on && placeholder === null) { placeholder = ta.placeholder; ta.placeholder = ''; }
+    else if (!on && placeholder !== null) { if (!ta.placeholder) ta.placeholder = placeholder; placeholder = null; }
+    if (on && ghost.style) { ghost.style.left = (ta.offsetLeft || 0) + 'px'; ghost.style.top = (ta.offsetTop || 0) + 'px'; ghost.style.width = (ta.offsetWidth || 0) ? ta.offsetWidth + 'px' : ''; }
+  };
   const draw = () => {
     const sug = String((C.st && C.st.suggestion) || '').trim(); const busy = !!(C.st && C.st.busy);
     const want = sug && !busy && !ta.value && !C.locked && !C.shellMode && sug !== dismissed && !C.ghostGone ? sug : '';
     if (want === shown && ghost.hidden === !want) return;
-    shown = want; ghost.hidden = !want; ghost.replaceChildren();
+    shown = want; ghost.hidden = !want; ghost.replaceChildren(); seat(!!want);
     if (want) ghost.append(document.createTextNode(want), ' ', hint);
   };
   C.ghostRefresh = () => { if (C.st && C.st.suggestion) C.ghostGone = false; draw(); };

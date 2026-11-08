@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from axon.features import dash_fs
+from axon.features import dash_fs, worktree_view
 from axon.features.dash_common import DashError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -43,7 +43,7 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     if route == "/api/ws":
         info = dash_fs.git_info(ws)
         return {"workspace": str(ws), "name": ws.name, "home": str(Path.home()), "recent": dash_fs.recent_projects(),
-                "git": {"repo": info["repo"], "branch": info["branch"], "changed": len(info["files"])},
+                "git": {"repo": info["repo"], "branch": info["branch"], "changed": worktree_view.changed_count(ws) if info["repo"] else 0},
                 "live": srv.live is not None, "can_switch": srv.live is None,
                 "extra_dirs": [str(p) for p in srv.extra_dirs()]}
     if route == "/api/fs/dirs":
@@ -58,8 +58,8 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
         p = dash_fs.jail(ws, srv.extra_dirs(), qs.get("path", ""))
         if not p.is_file() or p.stat().st_size > 2_000_000:
             raise DashError("file not found or too large to preview", 404)
-        from axon.features.dashboard import redact_text, render_markdown
-        return {"html": render_markdown(redact_text(p.read_text(encoding="utf-8", errors="replace"))), "path": dash_fs.rel_to(ws, p)}
+        from axon.features.dashboard import render_markdown
+        return {"html": render_markdown(dash_fs.safe_text(p.name, p.read_text(encoding="utf-8", errors="replace"))), "path": dash_fs.rel_to(ws, p)}
     if route == "/api/file/extract":
         return dash_fs.extract_file(ws, srv.extra_dirs(), qs.get("path", ""), qs.get("pages"), qs.get("sheet"),
                                     _int(qs.get("offset"), 0, 0, 10**9), _int(qs.get("limit"), 500, 1, 5000))
@@ -111,10 +111,8 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
             raise DashError("n must be a subagent number") from None
         return dash_subagents.detail(srv, qs.get("session", ""), num)
     if route == "/api/models":
-        from axon.providers.registry import known_models
-        rt = srv.runtime(qs.get("session", ""), create=False)
-        cur = rt.agent.settings.model if rt else srv.settings_obj().model
-        return {"models": sorted(set(known_models()) | {cur}), "current": cur}
+        from axon.features import dash_providers as dp
+        return dp.current_models(srv, srv.runtime(qs.get("session", ""), create=False))
     if route == "/api/cmdcard":                  # structured command cards (dash_cmdcards.py)
         from axon.features import dash_cmdcards
         return dash_cmdcards.get(srv, qs)
@@ -134,7 +132,7 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     if route == "/api/memory":
         return memory_list(srv)
     if route == "/api/marketplace":
-        return marketplace(qs.get("tab", "connectors"), qs.get("q", ""))
+        return marketplace(qs.get("tab", "connectors"), qs.get("q", ""), ws)
     if route == "/api/permissions":
         return permissions_view(srv, qs.get("session", ""))
     return None
@@ -156,16 +154,35 @@ def _background(tail: bool) -> list[dict[str, Any]]:
     return rows
 
 
+def instruction_files(ws: Path) -> list[dict[str, Any]]:
+    """The AXON.md style files the model reads at the start, found the way the terminal finds them (the Axon home
+    folder and the project's folders, not the real home folder), each with where it lives and whether the page can edit it."""
+    rows: list[dict[str, Any]] = []
+    try:
+        from axon.agent.memory import discover_instruction_files
+        nodes = discover_instruction_files(ws)
+    except Exception:
+        return rows
+    wsr = Path(ws).resolve()
+    for n in nodes:
+        if n.scope in ("auto", "global-memory", "repo-memory"):      # the saved-memory indexes are listed as notes below
+            continue
+        p = Path(n.path)
+        try:
+            rel = p.resolve().relative_to(wsr).as_posix()
+        except (ValueError, OSError):
+            rel = ""
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = len(n.content)
+        rows.append({"name": p.name, "scope": "project" if rel else n.scope, "path": str(p), "rel": rel, "size": size, "editable": bool(rel)})
+    return rows
+
+
 def memory_list(srv: "DashServer") -> dict[str, Any]:
     ws = srv.workspace
-    files = []
-    for base, label in ((ws, "project"), (Path.home(), "user")):
-        for name in ("AXON.md", "CLAUDE.md", "AGENTS.md"):
-            p = base / name
-            if p.is_file():
-                inside = label == "project"
-                files.append({"name": name, "scope": label, "path": str(p), "rel": name if inside else "",
-                              "size": p.stat().st_size, "editable": inside})
+    files = instruction_files(ws)
     notes: list[dict[str, Any]] = []
     try:
         from axon.features import memory_files as mf
@@ -177,27 +194,44 @@ def memory_list(srv: "DashServer") -> dict[str, Any]:
     return {"files": files, "memories": notes, "workspace": str(ws)}
 
 
-def marketplace(tab: str, q: str) -> dict[str, Any]:
-    from axon.marketplace import catalog
+def marketplace(tab: str, q: str, workspace: Path | None = None) -> dict[str, Any]:
+    """The catalog the terminal's /marketplace shows: the built-in one plus the marketplaces you added, with what is installed."""
+    from axon.marketplace.cli import Marketplace
     if tab not in ("connectors", "skills", "plugins"):
         raise DashError("tab must be connectors, skills or plugins")
     try:
-        entries = catalog.filter_entries(catalog.load_tab(tab), q)
+        mk = Marketplace(Path(workspace) if workspace else Path.cwd())
+        installed = mk.installed_ids(tab)
+        from axon.marketplace import catalog
+        entries = catalog.filter_entries(mk.entries(tab), q)
     except Exception as e:
         raise DashError(f"could not load the catalog: {type(e).__name__}", 500) from None
     rows = []
-    for e in entries[:300]:
+    for e in entries[:400]:
         d = dataclasses.asdict(e)
-        rows.append({k: d.get(k) for k in ("id", "name", "publisher", "description", "category", "verified", "free", "docs_url",
-                                           "transport", "kind", "license") if k in d})
+        row = {k: d.get(k) for k in ("id", "name", "publisher", "description", "category", "verified", "free", "docs_url",
+                                     "transport", "kind", "license", "note") if k in d}
+        row["installed"] = e.id in installed
+        rows.append(row)
     return {"tab": tab, "entries": rows, "total": len(entries)}
 
 
 def permissions_view(srv: "DashServer", session: str) -> dict[str, Any]:
     rt = srv.runtime(session, create=False)
     s = rt.agent.settings if rt else srv.settings_obj()
-    perms = s.permissions
-    return {"mode": s.mode, "allow": list(perms.allow), "deny": list(perms.deny), "ask": list(getattr(perms, "ask", [])),
+    # The engine holds every rule in force (settings files, project and local files, this session), which the plain
+    # settings object does not: a rule added with /permissions never showed up here.
+    try:
+        from axon.marketplace.control import permission_engine
+        entries = permission_engine(srv.workspace, rt.agent.permissions if rt else None).list_rules()
+        rules = [{"kind": e.kind, "rule": str(e.rule), "source": str(e.source)} for e in entries]
+    except Exception:
+        perms = s.permissions
+        rules = ([{"kind": "allow", "rule": str(r), "source": "settings"} for r in perms.allow]
+                 + [{"kind": "ask", "rule": str(r), "source": "settings"} for r in getattr(perms, "ask", [])]
+                 + [{"kind": "deny", "rule": str(r), "source": "settings"} for r in perms.deny])
+    by = {k: [r["rule"] for r in rules if r["kind"] == k] for k in ("allow", "ask", "deny")}
+    return {"mode": s.mode, **by, "rules": rules,
             "additional_dirs": [str(p) for p in srv.extra_dirs()], "sandbox": bool(getattr(s, "sandbox_enabled", False))}
 
 
@@ -208,6 +242,9 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     if route.startswith("/api/manage/"):          # Sessions and Usage controls (dash_manage.py)
         from axon.features import dash_manage
         return dash_manage.post(srv, route, body)
+    if route == "/api/extensions/trust":
+        from axon.features import dash_ext
+        return dash_ext.trust_post(srv, body)
     if route == "/api/ws/set":
         return srv.set_workspace(_s(body, "path", 4096))
     if route == "/api/file/save":
@@ -249,6 +286,18 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
         if labels is not None and not (isinstance(labels, list) and all(isinstance(x, str) for x in labels)):
             raise DashError("labels must be a list of strings or null")
         rt.answer_question(_s(body, "id", 64), labels)
+        return {"ok": True}
+    if route == "/api/chat/elicit":
+        rt = srv.runtime(_s(body, "session", 300), create=False)
+        if rt is None:
+            raise DashError("no such session", 404)
+        action = _s(body, "action", 16)
+        if action not in ("accept", "decline", "cancel"):
+            raise DashError("action must be accept, decline or cancel")
+        content = body.get("content")
+        if content is not None and not isinstance(content, dict):
+            raise DashError("content must be an object")
+        rt.answer_elicit(_s(body, "id", 64), action, content)
         return {"ok": True}
     if route == "/api/subagent/stop":
         rt = srv.runtime(_s(body, "session", 300), create=False)
@@ -345,6 +394,15 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     return None
 
 
+def expand_mentions(text: str, workspace: Path) -> str:
+    """@file, @folder, @agent-name and @server:uri mean the same in the page as in the terminal."""
+    try:
+        from axon.cli import expand_agent_mentions, expand_file_mentions
+        return expand_file_mentions(expand_agent_mentions(text, Path(workspace)), Path(workspace))
+    except Exception:
+        return text
+
+
 def chat_send(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
     from axon.features import dash_providers as dp
     plain = not str(body.get("text") or "").lstrip().startswith("/")
@@ -375,7 +433,7 @@ def chat_send(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
     ready, why = dp.provider_ready(srv, rt)
     if not ready:
         raise DashError(why, 412)
-    line = srv.attach.expand(text)
+    line = srv.attach.expand(expand_mentions(text, rt.workspace))
     res = rt.send(line, display=text, steer=body.get("steer") is not False)
     res["session"] = rt.session_id
     return res

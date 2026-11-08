@@ -8,6 +8,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -130,6 +131,7 @@ def git_diff(ws: Path, p: Path) -> dict[str, Any]:
     if not text and info["files"].get(rel) == "U":
         out = _git(ws, "diff", "--no-index", "--no-color", "--", os.devnull, str(p), timeout=10)
         text = out.stdout.decode("utf-8", "replace") if out is not None else ""
+    text = redact_diff_text(text, is_secret_file(p.name))
     truncated = len(text) > MAX_DIFF_BYTES
     return {"repo": True, "diff": text[:MAX_DIFF_BYTES], "truncated": truncated, "status": info["files"].get(rel, "")}
 
@@ -254,6 +256,60 @@ def _redacted_view(text: str) -> tuple[str, bool]:
     from axon.features.dashboard import redact_text
     shown = redact_text(text)
     return shown, shown != text
+
+
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_KEY_VALUE = re.compile(r"^(\s*(?:export\s+)?[\"']?[\w.\-]+[\"']?\s*[:=]\s*)(.*)$")
+_STRUCTURE = {"", "{", "}", "[", "]", "},", "],", "---", "..."}
+
+
+def mask_secret_line(line: str) -> str:
+    """One line of a credential file (.env, credentials.json, a key): the value is hidden, the key name stays."""
+    s = line.strip()
+    if s in _STRUCTURE or s.startswith("#"):
+        return line
+    m = _KEY_VALUE.match(line)
+    if m and m.group(2).strip() not in _STRUCTURE:
+        return m.group(1) + "[REDACTED]"
+    return "[REDACTED]"
+
+
+def redact_lines(lines: list[str], secret_file: bool = False) -> list[str]:
+    """Secrets masked line by line without moving any line. A private key spans many lines, so its body is hidden
+    from the BEGIN line to the END line, which a one-line-at-a-time redactor cannot see. In a credential file
+    (*secret_file*) every value is hidden, whatever the key is called."""
+    from axon.features.dashboard import redact_text
+    out: list[str] = []
+    in_key = False
+    for ln in lines:
+        if in_key or _PEM_BEGIN.search(ln):
+            in_key = not _PEM_END.search(ln)
+            out.append("[REDACTED]")
+        else:
+            ln = redact_text(ln)
+            out.append(mask_secret_line(ln) if secret_file else ln)
+    return out
+
+
+def redact_diff_text(text: str, secret_file: bool = False) -> str:
+    """A unified diff with secrets masked in its content lines (file and hunk headers are left alone)."""
+    lines = text.split("\n")
+    body: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines):
+        if ln[:1] in ("+", "-", " ") and not ln.startswith(("+++ ", "--- ")):
+            body.append((i, ln))
+    bare = redact_lines([b[1:] for _, b in body], secret_file)
+    for (i, ln), new in zip(body, bare):
+        lines[i] = ln[:1] + new
+    return "\n".join(lines)
+
+
+def safe_text(name: str, text: str) -> str:
+    """File text as the page may show it: secrets masked, and a credential file's values always hidden."""
+    from axon.features.dashboard import redact_text
+    shown = redact_text(text)
+    return "\n".join(redact_lines(shown.split("\n"), True)) if is_secret_file(name) else shown
 
 
 # ─── shared extraction (docx, xlsx, pptx, sqlite, archives, ...): the same code the Read tool uses ───────────
@@ -387,6 +443,8 @@ def read_file(ws: Path, extra: list[Path], raw: str, offset: int = 0, limit: int
     secret_name = is_secret_file(p.name)
     if redacted:
         window = shown.split("\n")
+    if secret_name:                              # a credential file never shows a value, whatever the key is called
+        window = redact_lines(window, True)
     utf8_ok = True
     if whole:
         try:
@@ -448,8 +506,19 @@ def save_file(ws: Path, extra: list[Path], raw: str, content: str, expected_sha:
         mode = p.stat().st_mode & 0o7777
     elif not create:
         raise DashError("file does not exist", 404)
+    elif is_secret_file(p.name):
+        raise DashError("refused: this name is a credential file, which cannot be created or changed from here, because the page "
+                        "never shows its secrets. Create it in your own editor.", 403)
     elif not p.parent.is_dir():
         raise DashError("the folder does not exist", 404)
+    if p.suffix.lower() == ".ipynb":
+        try:
+            ok = isinstance(json.loads(content), dict)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise DashError("a notebook has to stay valid JSON, and this text is not, so it was not saved. "
+                            "Fix the JSON, or close the editor to discard the change.", 422)
     data = content.replace("\r\n", "\n")
     if eol == "\r\n":
         data = data.replace("\n", "\r\n")
@@ -642,6 +711,7 @@ def grep_files(ws: Path, query: str, limit: int = 200, budget_s: float = 5.0) ->
     t0 = time.time()
     matches: list[dict[str, Any]] = []
     scanned = 0
+    skipped = 0
     partial = False
     for f in iter_files(ws, include_hidden=False):
         if time.time() - t0 > budget_s or len(matches) >= limit:
@@ -650,6 +720,7 @@ def grep_files(ws: Path, query: str, limit: int = 200, budget_s: float = 5.0) ->
         try:
             st = f.stat()
             if st.st_size > 1_500_000:
+                skipped += 1
                 continue
             with open(f, "rb") as fh:
                 data = fh.read()
@@ -657,13 +728,15 @@ def grep_files(ws: Path, query: str, limit: int = 200, budget_s: float = 5.0) ->
             continue
         if b"\x00" in data[:4096]:
             continue
+        if is_secret_file(f.name):
+            continue                              # credential files are not searched: a match would print a secret
         scanned += 1
         text = data.decode("utf-8", "replace")
         if needle not in text.lower():
             continue
-        for n, line in enumerate(text.split("\n"), 1):
+        for n, line in enumerate(redact_lines(text.split("\n")), 1):
             if needle in line.lower():
                 matches.append({"path": rel_to(ws, f), "line": n, "text": line.strip()[:200]})
                 if len(matches) >= limit:
                     break
-    return {"matches": matches, "files": scanned, "partial": partial}
+    return {"matches": matches, "files": scanned, "partial": partial, "skipped_large": skipped}

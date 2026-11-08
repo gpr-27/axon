@@ -170,8 +170,10 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
 
     saved = (sys.stdin, plat.read_key, plat.raw_terminal, plat.term_size, picker.LiveFrame.render, picker.LiveFrame.clear)
     menus_before = picker.menus_run()
-    old_alarm = signal.signal(signal.SIGALRM, timeout)
-    signal.alarm(seconds)
+    has_alarm = hasattr(signal, "SIGALRM")        # Windows has no SIGALRM: no per-command time limit there
+    if has_alarm:
+        old_alarm = signal.signal(signal.SIGALRM, timeout)
+        signal.alarm(seconds)
     try:
         if tty:
             sys.stdin = _Keyboard()  # type: ignore[assignment]
@@ -185,8 +187,9 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
     except BaseException as exc:  # a command must never break the sweep
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_alarm)
+        if has_alarm:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_alarm)
         sys.stdin, plat.read_key, plat.raw_terminal, plat.term_size, picker.LiveFrame.render, picker.LiveFrame.clear = saved
         result.menus_shown = picker.menus_run() - menus_before + keys_read[0]
     result.output = out.getvalue()

@@ -109,9 +109,9 @@ def record_invocation(agent: Any, record_type: str, name: str, arguments: str, r
 
 
 def _parse_prompt_args(spec: list[dict[str, Any]], raw: str) -> dict[str, str]:
-    import shlex
+    from axon import platform
     try:
-        tokens = shlex.split(raw)
+        tokens = platform.split_words(raw)
     except ValueError:
         tokens = raw.split()
     out: dict[str, str] = {}
@@ -355,7 +355,7 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
         if d is None:
             err(f"No agent named '{rest}'.")
             return CommandResult(handled=True)
-        src = Path(str(d.source)) if str(d.source).endswith(".md") else None
+        src = Path(d.path) if getattr(d, "path", None) else (Path(str(d.source)) if str(d.source).endswith(".md") else None)
         if sub in ("show", "info"):
             header(d.name, str(d.source))
             kv("Description", d.description)
@@ -828,6 +828,32 @@ def _refresh_extensions(agent: Any) -> None:
     mgr = getattr(agent, "skills", None)
     if mgr is not None and hasattr(mgr, "discover"):
         mgr.discover()
+    hooks = getattr(agent, "hooks", None)      # a plugin's hooks and servers follow install / enable / remove at once
+    if hooks is not None and hasattr(hooks, "reload"):
+        try:
+            hooks.reload()
+        except Exception:
+            pass
+    _resync_plugin_servers(agent)
+
+
+def _resync_plugin_servers(agent: Any) -> None:
+    """Connect the MCP servers a plugin change added and drop the ones a removed or disabled plugin owned."""
+    try:
+        from axon.mcp import bridge as bridge_mod
+        from axon.mcp.config import MCPConfig
+        live = bridge_mod._bridge
+        if live is None:
+            return
+        specs = MCPConfig(ws_of(agent)).load_specs()
+        for name, conn in list(live.connections.items()):
+            if name not in specs and getattr(getattr(conn, "spec", None), "scope", "") == "plugin":
+                live.disconnect_server(name)
+        new = {n: s for n, s in specs.items() if s.scope == "plugin" and n not in live.connections}
+        if new:
+            live.connect_all(new)
+    except Exception:
+        pass
 
 
 @command("reload-plugins", category=CAT, description="Re-scan plugins, custom commands and skills", aliases=("reload",))

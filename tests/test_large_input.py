@@ -57,7 +57,7 @@ def test_request_stays_small_and_names_the_saved_file(workspace: Path):
     sent = _sent_text(agent.provider)
     assert len(sent) < 200_000
     saved = next(p for p in Path(agent.session.active_file).parent.joinpath("pastes").glob("*.txt"))
-    assert saved.read_text() == text and str(saved) in sent
+    assert saved.read_text(encoding="utf-8") == text and repr(str(saved))[1:-1] in sent     # the request text is a repr: backslashes are doubled
 
 
 def test_both_ends_of_the_input_reach_the_model(workspace: Path):

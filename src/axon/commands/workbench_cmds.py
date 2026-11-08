@@ -254,8 +254,11 @@ def print_context(agent: Any, expand: set[str], width: int) -> None:
     last = getattr(getattr(agent, "ledger", None), "last_usage", None)
     if last is not None and getattr(last, "input", 0):
         kv("Last API call", f"{last.input:,} input tokens (billed)")
-    print(f"\n  {DARK_SLATE}/context mcp|skills|memory|agents|messages|all   expands a list{RST}")
-    print(f"  {DARK_SLATE}/context --why explains each block · /compact frees space{RST}\n")
+    from axon.commands.common import is_tty
+    if not is_tty():  # in a terminal the /context menu offers these
+        print(f"\n  {DARK_SLATE}/context mcp|skills|memory|agents|messages|all   expands a list{RST}")
+        print(f"  {DARK_SLATE}/context --why explains each block · /compact frees space{RST}")
+    print()
 
 
 # ─── connectors ─────────────────────────────────────────────────────────────

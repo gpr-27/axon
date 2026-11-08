@@ -6,7 +6,7 @@ code without colliding with the main working tree or other concurrent subagents.
 from __future__ import annotations
 import logging
 import os
-import shutil
+from axon.platform import rmtree as _rmtree
 from typing import Any
 import subprocess
 from dataclasses import dataclass
@@ -92,14 +92,14 @@ class WorktreeManager:
 
         try:
             # Create worktree on a new branch from HEAD
-            cmd = ["git", "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"]
+            cmd = ["git", "-c", "core.longpaths=true", "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"]
             res = subprocess.run(cmd, cwd=str(workspace), capture_output=True, text=True,
                 encoding="utf-8",
                 errors="replace", timeout=10)
             if res.returncode != 0:
                 # If branch already exists, try without -b
                 if "already exists" in res.stderr:
-                    cmd = ["git", "worktree", "add", "--force", str(worktree_dir), "HEAD"]
+                    cmd = ["git", "-c", "core.longpaths=true", "worktree", "add", "--force", str(worktree_dir), "HEAD"]
                     res = subprocess.run(cmd, cwd=str(workspace), capture_output=True, text=True,
                 encoding="utf-8",
                 errors="replace", timeout=10)
@@ -222,7 +222,7 @@ class WorktreeManager:
 
         if worktree_path.exists():
             try:
-                shutil.rmtree(worktree_path, ignore_errors=True)
+                _rmtree(worktree_path, ignore_errors=True)
             except Exception:
                 pass
 
@@ -317,8 +317,8 @@ def create_session_worktree(workspace: Path, name: str | None = None) -> Worktre
     if (wt_dir / ".git").exists():
         return WorktreeInfo(task_id=clean, worktree_path=wt_dir, branch_name=branch, base_workspace=workspace, created=False)
     wt_dir.parent.mkdir(parents=True, exist_ok=True)
-    attempts = (["git", "worktree", "add", "-b", branch, str(wt_dir), "HEAD"],
-                ["git", "worktree", "add", str(wt_dir), branch])
+    attempts = (["git", "-c", "core.longpaths=true", "worktree", "add", "-b", branch, str(wt_dir), "HEAD"],
+                ["git", "-c", "core.longpaths=true", "worktree", "add", str(wt_dir), branch])
     for cmd in attempts:
         try:
             res = subprocess.run(cmd, cwd=str(workspace), capture_output=True, text=True,

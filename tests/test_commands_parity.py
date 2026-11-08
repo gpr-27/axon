@@ -431,6 +431,23 @@ def test_export_txt_and_clipboard(agent: Agent, monkeypatch, isolate_user_home: 
     assert out.exists() and "> export me" in out.read_text(encoding="utf-8")
 
 
+def test_export_without_a_keyboard_never_overwrites_and_never_just_cancels(agent: Agent, isolate_user_home: Path, tmp_path, capsys):
+    """The web app has no yes/no prompt: a second /export gets a numbered file, an explicit existing name is refused."""
+    agent.run_turn("export me")
+    from axon import storage
+    sid = agent.session.active_session_id
+    first = storage.session_dir(agent.settings.workspace, sid) / "exports" / f"{sid}.md"
+    dispatch_command("/export", agent)
+    first.write_text("keep me", encoding="utf-8")
+    dispatch_command("/export", agent)
+    assert first.read_text(encoding="utf-8") == "keep me" and (first.parent / f"{sid}-2.md").exists()
+    target = tmp_path / "out.md"
+    target.write_text("mine", encoding="utf-8")
+    capsys.readouterr()
+    res = dispatch_command(f"/export {target}", agent)
+    assert target.read_text(encoding="utf-8") == "mine" and "already exists" in capsys.readouterr().out and res.success is False
+
+
 def test_btw_sends_session_context(agent: Agent, monkeypatch):
     agent.run_turn("we are refactoring the parser")
     seen = {}

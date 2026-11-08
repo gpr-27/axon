@@ -15,13 +15,14 @@ from typing import Any
 from axon.features import dash_fs
 from axon.features.dash_common import DashError
 
-IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif")   # the last five are converted to PNG on the way in
 MAX_IMAGE_BYTES = 20 * 1024 * 1024      # larger pictures are refused with a reason; models reject them anyway
 MAX_PATHS = 50                          # one drop attaches at most this many items
 LIST_SHOWN = 60                         # entries of a folder shown to the model (one level, never recursive)
 LIST_SCANNED = 2000                     # entries looked at before the folder is called big
 INLINE_CHARS = 20_000                   # text of a referenced file sent inline; more is left for Read
 INLINE_BYTES = 256 * 1024
+TEXT_KINDS = ("text", "csv", "json", "jsonl", "yaml", "toml", "xml", "html", "svg", "log")
 SKIP_NAMES = {".git", "__pycache__", "node_modules", ".venv", ".DS_Store", ".mypy_cache", ".pytest_cache"}
 MAX_REGISTERED = 300
 
@@ -165,6 +166,18 @@ def _file_text(chip: str, p: Path) -> str:
     kb = f"{size / 1024:.1f} KB"
     if p.suffix.lower() == ".pdf":
         return f"[PDF: {rel}, {kb}. Read it with the Read tool; for a long one pass pages, for example pages=\"1-5\".]"
+    from axon.tools.file_formats import detect_kind, extract
+    try:
+        kind = detect_kind(p)
+    except OSError:
+        return chip
+    if kind not in TEXT_KINDS:
+        # Word, Excel, slides, archives, databases and the like: the readable text, as @path typed in the box gives.
+        text = extract(p, limit=2000).text
+        note = ""
+        if len(text) > INLINE_CHARS:
+            text, note = text[:INLINE_CHARS], f"\n[... cut at {INLINE_CHARS:,} characters; Read {rel} for the rest ...]"
+        return f"\n\n[File: {rel}]\n```\n{text}{note}\n```\n"
     if size <= INLINE_BYTES:
         try:
             data = p.read_bytes()
@@ -176,7 +189,7 @@ def _file_text(chip: str, p: Path) -> str:
             if len(text) > INLINE_CHARS:
                 text, note = text[:INLINE_CHARS], f"\n[... cut at {INLINE_CHARS:,} characters; Read {rel} for the rest ...]"
             return f"\n\n[File: {rel}]\n```\n{text}{note}\n```\n"
-        return f"[File: {rel}, {kb}, not text. Use the Read tool if you need it.]"
+        return f"\n\n[File: {rel}]\n```\n{extract(p, limit=2000).text[:INLINE_CHARS]}\n```\n"
     return f"[File: {rel}, {kb}, too large to include here. Read {rel} with the Read tool, in parts.]"
 
 

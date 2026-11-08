@@ -64,3 +64,14 @@ def test_a_disconnected_servers_tools_leave_the_search_list():
 def test_summary_groups_names_by_server():
     text = deferred_tool_summary({"mcp__a__x": 1, "mcp__a__y": 1, "mcp__b__z": 1, "Plain": 1})
     assert "mcp__a__ (2): x, y" in text and "mcp__b__ (1): z" in text and "Plain" in text
+
+
+def test_calling_a_deferred_tool_before_loading_it_says_to_use_toolsearch():
+    import pytest
+    from axon.tools.base import ToolError
+    registry = _registry_with([_mcp_tool("vercel", i) for i in range(100)])
+    defer_mcp_tools(registry, 1_000_000)
+    with pytest.raises(ToolError, match="select:mcp__vercel__tool_3"):
+        registry.get("mcp__vercel__tool_3")
+    with pytest.raises(ToolError, match="Unknown tool"):
+        registry.get("mcp__vercel__nope")

@@ -58,3 +58,13 @@ def test_a_pinned_result_is_never_dropped(workspace: Path) -> None:
 def test_unknown_id(workspace: Path) -> None:
     agent = _agent(workspace)
     assert not drop_result(agent, "nope")["ok"]
+
+
+def test_a_result_smaller_than_its_stub_is_kept(workspace: Path) -> None:
+    """Dropping a 20-token result swapped in a 130-token note and made the context bigger."""
+    agent = _agent(workspace)
+    small = min((i for i in ctxmap_data(agent)["items"] if i["kind"] == "tool_result"), key=lambda i: i["tokens"])
+    before = ctxmap_data(agent)["total"]
+    res = drop_result(agent, small["id"])
+    assert not res["ok"] and "kept" in res["message"]
+    assert ctxmap_data(agent)["total"] == before

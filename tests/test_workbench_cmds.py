@@ -371,7 +371,20 @@ def test_connectors_data_never_connects(repo: Path) -> None:
     names = [s["name"] for s in data["servers"]]
     assert "demo" in names
     demo = next(s for s in data["servers"] if s["name"] == "demo")
-    assert demo["status"] in ("not connected", "pending-approval") and demo["needs_reconnect"]
+    # A server waiting for approval is not "to reconnect": it has its own state and its own action (Approve).
+    assert demo["status"] in ("not connected", "pending-approval")
+    assert demo["needs_reconnect"] is (demo["status"] != "pending-approval") and demo["needs_approval"] is (demo["status"] == "pending-approval")
+
+
+def test_a_server_waiting_for_approval_says_so_not_reconnect(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from axon.mcp import state as mcp_state
+    (repo / ".mcp.json").write_text('{"mcpServers": {"demo": {"command": "definitely-not-a-real-binary"}}}')
+    monkeypatch.setattr(mcp_state, "project_choice", lambda ws, name: "pending")
+    data = wd.connectors(repo)
+    demo = next(s for s in data["servers"] if s["name"] == "demo")
+    if demo["status"] != "pending-approval":
+        pytest.skip("this build treats the project file as already approved")
+    assert demo["needs_approval"] is True and demo["needs_reconnect"] is False and data["approval"] == 1 and data["reconnect"] == 0
 
 
 def test_detail_screen_expands_and_shows_more(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -395,7 +408,10 @@ def test_detail_screen_expands_and_shows_more(monkeypatch: pytest.MonkeyPatch, r
 # ─── /workbench ─────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("width", [50, 80, 120])
-def test_workbench_sections_fit(repo: Path, width: int) -> None:
+def test_workbench_sections_fit(repo: Path, width: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    from axon.tools import shell as shell_tool
+    # background shells are process-wide: other tests' leftovers must not show up in the "Nothing running" check
+    monkeypatch.setattr(shell_tool, "BACKGROUND", shell_tool.BackgroundShells())
     agent = _agent(repo)
     agent.todos.replace([{"content": "write tests", "status": "in_progress", "active_form": "writing tests"},
                          {"content": "ship", "status": "pending"}]) if hasattr(agent.todos, "replace") else None

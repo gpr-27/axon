@@ -92,3 +92,15 @@ def ledger():
 def _private_clipboard(tmp_path_factory, monkeypatch):
     """Copies made by tests go to a temp file, never to the developer's real clipboard."""
     monkeypatch.setenv("AXON_CLIPBOARD_FILE", str(tmp_path_factory.mktemp("clip") / "clipboard.txt"))
+
+
+@pytest.fixture
+def other_live_pid():
+    """The pid of a running process that is not this one (pid 1 and the parent are not reliable on Windows)."""
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()

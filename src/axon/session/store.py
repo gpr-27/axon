@@ -464,7 +464,14 @@ class SessionStore:
             previous.release()
         folder = self.active_file.parent
         self._lease = lease.acquire(folder)
+        self._lease_file = self.active_file
         self.conflict = lease.holder(folder) if self._lease is None else None
+
+    def _ensure_lease(self) -> None:
+        """A session that was never ``open``ed (the one a fresh process starts with) takes its lease when it first writes,
+        so a second terminal or page that resumes it is told it is in use instead of interleaving two histories."""
+        if not self._explicit_dir and getattr(self, "_lease_file", None) != self.active_file:
+            self._take_lease()
 
     # ── writing ──
     def _encode(self, entry: dict[str, Any]) -> str:
@@ -477,6 +484,8 @@ class SessionStore:
 
     def _write_record(self, target: Path, record_type: str, data: Any) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target == self.active_file:
+            self._ensure_lease()
         if not target.exists() or target.stat().st_size == 0:
             meta = {"type": "session_meta", "timestamp": time.time(),
                     "data": {"workspace": str(self.workspace), "version": 1}}
@@ -989,6 +998,7 @@ class SessionStore:
             dest.mkdir(parents=True, exist_ok=False)
         except OSError:
             return False
+        self.last_trash = dest               # callers that need the folder name must not rescan every trashed session
         for i, src in enumerate(self._session_artifacts(session_id)):
             target = dest / f"{i:02d}_{src.name}"
             try:
@@ -1033,10 +1043,18 @@ class SessionStore:
         """Move a trashed session back (id, unique prefix or trash folder name). Returns its id.
         Files whose original location is occupied are left in the trash folder."""
         import shutil
-        items = self.list_trash()
         q = query.strip()
-        hit = ([m for m in items if m["id"] == q or m["path"].name == q]
-               or [m for m in items if m["id"].startswith(q) or m["path"].name.startswith(q)])
+        exact = self.trash_root() / q if q and q == Path(q).name and q not in (".", "..") else None
+        if exact is not None and exact.is_dir() and not exact.is_symlink():
+            hit = [{"id": q.split("_", 1)[-1], "path": exact}]        # a folder name: do not read every manifest in the trash
+            try:
+                hit[0]["id"] = str(json.loads((exact / "manifest.json").read_text(encoding="utf-8")).get("session_id") or hit[0]["id"])
+            except (OSError, ValueError, AttributeError):
+                pass
+        else:
+            items = self.list_trash()
+            hit = ([m for m in items if m["id"] == q or m["path"].name == q]
+                   or [m for m in items if m["id"].startswith(q) or m["path"].name.startswith(q)])
         if not q or not hit:
             return None
         entry = hit[0]  # newest deletion of that session

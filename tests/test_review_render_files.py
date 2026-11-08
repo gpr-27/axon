@@ -3,6 +3,7 @@ the repo-map, analytics, tips and chart-helper features.  One test per defect; t
 orders of magnitude above the fixed cost and below the old (quadratic or cubic) cost."""
 from __future__ import annotations
 
+import os
 import json
 import time
 from pathlib import Path
@@ -51,8 +52,9 @@ def test_css_number_regex_is_not_cubic_on_digit_runs() -> None:
 
 
 def test_inline_code_with_unknown_user_home_does_not_raise() -> None:
-    # Path("~nosuchuser/x").expanduser() raises RuntimeError
-    assert markdown.file_uri("~nosuchuser-axon-review/foo") == ""
+    # Path("~nosuchuser/x").expanduser() raises RuntimeError on POSIX; Windows resolves it beside the profile folder.
+    if os.name != "nt":
+        assert markdown.file_uri("~nosuchuser-axon-review/foo") == ""
     assert "foo.py" in strip_ansi(markdown._style_inline("see `~nosuchuser-axon-review/foo.py` now"))
 
 

@@ -29,6 +29,9 @@ IS_WINDOWS = sys.platform == "win32"
 # that merely happen to be called "system").
 _CREDENTIAL_PARTS = {".ssh", ".aws", ".gnupg", ".netrc", ".vault", ".git-credentials", ".pgpass", ".azure", ".kube", "shadow", "gshadow"}
 
+# Credential folders that sit one level below a shared folder: ~/.config/gh holds the GitHub token.
+_CREDENTIAL_PAIRS = {(".config", "gh"), (".config", "gcloud"), (".config", "op"), (".docker", "config.json")}
+
 _POSIX_SYSTEM_DIRS = [
     "/etc",
     "/private/etc",
@@ -84,6 +87,9 @@ def _is_credential_path(resolved: Path) -> str | None:
     for part in parts:
         if part in blocked:
             return part
+    for a, b in zip(parts, parts[1:]):
+        if (a, b) in _CREDENTIAL_PAIRS:
+            return f"{a}/{b}"
     # ~/.axon/.env holds provider API keys
     if is_within(_axon_home(), resolved) and resolved.name.lower() == ".env":
         return ".axon/.env"
@@ -163,6 +169,7 @@ def credential_stores() -> list[Path]:
         home = None
     names = sorted(n for n in _CREDENTIAL_PARTS if n.startswith("."))
     stores = [home / n for n in names] if home is not None else []
+    stores.extend(home / a / b for a, b in sorted(_CREDENTIAL_PAIRS)) if home is not None else None
     stores.append(_axon_home() / ".env")
     return [s for s in stores if s.exists()]
 

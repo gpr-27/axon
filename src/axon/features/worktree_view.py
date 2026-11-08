@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from axon.platform import rmtree as _rmtree
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from typing import Any
 TARGETS = ("working", "staged", "commit", "branch")
 TARGET_LABEL = {"working": "working tree", "staged": "staged", "commit": "last commit", "branch": "branch"}
 STATUS_WORD = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed", "U": "untracked", "C": "conflict"}
-EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbc4ba46"
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 MAX_DIFF_CHARS = 400_000
 MAX_COUNTED_UNTRACKED = 5000         # untracked files whose lines are counted (over 1 MB or binary counts 0)
 
@@ -85,6 +86,14 @@ def _count_lines(p: Path) -> int:
         return 0
 
 
+def valid_ref(ws: Path | str, ref: str) -> bool:
+    """True when *ref* names a commit. A ref that starts with a dash is an option to git (``--output=FILE`` would
+    overwrite a file), so it is refused before git ever sees it."""
+    if not ref or ref.startswith("-") or any(c in ref for c in "\0\n\r"):
+        return False
+    return git_text(ws, "rev-parse", "--verify", "-q", ref + "^{commit}") is not None
+
+
 def _base_args(ws: Path | str, target: str, ref: str, has_head: bool) -> tuple[list[str] | None, str]:
     """git-diff arguments for a compare target and the label of what is being compared with."""
     if target == "staged":
@@ -95,7 +104,7 @@ def _base_args(ws: Path | str, target: str, ref: str, has_head: bool) -> tuple[l
         parent = "HEAD~1" if git_text(ws, "rev-parse", "--verify", "-q", "HEAD~1") is not None else EMPTY_TREE
         return [parent, "HEAD"], "HEAD~1"
     if target == "branch":
-        if not ref:
+        if not valid_ref(ws, ref):
             return None, ""
         base = (git_text(ws, "merge-base", ref, "HEAD") or "").strip()
         return ([base] if base else [ref]), ref
@@ -105,6 +114,21 @@ def _base_args(ws: Path | str, target: str, ref: str, has_head: bool) -> tuple[l
 def _stat_code(c: str) -> str:
     c = c.strip()[:1] or "M"
     return c if c in STATUS_WORD else "M"
+
+
+_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def changed_count(ws: Path | str) -> int:
+    """Number of changed files, the same figure the Changes panel and ``/diff`` show (cached for 4 seconds)."""
+    import time
+    key, now = str(ws), time.time()
+    hit = _COUNT_CACHE.get(key)
+    if hit and now - hit[0] < 4:
+        return hit[1]
+    n = len(changes(ws).get("files") or [])
+    _COUNT_CACHE[key] = (now, n)
+    return n
 
 
 def changes(ws: Path | str, target: str = "working", ref: str = "") -> dict[str, Any]:
@@ -250,7 +274,7 @@ def file_diff(ws: Path | str, path: str, target: str = "working", ref: str = "",
             return {"rows": [], "truncated": False, "note": "Could not read the file."}
         if b"\0" in data[:4096]:
             return {"rows": [{"kind": "meta", "old": None, "new": None, "text": "Binary file"}], "truncated": False, "note": ""}
-        lines = data.decode("utf-8", "replace").split("\n")
+        lines = data.decode("utf-8", "replace").replace("\r\n", "\n").split("\n")        # a Windows file ends lines in CRLF
         if lines and lines[-1] == "":
             lines.pop()
         return {"rows": [{"kind": "add", "old": None, "new": i, "text": t} for i, t in enumerate(lines, 1)],
@@ -295,10 +319,12 @@ def discard(ws: Path | str, path: str, code: str = "") -> tuple[bool, str]:
     p = _inside(ws, path)
     if p is None:
         return False, "Outside the project."
+    if code == "U" and (p == ws.resolve() or ".git" in p.relative_to(ws.resolve()).parts):
+        return False, "That path cannot be discarded."      # never the project folder itself, never git's own files
     if code == "U":
         try:
             if p.is_dir():
-                shutil.rmtree(p)
+                _rmtree(p)
             else:
                 p.unlink()
         except OSError as e:

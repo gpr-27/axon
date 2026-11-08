@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import socket
 import stat
 import struct
@@ -131,7 +132,8 @@ def test_websocket_connection_through_the_bridge_uses_header_provider():
     spec = ServerSpec.from_dict("ws", {"type": "ws", "url": srv.url, "headersHelper": "echo"})
     conn = MCPServerConnection("ws", spec=spec, auto_reconnect=False)
     # a helper that prints a header the server demands
-    helper = f"{shlex.quote(sys.executable)} -c \"import json;print(json.dumps({{'X-Dyn':'1'}}))\""
+    quote = subprocess.list2cmdline if os.name == "nt" else shlex.quote      # the helper runs through cmd.exe on Windows
+    helper = f"{quote([sys.executable]) if os.name == 'nt' else quote(sys.executable)} -c \"import json;print(json.dumps({{'X-Dyn':'1'}}))\""
     conn.spec.headers_helper = helper
     try:
         assert conn.start(), conn.error

@@ -246,16 +246,21 @@ def test_a_shell_command_is_shown_exactly_with_all_its_lines():
     assert rows[0] == "echo 0" and rows[-1] == "… +7 more lines · /output 7" and len(rows) == 6
 
 
+def _slashes(rows):
+    """Windows shows the path separator it uses; the cards are otherwise identical."""
+    return [r.replace("\\", "/") for r in rows]
+
+
 def test_paths_are_shown_relative_to_the_workspace_and_home_as_tilde(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     home = os.path.expanduser("~")
     inp = {"file_path": f"{tmp_path}/src/axon/registry.py", "offset": 1, "limit": 40}
-    assert _fields(_card_text("Read", "     1→x", inp))["input"] == ["src/axon/registry.py · lines 1-40"]
+    assert _slashes(_fields(_card_text("Read", "     1→x", inp))["input"]) == ["src/axon/registry.py · lines 1-40"]
     grep = _fields(_card_text("Grep", f"{tmp_path}/src/a.py:3:x", {"pattern": "x", "path": f"{tmp_path}/src"}))
-    assert grep["input"] == ['"x" in src'] and grep["output"] == ["src/a.py:3  x"]
+    assert _slashes(grep["input"]) == ['"x" in src'] and _slashes(grep["output"]) == ["src/a.py:3  x"]
     other = _fields(_card_text("Read", "     1→x", {"file_path": f"{home}/notes/todo.md"}))
-    assert other["input"] == ["~/notes/todo.md"]
-    assert tool_cards.tidy_paths(f"cat {tmp_path}/a.txt {home}/b.txt") == "cat a.txt ~/b.txt"
+    assert _slashes(other["input"]) == ["~/notes/todo.md"]
+    assert tool_cards.tidy_paths(f"cat {tmp_path}/a.txt {home}/b.txt").replace("\\", "/") == "cat a.txt ~/b.txt"
 
 
 def test_default_options_are_dropped_and_real_ones_are_dim_extras():

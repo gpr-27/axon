@@ -70,9 +70,9 @@ def test_preview_check_accepts_only_http_loopback_with_a_port(c, url, ok):
 def test_browser_address_rules_in_the_page():
     fn = re.search(r"^function wbNormalizeUrl\(.*?^}\n", APP_JS, re.S | re.M).group(0)
     script = "const location = { port: '8900', hostname: '127.0.0.1' };\n" + fn + """
-const out = {}; for (const s of ['3000', ':5173', 'localhost:8080/a', 'example.com', 'https://localhost:3000', 'ftp://x', '127.0.0.1:8900', '', 'http://localhost']) out[s] = wbNormalizeUrl(s);
+const out = {}; for (const s of ['3000', ':5173', 'localhost:8080/a', 'example.com', 'https://localhost:3000', 'ftp://x', '127.0.0.1:8900', '', 'http://localhost', 'abc def', 'localhost:3000 x']) out[s] = wbNormalizeUrl(s);
 console.log(JSON.stringify(out));"""
-    r = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    r = json.loads(subprocess.run(["node", "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True).stdout)
     assert r["3000"] == {"url": "http://localhost:3000/", "frame": True, "own": False}
     assert r[":5173"]["frame"] is True and r["localhost:8080/a"]["frame"] is True
     assert r["example.com"]["frame"] is False and r["example.com"]["url"].startswith("https:")          # opened in a new tab, not framed
@@ -80,6 +80,7 @@ console.log(JSON.stringify(out));"""
     assert "err" in r["ftp://x"] and "err" in r[""]
     assert r["127.0.0.1:8900"]["own"] is True and r["127.0.0.1:8900"]["frame"] is False                  # never frames Axon itself
     assert r["http://localhost"]["frame"] is False
+    assert "err" in r["abc def"] and "err" in r["localhost:3000 x"]      # Chrome's URL() would turn the space into %20 and open it
 
 
 def test_the_frame_is_sandboxed_and_carries_no_referrer():
@@ -261,7 +262,7 @@ def test_usage_shows_only_real_limits(c, env):
 
 def test_connectors_view_is_read_only_and_hooks_listing_works(c, env):
     d = c.json("/api/workbench/connectors")
-    assert set(d) == {"servers", "reconnect", "connected"}
+    assert set(d) == {"servers", "reconnect", "connected", "approval"}   # approval: servers waiting for Approve
     assert c.post("/api/workbench/connector", {"name": "ghost", "action": "reconnect"})[0] == 404
     assert "hooks" in c.json("/api/workbench/hooks?session=")
 
@@ -291,8 +292,8 @@ def test_toolbar_panels_and_footer_are_in_the_page():
 @needs_node
 def test_page_script_for_the_workbench_has_no_syntax_errors(tmp_path):
     f = tmp_path / "app.js"
-    f.write_text(APP_JS)
-    r = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+    f.write_text(APP_JS, encoding="utf-8")
+    r = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr
 
 
@@ -303,7 +304,7 @@ def test_diff_rows_become_page_rows_and_are_capped():
 const rows = [{kind:'hunk',old:null,new:null,text:'@@ -1 +1 @@'},{kind:'del',old:1,new:null,text:'a'},{kind:'add',old:null,new:1,text:'b'},{kind:'meta',old:null,new:null,text:'No newline'}];
 const big = Array.from({length: 3500}, (_, i) => ({kind:'ctx',old:i,new:i,text:'x'}));
 console.log(JSON.stringify([wbRows({rows}).map(r => r.t + r.n), wbRows({rows: big}).length, wbRows({rows: big}).slice(-1)[0].t]));"""
-    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    out = json.loads(subprocess.run(["node", "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True).stdout)
     assert out[0] == ["hunknull", "del1", "add1", "notenull"] or out[0][0].startswith("hunk")
     assert out[1] == 3001 and out[2] == "note"
 
@@ -311,3 +312,93 @@ console.log(JSON.stringify([wbRows({rows}).map(r => r.t + r.n), wbRows({rows: bi
 def test_opening_panels_keeps_room_for_the_chat():
     from axon.features.dash_js_workbench import JS_WORKBENCH
     assert "wbKeepChatRoom(id)" in JS_WORKBENCH and "WB_CHAT_MIN = 560" in JS_WORKBENCH
+
+
+# ─── end-to-end round: defects found by driving the real page ───────────────
+
+@needs_git
+def test_last_commit_of_a_one_commit_repo_lists_every_file(c, repo):
+    """The empty-tree id was mistyped, so 'Last commit' showed nothing for a repo with a single commit."""
+    d = c.json("/api/workbench/changes?mode=commit")
+    assert {"a.py", "b.txt"} <= {f["path"] for f in d["files"]} and d["error"] == ""
+
+
+@needs_git
+def test_header_changed_count_is_the_changes_panel_count(c, repo):
+    """An untracked folder counted once in the header but once per file in the panel."""
+    (repo / "dir" / "sub").mkdir(parents=True)
+    (repo / "dir" / "one.txt").write_text("1\n")
+    (repo / "dir" / "sub" / "two.txt").write_text("2\n")
+    panel = c.json("/api/workbench/changes")
+    assert c.json("/api/ws")["git"]["changed"] == len(panel["files"])
+    assert any(f["path"] == "dir/sub/two.txt" for f in panel["files"])
+
+
+@needs_git
+def test_create_pr_refuses_the_base_branch_itself(c, repo):
+    from axon.features import dash_workbench as wb
+    plan = {"repo": True, "gh": True, "branch": "main", "base": "main", "needs_push": False, "upstream": "", "ahead": 0, "dirty": 0}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wb, "pr_plan", lambda ws: plan)
+        with pytest.raises(wb.DashError) as e:
+            wb.create_pr(repo, {"confirm": True})
+    assert e.value.status == 409 and "Switch to another branch" in str(e.value)
+
+
+def test_enable_says_so_when_the_shared_mcp_file_keeps_a_server_off(c, env):
+    """Enable wrote its state, the file's own "disabled": true still won, and the page said ok."""
+    (env.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"off": {"command": "true", "disabled": True}}}))
+    st, _, body = c.post("/api/workbench/connector", {"name": "off", "action": "enable"})
+    assert st == 409 and b"Remove that line" in body
+
+
+def test_menu_hints_do_not_use_the_chat_marker_class():
+    """`.mk` is the chat's 18px tool marker; a menu hint with that class was squeezed to 18px and cut off."""
+    from axon.features.dashboard_web import APP_CSS, WORKBENCH_CSS
+    assert "class: 'mhint'" in APP_JS and "class: 'mk'" not in APP_JS.split("function wbMenu")[1].split("return { close")[0]
+    assert ".wbmenu .mhint" in WORKBENCH_CSS and ".wbmenu .mk" not in WORKBENCH_CSS + APP_CSS
+
+
+def test_header_chip_follows_the_changes_panel_figures():
+    assert "function wbSyncGit" in APP_JS and APP_JS.count("wbSyncGit(d)") >= 2
+
+
+def test_chat_room_is_kept_on_load_and_on_resize_not_only_when_opening_a_panel():
+    """At 1000px a saved layout (Progress, Changes, Browser) left the chat 2px wide."""
+    from axon.features.dash_js_frame import JS_FRAME
+    assert "wbKeepChatRoom(null)" in JS_FRAME and "keepRoom();" in JS_FRAME.split("addEventListener('resize'")[1][:60]
+
+
+# ─── one home for each thing (owner decision: no duplicated panels) ─────────
+
+def test_left_panel_and_bottom_dock_are_gone_and_files_terminal_live_on_the_right():
+    from axon.features.dash_js_frame import JS_FRAME
+    for gone in ("id: 'lpanel'", "id: 'bpanel'", "rz-l'", "rz-b'", "'data-toggle': 'left'", "mountTree(body)", "mountSearch(body)", "ensureBottom();"):
+        assert gone not in JS_FRAME, gone
+    assert "files: { title: 'Files', kind: 'narrow'" in APP_JS and "terminal: { title: 'Terminal', kind: 'narrow'" in APP_JS
+    assert "if (!lsGet(wbKey())) WB.narrow = ['files']" in APP_JS            # first run: the tree is open
+
+
+def test_shell_and_terminal_routes_open_the_terminal_panel_and_palette_still_reaches_them():
+    assert "if (name === 'shell' || (name === 'terminal' && !rest)) { wbOpen('terminal');" in APP_JS
+    assert "if (name === 'files') { if (rest) return viewFile(rest); wbOpen('files');" in APP_JS
+    assert "wbToggle('terminal')" in APP_JS and "togglePanel('bottom')" not in APP_JS and "togglePanel('left'" not in APP_JS.split("function wbOpen")[0] + APP_JS.split("function wbRender")[1][:0]
+    assert "mountShell(host)" in APP_JS                                        # the line shell is the fallback inside the panel where there is no PTY
+
+
+def test_status_bar_does_not_repeat_the_chat_footer_and_progress():
+    from axon.features.dash_js_frame import JS_FRAME
+    body = JS_FRAME.split("function drawStatus()")[1].split("function setStatus")[0]
+    assert "const chat = !!(UI.active && UI.active.route === 'chat')" in body
+    for k in ("'model'", "'mode'", "'context'", "'cost'", "'effort'", "'git'"):
+        line = next(x for x in body.splitlines() if k in x)
+        assert "chat" in line, k
+
+
+def test_top_bar_has_brand_and_project_only_and_the_files_panel_has_the_folder_controls():
+    from axon.features.dash_js_frame import JS_FRAME
+    chip = JS_FRAME.split("function drawChip()")[1].split("function drawStatus")[0]
+    assert "ws-path" not in chip and "ws-git" not in chip
+    files = APP_JS.split("function wbFiles(P)")[1].split("// ---------- panel: changes")[0]
+    for need in ("Change folder", "Reload", "ignored files", "Filter, or ? to search in files", "Collapse all", "List or tree"):
+        assert need in files, need

@@ -1945,6 +1945,15 @@ def _extract_legacy(path: Path, size: int, offset: int, limit: int) -> Extracted
 
 # ─── text formats ───────────────────────────────────────────────────────────
 
+def _toml_module() -> Any:
+    """``tomllib`` (3.11+), or the ``tomli`` backport on Python 3.10."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+    return tomllib
+
+
 def _shape(v: Any, depth: int = 0) -> str:
     if isinstance(v, dict):
         keys = list(v)[:12]
@@ -2032,8 +2041,7 @@ def _extract_textfmt(path: Path, kind: str, offset: int, limit: int, size: int) 
         out = "\n".join(recs[offset:offset + limit]) if recs else text
     elif kind == "toml":
         try:
-            import tomllib
-            v = tomllib.loads(text)
+            v = _toml_module().loads(text)
             meta["shape"] = _shape(v)
         except Exception as e:
             meta["notes"].append(f"Not valid TOML ({e}).")
@@ -2267,8 +2275,7 @@ def text_note(kind: str, text: str, path: Path) -> str:
                     bad += 1
             return f"JSON Lines, {len(lines)} records" + (f", {bad} invalid" if bad else "")
         if kind == "toml":
-            import tomllib
-            return "valid TOML, " + _shape(tomllib.loads(text))
+            return "valid TOML, " + _shape(_toml_module().loads(text))
         if kind in ("xml", "svg"):
             root = parse_xml(text.encode("utf-8", "replace"))
             return f"well-formed XML, root <{_ln(root.tag)}>"

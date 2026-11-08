@@ -60,7 +60,7 @@ def run_headers_helper(spec: ServerSpec, workspace: Path, timeout: float = HELPE
     if spec.scope == "plugin" and spec.source is not None:
         env["AXON_PLUGIN_ROOT"] = env["CLAUDE_PLUGIN_ROOT"] = str(Path(spec.source).parent)
     try:
-        proc = subprocess.run(spec.headers_helper, shell=True, capture_output=True, text=True,
+        proc = subprocess.run(spec.headers_helper, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout, env=env, cwd=str(helper_cwd(spec, workspace)))
     except subprocess.TimeoutExpired:
         raise HeadersHelperError(f"headersHelper timed out after {timeout:g}s") from None

@@ -32,9 +32,19 @@ function mdLite(src, live) {
     }
     if (/^\s*>/.test(l)) { const q = []; while (i < lines.length && /^\s*>/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, '')); out.push('<blockquote>' + mdInline(q.join(' ')) + '</blockquote>'); continue; }
     if ((m = l.match(/^\s*([-*+]|\d+[.)])\s+/))) {
-      const ordered = /\d/.test(m[1]); const re = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/; const items = [];
-      while (i < lines.length && re.test(lines[i])) items.push(lines[i++].replace(re, ''));
-      out.push((ordered ? '<ol>' : '<ul>') + items.map(t => '<li>' + mdInline(t) + '</li>').join('') + (ordered ? '</ol>' : '</ul>')); continue;
+      const LI = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/; const items = [];      // every list line, with its indent: deeper lines nest
+      while (i < lines.length && LI.test(lines[i])) { const x = lines[i++].match(LI); items.push({ ind: x[1].replace(/\t/g, '    ').length, ord: /\d/.test(x[2]), t: x[3] }); }
+      const stack = []; let html = '';
+      const closeTo = (ind) => { while (stack.length && stack[stack.length - 1].ind > ind) { html += '</li></' + (stack.pop().ord ? 'ol' : 'ul') + '>'; } };
+      for (const it of items) {
+        closeTo(it.ind);
+        const top = stack[stack.length - 1];
+        if (!top || top.ind < it.ind) { html += (top ? '' : '') + '<' + (it.ord ? 'ol' : 'ul') + '>'; stack.push({ ind: it.ind, ord: it.ord }); }
+        else html += '</li>';
+        html += '<li>' + mdInline(it.t);
+      }
+      closeTo(-1);
+      out.push(html); continue;
     }
     if (!l.trim()) { i++; continue; }
     const para = [];
@@ -127,7 +137,7 @@ function followWire(C, feed) {
     else if (top < C.lastTop - 1) C.atBottom = false;           // the reader moved up: stop following
     C.lastTop = top;
   });
-  feed.addEventListener('wheel', e => { if (e.deltaY < 0) C.atBottom = false; }, { passive: true });
+  feed.addEventListener('wheel', e => { if (e.deltaY < 0 && feed.scrollTop > 0) C.atBottom = false; }, { passive: true });   // at the very top nothing moves, so nothing is left behind
   feed.addEventListener('touchmove', () => { if (feed.scrollHeight - feed.scrollTop - feed.clientHeight > 24) C.atBottom = false; }, { passive: true });
 }
 function followStick(C) {
@@ -139,7 +149,6 @@ function followJump(C, show) {
   const feed = C.feed; if (!feed || !feed.parentNode) return;
   if (!C.jump) {
     if (!show) return;
-    if (!document.getElementById('jump-css')) { const st = document.createElement('style'); st.id = 'jump-css'; st.textContent = '.jump-latest{position:absolute;left:50%;transform:translateX(-50%);z-index:5;border:1px solid var(--line);background:var(--raised);color:var(--ink);border-radius:999px;padding:5px 14px;font:inherit;font-size:12.5px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.25)}'; document.head.append(st); }
     const b = document.createElement('button'); b.type = 'button'; b.className = 'jump-latest'; b.textContent = 'Jump to latest'; b.hidden = true;
     b.addEventListener('click', () => { C.atBottom = true; feed.scrollTop = feed.scrollHeight; C.lastTop = feed.scrollTop; followJump(C, false); });
     const par = feed.parentNode; if (getComputedStyle(par).position === 'static') par.style.position = 'relative';

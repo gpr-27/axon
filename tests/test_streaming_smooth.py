@@ -102,8 +102,8 @@ def _run_js(body: str) -> str:
         pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "t.js"
-        f.write_text(PRELUDE + JS_MD + "\n" + body)
-        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=60)
+        f.write_text(PRELUDE + JS_MD + "\n" + body, encoding="utf-8")
+        r = subprocess.run([NODE, str(f)], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -262,8 +262,8 @@ def test_page_script_still_parses_with_the_new_live_code():
     from axon.features.dashboard_web import APP_JS
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "app.js"
-        f.write_text(APP_JS)
-        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, timeout=30)
+        f.write_text(APP_JS, encoding="utf-8")
+        r = subprocess.run([NODE, "--check", str(f)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert r.returncode == 0, r.stderr
     assert "liveText(C, cur)" in APP_JS and "followWire(C, feed)" in APP_JS and "setTimeout(() => { live.mdTimer" not in APP_JS
 

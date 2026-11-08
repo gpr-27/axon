@@ -296,13 +296,13 @@ def _delete_one(srv: "DashServer", sid: str) -> dict[str, Any]:
             rt.close()
         except Exception:
             pass
-    before = {t["path"].name for t in store.list_trash()}
     title = ref.meta.first_prompt if ref.meta is not None else ""
+    store.last_trash = None
     if not store.delete_session(sid):
         return {"id": sid, "ok": False, "reason": "Could not move it to the trash. Nothing was changed or only part moved; check the trash."}
-    new = [t for t in store.list_trash() if t["path"].name not in before and t["id"] == sid]
+    made = getattr(store, "last_trash", None)           # not a scan of the whole trash: that made a bulk delete slower with every chat
     return {"id": sid, "ok": True, "title": _clean_title(title), "project_key": ref.project_key,
-            "name": new[0]["path"].name if new else ""}
+            "name": made.name if made is not None else ""}
 
 
 def delete_sessions(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
@@ -493,7 +493,10 @@ def export_session(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
 def _period_scope(srv: "DashServer", qs: dict[str, str]) -> tuple[Any, str, str | None]:
     from axon.features import analytics as an
     from axon.features.dashboard import _project_key
-    per = an.parse_period(qs.get("period", "30d")) or an.parse_period("30d")
+    raw = qs.get("period", "30d") or "30d"
+    per = an.parse_period(raw)
+    if per is None:           # a mistyped or out-of-range period is said, not quietly replaced by 30 days
+        raise DashError("That period is not valid. Use 7d, 30d, all, or two dates like 2026-10-01..2026-10-15 (at most 10 years).", 400)
     scope = "all" if qs.get("scope") == "all" else "project"
     return per, scope, (None if scope == "all" else _project_key(srv.workspace))
 
@@ -730,6 +733,99 @@ def set_budget(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, **_budget_row(rt)}
 
 
+# ─── memory ──────────────────────────────────────────────────────────────────
+
+MEM_BODY_MAX = 20_000
+
+
+def _mem_row(m: Any) -> dict[str, Any]:
+    from axon.features.dashboard import redact_text
+    body = str(m.body)
+    return {"scope": m.scope, "id": m.id, "file": m.file, "name": redact_text(str(m.name))[:200], "type": m.type,
+            "description": redact_text(str(m.description))[:300], "body": redact_text(body[:MEM_BODY_MAX]), "cut": len(body) > MEM_BODY_MAX,
+            "updated": m.updated, "path": _home_short(m.path)}
+
+
+def memory_report(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
+    """Saved memories of every scope (global, project, repo), filtered by scope and text, plus the instruction files
+    the model is given at the start (the same discovery the terminal uses)."""
+    from axon.features import memory_files as mf
+    scope = qs.get("scope", "")
+    scopes = (mf.norm_scope(scope),) if scope in mf.SCOPES else None
+    items = mf.list_memories(srv.workspace, scopes)
+    counts: dict[str, int] = {}
+    for m in items:
+        counts[m.scope] = counts.get(m.scope, 0) + 1
+    q = (qs.get("q") or "").strip().lower()[:200]
+    if q:
+        items = [m for m in items if q in f"{m.name} {m.description} {m.body} {m.type} {m.id}".lower()]
+    from axon.features.dash_api import instruction_files
+    return {"memories": [_mem_row(m) for m in items[:500]], "total": len(items), "counts": counts,
+            "files": instruction_files(srv.workspace), "workspace": str(srv.workspace)}
+
+
+def _mem_body(body: dict[str, Any]) -> str:
+    text = _s(body, "body", MEM_BODY_MAX + 1)
+    if not text.strip():
+        raise DashError("A memory cannot be empty.")
+    if len(text) > MEM_BODY_MAX:
+        raise DashError(f"A memory can be at most {MEM_BODY_MAX:,} characters.", 413)
+    return text.strip()
+
+
+def _mem_scope(body: dict[str, Any]) -> str:
+    from axon.features import memory_files as mf
+    try:
+        return mf.norm_scope(_s(body, "scope", 20))
+    except ValueError as e:
+        raise DashError(str(e)) from None
+
+
+def memory_save(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    """Add a memory as written (no model call). Secrets are removed before it is saved."""
+    from axon.features import memory_files as mf
+    scope = _mem_scope(body)
+    text = _mem_body(body)
+    name = " ".join(_s(body, "name", 200).split()) or mf.derive_description(text)[:80]
+    typ = body.get("type") if body.get("type") in mf.TYPES else "user" if scope == "global" else "project"
+    try:
+        res = mf.write_memory(srv.workspace, scope, name=name, body=text, description=_s(body, "description", 300), type_=typ)
+    except OSError as e:
+        raise DashError(f"Could not save it ({type(e).__name__}).", 500) from None
+    return {"ok": True, "action": res.action, "id": res.path.stem, "scope": scope, "notes": res.notes()}
+
+
+def _mem_find(srv: "DashServer", body: dict[str, Any]) -> Any:
+    from axon.features import memory_files as mf
+    scope = _mem_scope(body)
+    mid = _s(body, "id", 200)
+    m = mf.find_memory(srv.workspace, f"{scope}:{mid}", mf.list_memories(srv.workspace, (scope,)))
+    if m is None:
+        raise DashError("That memory no longer exists.", 404)
+    return m
+
+
+def memory_update(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_files as mf
+    m = _mem_find(srv, body)
+    text = _mem_body(body)
+    try:
+        res = mf.replace_body(srv.workspace, m, text)
+    except OSError as e:
+        raise DashError(f"Could not save it ({type(e).__name__}).", 500) from None
+    return {"ok": True, "action": res.action, "id": m.id, "scope": m.scope, "notes": res.notes()}
+
+
+def memory_delete(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_files as mf
+    m = _mem_find(srv, body)
+    try:
+        mf.delete_memory(srv.workspace, m)
+    except OSError as e:
+        raise DashError(f"Could not delete it ({type(e).__name__}).", 500) from None
+    return {"ok": True, "id": m.id, "scope": m.scope, "kept": "A copy is kept; /memory restore brings it back."}
+
+
 # ─── dispatch ────────────────────────────────────────────────────────────────
 
 def get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
@@ -747,6 +843,8 @@ def get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
         return usage_clear_preview(srv, qs)
     if route == "/api/manage/budget":
         return budgets(srv)
+    if route == "/api/manage/memory":
+        return memory_report(srv, qs)
     raise DashError("not found", 404)
 
 
@@ -763,4 +861,10 @@ def post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
         return usage_clear(srv, body)
     if route == "/api/manage/budget":
         return set_budget(srv, body)
+    if route == "/api/manage/memory/save":
+        return memory_save(srv, body)
+    if route == "/api/manage/memory/update":
+        return memory_update(srv, body)
+    if route == "/api/manage/memory/delete":
+        return memory_delete(srv, body)
     raise DashError("not found", 404)

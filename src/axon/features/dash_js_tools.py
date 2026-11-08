@@ -27,13 +27,26 @@ function mountShell(main) {
       jobs[j.id] = { card, meta, body, kill, bytes: 0 };
       const es = new EventSource('/api/shell/stream?id=' + j.id + '&since=0'); onLeave(() => es.close());
       let pre = null, preErr = null;
+      // Output is added in batches (one layout per 60 ms, not one per chunk): a command that prints megabytes would otherwise
+      // freeze the page for minutes, laying out the whole growing block again for every 32 KB piece.
+      const flushOut = (jb) => {
+        jb.flushT = 0; const q = jb.q || []; jb.q = []; if (!q.length) return;
+        for (const ev of q) {
+          const stream = ev.stream; let p = stream === 'err' ? preErr : pre;
+          if (!p) { p = h('pre', { class: stream === 'err' ? 'err nolink' : 'nolink' }); jb.body.append(p); if (stream === 'err') preErr = p; else pre = p; }
+          const s = document.createElement('span'); s.innerHTML = ev.html; p.append(s); jb.bytes += s.textContent.length;
+          while (jb.bytes > 300000 && p.firstChild && p.childNodes.length > 1) { jb.bytes -= (p.firstChild.textContent || '').length; p.removeChild(p.firstChild); jb.trim = true; }
+        }
+        if (jb.trim && !jb.trimNote) { jb.trimNote = true; jb.meta.append(' (older output trimmed to keep the page fast)'); }
+        if (out.scrollHeight - out.scrollTop - out.clientHeight < 200) out.scrollTop = out.scrollHeight;
+      };
       es.onmessage = (m) => {
         const ev = JSON.parse(m.data); const jb = jobs[j.id];
         if (ev.type === 'start') { jb.meta.textContent = 'pid ' + ev.pid + (ev.sandbox ? ' · sandboxed' : '') + ' · running'; jb.kill.hidden = false; }
-        else if (ev.type === 'out') { const stream = ev.stream; let p = stream === 'err' ? preErr : pre; if (!p) { p = h('pre', { class: stream === 'err' ? 'err nolink' : 'nolink' }); jb.body.append(p); if (stream === 'err') preErr = p; else pre = p; } const s = document.createElement('span'); s.innerHTML = ev.html; p.append(s); jb.bytes += s.textContent.length; while (jb.bytes > 600000 && p.firstChild && p.childNodes.length > 2) { jb.bytes -= (p.firstChild.textContent || '').length; p.removeChild(p.firstChild); jb.trim = true; } if (jb.trim && !jb.trimNote) { jb.trimNote = true; jb.meta.append(' (older output trimmed to keep the page fast)'); } if (stream === 'out') pre = p; else preErr = p; if (out.scrollHeight - out.scrollTop - out.clientHeight < 200) out.scrollTop = out.scrollHeight; }
+        else if (ev.type === 'out') { (jb.q = jb.q || []).push(ev); if (!jb.flushT) jb.flushT = setTimeout(() => flushOut(jb), 60); }
         else if (ev.type === 'refused') { jb.body.append(h('div', { class: 'refused' }, 'Not run: ' + ev.message)); }
-        else if (ev.type === 'note') jb.body.append(notice(ev.message, 'warn'));
-        else if (ev.type === 'exit') { es.close(); jb.kill.hidden = true; if (ev.cwd) { const c = document.getElementById('shcwd'); if (c) c.textContent = 'in ' + ev.cwd; } jb.meta.replaceChildren(ev.refused ? 'refused' : h('span', { class: ev.code === 0 ? 'good' : 'bad' }, 'exit ' + (ev.killed ? 'killed' : ev.code)), ev.duration != null ? ' · ' + dur(ev.duration) : ''); loadHist(); decorate(jb.body); }
+        else if (ev.type === 'note') { clearTimeout(jb.flushT); flushOut(jb); jb.body.append(notice(ev.message, 'warn')); }
+        else if (ev.type === 'exit') { es.close(); clearTimeout(jb.flushT); flushOut(jb); jb.kill.hidden = true; if (ev.cwd) { const c = document.getElementById('shcwd'); if (c) c.textContent = 'in ' + ev.cwd; } jb.meta.replaceChildren(ev.refused ? 'refused' : h('span', { class: ev.code === 0 ? 'good' : 'bad' }, 'exit ' + (ev.killed ? 'killed' : ev.code)), ev.duration != null ? ' · ' + dur(ev.duration) : ''); loadHist(); decorate(jb.body); }
       };
     }
     async function go() {
@@ -51,7 +64,7 @@ function mountShell(main) {
       } catch (e) { /* history is optional */ }
     }
     api('/api/shell/history').then(d => { const c = document.getElementById('shcwd'); if (c && d.cwd) c.textContent = 'in ' + d.cwd; }).catch(() => {}); await loadHist(); const t = setInterval(() => { if (!S.closed) loadHist(); }, 4000); onLeave(() => clearInterval(t));
-    input.focus();
+    { const ae = document.activeElement; if (!(ae && ae.tagName === 'TEXTAREA')) input.focus(); }      // never take the cursor from a message being typed
   })();
 }
 
@@ -200,7 +213,8 @@ function openPalette() {
   const box = h('div', { class: 'palette' }, input, list); scrim.append(box); document.body.append(scrim);
   scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.remove(); });
   let items = [], sel = 0;
-  const pages = NAV.map(([id, label]) => ({ label: 'Go to ' + label, hint: '#/' + id, run: () => { location.hash = '#/' + id; } }));
+  const pages = [...NAV.map(([id, label]) => ({ label: 'Go to ' + label, hint: '#/' + id, run: () => { location.hash = '#/' + id; } })),
+    ...NAV_PANELS.map(([id, label, , help]) => ({ label: 'Open ' + label, hint: help, run: () => { location.hash = '#/' + id; } }))];
   allCommands().then((c) => { items = [...pages, ...c.map(x => ({ label: x.name, hint: x.description, cmd: x }))]; draw(); }).catch(() => { items = pages; draw(); });
   function matches() { const q = input.value.toLowerCase().trim(); return items.filter(i => !q || i.label.toLowerCase().includes(q.replace(/^\//, '')) || (i.hint || '').toLowerCase().includes(q)).slice(0, 40); }
   function draw() { const m = matches(); sel = Math.min(sel, Math.max(0, m.length - 1)); list.replaceChildren(...m.map((i, k) => h('div', { class: 'it', 'aria-selected': String(k === sel), onclick: () => choose(i) }, h('b', null, i.label), h('span', null, i.hint || '')))); }
@@ -211,7 +225,7 @@ function openPalette() {
 }
 function helpModal() {
   const scrim = h('div', { class: 'scrim', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts' }); scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.remove(); });
-  const rows = [['Ctrl/Cmd+K', 'Command palette'], ['/', 'Focus search or the message box'], ['g then c / f / h / m / s / u / y / e / t', 'Chat, Files, Shell, Commands, Sessions, Usage, Memory, Extensions, Settings'], ['Enter', 'Send (Shift+Enter for a new line)'], ['/ in the message box', 'Slash commands'], ['@ in the message box', 'Mention a file'], ['! at the start', 'Run a shell command, then Axon sees the output'], ['Up in an empty box', 'Previous prompt'], ['Ctrl/Cmd+S', 'Save the file you are editing'], ['Esc', 'Close a dialog'], ['?', 'This list']];
+  const rows = [['Ctrl/Cmd+K', 'Command palette'], ['/', 'Focus search or the message box'], ['g then c / f / h / x / m / s / u / i / y / e / t', 'Chat, Files panel, Shell (Terminal panel), Terminal panel, Commands, Sessions, Usage, Insights, Memory, Extensions, Settings'], ['Ctrl+P', 'Choose the model for this chat'], ['Shift+Tab in the message box', 'Cycle the permission mode'], ['Ctrl/Cmd+J', 'Show or hide the Terminal panel'], ['Ctrl/Cmd+\\', 'Show or hide the Files panel'], ['Enter', 'Send (Shift+Enter for a new line)'], ['/ in the message box', 'Slash commands'], ['@ in the message box', 'Mention a file'], ['! at the start', 'Run a shell command, then Axon sees the output'], ['Up in an empty box', 'Previous prompt'], ['Ctrl/Cmd+S', 'Save the file you are editing'], ['Esc', 'Close a dialog'], ['?', 'This list']];
   scrim.append(h('div', { class: 'modal' }, h('h3', null, 'Keyboard shortcuts'), h('dl', { class: 'kv' }, ...rows.flatMap(([k, v]) => [h('dt', null, h('span', { class: 'kbd' }, k)), h('dd', null, v)])), h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => scrim.remove() }, 'Close'))));
   document.body.append(scrim);
 }
@@ -219,12 +233,10 @@ function helpModal() {
 // ---------- memory & settings ----------
 async function viewMemory() {
   shell('memory', async (main) => {
-    main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Memory'), h('div', { class: 'sub' }, 'What Axon reads at the start of every session, and the notes it keeps about this project.'))));
+    main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Memory'), h('div', { class: 'sub' }, 'What Axon reads at the start of every session, and the notes it keeps.'))));
     let d; try { d = await api('/api/memory'); } catch (e) { main.append(errorBox(e.message)); return; }
     main.append(h('h2', null, 'Instruction files'), d.files.length ? table([{ label: 'File', key: 'name' }, { label: 'Scope', key: 'scope' }, { label: 'Size', cls: 'r', fmt: r => (r.size / 1024).toFixed(1) + ' KB' }, { label: '', fmt: r => r.editable ? h('a', { class: 'btn', href: '#/files/' + encodeURIComponent(r.rel) }, 'Open and edit') : h('span', { class: 'muted' }, r.path) }], d.files) : h('p', { class: 'muted' }, 'No AXON.md, CLAUDE.md or AGENTS.md here. Run /init from the Commands page to create one.'));
-    const note = h('input', { type: 'text', placeholder: 'Add a note for Axon to remember' }); const res = h('div');
-    main.append(h('h2', { style: 'margin-top:22px' }, 'Notes'), h('div', { class: 'formrow' }, note, h('button', { class: 'btn primary', onclick: async () => { if (!note.value.trim()) return; const r = await runSlash('#' + note.value.trim()); renderCmdResult(r, res); note.value = ''; } }, 'Remember')), res,
-      d.memories.length ? h('div', null, ...d.memories.map(m => h('details', { class: 'tool' }, h('summary', null, h('span', { class: 'tn' }, m.name), h('span', { class: 'ta' }, m.description), h('span', { class: 'ts' }, m.scope + (m.type ? ' · ' + m.type : ''))), h('pre', { class: 'out' }, m.body)))) : h('p', { class: 'muted' }, 'No saved notes yet.'));
+    mgMemoryPanel(main);
   });
 }
 // ---------- router & keys ----------
@@ -235,8 +247,8 @@ function openHash(hash, activate) {
     const [name, ...restParts] = clean.split('/'); const rest = restParts.join('/');
     document.querySelector('.scrim')?.remove();
     if (name === 'chat') return viewChat(rest ? decodeURIComponent(rest) : '');
-    if (name === 'files') { if (rest) return viewFile(rest); UI.leftTab = 'files'; togglePanel('left', true); drawLeftTabs(); if (!UI.active) return viewChat(''); return; }
-    if (name === 'shell') { togglePanel('bottom', true); if (!UI.active) return viewChat(''); return; }
+    if (name === 'files') { if (rest) return viewFile(rest); wbOpen('files'); if (!UI.active) return viewChat(''); return; }
+    if (name === 'shell' || (name === 'terminal' && !rest)) { wbOpen('terminal'); if (!UI.active) return viewChat(''); return; }   // old links: the Terminal panel
     if (name === 'terminal') return viewTerminal(rest);
     if (name === 'insights') return viewInsights(rest);
     if (name === 'commands') return viewCommands();
@@ -258,12 +270,19 @@ function ownsKeys(t) { return !!(t && (t.tagName === 'INPUT' || t.tagName === 'T
 function activePane() { return (UI.active && UI.active.pane) || document; }
 // Shift+Tab cycles the permission mode and Ctrl+P opens the model picker, as in the terminal app.
 function cycleMode() {
-  const sel = activePane().querySelector('select[aria-label="Permission mode"]'); if (!sel || sel.disabled) return false;
+  const sel = activePane().querySelector('select[aria-label="Permission mode"]');
+  if (!sel) {   // the composer footer has a mode button instead of a select
+    const C = UI.chat; if (!C || !C.foot || !UI.active || UI.active.route !== 'chat' || typeof WB_MODES === 'undefined') return false;
+    const i = WB_MODES.findIndex(m => m[0] === ((C.st && C.st.mode) || 'default')), nx = WB_MODES[(i + 1) % WB_MODES.length];
+    runCmd(C, '/mode ' + nx[0]).then(() => toast('Mode: ' + nx[1])).catch((e) => toast(e.message)); return true;
+  }
+  if (sel.disabled) return false;
   const opts = [...sel.options].filter(o => !o.disabled); if (opts.length < 2) return false;
   const i = opts.findIndex(o => o.value === sel.value); sel.value = opts[(i + 1) % opts.length].value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
 }
 function openModelPicker() {
-  const sel = activePane().querySelector('select[aria-label="Model"]'); if (!sel) return false;
+  const sel = activePane().querySelector('select[aria-label="Model"]');
+  if (!sel) { const C = UI.chat; if (C && C.foot && UI.active && UI.active.route === 'chat') { C.foot.model.focus(); C.foot.model.click(); return true; } return false; }
   sel.focus(); try { if (sel.showPicker) sel.showPicker(); } catch (e) { /* needs a user gesture; focus is enough */ } return true;
 }
 document.addEventListener('keydown', (e) => {
@@ -276,8 +295,8 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p' && !document.querySelector('.scrim')) { if (openModelPicker()) e.preventDefault(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); togglePanel('bottom'); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); togglePanel('left'); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); wbToggle('terminal'); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); wbToggle('files'); return; }
   if (e.key === 'Escape') { document.querySelector('.scrim')?.remove(); return; }
   const t = e.target, typing = ownsKeys(t);
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;

@@ -495,6 +495,7 @@ SESSION_ENTRIES: dict[str, str] = {
     "checkpoints": "file snapshots for /rewind", "images": "pasted images", "pastes": "large pastes",
     "attachments": "files dropped into the prompt, with index.jsonl listing everything kept",
     "writer.lease": "which process is writing this session",
+    "writer.lease.lock": "lets one process at a time take the writer lease (empty)",
     "todos.json": "todo list", "exports": "/export files", "debug.log": "--debug log",
     "legacy": "files kept by relayout when names clashed",
 }
