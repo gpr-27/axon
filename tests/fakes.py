@@ -78,7 +78,8 @@ class FakeProvider:
                         "type": "tool_result",
                         "tool_use_id": r.tool_use_id,
                         "content": r.content,
-                        **({"is_error": True} if r.is_error else {})
+                        **({"is_error": True} if r.is_error else {}),
+                        **({"images": [i.to_dict() for i in r.images]} if getattr(r, "images", ()) else {}),
                     }
                     for r in results
                 ]

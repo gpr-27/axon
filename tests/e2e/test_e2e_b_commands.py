@@ -82,7 +82,7 @@ def test_context_breakdown_after_turn(axon_env: AxonEnv) -> None:
     """/context on a resumed session counts messages and lists all categories."""
     _seed(axon_env)
     out = cmd(axon_env, "/context", "--continue").output
-    for k in ("System prompt", "Tool schemas", "Messages", "Free"):
+    for k in ("System prompt", "System tools", "Messages", "Free space"):
         assert k in out
     assert "0 messages" not in out
 

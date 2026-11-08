@@ -81,10 +81,14 @@ def test_slugify() -> None:
 
 def test_install_catalog_skill_with_mocked_download(monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
     text = "---\nname: frontend-design\ndescription: Design things.\n---\n\nBody text.\n"
-    monkeypatch.setattr("axon.skills.importer._download", lambda url: text)
+    from test_ext_skill_bundle import make_tar
+    tar = make_tar({"skills/frontend-design/SKILL.md": text.encode(), "skills/frontend-design/scripts/a.py": b"1"},
+                   comment=catalog.find_entry(catalog.load_skills(), "frontend-design").sha)
+    monkeypatch.setattr("axon.skills.importer._download_bytes", lambda url, limit: tar)
     entry = catalog.find_entry(catalog.load_skills(), "frontend-design")
     path = skill_tools.install_skill(entry, workspace)
     assert path.read_text(encoding="utf-8") == text
+    assert (path.parent / "scripts" / "a.py").is_file()
     assert "frontend-design" in skill_tools.installed_skills(workspace)
     assert skill_tools.remove_skill("frontend-design", workspace)
     assert not skill_tools.remove_skill("frontend-design", workspace)

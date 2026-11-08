@@ -382,7 +382,7 @@ def test_context_command_shows_grid(agent: Agent, capsys):
     agent.run_turn("hi")
     dispatch_command("/context", agent)
     out = capsys.readouterr().out
-    assert "Free" in out and "Messages" in out and ("⛁" in out or "#" in out)
+    assert "Free space" in out and "Messages" in out and "% used" in out and any(c in out for c in "█#M")
 
 
 def test_prompt_cache_stats_and_cost_line(agent: Agent, capsys):

@@ -61,9 +61,10 @@ def test_default_tool_set_is_compact(reg):
               "Skill", "AskUserQuestion"):
         assert n in names
     for removed in ("FileTree", "CodeSymbols", "TableSearch", "DeepResearch", "Http", "Env", "Diff",
-                    "UiPreview", "Git", "GoToDefinition", "FindReferences", "SemanticSearch", "Doctor"):
+                    "UiPreview", "GoToDefinition", "FindReferences", "SemanticSearch", "Doctor"):
         assert removed not in names
-    assert len(names) <= 22  # 20 built-ins + feature TOOLS (UsageStats)
+    # 20 built-ins + feature TOOLS (UsageStats) + Monitor, Git, CheckpointList/Undo, EnterPlanMode, LSP (only with a server)
+    assert len(names) <= 28
 
 
 @pytest.mark.parametrize("style", ["anthropic", "openai"])

@@ -153,7 +153,7 @@ def test_system_prompt_contains_memory_and_saved_items(workspace: Path) -> None:
     MemoryStore(workspace).add("Database is Postgres 16")
     text = "\n".join(b["text"] for b in build_system(make_settings(workspace), create_default_registry()))
     assert "Always use uv." in text and "Database is Postgres 16" in text
-    assert "Saved memories" in render_memory_context(workspace)
+    assert "Repo memory" in render_memory_context(workspace)   # saved items load through their scope's MEMORY.md index
 
 
 def test_compact_instructions_section() -> None:

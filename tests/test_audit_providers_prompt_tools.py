@@ -247,7 +247,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_native_tools_defaults_to_true_for_every_builtin_preset(home):
-    assert all(p.native_tools for p in PROVIDER_PRESETS)
+    # BizNeuro's gateway drops the `tools` field, so it is the one built-in preset that uses prompt tools.
+    assert all(p.native_tools for p in PROVIDER_PRESETS if p.id != "bizneuro")
+    assert get_preset_by_id("bizneuro").native_tools is False
     assert get_preset_by_id("ollama").native_tools is True
 
 

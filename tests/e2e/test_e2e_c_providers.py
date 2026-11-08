@@ -36,13 +36,14 @@ EXPECTED_ENDPOINT = {
     "together": "https://api.together.xyz/v1/chat/completions",
     "fireworks": "https://api.fireworks.ai/inference/v1/chat/completions",
     "cerebras": "https://api.cerebras.ai/v1/chat/completions",
+    "bizneuro": "https://stg-bizneuro-ai-1084382769362.asia-south1.run.app/v1/chat/completions",  # staging host
     "azure": None,  # needs AZURE_OPENAI_ENDPOINT; checked separately
 }
 EXPECTED_KEY_VAR = {
     "agentrouter": "AXON_API_KEY", "gemini": "GEMINI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
     "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "xai": "XAI_API_KEY", "groq": "GROQ_API_KEY",
     "mistral": "MISTRAL_API_KEY", "deepseek": "DEEPSEEK_API_KEY", "together": "TOGETHER_API_KEY",
-    "fireworks": "FIREWORKS_API_KEY", "cerebras": "CEREBRAS_API_KEY", "azure": "AZURE_OPENAI_API_KEY",
+    "fireworks": "FIREWORKS_API_KEY", "cerebras": "CEREBRAS_API_KEY", "bizneuro": "BZN_API_KEY", "azure": "AZURE_OPENAI_API_KEY",
     "ollama": None, "lmstudio": None,
 }
 

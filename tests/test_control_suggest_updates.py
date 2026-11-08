@@ -272,8 +272,12 @@ def test_updating_a_connector_by_command_is_refused(workspace: Path) -> None:
 def test_marketplace_installed_skill_records_its_origin(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from axon.skills import importer
     text = "---\nname: frontend-design\ndescription: Design\n---\n\nBody\n"
-    monkeypatch.setattr(importer, "_download", lambda url: text)
+    from test_ext_skill_bundle import make_tar
+    from axon.marketplace import catalog
+    pin = catalog.find_entry(catalog.load_skills(), "frontend-design").sha
+    tar = make_tar({"skills/frontend-design/SKILL.md": text.encode()}, comment=pin)
+    monkeypatch.setattr(importer, "_download_bytes", lambda url, limit: tar)
     outcome, _ = run(["install", "frontend-design", "--tab", "skills"], workspace)
     assert outcome.code == 0
     origin = skill_tools.read_origin(skill_tools.skills_root(workspace, "user") / "frontend-design")
-    assert origin["source"] and origin["sha256"] == skill_tools.text_hash(text)
+    assert origin["source"] and origin["sha256"] == skill_tools.text_hash(text) and origin["content_hash"]

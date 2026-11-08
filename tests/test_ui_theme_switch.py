@@ -27,7 +27,7 @@ def test_resolve_and_detect(monkeypatch):
     assert theme.detect_background({"COLORFGBG": "15;0"}) == "dark"
     assert theme.detect_background({}) == "dark"
     monkeypatch.setenv("COLORFGBG", "0;7")
-    assert theme.resolve_theme("auto") == "light"
+    assert theme.resolve_theme("auto") == "axon-light"
 
 
 def test_palettes_differ_and_mono_is_plain(colors):

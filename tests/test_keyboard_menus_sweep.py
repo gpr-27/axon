@@ -41,6 +41,7 @@ def sweeps(tmp_path_factory):
     patch = pytest.MonkeyPatch()
     home = tmp_path_factory.mktemp("sweep-home")
     patch.setenv("AXON_HOME", str(home))
+    patch.setenv("AXON_NEXT_MENU", "1")      # the sweep checks the "What next?" menus, which are opt-in now
     patch.setenv("AXON_CLIPBOARD_FILE", str(home / "clipboard.txt"))
     patch.setattr(Path, "home", classmethod(lambda cls: home))
     try:
@@ -195,6 +196,7 @@ def test_what_next_entry_runs_its_typed_line(name, position, monkeypatch) -> Non
 
 def test_a_report_is_printed_then_what_next_is_offered(workspace, picks, monkeypatch, capsys) -> None:
     from axon.commands.registry import dispatch_command
+    monkeypatch.setenv("AXON_NEXT_MENU", "1")      # the menu is opt-in now; a footer hint replaces it
     monkeypatch.setattr("axon.commands.common.is_tty", lambda: True)
     shown = picks([None])
     agent = make_agent(FakeProvider([]), workspace)
@@ -206,6 +208,7 @@ def test_a_report_is_printed_then_what_next_is_offered(workspace, picks, monkeyp
 
 def test_what_next_choice_runs_and_comes_back_to_the_menu(workspace, picks, monkeypatch, capsys) -> None:
     from axon.commands.registry import dispatch_command
+    monkeypatch.setenv("AXON_NEXT_MENU", "1")
     monkeypatch.setattr("axon.commands.common.is_tty", lambda: True)
     shown = picks(["Every API call", None])   # /cost, then Esc
     agent = make_agent(FakeProvider([]), workspace)
