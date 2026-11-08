@@ -162,6 +162,8 @@ def checkpoint_diff(cp: Any, n: int, ws: Path | None = None, rel: str = "") -> l
         else:
             text = "".join(difflib.unified_diff(_text(before), _text(after), f"a/{r}", f"b/{r}", n=3))
             rows = parse_diff(text)
+            for row in rows:
+                row["text"] = str(row.get("text", "")).rstrip("\r")   # a CRLF file must not show stray carriage returns
             if len(rows) > MAX_DIFF_LINES:
                 rows = rows[:MAX_DIFF_LINES] + [{"kind": "meta", "old": None, "new": None, "text": "Diff cut here."}]
             entry["rows"] = rows

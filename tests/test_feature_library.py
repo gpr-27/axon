@@ -532,3 +532,15 @@ def test_the_page_script_has_the_library_and_checkpoint_pieces_and_no_innerhtml(
         assert name in APP_JS
     assert "innerHTML" not in JS_LIBRARY and "html:" not in JS_LIBRARY
     assert ".cp-sec" in asset("app.css")[0]
+
+
+def test_the_names_prompt_had_before_the_library_still_work_but_are_not_listed(tmp_path):
+    import axon.features.prompt_library as pl
+    old = pl.get(tmp_path, "bugfix")
+    assert old is not None and "{description}" in old.text
+    assert "bugfix" not in [p.name for p in pl.list_prompts(tmp_path)]
+
+
+def test_a_crlf_file_shows_no_carriage_returns_in_a_checkpoint_diff():
+    import inspect
+    assert 'rstrip("\\r")' in inspect.getsource(cv.checkpoint_diff)

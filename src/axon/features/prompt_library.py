@@ -40,6 +40,19 @@ _FIELD = re.compile(r"\{\{\s*([A-Za-z_][\w-]{0,39})\s*(?::\s*(file|text)\s*)?(?:
 _LEGACY = re.compile(r"\{([A-Za-z_][A-Za-z0-9_ -]{0,39})\}")
 _FILE_NAME = re.compile(r"^(?:.*[_-])?(?:file|path|filepath|filename)s?$", re.I)
 
+# The names /prompt had before the library. They still work when typed, but are not listed.
+OLD_NAMES: dict[str, tuple[str, str]] = {
+    "overview": ("Explain the codebase", "Give me an overview of this codebase: purpose, architecture, main modules, data flow and how to run it. Cite key files."),
+    "trace": ("Trace a feature", "Trace how {feature} works end to end in this codebase. List the files and functions involved in order, with file:line references."),
+    "impact": ("What would break", "What would break if I deleted or changed {target}? Find every usage, explain the impact and how to do it safely."),
+    "tests": ("Write and run tests", "Write tests for {path}, run them, and fix any failures. Cover edge cases and error paths."),
+    "bugfix": ("Fix a bug", "Investigate and fix this bug: {description}. Reproduce it first, explain the root cause, apply a minimal fix and verify it with a test."),
+    "refactor": ("Safe refactor", "Refactor {target} to {goal} without changing behaviour. Keep tests passing and match the repository's conventions."),
+    "review": ("Review changes", "Review my uncommitted changes for bugs, security issues and missing tests. Report by severity with file:line references."),
+    "docs": ("Document code", "Write clear documentation for {target}: purpose, usage examples, parameters and pitfalls."),
+    "commit": ("Commit message", "Look at the staged changes (git diff --cached) and write a conventional commit message. Do not commit."),
+}
+
 STARTERS: dict[str, tuple[str, str]] = {
     "explain-codebase": ("Tour of the project",
                          "Give me an overview of this project: what it is for, how it is laid out, the main modules and how data moves through them, and how to run and test it. Name the key files."),
@@ -256,7 +269,11 @@ def list_prompts(ws: Path | str | None, scope: str = "") -> list[Prompt]:
 
 def get(ws: Path | str | None, name: str) -> Prompt | None:
     n = clean_name(name)
-    return next((p for p in list_prompts(ws) if p.name == n), None)
+    found = next((p for p in list_prompts(ws) if p.name == n), None)
+    if found is None and n in OLD_NAMES:
+        d, t = OLD_NAMES[n]
+        return Prompt(n, t, d, "starter", "", parse_fields(t))
+    return found
 
 
 def search(ws: Path | str | None, query: str, scope: str = "") -> list[Prompt]:
