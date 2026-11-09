@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from axon import notices
 from axon.mcp.config import ServerSpec, normalize_url
 from axon.mcp.callback_page import failure_page, success_page
 
@@ -196,6 +197,7 @@ class OAuthManager:
         self._lock = threading.RLock()
         self.key = endpoint_key(spec)
         self.challenge: dict[str, str] = {}      # last WWW-Authenticate parameters seen
+        self.helper_headers: dict[str, str] = {} # what the server's headersHelper last returned
 
     # ── state ───────────────────────────────────────────────────────────
     def _client(self) -> httpx.Client:
@@ -205,7 +207,8 @@ class OAuthManager:
         """Configured headers (except Authorization) go to the server's own origin (gateways)."""
         if _origin(url) != _origin(self.spec.url):
             return {}
-        return {k: v for k, v in self.spec.headers.items() if k.lower() != "authorization"}
+        merged = {**self.spec.headers, **self.helper_headers}
+        return {k: v for k, v in merged.items() if k.lower() != "authorization"}
 
     def tokens(self) -> dict[str, Any]:
         t = self.store.get(self.key).get("tokens")
@@ -236,11 +239,16 @@ class OAuthManager:
             return {"Authorization": f"{t.get('token_type') or 'Bearer'} {token}"} if token else {}
 
     def on_unauthorized(self) -> bool:
-        """401 from the server: refresh the token once. True = worth retrying the request."""
+        """401 from the server: refresh the token once. A login with no refresh token connects once without
+        the token (the rejected token is deleted): if the server answers, its tools work signed out.
+        True = worth retrying the request."""
         with self._lock:
-            before = self.tokens().get("access_token")
-            if not before:
+            t = self.tokens()
+            if not t.get("access_token"):
                 return False
+            if not t.get("refresh_token"):
+                self.forget_tokens()
+                return True
             return self.refresh()
 
     # ── discovery ───────────────────────────────────────────────────────
@@ -399,6 +407,8 @@ class OAuthManager:
             except OAuthError as e:
                 if not e.retryable:  # a rejected refresh token is dead; an offline laptop is not
                     self.store.update(self.key, tokens=None)
+                    notices.post(f'MCP server "{self.spec.name}" rejected the stored sign-in. '
+                                 "Open /mcp and select Sign in to sign in again.")
                 return False
             self._store_tokens(data, t)
             return True
@@ -439,7 +449,7 @@ class OAuthManager:
             meta = self.discover()
         except httpx.HTTPError as e:
             raise OAuthError(f"discovery failed: {e}") from e
-        port = int(self.spec.oauth.get("callbackPort") or 0)
+        port = int(self.spec.oauth.get("callbackPort") or os.environ.get("MCP_OAUTH_CALLBACK_PORT") or 0)
         cb = _CallbackServer(port, getattr(self.spec, "name", "") or "")
         try:
             redirect_uri = f"http://localhost:{cb.port}/callback"
@@ -462,6 +472,10 @@ class OAuthManager:
             raise OAuthError(f"authorization failed: {result.get('error_description') or result['error']}")
         if result.get("state") != state:
             raise OAuthError("authorization failed: state mismatch")
+        issuer = str(meta.get("issuer") or "").rstrip("/")
+        if result.get("iss") and issuer and result["iss"].rstrip("/") != issuer:
+            raise OAuthError("authorization failed: the response names an unexpected issuer "
+                             f"({result['iss'][:80]})")
         code = result.get("code")
         if not code:
             raise OAuthError("authorization failed: no code returned")
@@ -493,7 +507,8 @@ class OAuthManager:
 
     # ── sign out ────────────────────────────────────────────────────────
     def logout(self) -> bool:
-        """Forget tokens and the registered client; revoke the token when the server supports it."""
+        """Forget tokens and the registered client; revoke the token when the server supports it. A client
+        secret you set when adding the server stays: it can only be given at add time."""
         rec = self.store.get(self.key)
         t = rec.get("tokens") if isinstance(rec.get("tokens"), dict) else {}
         if t.get("access_token"):
@@ -507,6 +522,10 @@ class OAuthManager:
                                         headers=self._own_headers(str(endpoint)))
             except (OAuthError, httpx.HTTPError):
                 pass
+        client = rec.get("client") if isinstance(rec.get("client"), dict) else {}
+        if client.get("preconfigured"):
+            self.store.update(self.key, tokens=None)
+            return bool(t)
         return self.store.delete(self.key)
 
     def forget_tokens(self) -> None:

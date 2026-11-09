@@ -38,7 +38,7 @@ def recent_view(srv: "DashServer") -> dict[str, Any]:
     rows = po.recent_projects(limit=12)
     for r in rows:
         r["current"] = _same(r["path"], srv.workspace)
-    return {"projects": _redact(rows), "can_switch": srv.live is None, "workspace": str(srv.workspace)}
+    return {"projects": _redact(rows), "can_switch": srv.can_switch, "workspace": str(srv.workspace)}
 
 
 def handle_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any:
@@ -237,7 +237,8 @@ function overviewFill(body, d) {
   const link = (text, fn, title) => h('button', { class: 'linkbtn', type: 'button', title: title || '', onclick: fn }, text);
   const rows = [];
   const f = d.files; const langs = f.languages.slice(0, 4).map(l => l.name + ' ' + Math.round(l.pct) + '%').join(', ');
-  rows.push(['Files', h('span', null, link(f.count.toLocaleString() + (f.truncated ? '+' : '') + ' files', () => wbOpen('files'), 'Open the Files panel'), langs ? ' · ' + langs : '')]);
+  rows.push(['Files', h('div', null, link(f.count.toLocaleString() + (f.truncated ? '+' : '') + ' files', () => wbOpen('files'), 'Open the Files panel'),
+    f.languages.length ? vzSegments(f.languages.slice(0, 6).map(l => ({ name: l.name, value: l.pct, text: Math.round(l.pct) + '%' })), { label: 'Languages' }) : null)]);
   const g = d.git;
   if (!g.repo) rows.push(['Git', 'Not a git repository.']);
   else rows.push(['Git', h('div', null, link(g.branch + ' · ' + (g.changed ? g.changed + ' changed file' + (g.changed > 1 ? 's' : '') : 'no uncommitted changes'), () => wbOpen('changes'), 'Open the Changes panel'),
@@ -254,7 +255,7 @@ function overviewFill(body, d) {
   rows.push(['Last chats', d.chats.length ? h('ul', null, ...d.chats.map(c => h('li', null, h('a', { href: '#/chat/' + encodeURIComponent(c.id) }, c.title), h('span', { class: 'muted' }, ago(Date.now() / 1000 - c.when))))) : h('span', { class: 'muted' }, 'No chats in this project yet.')]);
   const m = d.memory;
   rows.push(['Memory', m.total ? h('span', null, link(m.total + ' note' + (m.total > 1 ? 's' : ''), () => { location.hash = '#/memory'; }, 'Open Memory'), ': ' + m.items.map(i => i.name).join(', ')) : h('span', { class: 'muted' }, 'No notes saved yet.')]);
-  body.replaceChildren(h('dl', { class: 'ov-grid' }, ...rows.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)])));
+  body.replaceChildren(h('dl', { class: 'ov-grid' }, ...rows.map(([k, v]) => h('div', { class: 'ov-f' }, h('dt', null, k), h('dd', null, v)))));
 }
 
 // ----- recent projects: the project name menu and Cmd+K -----

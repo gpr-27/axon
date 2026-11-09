@@ -1,9 +1,23 @@
 """
-Phased tool-call cards: how one tool call looks at the normal trace level.
+Tool calls in the terminal, drawn once when the result is in.
+
+At the compact trace level (opt-in) a call is one header row and a short preview (``compact_rows``)::
+
+    ✓ Bash  echo hello && ls -la  0.2s
+        hello
+        total 8
+        … +3 more lines · /output 1
+    ✓ Read  notes.md  2 lines  0.1s
+    ✗ Bash  ls /missing  failed · exit 1 · 2.1s
+        ls: /missing: No such file or directory
+
+The rest of this module is the phased card of the normal trace level (``card_rows``).
 
 Each step of a turn has up to three sections, told apart by their label::
 
-    ✻ THINKING  0.1s · The user wants a quick test of Bash and Ls...
+    ✻ THINKING  0.1s
+      The user wants a quick test of Bash and Ls, so I will run one harmless
+      command and list the folder together.
 
     ▣ TOOLS · 2 calls · one after another · allowed: bypass mode
       1 Bash  choose  Run a harmless echo to test Bash
@@ -35,7 +49,7 @@ renderer, the restored-session views and the transcript viewer all call it, so t
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from axon.agent import decision as _decision
@@ -60,6 +74,8 @@ CHANGED_FILE_ROWS = 4    # files a shell command changed that are listed under i
 DIFF_BODY_ROWS = 8       # changed lines of an Edit / Write card before '+N more lines'
 PLAN_ROWS = 6
 THINK_PREVIEW_CHARS = 100
+THINK_ROWS = 6          # the thought as wrapped rows at the normal level: this many, then a pointer to the rest
+COMPACT_DIFF_ROWS = 6    # changed lines of an Edit / Write at the compact level before '+N more lines'
 
 # Arguments that carry no choice of the model (defaults, limits, plumbing): not worth a place on the input line.
 _NOISY_OPTIONS = {
@@ -620,6 +636,154 @@ def card_rows(c: CardCall, width: int) -> list[str]:
     return rows
 
 
+# ─── the compact call: one header row and a short preview ───────────────────
+
+def _compact_secs(seconds: float | None) -> str:
+    if seconds is None:
+        return ""
+    return "<0.1s" if float(seconds) < 0.1 else _elapsed(float(seconds))
+
+
+def _compact_target(c: CardCall) -> str:
+    """The key argument on one line: a shell command's first line (with how many follow), else the target."""
+    render = _render()
+    inp = c.inp if isinstance(c.inp, dict) else {}
+    if c.name in _BASH_TOOLS:
+        lines = [l for l in render._command_lines(inp) if l.strip()]
+        if not lines:
+            return ""
+        more = f" +{len(lines) - 1} lines" if len(lines) > 2 else (" +1 line" if len(lines) == 2 else "")
+        return " ".join(tidy_paths(lines[0], c.workspace).split()) + more
+    return tidy_paths(render.tool_target(c.name, inp), c.workspace)
+
+
+def _fit_target(target: str, room: int) -> str:
+    """*target* cut to *room* columns: a path keeps its tail (the file name), anything else its start."""
+    if display_width(target) <= room:
+        return target
+    ellipsis = glyph("ellipsis")
+    if " " not in target and ("/" in target or "\\" in target) and room > 1:
+        tail = target
+        while tail and display_width(tail) > room - 1:
+            tail = tail[1:]
+        return ellipsis + tail
+    return truncate(target, max(1, room))
+
+
+def _diff_stat(first_row: str) -> str:
+    """'+1 −1' (coloured) from a diff card's header row, with 'created' / 'overwrote' in front when it says so."""
+    plain = strip_ansi(first_row)
+    pieces = [p.strip() for p in plain.split(f" {glyph('dot')} ")]
+    verb = next((v for v in ("Created", "Overwrote") if v in pieces[0]), "")
+    stat = next((p for p in pieces[1:] if re.match(r"^[+\-−]\d", p)), "")
+    if not stat:
+        changed = next((p for p in pieces[1:] if p == "no changes"), "")
+        return " ".join(x for x in (verb.lower(), changed) if x)
+    words = []
+    for word in stat.split():
+        if word[1:] == "0":
+            continue
+        words.append(f"{SUCCESS}{word}{RST}" if word.startswith("+") else (f"{ERROR}{word}{RST}" if word[0] in "-−" else word))
+    return (f"{MUTED}{verb.lower()}{RST} " if verb else "") + " ".join(words)
+
+
+def _compact_diff(c: CardCall, width: int) -> tuple[str, list[str]]:
+    """(the stat for the header row, the changed lines). A diff is the one result that keeps a longer preview."""
+    render = _render()
+    rows = render.summarize_tool_result(c.name, dict(c.inp), c.content, False, width, detail=1)
+    if not rows:
+        return "", []
+    shown, hidden = _collapse_diff(rows[1:], COMPACT_DIFF_ROWS)
+    return _diff_stat(rows[0]), [_fit(r, width) for r in shown] + ([_pointer(hidden, c.hint, " lines")] if hidden else [])
+
+
+def _quiet(row: str) -> str:
+    """A preview row with its body text muted, so the header rows carry the eye (errors keep their colour)."""
+    return row.replace(TEXT, MUTED) if TEXT else row
+
+
+def _compact_tails(c: CardCall, fact: str) -> list[str]:
+    """What follows the argument on the header row, longest first (a narrow window takes a shorter one)."""
+    secs = _compact_secs(c.duration)
+    dot = f" {glyph('dot')} "
+    if c.state == "stopped":
+        return [f"{ERROR}stopped before it finished{RST}", f"{ERROR}stopped{RST}"]
+    if is_failed(c):
+        blocked = (_decision.short_allowed(c.allowed) or "").startswith(("denied", "declined"))
+        word = "blocked" if blocked else "failed"
+        code = bash_exit_code(c.content) if c.name in _BASH_TOOLS else 0
+        full = [word] + ([f"exit {code}"] if code else []) + ([secs] if secs else [])
+        return [f"{ERROR}{dot.join(full)}{RST}", f"{ERROR}{dot.join([word] + ([secs] if secs else []))}{RST}", f"{ERROR}{word}{RST}"]
+    timing = f"{MUTED}{secs}{RST}" if secs else ""
+    with_fact = f"{MUTED}{fact}{RST}" + (f"{MUTED}{dot}{RST}{timing}" if timing else "") if fact else ""
+    return [t for t in (with_fact, timing) if t] + [""]
+
+
+def _without_subagent_banner(c: CardCall) -> CardCall:
+    """A subagent's report without its '[Subagent #1 Result (...) | N tokens ...]:' line."""
+    if c.name not in _SUBAGENT_TOOLS or c.is_error:
+        return c
+    first, _, rest = sanitize(c.content or "").lstrip().partition("\n")
+    return replace(c, content=rest) if first.startswith("[Subagent #") and rest.strip() else c
+
+
+def compact_rows(c: CardCall, width: int) -> list[str]:
+    """One tool call at the compact level: 'status name  argument  facts · time', then a short preview.
+
+    Failures always say why. The reason for the call, its permission outcome and the rest of the
+    result stay in the transcript (Ctrl+F) and ``/output K``."""
+    render = _render()
+    width = max(20, width)
+    failed = is_failed(c)
+    body_w = max(12, width - 2)
+    fact, body = "", []
+    if c.state == "done" and c.name in _DIFF_TOOLS and not failed:
+        fact, body = _compact_diff(c, body_w)
+    elif c.state == "done":
+        body = output_rows(_without_subagent_banner(c), body_w)
+        if len(body) == 1 and strip_ansi(body[0]).strip() in _EMPTY_NOTES and not failed:
+            fact, body = strip_ansi(body[0]).strip().strip("()"), []
+        if not failed:
+            summary = result_summary(c).split(f" {glyph('dot')} ")[0]
+            fact = summary or fact
+            if c.name in _READ_TOOLS:
+                body = []                # the file's text is the model's business: the header says how much it read
+            elif width < SHOW_PREVIEW_FROM:
+                body = _one_row(body, body_w)
+            body = [_quiet(r) for r in body]
+    mark = f"{ERROR}{glyph('fail')}{RST}" if failed or c.state == "stopped" else f"{SUCCESS}{glyph('ok')}{RST}"
+    label = render.tool_label(c.name)
+    if display_width(label) > max(10, width // 3):
+        label = truncate(label, max(10, width // 3))
+    lead = f"{mark} {BOLD}{TEXT}{label}{RST}"
+    target = _compact_target(c)
+    used = display_width(lead)
+    tails = _compact_tails(c, fact)
+    tail = tails[-1]
+    for option in tails:            # keep the facts while the argument still gets a fair share of the row
+        room = width - used - 2 - (display_width(option) + 2 if option else 0)
+        if room >= min(16, display_width(target)):
+            tail = option
+            break
+    room = width - used - 2 - (display_width(tail) + 2 if tail else 0)
+    show_options = width >= SHOW_OPTIONS_FROM and c.name not in _SUBAGENT_TOOLS       # a subagent's prompt is no option
+    options = input_options(c.name, c.inp if isinstance(c.inp, dict) else {}) if show_options else []
+    header = lead
+    if target and room > 0:
+        shown = _fit_target(target, room)
+        header += f"  {TEXT}{shown}{RST}"
+        extra = "  ".join(options)
+        if extra and display_width(shown) + 2 + display_width(extra) <= room:
+            header += f"  {MUTED}{extra}{RST}"
+    if tail:
+        header += f"  {tail}"
+    rows = [truncate(header, width)]
+    rows += ["  " + r for r in body]
+    rows += ["  " + r for line in c.notes[:2] if "blocked" in line or glyph("warn") in line
+             for r in _wrap(f"{MUTED}{line}{RST}", body_w, 1)]
+    return rows
+
+
 def step_results_text(count: int, n_bytes: int, est_tokens: int, next_step: int, width: int = 0) -> str:
     """'→ 2 results (314 B, ~84 tokens) go to step 2'; in a narrow window the token count, then the size, go first."""
     arrow = glyph("arrow")
@@ -712,8 +876,24 @@ def thinking_line(seconds: float | None, text: str, width: int) -> str:
     return truncate(head, width)
 
 
+def thinking_rows(seconds: float | None, text: str, width: int, hint: str = "/transcript", max_rows: int = THINK_ROWS,
+                  indent: str = "  ") -> list[str]:
+    """The thought as it was written: '✻ THINKING  0.1s' then the text wrapped and indented, dim italic, at most
+    *max_rows* rows and then a pointer to the rest. A thought with no text is just the header."""
+    head = f"{PRIMARY}{BOLD}{glyph('star')} THINKING{RST}" + (f"  {MUTED}{seconds:.1f}s{RST}" if seconds is not None else "")
+    flat = " ".join(str(text or "").split())
+    if not flat:
+        return [truncate(head, width)]
+    body = _wrap_plain(flat, max(20, width - len(indent)), 10_000)
+    shown = body[:max_rows]
+    rows = [truncate(head, width)] + [f"{indent}{DIM}{ITALIC}{r}{RST}" for r in shown]
+    if len(body) > max_rows:
+        rows.append(f"{indent}{MUTED}{glyph('ellipsis')} +{len(body) - max_rows} more lines {glyph('dot')} {hint}{RST}")
+    return rows
+
+
 __all__ = [
-    "CardCall", "batch_mode", "answer_label", "card_rows", "choose_text", "first_error_line", "input_rows",
-    "name_column_width", "output_rows", "common_permission", "real_reason", "tidy_paths", "run_text", "step_results_text", "thinking_line",
+    "CardCall", "batch_mode", "answer_label", "card_rows", "choose_text", "compact_rows", "first_error_line", "input_rows",
+    "name_column_width", "output_rows", "common_permission", "real_reason", "tidy_paths", "run_text", "step_results_text", "thinking_line", "thinking_rows",
     "tools_label",
 ]

@@ -531,7 +531,7 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
         import pydoc
         pydoc.pager("\n".join(f"{i:5d}  {ln}" for i, ln in enumerate(lines, 1)))
         return CommandResult(handled=True)
-    header(title, f"{len(lines)} lines · {len(out):,} chars · /transcript (Ctrl+F) expands any tool call")
+    header(title, f"{len(lines)} lines · {len(out):,} chars · /transcript (Ctrl+O) expands any tool call")
     if shown_no:
         from axon.ui.render import tool_output_details
         details = tool_output_details(shown_no, max(40, shutil.get_terminal_size((100, 24)).columns - 8))
@@ -546,7 +546,7 @@ def handle_output(agent: Any, arg: str) -> CommandResult:
 
 
 @command("transcript", category=CAT,
-         description="Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+F)",
+         description="Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+O)",
          aliases=("tr", "scrollback"),
          usage="/transcript   (keys: click/enter expand · e/c all · t turns · / search · n/N · y copy · q close)")
 def handle_transcript(agent: Any, arg: str) -> CommandResult:

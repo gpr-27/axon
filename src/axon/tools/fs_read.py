@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 from typing import Any, ClassVar
 
+from axon import envvars
 from axon.errors import ToolError
 from axon.tools.base import (
     Tool, ToolContext, cap_text, default_summary, display_path, human_size, int_arg, output_cap, plural, resolve_path,
@@ -19,6 +20,30 @@ from axon.tools.textio import is_binary_bytes, MAX_TEXT_BYTES
 
 DEFAULT_LIMIT = 2000
 MAX_LINE_CHARS = 2000
+DEFAULT_MAX_TOKENS = 25_000
+MAX_IMAGE_BYTES = 128 * 1024 * 1024
+MAX_NOTEBOOK_BYTES = 100 * 1024 * 1024
+
+
+def read_token_limit() -> int:
+    val = envvars.integer("AXON_FILE_READ_MAX_OUTPUT_TOKENS")
+    return val if val and val > 0 else DEFAULT_MAX_TOKENS
+
+
+def _tokens(text: str) -> int:
+    return len(text) // 4
+
+
+def _room_tokens(ctx: ToolContext) -> int:
+    """What a large read is sized against: the room left in the session's context window."""
+    agent = getattr(ctx, "agent", None)
+    try:
+        cm = getattr(agent, "context", None) or getattr(agent, "ctx", None)
+        window = int(cm.context_window())
+        used = int(getattr(cm, "last_input_tokens", 0) or 0)
+        return max(1000, window - used - 8000)
+    except Exception:
+        return 200_000
 
 
 def _attach_image(p: Path, data: bytes, rel: str, size: int, ctx: ToolContext) -> str | None:
@@ -153,7 +178,8 @@ class ReadTool(Tool):
     description: ClassVar[str] = (
         "Read a file. Output is numbered like `cat -n` (\"     12→text\"); the number prefix is not part of the file, "
         "so never include it in Edit old_string. Reads up to 2000 lines from `offset` by default — use offset/limit "
-        "to page through large files. Lines over 2000 chars are truncated. Also reads notebooks, PDFs, "
+        "to page through large files. One call returns at most 25,000 tokens; set "
+        "allow_large=true only when you need the whole file or a long range. Lines over 2000 chars are truncated. Also reads notebooks, PDFs, "
         "images, Word/Excel/PowerPoint/OpenDocument/RTF/EPUB, CSV, SQLite, archives, audio/video and fonts as extracted text; "
         "other binaries get a hex preview. You must Read a file before "
         "you Edit/Write it; reading many files in parallel in one turn is encouraged."
@@ -166,6 +192,8 @@ class ReadTool(Tool):
             "limit": {"type": "integer", "minimum": 1, "maximum": 20000, "description": f"Maximum number of lines to read (default {DEFAULT_LIMIT})"},
             "pages": {"type": "string", "description": "PDF pages, slides or EPUB chapters: \"3\", \"2-5\" or \"4-\""},
             "part": {"type": "string", "description": "Sheet name, SQLite table or archive member path"},
+            "allow_large": {"type": "boolean", "description": "Read a large text file or long range in one call, sized "
+                                                              "against the room left in the context window"},
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -187,8 +215,11 @@ class ReadTool(Tool):
 
         rel = display_path(p, ctx.workspace)
         offset = int_arg(args, "offset", 1, lo=1, strict=True)
-        limit = int_arg(args, "limit", DEFAULT_LIMIT, lo=1, hi=20000, strict=True)
-        cap = output_cap(ctx, 100_000)
+        allow_large = bool(args.get("allow_large"))
+        whole = args.get("offset") is None and args.get("limit") is None
+        limit = int_arg(args, "limit", 10**9 if allow_large else DEFAULT_LIMIT, lo=1, hi=None if allow_large else 20000, strict=True)
+        token_limit = _room_tokens(ctx) if allow_large else read_token_limit()
+        cap = token_limit * 4 if allow_large else output_cap(ctx, 100_000)
 
         try:
             size = p.stat().st_size
@@ -211,6 +242,9 @@ class ReadTool(Tool):
             raise ToolError(f"Failed to read file {raw_path}: {e}") from e
 
         if kind == "image":
+            if size > MAX_IMAGE_BYTES:
+                raise ToolError(f"{rel} is {size // 1_048_576} MB, over the 128 MB limit for reading an image. Resize it or "
+                                f"export a smaller copy, then read that copy.")
             ctx.file_state.record_read(p)
             attached = _attach_image(p, data, rel, size, ctx)
             return attached if attached is not None else _image_notice(p, data, rel)
@@ -220,15 +254,22 @@ class ReadTool(Tool):
             return self._read_pdf(p, data, rel, size, offset, limit, cap, args.get("pages"))
 
         if kind == "ipynb":
+            if size > MAX_NOTEBOOK_BYTES:
+                raise ToolError(f"{rel} is {size // 1_048_576} MB, over the 100 MB limit for reading a notebook. Read a slice of "
+                                f"its cells with a shell command, such as: python -c \"import json; print(json.load(open('{rel}'))"
+                                f"['cells'][:5])\"")
+            nb = None
             try:
                 from axon.tools.notebook import load_notebook, render_notebook
                 nb = load_notebook(p)
-                ctx.file_state.record_read(p)
-                out = cap_text(render_notebook(nb, p.name), cap, "Use NotebookEdit to modify cells.")
-                self._attach_notebook_images(nb, ctx)
-                return out
             except ToolError:
                 pass  # malformed notebook JSON: fall through and show raw text
+            if nb is not None:
+                rendered = render_notebook(nb, p.name)
+                ctx.file_state.record_read(p, partial=len(rendered) > cap)
+                out = cap_text(rendered, cap, "Use NotebookEdit to modify cells.")
+                self._attach_notebook_images(nb, ctx)
+                return out
 
         if kind in ff.EXTRACT_KINDS:
             ctx.file_state.record_read(p)
@@ -249,6 +290,23 @@ class ReadTool(Tool):
             return f"[{rel} has {total} lines; offset {offset} is beyond the end of the file.]"
         end = min(total, offset - 1 + limit)
         result = _number_lines(lines[offset - 1 : end], offset)
+        partial = False
+        if _tokens(result) > token_limit:
+            if not whole:
+                raise ToolError(f"Lines {offset}-{end} of {rel} come to about {_tokens(result):,} tokens, over the limit of "
+                                f"{token_limit:,}. Read a smaller portion with offset and limit, or search with Grep.")
+            room, end = token_limit * 4, offset - 1
+            for ln in lines:      # the first page: as many whole lines as fit
+                room -= min(len(ln), MAX_LINE_CHARS) + 8
+                if room < 0:
+                    break
+                end += 1
+            end = max(end, 1)
+            result = _number_lines(lines[:end], 1)
+            partial = True
+        if whole and end < total:
+            partial = True
+        ctx.file_state.record_read(p, partial=partial)
         notes = []
         if encoding not in ("utf-8", "utf-8-sig"):
             notes.append(f"decoded as {encoding}")
@@ -259,10 +317,12 @@ class ReadTool(Tool):
             if note:
                 notes.append(note)
         if end < total:
-            result += f"\n\n[... {total - end} more lines. Continue with offset={end + 1} ...]"
+            head = f"PARTIAL view: lines {offset}-{end} of {total}. " if partial else ""
+            result += f"\n\n[{head}... {total - end} more lines. Continue with offset={end + 1} ...]"
         if notes:
             result = f"[{rel}: {', '.join(notes)}]\n" + result
-        return cap_text(result, cap, f"Use offset/limit to read a smaller range (file has {total} lines)")
+        return cap_text(result, max(cap, token_limit * 4) if not allow_large else cap,
+                        f"Use offset/limit to read a smaller range (file has {total} lines)")
 
     @staticmethod
     def _attach_notebook_images(nb: dict[str, Any], ctx: ToolContext) -> None:

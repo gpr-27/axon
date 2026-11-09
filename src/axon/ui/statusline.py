@@ -11,6 +11,9 @@ of the session on stdin (``model``, ``workspace``, ``cost``, ``context_window``,
 shown under the prompt. Results are cached for 300 ms; a command that fails or exceeds the
 timeout keeps the last good output (or falls back to the built-in line).
 
+While the prompt sits idle the command re-runs only when the session data it receives changes, or
+every ``refreshInterval`` seconds (minimum 1) when that is set, for clocks and other outside data.
+
 Built-in line (no command configured): ``model · ctx 42% · $0.1234 · trace normal · ⎇ main``.
 """
 from __future__ import annotations
@@ -33,6 +36,7 @@ MAX_LINES = 4
 _lock = threading.Lock()
 _cache: dict[str, tuple[float, str | None]] = {}
 _last_good: dict[str, str] = {}
+_last_key: dict[str, str] = {}     # command -> the session data it last ran with
 _git_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -51,6 +55,14 @@ def status_line_config(settings: Any) -> dict[str, Any] | None:
     if str(cfg.get("type") or "command") != "command":
         return None
     return cfg
+
+
+def refresh_interval(cfg: dict[str, Any]) -> float | None:
+    """``refreshInterval`` in seconds (minimum 1), None when unset or not a number."""
+    value = cfg.get("refreshInterval", cfg.get("refresh_interval"))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(1.0, float(value))
 
 
 # ─── git branch (no subprocess: read .git/HEAD) ───────────────────────────
@@ -209,8 +221,10 @@ def run_status_command(command: str, payload: dict[str, Any], timeout: float = T
     argv = plat.shell_command_argv(os.path.expanduser(command))
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     try:
+        cols, lines = plat.term_size()      # the script's output is captured, so it cannot ask the terminal itself
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 cwd=cwd if cwd and os.path.isdir(cwd) else None,
+                                env={**os.environ, "COLUMNS": str(cols), "LINES": str(lines)},
                                 **plat.new_process_group_kwargs())
     except (OSError, ValueError):
         return None
@@ -230,8 +244,9 @@ def run_status_command(command: str, payload: dict[str, Any], timeout: float = T
     return text
 
 
-def render_custom_status(settings: Any, agent: Any = None) -> str | None:
-    """Output of the configured status-line command (None when none is set or it failed)."""
+def render_custom_status(settings: Any, agent: Any = None, idle: bool = False) -> str | None:
+    """Output of the configured status-line command (None when none is set or it failed).
+    *idle*: asked by the prompt's idle timer rather than by an event, see the module docstring."""
     cfg = status_line_config(settings if settings is not None else getattr(agent, "settings", None))
     if cfg is None:
         return None
@@ -242,8 +257,12 @@ def render_custom_status(settings: Any, agent: Any = None) -> str | None:
     now = time.monotonic()
     with _lock:
         hit = _cache.get(key)
-        if hit and now - hit[0] < CACHE_TTL_S:
+        ttl = CACHE_TTL_S
+        if idle and _last_key.get(command) == key:
+            ttl = refresh_interval(cfg) or float("inf")
+        if hit and now - hit[0] < ttl:
             return hit[1]
+        _last_key[command] = key
     ws = str(getattr(settings, "workspace", "") or "") or None
     text = run_status_command(command, payload, timeout=_num(cfg.get("timeout"), TIMEOUT_S) or TIMEOUT_S, cwd=ws)
     with _lock:
@@ -282,13 +301,13 @@ def default_status_line(agent: Any, width: int | None = None, include_mode: bool
     return truncate(line, (width or term_width()) - 1)
 
 
-def prompt_status_rows(agent: Any, width: int | None = None) -> list[str]:
+def prompt_status_rows(agent: Any, width: int | None = None, idle: bool = False) -> list[str]:
     """Rows shown under the prompt: the custom command output, else the built-in line."""
     if agent is None:
         return []
     settings = getattr(agent, "settings", None)
     try:
-        custom = render_custom_status(settings, agent)
+        custom = render_custom_status(settings, agent, idle=idle)
     except Exception:
         custom = None
     if custom:
@@ -324,41 +343,24 @@ def running_tasks(agent: Any) -> list[Any]:
 
 
 def agent_panel_rows(agent: Any, width: int | None = None, max_rows: int = 6, selected: int | None = None,
-                     row_ids: list | None = None) -> list[str]:
+                     row_ids: list | None = None, arrow_keys: bool = False) -> list[str]:
     """Live roster under the prompt: ``main`` plus one row per subagent (running first) with what
     it is doing, how long it has run and its tokens. ``selected`` marks one agent row (index into
     :func:`ordered_tasks`); ``row_ids``, when given, receives (row offset, task id) for every agent row
     so clicks can be mapped back. Empty when the session has no subagents."""
-    import time as _time
-    from axon.ui.theme import BOLD, CYAN, GOLD, MINT, ROSE, RST, SLATE, WHITE, display_width, sanitize, strip_ansi, term_width, truncate
+    from axon.ui.subagent_monitor import agent_table
+    from axon.ui.theme import GOLD, RST, SLATE, WHITE, term_width, truncate
     order = running_tasks(agent)
     if not order:
         return []
     w = (width or term_width()) - 1
     head = f"  {GOLD}{len(order)} agent{'s' if len(order) != 1 else ''} running{RST}"
-    hint = "↓ select · enter open · /tell · /stop" if selected is None else "↑↓ move · enter open · x stop · esc back"
+    hint = (("↓ select · /tasks · /stop" if arrow_keys else "/tasks opens the list · /tell · /stop") if selected is None
+            else "↑↓ move · enter open · x stop · esc back")
     rows = [truncate(head + f"{SLATE} · {hint}{RST}", w), f"  {WHITE}● main{RST}"]
-    spin = "◐◓◑◒"[int(_time.monotonic() * 6) % 4]          # running agents turn
-    glyphs = {"running": (GOLD, spin), "completed": (MINT, "✓"), "error": (ROSE, "✗"), "exhausted": (ROSE, "✗")}
-    first = 0
-    if selected is not None and selected >= max_rows:
-        first = selected - max_rows + 1              # keep the selected row in view
-    for i, t in enumerate(order[first:first + max_rows], start=first):
-        color, mark = glyphs.get(t.status, (SLATE, "○"))
-        secs = (_time.time() - t.start_time) if t.status == "running" and t.start_time else float(t.elapsed_s or 0.0)
-        mins, sec = divmod(int(secs), 60)
-        clock = f"{mins}m {sec:02d}s" if mins else f"{sec}s"
-        tok = int(t.tokens_consumed or 0)
-        tokens = f"{tok / 1000:.1f}k" if tok >= 1000 else str(tok)
-        right = f"{clock} · ↓ {tokens} tokens"
-        lead = f"{CYAN}{BOLD}❯{RST} " if i == selected else "  "
-        what = " ".join(sanitize(strip_ansi(str(t.activity or t.title or ""))).split())   # model / tool text: no escapes
-        left = f"{lead}{color}{mark}{RST} {WHITE}{t.id}{RST} {sanitize(strip_ansi(str(t.agent_type)))}  {SLATE}{what}{RST}"
-        room = w - display_width(right) - 2
-        left = truncate(left, max(10, room))
-        if row_ids is not None:
-            row_ids.append((len(rows), t.id))
-        rows.append(left + " " * max(1, w - display_width(left) - display_width(right)) + f"{SLATE}{right}{RST}")
-    if len(order) > first + max_rows:
-        rows.append(f"  {SLATE}… and {len(order) - first - max_rows} more{RST}")
-    return rows
+    table = agent_table(order, w, selected, max_rows=max_rows + 2)
+    per = 2 if len(table) > 1 + len(order) else 1      # narrow windows give each agent a second line
+    if row_ids is not None:
+        for i, t in enumerate(order[:(len(table) - 1) // per]):
+            row_ids.append((len(rows) + 1 + i * per, t.id))
+    return rows + table

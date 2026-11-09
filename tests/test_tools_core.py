@@ -64,7 +64,8 @@ def test_default_tool_set_is_compact(reg):
                     "UiPreview", "GoToDefinition", "FindReferences", "SemanticSearch", "Doctor"):
         assert removed not in names
     # 20 built-ins + feature TOOLS (UsageStats) + Monitor, Git, CheckpointList/Undo, EnterPlanMode, LSP (only with a server)
-    assert len(names) <= 28
+    # + CronCreate/List/Delete, ScheduleWakeup
+    assert len(names) <= 32
 
 
 @pytest.mark.parametrize("style", ["anthropic", "openai"])
@@ -225,7 +226,9 @@ def test_edit_detects_stale_file(reg, ctx, workspace):
     f.write_text("changed elsewhere\n", encoding="utf-8")
     os.utime(f, ns=(1, 1))
     with pytest.raises(StaleFileError):
-        reg.get("Edit").run({"path": "s.txt", "old_string": "changed", "new_string": "x"}, ctx)
+        reg.get("Edit").run({"path": "s.txt", "old_string": "one", "new_string": "x"}, ctx)   # a stale old_string
+    out = reg.get("Edit").run({"path": "s.txt", "old_string": "changed", "new_string": "x"}, ctx)   # matches what is there now
+    assert "carries changes" in out and f.read_text(encoding="utf-8") == "x elsewhere\n"
 
 
 def test_multiedit_atomic_and_checkpointed(reg, ctx, workspace):
@@ -286,11 +289,15 @@ def _tree(ws: Path) -> None:
     (ws / "node_modules" / "lib" / "x.py").write_text("Target\n", encoding="utf-8")
 
 
-def test_glob_respects_gitignore_and_sorts(reg, ctx, workspace, backend):
+def test_glob_respects_gitignore_and_sorts(reg, ctx, workspace, backend, monkeypatch):
     _tree(workspace)
     out = reg.get("Glob").run({"pattern": "**/*.py"}, ctx)
     assert "src/pkg/mod.py" in out
-    assert "build/out.py" not in out and "node_modules" not in out
+    assert "build/out.py" not in out and "node_modules" not in out            # by default what .gitignore hides stays hidden
+    monkeypatch.setenv("AXON_GLOB_NO_IGNORE", "1")                          # opt in to see it
+    assert "build/out.py" in reg.get("Glob").run({"pattern": "**/*.py"}, ctx)
+    monkeypatch.delenv("AXON_GLOB_NO_IGNORE")
+    out = reg.get("Glob").run({"pattern": "**/*.py"}, ctx)
     assert "\\" not in out
     assert reg.get("Glob").run({"pattern": "*.py"}, ctx).startswith("No files matched")
     out = reg.get("Glob").run({"pattern": "**/*.{py,ts}", "path": "src"}, ctx)
@@ -302,7 +309,7 @@ def test_glob_respects_gitignore_and_sorts(reg, ctx, workspace, backend):
 def test_grep_modes_and_filters(reg, ctx, workspace, backend):
     _tree(workspace)
     g = reg.get("Grep")
-    content = g.run({"pattern": "Target"}, ctx)
+    content = g.run({"pattern": "Target", "output_mode": "content"}, ctx)
     assert "src/pkg/mod.py:1:def Target():" in content
     assert "build/out.py" not in content and "node_modules" not in content and "debug.log" not in content
     files = g.run({"pattern": "Target", "output_mode": "files_with_matches"}, ctx)
@@ -311,7 +318,7 @@ def test_grep_modes_and_filters(reg, ctx, workspace, backend):
     assert "src/pkg/mod.py:2" in count
     typed = g.run({"pattern": "Target", "type": "ts"}, ctx)
     assert "src/app.ts" in typed and "mod.py" not in typed
-    ctxed = g.run({"pattern": "return 1", "-B": 1, "path": "src/pkg/mod.py"}, ctx)
+    ctxed = g.run({"pattern": "return 1", "-B": 1, "path": "src/pkg/mod.py", "output_mode": "content"}, ctx)
     assert "src/pkg/mod.py-1-def Target():" in ctxed and "src/pkg/mod.py:2:    return 1" in ctxed
     assert g.run({"pattern": "-dash-pattern"}, ctx).startswith("No matches")  # pattern starting with '-'
     limited = g.run({"pattern": "Target", "head_limit": 1}, ctx)
@@ -442,7 +449,7 @@ def test_patch_headerless_with_path(reg, ctx, workspace):
 def test_notebook_edit_modes(reg, ctx, workspace):
     nb_path = workspace / "a.ipynb"
     tool = reg.get("NotebookEdit")
-    tool.run({"notebook_path": "a.ipynb", "edit_mode": "insert", "new_source": "x = 1\ny = 2"}, ctx)
+    tool.run({"notebook_path": "a.ipynb", "edit_mode": "insert", "new_source": "x = 1\ny = 2", "cell_type": "code"}, ctx)
     nb = json.loads(nb_path.read_text(encoding="utf-8"))
     assert nb["cells"][0]["source"] == ["x = 1\n", "y = 2"]
     cid = nb["cells"][0]["id"]
@@ -516,7 +523,7 @@ def test_tool_summaries(reg, ctx, workspace, backend):
 
     assert run("Read", {"path": "f.txt"}).startswith("200 lines · ")
     assert run("Read", {"path": "f.txt", "offset": 11, "limit": 5}) .endswith("(lines 11-15)")
-    assert run("Grep", {"pattern": "Target"}) == "3 matches in 3 files"
+    assert run("Grep", {"pattern": "Target", "output_mode": "content"}) == "3 matches in 3 files"
     assert run("Grep", {"pattern": "Target", "output_mode": "files_with_matches"}) == "3 files"
     assert run("Grep", {"pattern": "nomatchzzz"}) == "no matches"
     assert run("Glob", {"pattern": "**/*.py"}) == "1 file"

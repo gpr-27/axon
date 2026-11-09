@@ -83,7 +83,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                            show_thinking: bool = True, tag: str = "", trace_level: str = "normal") -> list[str]:
     """Rows for the whole session in ``path`` (``row_tags`` receives the transcript-entry tag of each
     row for click-to-expand; ``tool_tags`` maps tool_use_id -> tag). *trace_level* picks the layout like
-    the live view: compact and normal draw the phased tool cards, detailed and debug the full explainer."""
+    the live view: compact draws the answers and one tidy row per call, normal the phased tool cards,
+    detailed and debug the full explainer."""
     from axon.ui import tool_cards
     from axon.ui.theme import strip_ansi
     from axon.ui.input import format_user_prompt_banner
@@ -91,7 +92,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
         TRACE_LEVELS, Renderer, _clean, _fmt_bytes, _fmt_tokens, _one_line, _plural, context_gauge, exact_call_rows,
         normalize_trace_level, step_usage, tool_result_rows_exact, turn_summary_rows,
     )
-    phased = TRACE_LEVELS.index(normalize_trace_level(trace_level)) <= 1
+    level = TRACE_LEVELS.index(normalize_trace_level(trace_level))
+    phased, clean = level <= 1, level == 0
     _SHELL_CTX = Renderer._SHELL_CTX_RE
 
     width = width or max(40, layout_width(4))
@@ -106,8 +108,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
         elif r.get("type") == "permission" and isinstance(r.get("data"), dict) and r["data"].get("tool_use_id"):
             permissions[str(r["data"]["tool_use_id"])] = r["data"]
 
-    rail = f"{BORDER}{glyph('v')}{RST} "
-    says = f"{ACCENT}{glyph('quote')}{RST} "
+    rail = "  " if clean else f"{BORDER}{glyph('v')}{RST} "
+    says = "" if clean else f"{ACCENT}{glyph('quote')}{RST} "
     dot = glyph("dot")
     out: list[str] = []
     tags: list[Any] = []
@@ -151,8 +153,22 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             head = f"{SUCCESS}{glyph('ok')} Done{RST}"
         return f"{BORDER}{glyph('sq_bl')}{RST} {head} {MUTED}{dot} {f' {dot} '.join(facts)}{RST}"
 
+    def clean_done_row() -> str:
+        """'✓ Done · 3 tools · $0.0012': the compact summary, like the live one."""
+        facts = ([_plural(state["tools"], "tool")] if state["tools"] else []) + ([f"${state['cost']:.4f}"] if state["cost"] else [])
+        head = f"{ERROR}{glyph('fail')} Stopped{RST}" if state["stopped"] else f"{SUCCESS}{glyph('ok')} Done{RST}"
+        return f"  {head}" + (f" {MUTED}{dot} {f' {dot} '.join(facts)}{RST}" if facts else "")
+
     def close_turn() -> None:
         if not state["open"]:
+            return
+        if clean:
+            if out and strip_ansi(out[-1]).strip():
+                add("")
+            add(clean_done_row())
+            add("")
+            state.update(open=False, step=0, cost=0.0, calls=0, tools=0, time=0.0, answer=(0, ""), steps=[],
+                         context=(0, 0), stopped=False)
             return
         answer_step, answer_model = state["answer"]
         if state["calls"] > 1 and answer_step and not state["stopped"]:
@@ -172,12 +188,14 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
         if prompt:
             add_many(format_user_prompt_banner(prompt, max_w=width + 2).splitlines())
             add("")
+        state["open"] = True
+        if clean:
+            return
         head = f"{BORDER}{glyph('sq_tl')}{RST} {BOLD}Turn {state['turn']}{RST}" + (f" {MUTED}{tag}{RST}" if tag else "")
         if prompt:
             head += f" {MUTED}{dot}{RST} {TEXT}\"{_one_line(prompt, 60)}\"{RST}"
         add(truncate(head, width + 2))
         state["head"] = len(out) - 1
-        state["open"] = True
 
     def tool_block(tu: dict[str, Any]) -> None:
         name = str(tu.get("name", "tool"))
@@ -230,7 +248,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
         add_many(wrap_rows(tool_then_row(_then_text(res, state["step"] + 1)), f"{rail}       ", f"{rail}         "), tag)
 
     def card_block(uses: list[dict[str, Any]]) -> None:
-        """The step's tool calls as one 'TOOLS' section of phased cards, then the '→ N results' line."""
+        """The step's tool calls: one 'TOOLS' section of phased cards and the '→ N results' line, or at the
+        compact level just one tidy row per call."""
         names = [str(u.get("name", "tool")) for u in uses]
         allowed_texts: list[str] = []
         for tu in uses:
@@ -238,8 +257,9 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             allowed_texts.append(_decision.allowed_because(str(perm.get("outcome", "")), str(perm.get("source", "")),
                                                            str(perm.get("reason", "")), perm.get("approval")) if perm else "")
         common = tool_cards.common_permission(allowed_texts)
-        gap()
-        add(f"{rail}{tool_cards.tools_label(len(uses), tool_cards.batch_mode(names, registry), common)}")
+        if not clean:
+            gap()
+            add(f"{rail}{tool_cards.tools_label(len(uses), tool_cards.batch_mode(names, registry), common)}")
         name_w = tool_cards.name_column_width(names, width - 6)
         n_bytes = n_tokens = 0
         for number, tu in enumerate(uses, 1):
@@ -260,8 +280,12 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                 is_error=bool(res.get("is_error")) if res is not None else False,
                 duration=float(dur) if dur else None, state="done" if res is not None else "stopped",
                 hint="/transcript", registry=registry, name_w=name_w, total=len(uses), common_allowed=common)
-            add_many((f"{rail}  {r}" for r in tool_cards.card_rows(call, width - 6)), (tool_tags or {}).get(call_id))
-        add(f"{rail}  {tool_cards.step_results_text(len(uses), n_bytes, n_tokens, state['step'] + 1, width - 6)}")
+            if clean:
+                add_many((f"{rail}{r}" for r in tool_cards.compact_rows(call, width - 2)), (tool_tags or {}).get(call_id))
+            else:
+                add_many((f"{rail}  {r}" for r in tool_cards.card_rows(call, width - 6)), (tool_tags or {}).get(call_id))
+        if not clean:
+            add(f"{rail}  {tool_cards.step_results_text(len(uses), n_bytes, n_tokens, state['step'] + 1, width - 6)}")
 
     for rec in records:
         t, data = rec.get("type"), rec.get("data")
@@ -276,13 +300,15 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             state["calls"] += 1
             model = str(data.get("model") or "")
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
-            if state["step"] > 1:
+            if state["step"] > 1 and not clean:
                 add(rail.rstrip())
             # Same header as the live step row: model (provider) · reads N messages (~tokens).
             prov = str(call.get("provider") or "")
             reads = int(call.get("message_count") or 0)
             size = f" (~{_fmt_tokens(int(call.get('tokens_in') or 0))} tokens)" if call.get("tokens_in") else ""
-            if phased:       # normal: 'Step 4 · model · 7 messages · ~17.2k tokens' (the turn header names the provider)
+            if clean:
+                pass
+            elif phased:     # normal: 'Step 4 · model · 7 messages · ~17.2k tokens' (the turn header names the provider)
                 tokens = f" {dot} ~{_fmt_tokens(int(call.get('tokens_in') or 0))} tokens" if call.get("tokens_in") else ""
                 add(truncate(f"{rail}{ACCENT}{glyph('diamond')}{RST} {BOLD}Step {state['step']}{RST} {MUTED}{dot}{RST} {TEXT}{model}{RST}"
                              + (f" {MUTED}{dot} {_plural(reads, 'message')}{tokens}{RST}" if reads else ""), width + 2))
@@ -316,9 +342,12 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                         f"{SUBTLE}{dot} {int(f.get('lines') or 0)} lines {dot} {int(f.get('bytes') or 0):,} bytes {dot} "
                         f"~{_fmt_tokens(int(f.get('tokens') or 0))} tok{RST}")
             thinking = sanitize(str(data.get("thinking") or "")).strip()        # model text: no raw escapes
-            if thinking and show_thinking and phased:
+            if clean:
+                pass         # the transcript viewer has the thought
+            elif thinking and show_thinking and phased:
                 secs = sum(float(x) for x in (data.get("thinking_s") or []) if isinstance(x, (int, float)))
-                add(f"{rail}{tool_cards.thinking_line(secs or None, thinking, width - 2)}")
+                for r in tool_cards.thinking_rows(secs or None, thinking, width - 2):
+                    add(f"{rail}{r}")
             elif thinking and show_thinking:
                 add(f"{rail}  {SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}")
                 for para in thinking.splitlines():
@@ -328,12 +357,17 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                     if isinstance(secs, (int, float)):
                         add(f"{rail}  {SUBTLE}{glyph('star')} thought for {secs:.1f}s{RST}")
             text = str(data.get("text") or "").strip()
-            if text and phased:
+            if text and clean:
+                if out and strip_ansi(out[-1]).strip():
+                    add("")
+            elif text and phased:
                 gap()
                 add(f"{rail}{tool_cards.answer_label()}")
             if text:
                 for r in format_markdown(text, max_width=width - 2).splitlines():
                     add(f"{rail}{says}{r[2:] if r.startswith('  ') else r}")
+                if clean and data.get("tool_uses"):
+                    add("")
             usage = data.get("usage")
             if usage:
                 # Recorded for the end-of-turn table (the live view shows no cost line mid-turn either).

@@ -247,7 +247,7 @@ def list_command_names(workspace: Path | None = None, agent: Any = None) -> list
         out.append((f"/{key}", getattr(sk, "description", "") or "skill"))
         seen.add(key)
     for p in _mcp_prompts():
-        out.append((f"/{_mcp_prompt_name(p)}", str(p.get("description", "") or "MCP prompt")))
+        out.append((f"/{p['server']}:{p['name']}", f"{str(p.get('description', '') or 'MCP prompt')} (MCP)"))
     return out
 
 
@@ -327,7 +327,7 @@ def render_help(agent: Any, topic: str = "") -> None:
     collisions = shadowed_names(agent)
     if collisions:
         print(f"\n  {GOLD}!{RST} {SLATE}Shadowed by built-ins (use the prefixed form): {', '.join(collisions)}{RST}")
-    print(f"\n  {DARK_SLATE}Shortcuts: {WHITE}?{DARK_SLATE} help · {WHITE}#text{DARK_SLATE} quick memory · {WHITE}!cmd{DARK_SLATE} shell · {WHITE}@file{DARK_SLATE} attach · {WHITE}Ctrl+F{DARK_SLATE} transcript · {WHITE}Ctrl+D{DARK_SLATE} exit{RST}\n")
+    print(f"\n  {DARK_SLATE}Shortcuts: {WHITE}?{DARK_SLATE} help · {WHITE}#text{DARK_SLATE} quick memory · {WHITE}!cmd{DARK_SLATE} shell · {WHITE}@file{DARK_SLATE} attach · {WHITE}Ctrl+O{DARK_SLATE} transcript · {WHITE}Ctrl+D{DARK_SLATE} exit{RST}\n")
 
 
 def search_commands(word: str, agent: Any = None, limit: int = 12) -> list[tuple[str, str]]:

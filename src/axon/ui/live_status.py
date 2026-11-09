@@ -1,5 +1,6 @@
 """
-Live status: "what is happening right now" and a state-based tip, shown under the spinner while a turn runs.
+Live status: "what is happening right now", the text of the spinner row while a turn runs, and a state-based
+tip on the row under it.
 
 Everything comes from data Axon already has (the events the renderer receives, plus a few "waiting" marks
 placed around hooks, MCP calls and compaction). No model call, no extra request, nothing invented: when the
@@ -79,6 +80,7 @@ class View:
     retry: RetryView | None = None
     waits: tuple[Wait, ...] = ()
     context_pct: float = 0.0
+    detail: bool = True      # say the step number and the token count too (off at the compact trace level)
 
     @property
     def tokens(self) -> int:
@@ -221,15 +223,16 @@ def _subagent_lines(v: View, now: float) -> list[str]:
 
 
 def _tool_lines(v: View, now: float) -> list[str]:
-    tail = _join(secs(now - min(t.t0 for t in v.tools)), f"step {v.step}" if v.step else "")
+    step = f"step {v.step}" if v.step and v.detail else ""
+    tail = _join(secs(now - min(t.t0 for t in v.tools)), step)
     if len(v.tools) > 1:
         names = ", ".join(dict.fromkeys(_clip(t.name, 20) for t in v.tools))
         return [_join(f"running {len(v.tools)} tools at once: {names}", tail),
-                _join(f"running {len(v.tools)} tools at once", tail)]
+                _join(f"running {len(v.tools)} tools at once", tail), _join(f"{len(v.tools)} tools", tail)]
     tool = v.tools[0]
     name = _clip(tool.name, 30)
     what = _clip(tool.what, 70)
-    tail = _join(secs(now - tool.t0), f"step {v.step}" if v.step else "")
+    tail = _join(secs(now - tool.t0), step)
     return [_join(f"running {name}: {what}" if what else f"running {name}", tail),
             _join(f"running {name}", tail)]
 
@@ -243,7 +246,7 @@ def _model_lines(v: View, now: float) -> list[str]:
                     _join(f"waiting for {_model_name(v)}", waited, "no reply yet; Esc stops it"),
                     _join("waiting for the model", waited, "Esc stops it")]
         return [_join(f"waiting for {_who(v)}", waited), _join("waiting for the model", waited)]
-    tokens = _tokens_text(v.tokens)
+    tokens = _tokens_text(v.tokens) if v.detail else ""
     if v.phase == "thinking":
         return [_join(f"{_model_name(v)} is thinking", tokens, waited), _join("thinking", tokens)]
     if v.phase == "writing":
@@ -256,7 +259,7 @@ def _model_lines(v: View, now: float) -> list[str]:
 
 def _unknown_line(v: View, now: float) -> list[str]:
     age = secs(now - v.turn_t0) if v.turn_t0 else ""
-    return [_join(f"step {v.step}" if v.step else "working", age)]
+    return [_join(f"step {v.step}" if v.step and v.detail else "working", age)]
 
 
 def now_candidates(v: View, now: float) -> list[str]:
@@ -309,6 +312,7 @@ class LiveStatus:
         self.subagents_of: Callable[[], list[SubView]] = self._running_subagents
         self.facts_of: Callable[[], TipFacts] = lambda: live_tips.facts_from_agent(self._agent_of())
         self.tips_enabled_of: Callable[[], bool] = self._tips_setting
+        self.detail_of: Callable[[], bool] = lambda: True    # the renderer: False at the compact trace level
         self.fallback_tip: Callable[[], str] | None = None
         self._lock = threading.RLock()
         self._picker = live_tips.TipPicker()
@@ -397,7 +401,11 @@ class LiveStatus:
         inp = dict(getattr(e, "input", None) or {})
         name = str(getattr(e, "name", "") or "")
         said = str(getattr(e, "rationale", "") or "") if str(getattr(e, "rationale_source", "")) in ("text", "model-text") else ""
-        tool = ToolView(id=str(e.id), name=name, t0=now, what=tool_phrase(name, inp, self._registry()),
+        what = tool_phrase(name, inp, self._registry())
+        command = inp.get("command")
+        if name in ("Bash", "PowerShell") and isinstance(command, str) and command.strip():
+            what = " ".join(command.split())               # the exact command that is running, not its description
+        tool = ToolView(id=str(e.id), name=name, t0=now, what=what,
                         why=" ".join(said.split()) or self._said.pop(str(e.id), ""))
         self._set(tools=self._v.tools + (tool,), phase="tools", phase_t0=self._v.phase_t0 or now, retry=None)
 
@@ -450,7 +458,7 @@ class LiveStatus:
             self._picker.new_turn()
 
     def rows(self, width: int, show_tip: bool = True, now: float | None = None) -> Rows:
-        """The two rows for the spinner, recomputed at most every ``REFRESH_S`` seconds."""
+        """The spinner row's text and the tip, recomputed at most every ``REFRESH_S`` seconds."""
         now = self.clock() if now is None else now
         with self._lock:
             cached = self._cache
@@ -459,7 +467,7 @@ class LiveStatus:
             v = self._v
             if not v.turn_t0:
                 return Rows()
-            v = self._with_live_marks(v)
+            v = replace(self._with_live_marks(v), detail=bool(self.detail_of()))
             text = fit(now_candidates(v, now), width)
             tip = self._tip(v, now) if show_tip else ""
             rows = Rows(text, tip)

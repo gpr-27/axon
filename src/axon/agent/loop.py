@@ -457,6 +457,8 @@ class Agent:
         self._tool_timings: dict[str, float] = {}
         self._pending_context: list[str] = []       # `!cmd` output etc., prepended to the next prompt
         self._hook_stop: str = ""                    # set when a hook returned continue:false mid-turn
+        self.decline_ends_turn = False               # set where a person answers prompts (the terminal, the web page)
+        self._declined: bool = False                 # they answered a prompt with a plain No this turn
         self._prompt_id: str = ""
         self._post_compact_context: str = ""        # files re-read after a compaction
         self._repo_map: str | None = None
@@ -598,7 +600,7 @@ class Agent:
                             self.permissions.add_session_rule(behavior, spec)
                 elif kind == "setMode":
                     mode = {"acceptEdits": "acceptEdits", "plan": "plan", "default": "default", "manual": "default",
-                            "bypassPermissions": "bypass"}.get(str(upd.get("mode") or ""))
+                            "bypassPermissions": "bypass", "dontAsk": "dontAsk"}.get(str(upd.get("mode") or ""))
                     if mode:
                         self.set_mode(mode)
             except Exception:
@@ -871,6 +873,8 @@ class Agent:
         self.last_failed_turn = None
         self._git_snapshot = None
         self._pending_context = []
+        from axon.commands.workspace_cmds import stop_loops
+        stop_loops(self)                 # scheduled prompts belong to the session that asked for them
         self._post_compact_context = ""
         self._repo_map = None
         self._titled = None
@@ -1940,6 +1944,7 @@ class Agent:
                 return self._stop_result(cf.limit_message(hit), "budget_exceeded", 0, 0, total_usage)
 
         self._hook_stop = ""
+        self._declined = False
         if not self.is_subagent:
             import uuid
             self._prompt_id = str(uuid.uuid4())
@@ -1967,7 +1972,9 @@ class Agent:
         self.conversation.repair()
         user_input = self._fit_large_input(user_input)
         # A subagent's prompt is written by the model: paths in it are files to read, not images to attach.
-        self.conversation.append_user(user_input, attach_images=not self.is_subagent)
+        # The same goes for a scheduled prompt.
+        model_written = self.is_subagent or self.__dict__.pop("_model_written_prompt", False)
+        self.conversation.append_user(user_input, attach_images=not model_written)
         prompt_message = self.conversation.messages[-1]
         self.session.append_user(user_input)
         self._current_turn_prompt = user_input
@@ -2212,6 +2219,9 @@ class Agent:
                 self._hook_stop = ""
                 return self._stop_result((final_text + "\n\n" if final_text else "") + f"[Stopped by hook: {batch_stop}]",
                                          "blocked", iterations, total_tool_calls, total_usage)
+            if self._declined:
+                self._declined = False
+                return self._stop_result(final_text, "declined", iterations, total_tool_calls, total_usage)
 
         budget = int(self.settings.turn_token_budget or 0)
         over_budget = (ceiling > 0 and self.ledger.total() >= ceiling) or (
@@ -2578,9 +2588,11 @@ class Agent:
                 if tu.name == "Task" and isinstance(tu.input, dict) and str(tu.input.get("prompt") or tu.input.get("subtask") or "").strip():
                     batch_nums.add(self.subagents.reserve(tu.id))  # same check TaskTool.run makes, so rejected calls leave no gap
             try:
-                future_map = {pool.submit(self._run_one, tu): idx for idx, tu in enumerate(tool_uses)}
-                if has_tasks and self._interactive_monitor():
+                monitored = has_tasks and self._interactive_monitor()
+                if monitored:                # from before the first thread starts: no "subagent started" line above the frame
                     self._held_events = []
+                future_map = {pool.submit(self._run_one, tu): idx for idx, tu in enumerate(tool_uses)}
+                if monitored:
                     try:
                         from axon.ui.subagent_monitor import run_live_subagent_monitor
                         with _pause_input():
@@ -2864,7 +2876,8 @@ class Agent:
             source = "invariant"
         else:
             source = "mode"
-        if tool.name == "Task" and outcome != "deny":
+        hard_ask = bool(getattr(decision, "hard", False))   # an ask rule, critical path or network read: no hook skips it
+        if tool.name == "Task" and outcome != "deny" and not hard_ask:
             # Delegation itself is safe; each subagent tool call is permission-checked on its own.
             outcome, source, reason = "allow", "delegation", "Delegation is allowed; subagent tool calls are checked individually."
         elif tool.name == "Task" and outcome == "deny" and not getattr(decision, "rule", None) and self.settings.mode == "plan":
@@ -2872,7 +2885,7 @@ class Agent:
         if outcome == "deny":
             self._perm_event(block, "deny", reason, source, rule=getattr(decision, "rule", None) or "")
             return self._error_result(block, f"Permission Denied: {decision.reason}")
-        if hook_perm == "allow" and outcome == "ask":
+        if hook_perm == "allow" and outcome == "ask" and not hard_ask:
             outcome, source, reason = "allow", "hook", "Allowed by PreToolUse hook."
         elif hook_perm == "ask" and outcome == "allow":
             outcome, source, reason = "ask", "hook", "PreToolUse hook requested confirmation."
@@ -2892,6 +2905,10 @@ class Agent:
                     self._hook_stop = self._hook_stop or f"PermissionRequest hook denied {tool.name} and stopped: {why}"
                 self._perm_event(block, "deny", f"PermissionRequest hook: {why}", "hook")
                 return self._error_result(block, f"Permission denied by PermissionRequest hook: {why}")
+        comment = ""
+        if self._declined:
+            self._perm_event(block, "deny", "The user declined an earlier action in this step.", "user")
+            return self._error_result(block, "Not run: the user declined an earlier action in this step and the turn stopped.")
         if outcome == "allow":
             self._perm_event(block, "allow", reason, source, rule=getattr(decision, "rule", None) or "")
         else:
@@ -2907,8 +2924,11 @@ class Agent:
                 approval = self.on_approval(tool.name, tool_input, decision)
             self._perm_event(block, "deny" if approval == "deny" else "allow", reason, "user", approval=str(approval),
                              rule=getattr(decision, "rule", None) or "")
+            comment = str(getattr(approval, "comment", "") or "")
             if approval == "deny":
-                return self._error_result(block, "User declined this action.")
+                # A reason lets the model carry on. A plain No stops the turn, in the main conversation only.
+                self._declined = not comment and self.decline_ends_turn and not self.is_subagent
+                return self._error_result(block, f"User declined this action. Their reason: {comment}" if comment else "User declined this action.")
             if approval == "always":
                 self._grant_session(tool.name)
             elif approval == "rule":
@@ -2961,6 +2981,8 @@ class Agent:
                 extra.append(f"[PostToolUse hook context]\n{post.additional_context}")
             if extra:
                 content = content + "\n\n" + "\n\n".join(extra)
+        if comment:
+            content = f"{content}\n\n[The user approved this action with a comment]\n{comment}"
         if pre_context:
             content = f"{content}\n\n[PreToolUse hook context]\n{pre_context}"
 

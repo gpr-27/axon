@@ -204,6 +204,61 @@ def is_protected_path(raw: str | Path, root: Path | None = None) -> str | None:
     return None
 
 
+# Writes here are never auto-approved except in bypass mode: repository state, tool configuration and
+# files a shell or build tool runs on its own.
+PROTECTED_WRITE_DIRS = frozenset({".git", ".vscode", ".idea", ".husky", ".cargo", ".devcontainer", ".yarn", ".mvn", ".axon", ".claude"})
+PROTECTED_WRITE_FILES = frozenset({
+    ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".bash_logout", ".zshrc", ".zprofile",
+    ".zshenv", ".zlogin", ".zlogout", ".profile", ".envrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnp.cjs", ".pnp.loader.mjs",
+    ".pnpmfile.cjs", "bunfig.toml", ".bunfig.toml", ".bazelrc", ".bazelversion", ".bazeliskrc", ".pre-commit-config.yaml",
+    "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml", "gradle-wrapper.properties", "maven-wrapper.properties",
+    ".devcontainer.json", ".ripgreprc", "pyrightconfig.json", ".mcp.json", ".claude.json", ".axon.json",
+})
+
+
+def _protected_exception(parts: list[str], i: int) -> bool:
+    """Axon's own working files under .axon: worktrees, plan files, and Markdown memory."""
+    rest = parts[i + 1:]
+    if rest[:1] in (["worktrees"], ["plans"], ["jobs"]):
+        return True
+    return bool(rest) and rest[-1].endswith(".md") and ("agent-memory" in rest or "memory" in rest)
+
+
+def protected_write(raw: str | Path, root: Path | None = None) -> str | None:
+    """The protected directory or file a write would touch, else None. Checks the requested path and what it resolves to."""
+    p = _expand(raw)
+    if not p.is_absolute() and root is not None:
+        p = Path(root) / p
+    for candidate in (Path(os.path.normpath(str(p))), _real(p)):
+        parts = [x.lower() for x in candidate.parts] if IS_WINDOWS else list(candidate.parts)
+        if parts and parts[-1] in PROTECTED_WRITE_FILES:
+            return parts[-1]
+        for a, b in zip(parts, parts[1:]):
+            if (a, b) == (".config", "git"):
+                return ".config/git"
+        for i, part in enumerate(parts[:-1] if parts else []):
+            if part in PROTECTED_WRITE_DIRS and not (part in (".axon", ".claude") and _protected_exception(parts, i)):
+                return part
+    return None
+
+
+def is_network_path(raw: str | Path) -> bool:
+    """A path whose lookup can contact another computer: a UNC share, or a /net automount."""
+    s = str(raw).strip()
+    if s.startswith("\\\\") or (IS_WINDOWS and s.startswith("//") and not s.startswith("//?")):
+        return True
+    return s == "/net" or s.startswith("/net/")
+
+
+def critical_removal_targets(workspace: Path, extra_dirs: list[Path] | None = None) -> tuple[list[str], list[str]]:
+    """(paths whose removal is critical, directories where only a glob below them is)."""
+    home = _real(Path.home())
+    ws = _real(workspace)
+    exact = [str(home), str(ws)] + [str(x) for x in ws.parents]
+    globs = [str(_real(d)) for d in (extra_dirs or [])]
+    return list(dict.fromkeys(exact)), globs
+
+
 def too_broad_for_workspace(raw: str | Path) -> str | None:
     """A plain reason when ``raw`` is the filesystem root or the home folder itself (a project lives inside them)."""
     try:

@@ -10,7 +10,7 @@ const AX_SENT = {
   Read: (i) => 'Read ' + axPath(i), Write: (i) => 'Wrote ' + axPath(i), Edit: (i) => 'Edited ' + axPath(i), MultiEdit: (i) => 'Made several edits to ' + axPath(i),
   NotebookEdit: (i) => 'Changed a notebook cell in ' + axPath(i, 'notebook_path'), Patch: (i) => 'Applied a patch', Bash: (i) => 'Ran ' + axQ(i.command),
   BashOutput: () => 'Read output from a background shell', KillShell: () => 'Stopped a background shell', Process: (i) => 'Managed a process' + (i.action ? ' (' + axQ(i.action) + ')' : ''),
-  Monitor: () => 'Watched a background command', Grep: (i) => 'Searched file contents for ' + axQ(i.pattern), Glob: (i) => 'Listed files matching ' + axQ(i.pattern),
+  Monitor: () => 'Watched a background command', CronCreate: (i) => 'Scheduled a prompt: ' + axQ(i.cron), CronList: () => 'Listed scheduled prompts', CronDelete: (i) => 'Cancelled scheduled prompt ' + axQ(i.id), ScheduleWakeup: (i) => i.stop ? 'Ended the loop' : 'Chose when the loop runs next', Grep: (i) => 'Searched file contents for ' + axQ(i.pattern), Glob: (i) => 'Listed files matching ' + axQ(i.pattern),
   Ls: (i) => 'Listed ' + axPath(i), CodeSearch: (i) => 'Searched the code graph for ' + axQ(i.query || i.name), GoToDefinition: (i) => 'Looked up a definition' + (i.symbol ? ' of ' + axQ(i.symbol) : ''),
   FindReferences: (i) => 'Looked up references' + (i.symbol ? ' to ' + axQ(i.symbol) : ''), SemanticSearch: (i) => 'Searched by meaning for ' + axQ(i.query), LSP: (i) => 'Asked the language server' + (i.operation ? ' (' + axQ(i.operation) + ')' : ''),
   Git: (i) => 'Ran git' + (i.subcommand || i.command ? ' ' + axQ(i.subcommand || i.command) : ''), WebFetch: (i) => 'Fetched ' + axQ(i.url), WebSearch: (i) => 'Searched the web for ' + axQ(i.query),

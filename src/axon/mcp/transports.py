@@ -25,6 +25,13 @@ OnClose = Callable[[str], None]
 HeaderProvider = Callable[[], dict[str, str]]       # extra request headers, asked for on every request
 OnUnauthorized = Callable[[], bool]                  # refresh credentials after a 401/403; True = retry once
 IS_WINDOWS = os.name == "nt"
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024               # one JSON body or one event of an event stream
+STOP_SIGNAL_WAITS = ((signal.SIGINT, 0.1), (signal.SIGTERM, 0.4))     # then SIGKILL (POSIX)
+GRACEFUL_STOP_WAIT = 1.5                                             # stdin closed, server exits by itself
+# What a stdio server keeps under CLAUDE_CODE_MCP_ALLOWLIST_ENV / AXON_MCP_ALLOWLIST_ENV.
+_SAFE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP",
+             "TMP", "TZ", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA",
+             "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA")
 
 
 class TransportError(Exception):
@@ -34,6 +41,10 @@ class TransportError(Exception):
         super().__init__(message)
         self.status = status
         self.headers = headers or {}        # response headers (e.g. WWW-Authenticate) when there were any
+
+
+class ResponseTooLarge(TransportError):
+    """A response from a remote server passed the size limit; the request fails."""
 
 
 class SessionExpired(TransportError):
@@ -135,6 +146,49 @@ def kill_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """The server runs in its own session: signal its group so a wrapper's child (npx, uvx) hears it too."""
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Close stdin and give the server about 1.5 s to exit by itself. Then, on POSIX, SIGINT, SIGTERM 100 ms
+    later, SIGKILL after a further 400 ms; on Windows, end the process tree."""
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=GRACEFUL_STOP_WAIT)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if IS_WINDOWS:
+        kill_tree(proc)
+        return
+    for sig, wait in STOP_SIGNAL_WAITS:
+        if proc.poll() is not None:
+            return
+        _signal_group(proc, sig)
+        try:
+            proc.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    _signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 class StdioTransport(Transport):
     """Newline-delimited JSON-RPC over a subprocess's stdin/stdout.
     stderr goes straight to ~/.axon/logs/mcp-<name>.log (never a pipe, so it can't deadlock)."""
@@ -175,6 +229,8 @@ class StdioTransport(Transport):
 
     def start(self, on_message: OnMessage, on_close: OnClose) -> None:
         full_env = dict(os.environ)
+        if any(os.environ.get(v) == "1" for v in ("CLAUDE_CODE_MCP_ALLOWLIST_ENV", "AXON_MCP_ALLOWLIST_ENV")):
+            full_env = {k: v for k, v in full_env.items() if k.upper() in _SAFE_ENV}
         if self.project_dir:  # the stable project root, whatever directory the server runs in
             full_env["AXON_PROJECT_DIR"] = self.project_dir
             full_env["CLAUDE_PROJECT_DIR"] = self.project_dir
@@ -253,21 +309,15 @@ class StdioTransport(Transport):
         proc = self.proc
         if proc is not None:
             try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                kill_tree(proc)
+                stop_process(proc)
             except Exception:
                 pass
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-            except OSError:
-                pass
+            for pipe in (proc.stdin, proc.stdout):
+                try:
+                    if pipe:
+                        pipe.close()
+                except OSError:
+                    pass
         self._close_log()
 
 
@@ -300,12 +350,50 @@ def iter_sse(lines: Iterable[str]) -> Iterator[tuple[str, str, str | None]]:
 
 def _deliver_sse(lines: Iterable[str], on_message: OnMessage) -> None:
     for event, data, _ in iter_sse(lines):
+        if len(data) > MAX_RESPONSE_BYTES:
+            raise ResponseTooLarge(f"event over {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB")
         if event != "message":
             continue
         try:
             _dispatch(json.loads(data), on_message)
         except ValueError:
             continue
+
+
+def _bounded_lines(resp: httpx.Response, limit: int = MAX_RESPONSE_BYTES) -> Iterator[str]:
+    """``resp.iter_lines()`` that stops reading once one line alone passes the limit (after decompression)."""
+    buf = ""
+    for chunk in resp.iter_text():
+        buf += chunk
+        if "\n" not in buf and "\r" not in buf:
+            if len(buf) > limit:
+                raise ResponseTooLarge(f"event over {limit // (1024 * 1024)} MiB")
+            continue
+        lines = buf.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        buf = lines.pop()
+        yield from lines
+    if buf:
+        yield buf
+
+
+def _read_bounded(resp: httpx.Response, limit: int = MAX_RESPONSE_BYTES) -> bytes:
+    out = bytearray()
+    for chunk in resp.iter_bytes():
+        out += chunk
+        if len(out) > limit:
+            raise ResponseTooLarge(f"response over {limit // (1024 * 1024)} MiB")
+    return bytes(out)
+
+
+def _stream_mode(resp: httpx.Response) -> None:
+    """The per-request timer only covers the wait for the first response byte: an event stream may be quiet
+    for as long as it likes after that (the tool-call limits still apply)."""
+    try:
+        timeouts = resp.request.extensions.get("timeout")
+        if isinstance(timeouts, dict):
+            timeouts["read"] = None
+    except (RuntimeError, AttributeError):
+        pass
 
 
 # ─── Streamable HTTP ─────────────────────────────────────────────────────
@@ -400,13 +488,18 @@ class StreamableHTTPTransport(Transport):
             resp.close()
             return
         if "text/event-stream" in ctype:
+            _stream_mode(resp)
             with self._lock:
                 self._streams.append(resp)
             on_message = self._on_message
 
             def _consume() -> None:
                 try:
-                    _deliver_sse(resp.iter_lines(), on_message)
+                    _deliver_sse(_bounded_lines(resp), on_message)
+                except ResponseTooLarge as e:
+                    if message.get("id") is not None:  # the request fails; the connection stays usable
+                        on_message({"jsonrpc": "2.0", "id": message["id"],
+                                    "error": {"code": -32000, "message": f"{self.name}: {e}"}})
                 except (httpx.HTTPError, OSError, RuntimeError):
                     pass
                 finally:
@@ -418,7 +511,9 @@ class StreamableHTTPTransport(Transport):
             threading.Thread(target=_consume, name=f"mcp-{self.name}-sse", daemon=True).start()
             return
         try:
-            raw = resp.read()
+            raw = _read_bounded(resp)
+        except httpx.HTTPError as e:
+            raise TransportError(f"HTTP request failed: {e}") from e
         finally:
             resp.close()
         if raw.strip():
@@ -443,10 +538,11 @@ class StreamableHTTPTransport(Transport):
                     resp.close()
                     return
                 self._streams.append(resp)
+            _stream_mode(resp)
             try:
                 assert self._on_message is not None
-                _deliver_sse(resp.iter_lines(), self._on_message)
-            except (httpx.HTTPError, OSError, RuntimeError):
+                _deliver_sse(_bounded_lines(resp), self._on_message)
+            except (httpx.HTTPError, OSError, RuntimeError, TransportError):
                 pass
             finally:
                 resp.close()
@@ -546,7 +642,7 @@ class LegacySSETransport(Transport):
                 return
             self._stream = resp
             try:
-                for event, data, _ in iter_sse(resp.iter_lines()):
+                for event, data, _ in iter_sse(_bounded_lines(resp)):
                     if event == "endpoint":
                         endpoint = urljoin(self.url, data.strip())
                         a, b = urlsplit(endpoint), urlsplit(self.url)
@@ -562,7 +658,7 @@ class LegacySSETransport(Transport):
                             _dispatch(json.loads(data), on_message)
                         except ValueError:
                             continue
-            except (httpx.HTTPError, OSError, RuntimeError):
+            except (httpx.HTTPError, OSError, RuntimeError, TransportError):
                 pass
             finally:
                 resp.close()

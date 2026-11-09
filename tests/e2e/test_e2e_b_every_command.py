@@ -136,13 +136,21 @@ def test_listed_skill_name_does_not_resolve_to_a_different_builtin() -> None:
     assert clashes == [], clashes
 
 
+def _exit_ok(name: str, r) -> None:
+    """Exit 0, except a command that honestly reports it cannot run in this (non-git) workspace."""
+    if name == "/worktree":
+        assert r.code == 1 and "Not a git repository" in r.output, str(r)
+    else:
+        assert r.code == 0, str(r)
+
+
 @pytest.mark.parametrize("name", [n for n in ALL_COMMANDS if n not in SKIP])
 def test_every_command_runs_fresh(sweep, name: str) -> None:
     """`axon -p "/<cmd>"` on an empty session finishes without a crash."""
     r = sweep[("fresh", name)]
     bad = _bad(r.output)
     assert bad is None, f"{name}: {bad}\n{r}"
-    assert r.code == 0, str(r)
+    _exit_ok(name, r)
 
 
 @pytest.mark.parametrize("name", BUILTIN_COMMANDS)
@@ -151,7 +159,7 @@ def test_every_command_runs_on_populated_session(sweep, name: str) -> None:
     r = sweep[("populated", name)]
     bad = _bad(r.output)
     assert bad is None, f"{name}: {bad}\n{r}"
-    assert r.code == 0, str(r)
+    _exit_ok(name, r)
 
 
 # Commands that do not open a full-screen picker on a terminal (pickers are covered elsewhere).

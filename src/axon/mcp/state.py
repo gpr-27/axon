@@ -36,6 +36,35 @@ def is_interactive() -> bool:
     return bool(_session["interactive"])
 
 
+def set_listing(flag: bool) -> None:
+    """``axon mcp ...`` from a shell, with or without a terminal: a server you have not approved stays
+    pending (and is not started by a health check), even when the output goes into a pipe."""
+    _session["listing"] = bool(flag)
+
+
+def set_skip_approval(flag: bool) -> None:
+    """A session started in bypassPermissions with skipDangerousModePermissionPrompt in your own settings."""
+    _session["skip_approval"] = bool(flag)
+
+
+def approval_required() -> bool:
+    """Does a .mcp.json server you have not decided on wait for you? ``-p`` and SDK runs cannot show the
+    prompt, so they load it without asking."""
+    if _session.get("listing"):
+        return True
+    return bool(_session["interactive"]) and not _session.get("skip_approval")
+
+
+def set_cli_settings(data: dict[str, Any] | None) -> None:
+    """The settings passed with ``--settings``: they count as yours, like ~/.axon/settings.json."""
+    _session["cli_settings"] = dict(data or {})
+
+
+def cli_settings() -> dict[str, Any]:
+    value = _session.get("cli_settings")
+    return value if isinstance(value, dict) else {}
+
+
 def set_page_mode(flag: bool) -> None:
     """The web app is the interactive surface (approvals and questions appear on the page): same decisions as
     the REPL, but nothing may wait on the terminal's stdin."""
@@ -130,6 +159,27 @@ def set_server_disabled(workspace: Path | str, name: str, disabled: bool) -> Non
             proj["disabledMcpServers"] = sorted(names)
         else:
             proj.pop("disabledMcpServers", None)
+    _update(workspace, fn)
+
+
+# ─── sign-in notices ────────────────────────────────────────────────────────
+
+def auth_announced(workspace: Path | str, name: str) -> bool:
+    return name in _names(project_state(workspace), "authNoticeShown")
+
+
+def set_auth_announced(workspace: Path | str, name: str, shown: bool) -> None:
+    if auth_announced(workspace, name) == shown:
+        return
+
+    def fn(proj: dict[str, Any]) -> None:
+        names = [n for n in _names(proj, "authNoticeShown") if n != name]
+        if shown:
+            names.append(name)
+        if names:
+            proj["authNoticeShown"] = sorted(names)
+        else:
+            proj.pop("authNoticeShown", None)
     _update(workspace, fn)
 
 

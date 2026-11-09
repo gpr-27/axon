@@ -66,21 +66,75 @@ def _first_file(name: str) -> Path | None:
     return None
 
 
+def _project_settings_files(workspace: Path) -> list[tuple[str, Path]]:
+    ws = Path(workspace)
+    return [(label, ws / rel) for label, rel in (
+        ("project", ".claude/settings.json"), ("project", ".axon/settings.json"),
+        ("local", ".claude/settings.local.json"), ("local", ".axon/settings.local.json"))
+        if (ws / rel).is_file()]
+
+
 def settings_layers(workspace: Path, *, include_project: bool = True) -> list[tuple[str, dict[str, Any]]]:
-    """(label, settings dict) lowest to highest: user, project (shared), project (local)."""
+    """(label, settings dict) lowest to highest: user, project (shared), project (local), --settings."""
+    from axon.mcp import state
     from axon.storage import user_file
     layers: list[tuple[str, dict[str, Any]]] = [("user", _read_json(user_file("settings.json")))]
     if include_project:
-        ws = Path(workspace)
-        for label, rel in (("project", ".claude/settings.json"), ("project", ".axon/settings.json"),
-                           ("local", ".claude/settings.local.json"), ("local", ".axon/settings.local.json")):
-            p = ws / rel
-            if p.is_file():
-                layers.append((label, _read_json(p)))
+        layers += [(label, _read_json(p)) for label, p in _project_settings_files(workspace)]
+    if state.cli_settings():
+        layers.append(("cli", state.cli_settings()))
     return layers
 
 
-# ─── pattern matching ───────────────────────────────────────────────────────
+# ─── folder trust, as MCP needs it ──────────────────────────────────────────
+
+def _home_project_entry(workspace: Path | str) -> dict[str, Any]:
+    from axon.hooks import trust
+    from axon.storage import user_file
+    projects = _read_json(user_file("mcp.json")).get("projects")
+    entry = projects.get(trust._key(workspace)) if isinstance(projects, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def folder_trusted(workspace: Path | str) -> bool:
+    """You trusted exactly this folder: accepted the trust dialog (``/trust``), or set
+    ``projects["<path>"].hasTrustDialogAccepted`` in ~/.axon/mcp.json. A parent folder's trust does not count,
+    and neither does the way a ``-p`` run loads project hooks without asking."""
+    from axon.hooks import trust
+    if _home_project_entry(workspace).get("hasTrustDialogAccepted") is True:
+        return True
+    try:
+        return trust.status(workspace) == "trusted"
+    except Exception:  # noqa: BLE001 - not knowing means not trusted
+        return False
+
+
+def set_folder_trusted(workspace: Path | str) -> None:
+    """Record the answer to the trust question asked before a project's headersHelper first runs."""
+    from axon.hooks import trust
+    from axon.session.store import atomic_write_text
+    from axon.storage import user_file
+    path = user_file("mcp.json")
+    data = _read_json(path)
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        projects = data["projects"] = {}
+    entry = projects.get(trust._key(workspace))
+    if not isinstance(entry, dict):
+        entry = projects[trust._key(workspace)] = {}
+    entry["hasTrustDialogAccepted"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
+
+def _approval_layers(workspace: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Settings that may approve a .mcp.json server, and their label: your user settings, your local settings
+    and ``--settings`` approve ("yours"); the committed project settings can only reject."""
+    layers: list[tuple[str, dict[str, Any]]] = []
+    for label, data in settings_layers(workspace, include_project=True):
+        layers.append(("reject-only" if label == "project" else "yours", data))
+    return layers
+
 
 def _expand(text: str) -> str:
     def sub(m: re.Match[str]) -> str:
@@ -269,10 +323,10 @@ def settings_approval(workspace: Path, name: str) -> str | None:
     """'approved' / 'rejected' / None from settings keys. Only your own settings can approve a server
     (a cloned repo's committed settings cannot approve its own .mcp.json); any layer can reject."""
     approved = False
-    for label, data in settings_layers(workspace):
+    for label, data in _approval_layers(workspace):
         if name in (data.get("disabledMcpjsonServers") or []):
             return "rejected"
-        if label in ("user", "local"):
+        if label == "yours":
             if data.get("enableAllProjectMcpServers") or name in (data.get("enabledMcpjsonServers") or []):
                 approved = True
     managed_path = _first_file("managed-settings.json")

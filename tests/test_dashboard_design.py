@@ -42,6 +42,42 @@ def test_motion_stops_when_the_user_asks():
     assert "prefers-reduced-motion:reduce" in DESIGN_CSS
 
 
+def _ratio(a: str, b: str) -> float:
+    def lum(h: str) -> float:
+        rgb = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, bl = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * bl
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+@pytest.mark.parametrize("block", ["_DARK", "_LIGHT"])
+def test_text_tokens_reach_aa_on_every_surface(block):
+    from axon.features import dash_design
+    t = dict(p.split(":", 1) for p in getattr(dash_design, block).split(";"))
+    surfaces = ("--canvas", "--page", "--raised", "--raised2", "--float", "--field", "--you", "--code-bg")
+    inks = ("--ink", "--ink2", "--link", "--primary", "--accent", "--info", "--ok", "--warn", "--bad")
+    bad = [(fg, bg, round(_ratio(t[fg], t[bg]), 2)) for fg in inks for bg in surfaces if _ratio(t[fg], t[bg]) < 4.5]
+    assert not bad, bad
+    assert _ratio(t["--on-primary"], t["--primary"]) >= 4.5
+
+
+def test_tab_bar_waits_for_a_second_tab_and_turn_state_updates_live():
+    from axon.features.dashboard_web import APP_JS
+    assert "strip.hidden = UI.tabs.length < 2" in APP_JS
+    # the tab is named by the first message, and files changed by a tool reach the panels, while the turn runs
+    assert "liveTitle(C, ev.text)" in APP_JS and "liveFiles(C, ev)" in APP_JS
+    live = APP_JS[APP_JS.index("function liveFiles"):]
+    assert "treeReload()" in live[:live.index("// What Axon itself changed")] and "wbRefreshChanges(true)" in live[:live.index("// What Axon itself changed")]
+
+
+def test_finish_layer_loads_nothing_and_is_served_after_the_type_pass():
+    from axon.features.dash_design import FINISH_CSS, TYPE_TAIL
+    css, _ = asset("app.css")
+    assert "http" not in FINISH_CSS and "@import" not in FINISH_CSS and "url(" not in FINISH_CSS
+    assert css.index(FINISH_CSS) > css.rindex(TYPE_TAIL)
+
+
 @needs_node
 @pytest.mark.parametrize("text,expected", [
     ("Created **notes.txt** for you.", "<strong>notes.txt</strong>"),

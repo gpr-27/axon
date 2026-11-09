@@ -140,3 +140,54 @@ def test_status_rows_render_under_prompt(monkeypatch):
     lines, _ = build_frame(st, PromptChrome())
     plain = [strip_ansi(l) for l in lines]
     assert plain.index("  my custom status") == plain.index(next(l for l in plain if "shift+tab to cycle" in l)) + 1
+
+
+# ─── refreshInterval and the idle timer ────────────────────────────────────
+
+@pytest.mark.parametrize("value, expected", [(5, 5.0), (1, 1.0), (0.2, 1.0), (0, 1.0), (-3, 1.0), (2.5, 2.5),
+                                             ("5", None), (None, None), (True, None), ([], None)])
+def test_refresh_interval_value(value, expected):
+    assert sl.refresh_interval({"refreshInterval": value}) == expected
+    assert sl.refresh_interval({"refresh_interval": value}) == expected
+
+
+@posix_only
+def test_idle_timer_reruns_only_on_refresh_interval(tmp_path, monkeypatch):
+    log = tmp_path / "runs.txt"
+    cmd = script_cmd(tmp_path, f"open({str(log)!r}, 'a').write('x')\nprint('ok')\n")
+    clock = [1000.0]
+    monkeypatch.setattr(sl.time, "monotonic", lambda: clock[0])
+    agent = make_agent(tmp_path, {"command": cmd, "refreshInterval": 5})
+
+    def runs() -> int:
+        return len(log.read_text())
+    assert sl.render_custom_status(agent.settings, agent, idle=True) == "ok" and runs() == 1
+    clock[0] += 4.9
+    assert sl.render_custom_status(agent.settings, agent, idle=True) == "ok" and runs() == 1
+    clock[0] += 0.2
+    assert sl.render_custom_status(agent.settings, agent, idle=True) == "ok" and runs() == 2
+
+
+@posix_only
+def test_idle_timer_without_interval_waits_for_an_event(tmp_path, monkeypatch):
+    log = tmp_path / "runs.txt"
+    cmd = script_cmd(tmp_path, f"open({str(log)!r}, 'a').write('x')\nprint('ok')\n")
+    clock = [1000.0]
+    monkeypatch.setattr(sl.time, "monotonic", lambda: clock[0])
+    agent = make_agent(tmp_path, {"command": cmd})
+
+    def runs() -> int:
+        return len(log.read_text())
+    sl.render_custom_status(agent.settings, agent, idle=True)
+    clock[0] += 3600
+    sl.render_custom_status(agent.settings, agent, idle=True)
+    assert runs() == 1                                         # an hour idle, nothing changed
+    sl.render_custom_status(agent.settings, agent)             # a new prompt after a turn, /compact, ...
+    assert runs() == 2
+    agent.renderer.last_context = (90_000, 200_000)            # the session data changed
+    clock[0] += 3600
+    sl.render_custom_status(agent.settings, agent, idle=True)
+    assert runs() == 3
+    agent.renderer.last_context = (50_000, 200_000)            # and changing back is a change too
+    sl.render_custom_status(agent.settings, agent, idle=True)
+    assert runs() == 4

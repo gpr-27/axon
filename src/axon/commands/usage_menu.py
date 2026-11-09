@@ -69,7 +69,6 @@ ACTION_MENU = {
     "fix": "Fixes the last failing check or command.",
     "index": "Builds the code index for this project.",
     "learn": "Saves a rule or fact to memory.",
-    "loop": "Re-runs a prompt on a schedule while Axon is idle.",
     "main": "Switches back to the main conversation.",
     "map": "Maps the symbols of the project.",
     "next": "Suggests what to do next.",
@@ -111,6 +110,7 @@ REPORT_MENU = {
 
 NO_MENU = {
     "exit": "leaves Axon; there is nothing to choose",
+    "loop": "a bare /loop starts the maintenance loop; /loop list and /loop stop are typed",
 }
 
 @dataclass
@@ -169,9 +169,6 @@ OVERRIDES: dict[str, list[Choice]] = {
                ch("Choose the period in days…", "--days", "Days"), ch("Every project, not just this one", "--all-projects"),
                ch("Every project, and open in browser", "--all-projects --open")],
     "index": [ch("Run it"), ch("Rebuild from scratch", "--rebuild")],
-    "loop": [ch("List the loops"), ch("Repeat a prompt N times…", ask="N and the prompt, for example: 3x run the tests"),
-             ch("Re-run on a schedule…", ask="Interval and prompt, for example: 5m check the build"),
-             ch("Stop every loop", "stop")],
     "stop": [ch("Stop every subagent"), ch("Stop one…", ask="Task id")],
     "import": [ch("From Cursor", "cursor"), ch("From Gemini", "gemini"), ch("From Codex", "codex"),
                ch("From all of them", "all"), ch("Preview only (dry run)", "all --dry-run")],

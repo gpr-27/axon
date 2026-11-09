@@ -193,7 +193,7 @@ def test_repl_wake_runs_queue_with_banner(monkeypatch, capsys) -> None:
     q.push("queued question")
     agent = SimpleNamespace(message_queue=q, busy=False)
     ran: list[str] = []
-    monkeypatch.setattr(cli, "process_line", lambda a, r, line, from_queue=False: ran.append(line) or True)
+    monkeypatch.setattr(cli, "process_line", lambda a, r, line, from_queue=False, plain=False: ran.append(line) or True)
     assert cli.drain_queue(agent, None)
     assert ran == ["queued question"] and "[Queued #" in plat.strip_ansi(capsys.readouterr().out)
 

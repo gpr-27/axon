@@ -2,9 +2,8 @@
 
 WORKBENCH_CSS = r"""
 /* ---- workbench ---- */
-:root{--c-msg:#4C8DF6;--c-sys:#E0703A;--c-mcp:#33A584;--c-skill:#D49A12;--c-prompt:#8E96A3;--c-minst:#A774D6;--c-agent:#D4588C;--c-mem:#4DAFC4;--c-buf:#5E6572}
-:root[data-theme=light]{--c-msg:#2F6FDC;--c-sys:#C85A24;--c-mcp:#1F8A6C;--c-skill:#A87500;--c-prompt:#6A7280;--c-minst:#8650BD;--c-agent:#B83A70;--c-mem:#237F93;--c-buf:#8A919D}
-@media (prefers-color-scheme:light){:root:not([data-theme=dark]){--c-msg:#2F6FDC;--c-sys:#C85A24;--c-mcp:#1F8A6C;--c-skill:#A87500;--c-prompt:#6A7280;--c-minst:#8650BD;--c-agent:#B83A70;--c-mem:#237F93;--c-buf:#8A919D}}
+/* context categories wear the validated series slots */
+:root{--c-msg:var(--s1);--c-sys:var(--s2);--c-mcp:var(--s3);--c-skill:var(--s4);--c-prompt:var(--s5);--c-minst:var(--s7);--c-agent:var(--s8);--c-mem:var(--s6);--c-buf:var(--ink2)}
 /* top bar */
 .top .tbicons{display:flex;align-items:center;gap:2px;margin-left:auto;overflow:visible}
 .tbi{width:34px;height:34px;border:0;background:none;border-radius:8px;color:var(--ink2);display:grid;place-items:center;cursor:pointer;padding:0;flex:none}

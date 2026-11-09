@@ -225,10 +225,14 @@ def handle_resume(agent: Agent, session_id: str = "") -> None:
     if not chosen:
         print(f"\n  {SLATE}(Session unchanged: {store.active_session_id}){RST}\n")
         return
+    from axon.commands.workspace_cmds import stop_loops
+    stop_loops(agent)                # scheduled prompts belong to the session that asked for them
     agent.conversation = store.load(chosen)
     agent.ledger = store.load_ledger(chosen, agent.settings.model)
     from axon.session.store import restore_retry_state
     restore_retry_state(agent, chosen)
+    from axon.commands.workspace_cmds import restore_cron_jobs
+    restore_cron_jobs(agent, chosen)
     cp = getattr(agent, "checkpoints", None)
     if cp is not None and hasattr(cp, "set_session"):
         try:

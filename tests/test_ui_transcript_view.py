@@ -389,11 +389,11 @@ def test_transcript_source_falls_back_to_the_conversation(monkeypatch: pytest.Mo
 
 # ─── wiring ────────────────────────────────────────────────────────────────
 
-def test_ctrl_f_is_bound_to_the_transcript() -> None:
+def test_ctrl_o_and_ctrl_f_are_bound_to_the_transcript() -> None:
     from axon.ui import input as inp
     from axon.ui.keybindings import ACTIONS
-    assert ACTIONS["app:transcript"][1] == ("ctrl-f",)
-    assert ACTIONS["app:traceCycle"][1] == ("ctrl-o",)  # unchanged
+    assert ACTIONS["app:transcript"][1] == ("ctrl-o", "ctrl-f")
+    assert ACTIONS["app:traceCycle"][1] == ("alt-l", "ctrl-x l")
     assert inp._ACTION_COMMANDS["app:transcript"] == "/transcript"
     owners = [a for a, (_d, keys) in ACTIONS.items() if "ctrl-f" in keys]
     assert owners == ["app:transcript"]
@@ -421,3 +421,27 @@ def test_clear_command_clears_the_transcript(monkeypatch: pytest.MonkeyPatch) ->
     render._record(E("turn", 1, title="Turn 1"))
     sc._clear_transcript()
     assert render.get_transcript() == []
+
+
+def test_braces_move_between_prompts_and_stop_at_the_ends():
+    from types import SimpleNamespace
+
+    from axon.ui.transcript_view import TranscriptViewer
+
+    v = TranscriptViewer([], width=80, height=20)
+    turns = [SimpleNamespace(key=k, kind="turn", parents=(), entry=None) for k in (1, 5, 9)]
+    others = [SimpleNamespace(key=k, kind="tool", parents=(), entry=None) for k in (2, 6)]
+    v.nodes = sorted(turns + others, key=lambda n: n.key)
+    v.ensure_visible = lambda key=None: None
+    v.sel = 2
+    v.jump_turn(1)
+    assert v.sel == 5
+    v.jump_turn(1)
+    assert v.sel == 9
+    v.jump_turn(1)
+    assert v.sel == 9 and "last prompt" in v.message
+    v.jump_turn(-1)
+    assert v.sel == 5
+    v.sel = 1
+    v.jump_turn(-1)
+    assert v.sel == 1 and "first prompt" in v.message

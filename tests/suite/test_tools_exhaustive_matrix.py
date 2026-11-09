@@ -120,7 +120,7 @@ def test_grep_patterns(ctx: ToolContext, pattern: str, should_match: bool):
     f = ctx.workspace / "grep_case.txt"
     f.write_text("This line contains TargetString here.\n")
     reg = create_default_registry()
-    res = reg.get("Grep").run({"pattern": pattern}, ctx)
+    res = reg.get("Grep").run({"pattern": pattern, "output_mode": "content"}, ctx)
     if should_match:
         assert "TargetString" in res
     else:

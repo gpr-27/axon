@@ -1,33 +1,46 @@
 """
 Permission rule syntax and matching (Claude Code compatible).
 
-    Bash                      every Bash command
-    Bash(git status:*)        "git status" or anything starting with "git status "
-    Bash(npm run *)           shell-style glob over the whole command
-    Edit(src/**)              any file-editing tool (Write/Edit/MultiEdit/Patch) under src/
-    Read(~/.ssh/**)           any read tool (Read/Ls/Glob/Grep/...) under ~/.ssh
+    Bash                      every Bash command (Bash(*) is the same)
+    Bash(npm run build)       exactly that command
+    Bash(npm run *)           * is any text; a trailing " *" also matches the bare "npm run"
+    Bash(git status:*)        ":*" at the very end is the same as " *"
+    Edit(src/**)              the file-editing tools under src/
+    Read(~/.ssh/**)           the file-reading tools under ~/.ssh
     WebFetch(domain:x.com)    fetches of x.com or its subdomains
-    mcp__github               every tool exposed by the "github" MCP server
-    mcp__github__create_issue one MCP tool
+    Agent(model:opus)         deny/ask only: a top-level input parameter with that value
+    mcp__github               every tool of the "github" MCP server
+    mcp__github__get_*        allow rules may glob only after a literal mcp__<server>__
+    mcp__*, *                 deny/ask rules may glob the whole tool name
 
-Path patterns: ``~/`` is the home directory, absolute paths (``/x``, ``//x``,
-``C:/x``) are absolute, anything else is relative to the workspace. ``**`` crosses
-directories, ``*`` and ``?`` do not. A pattern without wildcards also matches
-everything below it when it names a directory. Matching is case-insensitive on
-Windows.
+Path patterns follow gitignore:
 
-Bash commands are split into sub-commands on ``; && || | & newline`` (quotes
-respected). A *deny* rule matches when any sub-command matches; an *allow* rule only
-when every sub-command matches and the command contains no ``$( )`` / backtick
-substitution (unless the rule is the exact full command).
+    //path    absolute, from the filesystem root
+    ~/path    from the home directory
+    /path     from the settings source: the workspace for project and local files and for flags,
+              ~/.axon for user settings, the file's own folder for --settings <file>
+    path      relative to the workspace; a bare name matches at any depth; a single directory segment
+              such as src/** matches at any depth in deny and ask rules, and only at the top in allow rules
+    ./path    relative to the workspace, at that place only
+
+``*`` stays inside a path segment, ``**`` crosses directories, ``!pattern`` carves a path out of the
+relative deny or ask rules listed before it in the same file (see ``apply_carve_outs``). An allow rule needs the
+requested path and the file it resolves to to match; a deny or ask rule needs either. Matching is
+case-insensitive on Windows, where ``C:\\x`` compares as ``/c/x``.
+
+Bash commands are split into sub-commands on ``; && || | |& & newline`` (quotes respected). A deny or ask rule
+matches when any sub-command matches, including one inside a subshell, a substitution or a loop body, and looks past
+any leading assignment and the wrappers. An allow rule needs every sub-command and looks past the fixed wrapper list
+and known-safe assignments only.
 """
 from __future__ import annotations
 
 import fnmatch
 import os
 import re
+import shlex
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -36,6 +49,7 @@ IS_WINDOWS = sys.platform == "win32"
 
 EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "Patch", "NotebookEdit", "Notebook"})
 READ_TOOLS = frozenset({"Read", "Ls", "Glob", "Grep", "CodeSearch", "FileTree", "CodeSymbols", "TableSearch", "Diff", "SemanticSearch", "CodeGraph"})
+READ_DENY_ALSO_BLOCKS = frozenset({"Write", "Edit", "MultiEdit", "Patch"})
 PATH_ARG_KEYS = ("path", "file_path", "notebook_path", "path_a", "path_b")
 _GLOB_CHARS = set("*?[")
 
@@ -306,42 +320,187 @@ def all_subcommands(cmd: str, _depth: int = 0) -> list[str]:
     return subs
 
 
-_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+")
+_ENV_ASSIGN = re.compile(r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\S)*\s+""")
+_SAFE_ENV = frozenset({"NODE_ENV", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "NO_COLOR", "FORCE_COLOR", "TERM",
+                       "TZ", "CI", "DEBUG", "RUST_BACKTRACE", "RUST_LOG", "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE",
+                       "GOOS", "GOARCH", "CGO_ENABLED", "PAGER", "GIT_PAGER"})
+# Wrappers that run their argument as the actual command. xargs counts only with no flags at all.
+_BASH_WRAPPERS = ("timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob")
+# Also looked through for deny and ask rules: they run their argument too, and a deny rule should see it.
+_DENY_ONLY_WRAPPERS = ("sudo", "exec", "env")
+EXEC_WRAPPERS = frozenset({"watch", "setsid", "ionice", "flock"})
+FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-rm", "-fprint", "-fprint0", "-fprintf", "-fls", "-files0-from"})
+_SHELL_KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{", "(", "time"})
+_SHELL_ENDERS = frozenset({"done", "fi", "esac", "}", ")"})
+_OPTION_WITH_VALUE = {"timeout": ("-k", "--kill-after", "-s", "--signal"), "nice": ("-n", "--adjustment"),
+                      "stdbuf": ("-i", "-o", "-e", "--input", "--output", "--error")}
+
+
+def _strip_one_wrapper(c: str, names: tuple[str, ...]) -> str | None:
+    """``c`` with one leading wrapper and its options removed, or None when it starts with none of ``names``."""
+    word, _, rest = c.partition(" ")
+    if word not in names or not rest.strip():
+        return None
+    if word == "command" and rest.lstrip().startswith(("-v", "-V")):
+        return None                            # the query form looks a command up instead of running it
+    rest = rest.lstrip()
+    takes_value = _OPTION_WITH_VALUE.get(word, ())
+    while rest.startswith("-"):
+        flag, _, more = rest.partition(" ")
+        rest = more.lstrip()
+        if flag in takes_value or (word == "sudo" and flag in ("-u", "-g")):
+            _, _, rest = rest.partition(" ")
+            rest = rest.lstrip()
+    if word == "timeout":                      # its first plain word is the duration
+        _, _, rest = rest.partition(" ")
+        rest = rest.lstrip()
+    elif word == "nice" and rest[:1].isdigit():
+        _, _, rest = rest.partition(" ")
+        rest = rest.lstrip()
+    if word == "env":
+        while _ENV_ASSIGN.match(rest):
+            rest = rest[_ENV_ASSIGN.match(rest).end():]  # type: ignore[union-attr]
+    return rest or None
 
 
 def strip_wrappers(cmd: str) -> str:
-    """Remove leading env assignments and sudo/command/exec wrappers (used for deny matching)."""
+    """For deny and ask rules: remove every leading assignment and every wrapper."""
     c = cmd.strip()
     changed = True
     while changed:
         changed = False
         m = _ENV_ASSIGN.match(c)
         if m:
-            c = c[m.end():]
+            c = c[m.end():].lstrip()
             changed = True
-        for w in ("sudo ", "command ", "exec ", "nohup ", "time ", "env "):
-            if c.startswith(w):
-                c = c[len(w):].lstrip()
-                # drop sudo flags such as -E / -u root
-                while c.startswith("-"):
-                    flag, _, rest = c.partition(" ")
-                    c = rest.lstrip()
-                    if flag in ("-u", "-g") and c:
-                        _, _, c = c.partition(" ")
-                        c = c.lstrip()
-                changed = True
+            continue
+        inner = _strip_one_wrapper(c, _BASH_WRAPPERS + _DENY_ONLY_WRAPPERS)
+        if inner is not None:
+            c, changed = inner, True
+            continue
+        if c.startswith("xargs ") and not c[6:].lstrip().startswith("-"):
+            c, changed = c[6:].lstrip(), True
     return c
+
+
+def strip_allow_wrappers(cmd: str) -> str:
+    """For allow rules: only the fixed wrapper list, known-safe assignments and flagless xargs."""
+    c = cmd.strip()
+    changed = True
+    while changed:
+        changed = False
+        m = _ENV_ASSIGN.match(c)
+        if m and c.split("=", 1)[0] in _SAFE_ENV:
+            c, changed = c[m.end():].lstrip(), True
+            continue
+        inner = _strip_one_wrapper(c, _BASH_WRAPPERS)
+        if inner is not None:
+            c, changed = inner, True
+            continue
+        if c.startswith("xargs ") and not c[6:].lstrip().startswith("-"):
+            c, changed = c[6:].lstrip(), True
+    return c
+
+
+def bare_simple_command(sub: str) -> str:
+    """A sub-command without the shell syntax around it: ``do rm x`` -> ``rm x``, ``(rm x`` -> ``rm x``, ``done`` -> ''."""
+    c = sub.strip()
+    while True:
+        c = c.lstrip("( \t")
+        first, _, rest = c.partition(" ")
+        if first in _SHELL_KEYWORDS and first != "time":
+            c = rest.strip()
+            continue
+        break
+    c = c.rstrip(") \t") if c.count(")") > c.count("(") else c
+    if c.endswith(" }"):
+        c = c[:-2].rstrip()
+    if c in _SHELL_ENDERS:
+        return ""
+    if re.match(r"^(for|case|select)\b", c):
+        return ""                              # the loop header runs nothing itself; its body is the next sub-command
+    return c
+
+
+def _command_regex(pat: str) -> re.Pattern[str]:
+    """``*`` is any text, including spaces; everything else, ``?`` and ``[`` too, is literal."""
+    return re.compile("^" + ".*".join(re.escape(p) for p in pat.split("*")) + "$", re.S)
 
 
 def _command_matches(pattern: str, cmd: str) -> bool:
     cmd = " ".join(cmd.split())
-    pat = pattern.strip()
-    if pat.endswith(":*"):
-        prefix = " ".join(pat[:-2].split())
-        return cmd == prefix or cmd.startswith(prefix + " ")
-    if any(c in pat for c in _GLOB_CHARS):
-        return fnmatch.fnmatchcase(cmd, " ".join(pat.split()))
-    return cmd == " ".join(pat.split())
+    pat = " ".join(pattern.strip().split())
+    if pat.endswith(":*"):                     # only recognised at the very end: Bash(git:* push) is a literal colon
+        pat = pat[:-2] + " *"
+    if "*" not in pat:
+        return cmd == pat
+    if pat.endswith(" *") and pat.count("*") == 1 and cmd == pat[:-2]:
+        return True                            # a trailing " *" that is the only wildcard also matches the bare command
+    return bool(_command_regex(pat).match(cmd))
+
+
+def is_unparseable_compound(cmd: str) -> bool:
+    """``npm test &&``: a dangling operator means the line cannot be split for allow-rule matching."""
+    return bool(re.search(r"(&&|\|\|)\s*$", cmd.strip()))
+
+
+def prefix_rule_cannot_approve(sub: str) -> bool:
+    """Exec wrappers and find with an action run or destroy things a wildcard rule never named."""
+    words = sub.split()
+    if not words:
+        return False
+    prog = words[0].rsplit("/", 1)[-1]
+    return prog in EXEC_WRAPPERS or (prog == "find" and any(w in FIND_ACTIONS for w in words[1:]))
+
+
+_READ_COMMANDS = frozenset({"cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "diff", "stat", "file", "nl", "sort", "uniq", "cut", "od", "xxd", "strings", "md5sum", "sha1sum", "sha256sum", "sha512sum", "base64"})
+_WRITE_COMMANDS = frozenset({"tee", "touch", "rm", "rmdir", "mkdir", "truncate", "shred"})
+
+
+def _words(sub: str) -> list[str]:
+    try:
+        return shlex.split(sub, posix=True)
+    except ValueError:
+        return sub.split()
+
+
+def bash_file_targets(cmd: str) -> tuple[list[str], list[str]]:
+    """(files read, files written) that a shell line names through commands Axon recognises and redirections."""
+    reads, writes = [], list(redirect_targets(cmd))
+    reads += input_redirect_targets(cmd)
+    for sub in all_subcommands(cmd):
+        c = strip_wrappers(bare_simple_command(sub))
+        words = [w for w in _words(re.sub(r"\d*(?:>>?|>\||&>>?|<)\s*\S+", " ", c)) if w]
+        if not words:
+            continue
+        prog = words[0].rsplit("/", 1)[-1]
+        args = words[1:]
+        plain = [a for a in args if not a.startswith("-")]
+        if prog in ("grep", "egrep", "fgrep", "rg") and plain:
+            plain = plain[1:]                  # the pattern
+        if prog in _READ_COMMANDS:
+            reads += plain
+        elif prog in _WRITE_COMMANDS:
+            writes += plain
+        elif prog == "sed":
+            inplace = any(a == "-i" or a.startswith(("-i", "--in-place")) for a in args)
+            files = plain[1:] if plain else []
+            (writes if inplace else reads).extend(files)
+        elif prog in ("cp", "mv", "install") and len(plain) >= 2:
+            reads += plain[:-1]
+            writes += plain[-1:]
+            if prog == "mv":
+                writes += plain[:-1]
+    return reads, writes
+
+
+def input_redirect_targets(cmd: str) -> list[str]:
+    """Files a shell line reads with ``<`` (here-docs, here-strings, ``<&3`` and ``<(...)`` are not files)."""
+    out: list[str] = []
+    for sub in split_shell_commands(cmd):
+        for m in re.finditer(r"""(?<![<\\])<(?![<&(])\s*("[^"]*"|'[^']*'|[^\s;|&<>]+)""", sub):
+            out.append(m.group(1).strip("'\""))
+    return out
 
 
 # ─── Path globbing ──────────────────────────────────────────────────────────
@@ -351,6 +510,10 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
     i = 0
     while i < len(pat):
         c = pat[i]
+        if c == "\\" and pat[i + 1:i + 2] in ("[", "]", "*", "?", "!", "\\"):
+            out.append(re.escape(pat[i + 1]))  # the escaped form generated rules use for a literal path
+            i += 2
+            continue
         if c == "*":
             if pat[i:i + 3] == "**/":
                 out.append("(?:.*/)?")
@@ -381,95 +544,204 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$", re.IGNORECASE if IS_WINDOWS else 0)
 
 
+def _posix_form(p: str) -> str:
+    """Windows paths compare as /c/Users/x, so //c/** and //**/.env mean what they say."""
+    p = p.replace("\\", "/")
+    if IS_WINDOWS and re.match(r"^[A-Za-z]:(/|$)", p):
+        return "/" + p[0].lower() + p[2:]
+    return p
+
+
 def _abs_posix(p: str | Path) -> str:
     s = os.path.normpath(os.path.abspath(os.path.expanduser(str(p))))
     try:
         s = os.path.realpath(s)
     except OSError:
         pass
-    return s.replace("\\", "/")
+    return _posix_form(s)
 
 
-def _pattern_to_abs(pattern: str, workspace: Path | None) -> str:
-    pat = pattern.strip().replace("\\", "/")
+def _requested_posix(p: str | Path) -> str:
+    """The path as it was asked for: absolute and collapsed, symlinks not followed."""
+    return _posix_form(os.path.normpath(os.path.abspath(os.path.expanduser(str(p)))))
+
+
+def _has_glob(text: str) -> bool:
+    return any(c in text for c in _GLOB_CHARS)
+
+
+def pattern_shape(pattern: str) -> str:
+    """'absolute' (//x), 'home' (~/x), 'anchored' (/x), 'here' (./x) or 'relative' (x)."""
+    pat = pattern.strip().replace("\\\\", "/") if IS_WINDOWS else pattern.strip()
     if pat.startswith("//"):
-        pat = pat[1:]
+        return "absolute"
     if pat.startswith("~"):
-        base = str(Path.home()).replace("\\", "/")
-        pat = base.rstrip("/") + pat[1:]
-    elif not (pat.startswith("/") or re.match(r"^[A-Za-z]:/", pat)):
-        ws = _abs_posix(workspace) if workspace is not None else _abs_posix(Path.cwd())
-        if pat.startswith("./"):
-            pat = pat[2:]
-        pat = ws.rstrip("/") + "/" + pat
-    # Normalise the literal (non-glob) head so symlinked roots compare equal
-    head_parts = []
-    rest_parts = pat.split("/")
-    for idx, part in enumerate(rest_parts):
-        if any(c in part for c in _GLOB_CHARS):
-            rest = "/".join(rest_parts[idx:])
-            head = "/".join(head_parts) or "/"
-            return _abs_posix(head).rstrip("/") + "/" + rest
-        head_parts.append(part)
-    return _abs_posix(pat)
+        return "home"
+    if pat.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", pat):
+        return "absolute" if not pat.startswith("/") else "anchored"
+    if pat.startswith("./"):
+        return "here"
+    return "relative"
 
 
-def path_matches(pattern: str, path: str, workspace: Path | None = None) -> bool:
-    """Match a path argument against a rule's path pattern."""
-    if pattern.strip() in ("*", "**"):
-        return True
-    raw = Path(path.strip()).expanduser()
-    if not raw.is_absolute():
-        raw = (Path(workspace) if workspace is not None else Path.cwd()) / raw
-    target = _abs_posix(raw)
-    pat_abs = _pattern_to_abs(pattern, workspace)
+def _literal_head_variants(pat: str) -> list[str]:
+    """``pat`` as written and with its literal directories resolved, so //etc/** also covers /private/etc."""
+    parts = pat.split("/")
+    head: list[str] = []
+    rest: list[str] = []
+    for idx, part in enumerate(parts):
+        if _has_glob(part):
+            rest = parts[idx:]
+            break
+        head.append(part)
+    literal = "/".join(head) or "/"
+    tail = ("/" + "/".join(rest)) if rest else ""
+    real = _abs_posix(literal)
+    return list(dict.fromkeys([literal.rstrip("/") + tail if tail else literal, real.rstrip("/") + tail if tail else real]))
+
+
+def _rule_patterns(pattern: str, workspace: Path | None, anchor: Path | None, kind: str) -> list[str]:
+    """The absolute patterns a rule's path pattern stands for, for this kind of rule."""
+    pat = pattern.strip()
+    if IS_WINDOWS:
+        pat = pat.replace("\\", "/")
+    ws = _requested_posix(workspace) if workspace is not None else _requested_posix(Path.cwd())
+    shape = pattern_shape(pat)
+    if shape == "absolute":
+        out = [_posix_form(pat[1:] if pat.startswith("//") else pat)]
+    elif shape == "home":
+        out = [_posix_form(str(Path.home())).rstrip("/") + pat[1:]]
+    elif shape == "anchored":
+        base = _requested_posix(anchor) if anchor is not None else ws
+        out = [_posix_form(pat)]                                  # how a leading / always read: an absolute path
+        if kind != "allow":
+            out.append(base.rstrip("/") + pat)                    # and, to be safe, the settings folder too
+    elif shape == "here":
+        out = [ws.rstrip("/") + "/" + pat[2:]]
+    else:
+        body = pat.rstrip("/")
+        out = [ws.rstrip("/") + "/" + pat]
+        if "/" not in body:                    # a bare name: gitignore matches it at any depth
+            out.append(ws.rstrip("/") + "/**/" + pat)
+        elif kind != "allow" and body.endswith("/**") and "/" not in body[:-3]:
+            out.append(ws.rstrip("/") + "/**/" + pat)  # src/**: any depth for deny and ask, the top for allow
+    variants: list[str] = []
+    for p in out:
+        variants += _literal_head_variants(p)
+    return list(dict.fromkeys(variants))
+
+
+def _one_pattern_matches(pat_abs: str, target: str) -> bool:
     if pat_abs.endswith("/"):
         pat_abs += "**"
-    if not any(c in pat_abs for c in _GLOB_CHARS):
+    if not _has_glob(pat_abs) and "\\" not in pat_abs:
         a = pat_abs.lower() if IS_WINDOWS else pat_abs
         t = target.lower() if IS_WINDOWS else target
         return t == a or t.startswith(a.rstrip("/") + "/")
     if _glob_to_regex(pat_abs).match(target):
         return True
-    # "dir/**" should also match "dir" itself
-    if pat_abs.endswith("/**"):
-        base = pat_abs[:-3]
-        a = base.lower() if IS_WINDOWS else base
-        t = target.lower() if IS_WINDOWS else target
-        return t == a
+    if pat_abs.endswith("/**"):                # "dir/**" also matches "dir" itself
+        a = pat_abs[:-3].lower() if IS_WINDOWS else pat_abs[:-3]
+        return (target.lower() if IS_WINDOWS else target) == a
     return False
+
+
+def path_matches(pattern: str, path: str, workspace: Path | None = None, *, anchor: Path | None = None, kind: str = "deny") -> bool:
+    """Match a path argument against a rule's path pattern. An allow rule needs both the requested path and the
+    file it resolves to to match; a deny or ask rule needs either."""
+    if pattern.strip() in ("*", "**"):
+        return True
+    raw = Path(path.strip()).expanduser()
+    if not raw.is_absolute():
+        raw = (Path(workspace) if workspace is not None else Path.cwd()) / raw
+    requested, resolved = _requested_posix(raw), _abs_posix(raw)
+    patterns = _rule_patterns(pattern, workspace, anchor, kind)
+    hit_requested = any(_one_pattern_matches(p, requested) for p in patterns)
+    hit_resolved = any(_one_pattern_matches(p, resolved) for p in patterns)
+    return (hit_requested and hit_resolved) if kind == "allow" else (hit_requested or hit_resolved)
+
+
+def domain_matches(rule_domain: str, host: str) -> bool:
+    """``x.com`` is that host and its subdomains, ``*.x.com`` any subdomain at any depth but not x.com, ``*`` every host; any
+    other ``*`` stays between two dots, so example.* never matches example.evil.com. A trailing dot is dropped."""
+    dom, host = rule_domain.strip().lower().rstrip("."), host.lower().rstrip(".")
+    if not host or not dom:
+        return False
+    if dom == "*":
+        return True
+    if dom.startswith("*."):
+        return host.endswith(dom[1:]) and host != dom[2:] and "*" not in dom[2:]
+    if "*" not in dom:
+        return host == dom or host.endswith("." + dom)
+    return bool(re.match("^" + "[^.]*".join(re.escape(p) for p in dom.split("*")) + "$", host))
 
 
 # ─── Rules ──────────────────────────────────────────────────────────────────
 
-def _tool_selector_matches(selector: str, tool_name: str) -> bool:
-    if selector in ("*", ""):
-        return True
+def _name_glob(selector: str, name: str) -> bool:
+    return bool(re.match("^" + ".*".join(re.escape(p) for p in selector.split("*")) + "$", name, re.I))
+
+
+def allow_glob_is_anchored(selector: str) -> bool:
+    """An allow rule may glob a tool name only after a literal ``mcp__<server>__``."""
+    m = re.match(r"^mcp__([^*]+?)__", selector)
+    return bool(m)
+
+
+def _tool_selector_matches(selector: str, tool_name: str, kind: str = "deny", server: str | None = None) -> bool:
+    if selector in ("", "*"):
+        return kind != "allow"                 # an unanchored allow glob approves nothing
     s, t = selector.lower(), tool_name.lower()
     if s == t:
         return True
-    if selector in ("Agent", "Task") and tool_name == "Task":
+    if selector == "Agent" and tool_name == "Task":
         return True
     if selector == "Edit" and tool_name in EDIT_TOOLS:
         return True
     if selector == "Read" and tool_name in READ_TOOLS:
         return True
-    if s.startswith("mcp__"):
-        base = s[:-1] if s.endswith("*") else s
-        if base.endswith("__"):
-            return t.startswith(base)
-        if base.count("__") == 1:  # server-level rule: mcp__server
-            return t.startswith(base + "__")
+    if selector == "Read" and kind == "deny" and tool_name in READ_DENY_ALSO_BLOCKS:
+        return True                            # a Read deny also stops Edit and Write on that path, not NotebookEdit
+    if "*" in s:
+        if kind == "allow" and not allow_glob_is_anchored(selector):
+            return False
+        return _name_glob(s, t)
+    if s.startswith("mcp__") and s.count("__") == 1:
+        if not t.startswith(s + "__"):
+            return False                       # mcp__server: every tool of that server
+        # As an allow rule it names the server exactly; mcp__reports must not approve a server called reports__v2.
+        return kind != "allow" or server is None or server.lower() == s[5:]
+    if s.startswith("mcp__") and kind != "allow" and t.startswith(s + "__"):
+        return True                            # deny/ask: mcp__reports__v2 covers the server reports__v2
     return False
+
+
+# The field a tool's own rule syntax already covers; Bash(command:rm *) would be bypassed by a compound command.
+PRIMARY_PARAMS = {"Bash": "command", "PowerShell": "command", "Read": "file_path", "Edit": "file_path", "Write": "file_path",
+                  "Grep": "path", "Glob": "path", "NotebookEdit": "notebook_path", "WebFetch": "url"}
+_PARAM_RULE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", re.S)
+
+
+def primary_param_rule(tool: str, pattern: str | None) -> bool:
+    """True for a rule such as Bash(command:rm *), which Axon ignores and warns about."""
+    m = _PARAM_RULE.match(pattern or "")
+    canonical = "Bash" if tool == "Bash" else tool
+    return bool(m and PRIMARY_PARAMS.get(canonical) == m.group(1))
 
 
 @dataclass(frozen=True)
 class Rule:
     tool: str
     pattern: str | None = None
+    # Where a /path pattern anchors. None: the workspace (project and local files, flags, session rules).
+    anchor: Path | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return f"{self.tool}({self.pattern})" if self.pattern else self.tool
+
+    @property
+    def negated(self) -> bool:
+        return (self.pattern or "").strip().startswith("!")
 
     def matches(
         self,
@@ -478,43 +750,72 @@ class Rule:
         workspace: Path | None = None,
         *,
         for_deny: bool = False,
+        kind: str | None = None,
+        server: str | None = None,
     ) -> bool:
-        if not _tool_selector_matches(self.tool, tool_name):
+        kind = kind or ("deny" if for_deny else "allow")
+        restrict = kind != "allow"
+        if not _tool_selector_matches(self.tool, tool_name, kind, server):
             return False
         if not self.pattern or self.pattern.strip() == "*":
             return True
         pat = self.pattern.strip()
 
+        if restrict:
+            m = _PARAM_RULE.match(pat)
+            if m and m.group(1) != "domain":
+                name, value = m.group(1), m.group(2)
+                if PRIMARY_PARAMS.get(tool_name) == name:
+                    return False
+                if name in args:               # a parameter the call leaves out is never matched
+                    actual = args[name]
+                    if isinstance(actual, bool):
+                        actual = "true" if actual else "false"
+                    if not isinstance(actual, (str, int, float)):
+                        return False
+                    return bool(_command_regex(value).match(str(actual)))
+
         if tool_name == "Bash":
             cmd = str(args.get("command", "")).strip()
             if not cmd:
                 return False
-            # A rule that is literally the whole command line matches it, even a compound line or one
-            # containing glob characters ("always allow" stores such commands verbatim).
-            if " ".join(pat.split()) == " ".join(cmd.split()):
+            whole = " ".join(pat.split()) == " ".join(cmd.split())
+            if restrict:
+                if whole:
+                    return True
+                for s in all_subcommands(cmd):
+                    s = bare_simple_command(s)
+                    if s and (_command_matches(pat, s) or _command_matches(pat, strip_wrappers(s))):
+                        return True
+                return False
+            if is_unparseable_compound(cmd):
+                return False
+            # A rule that is literally the whole line approves it. With a * in it the rule reads as a pattern,
+            # so a wrapper or a find action stays out of reach.
+            if whole and not ("*" in pat and any(prefix_rule_cannot_approve(s) for s in split_shell_commands(cmd))):
                 return True
-            subs = split_shell_commands(cmd)
-            if for_deny:
-                subs = all_subcommands(cmd)
-                return any(_command_matches(pat, s) or _command_matches(pat, strip_wrappers(s)) for s in subs)
             if has_substitution(cmd):
                 return False
-            return bool(subs) and all(_command_matches(pat, s) for s in subs)
+            subs = [bare_simple_command(s) for s in split_shell_commands(cmd)]
+            subs = [s for s in subs if s]
+            return bool(subs) and all(sub_allowed_by(pat, s) for s in subs)
 
         if tool_name == "Task":      # Agent(Explore): match the subagent type
-            kind = str(args.get("subagent_type") or "general-purpose").strip().lower()
-            return fnmatch.fnmatchcase(kind, pat.lower())
+            kind_name = str(args.get("subagent_type") or "general-purpose").strip().lower()
+            return fnmatch.fnmatchcase(kind_name, pat.lower())
 
         if pat.startswith("domain:"):
-            url = str(args.get("url", "")).strip()
-            host = (urlparse(url).hostname or "").lower()
-            dom = pat[len("domain:"):].strip().lower()
-            return bool(host) and (host == dom or host.endswith("." + dom))
+            host = urlparse(str(args.get("url", "")).strip()).hostname or ""
+            return domain_matches(pat[len("domain:"):], host)
 
-        paths = tool_paths(tool_name, args, keep_prefixed=for_deny)
+        paths = tool_paths(tool_name, args, keep_prefixed=restrict)
         if paths:
-            hits = [path_matches(pat, p, workspace) for p in paths]
-            return any(hits) if for_deny else all(hits)
+            if pat.startswith("!"):
+                if not restrict:
+                    return False               # a carve-out is not an approval
+                return any(carve_out_matches(pat, p, workspace) for p in paths)
+            hits = [path_matches(pat, p, workspace, anchor=self.anchor, kind=kind) for p in paths]
+            return any(hits) if restrict else all(hits)
 
         if tool_name == "Git":
             line = " ".join(str(x) for x in [args.get("subcommand", "")] + list(args.get("args", []) or []) if x)
@@ -525,6 +826,41 @@ class Rule:
             if isinstance(v, str) and fnmatch.fnmatchcase(v, pat):
                 return True
         return False
+
+
+def sub_allowed_by(pattern: str, sub: str) -> bool:
+    """One simple command against one allow pattern."""
+    if "*" in pattern and prefix_rule_cannot_approve(strip_allow_wrappers(sub)):
+        return False
+    return _command_matches(pattern, sub) or _command_matches(pattern, strip_allow_wrappers(sub))
+
+
+def carve_out_matches(pattern: str, path: str, workspace: Path | None) -> bool:
+    """``!pattern`` is always read relative to the workspace, so it cannot reach a //, ~/ or / rule."""
+    body = pattern.strip()[1:]
+    if body.startswith(("/", "~")):
+        return False
+    return path_matches(body, path, workspace, kind="deny")
+
+
+def carve_out_can_reopen(rule: Rule) -> bool:
+    """A carve-out reaches only relative rules, and not one that blocks a directory as a whole."""
+    pat = (rule.pattern or "").strip()
+    if not pat or pat.startswith("!") or pattern_shape(pat) not in ("relative", "here"):
+        return False
+    return not pat.rstrip("/").endswith("/**") and not pat.endswith("/")
+
+
+def apply_carve_outs(rules: list[Rule], tool_name: str, args: dict[str, Any], workspace: Path | None, kind: str) -> Rule | None:
+    """The first rule from one settings source that still matches after that source's ``!`` patterns."""
+    hits: list[Rule] = []
+    for r in rules:
+        if r.negated:
+            if r.matches(tool_name, args, workspace, kind=kind):
+                hits = [h for h in hits if not carve_out_can_reopen(h)]
+        elif r.matches(tool_name, args, workspace, kind=kind):
+            hits.append(r)
+    return hits[0] if hits else None
 
 
 def parse_rule(spec: str) -> Rule:

@@ -81,10 +81,12 @@ def test_esc_esc_on_empty_prompt_requests_rewind(keys) -> None:
     assert read_input()[0] == ui_input.REWIND
 
 
-def test_left_on_empty_opens_switcher_and_ctrl_o_cycles_trace(keys) -> None:
+def test_left_on_empty_opens_switcher_ctrl_o_opens_transcript_alt_l_cycles_trace(keys) -> None:
     keys(["left"])
     assert read_input()[0] == ui_input.SWITCH_SESSION
     keys(["ctrl-o"])
+    assert read_input()[0] == "/transcript"
+    keys(["alt-l"])
     assert read_input()[0] == ui_input.TRACE_CYCLE
 
 
@@ -281,7 +283,7 @@ def test_agent_panel_rows_list_main_and_running_agents_first():
              elapsed_s=0, tokens_consumed=2500)
     rows = agent_panel_rows(N(subagents=N(all_tasks=lambda: [done, live])), 100)
     text = "\n".join(rows)
-    assert "1 agent running" in text and "main" in text and "2.5k tokens" in text
+    assert "1 agent running" in text and "main" in text and "2.5k" in text and "Reading x.ts" in text and "1m 05s" in text
     assert "explore" not in text          # finished agents leave the roster
     assert agent_panel_rows(N(subagents=N(all_tasks=lambda: [])), 100) == []
 

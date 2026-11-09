@@ -507,4 +507,18 @@ def test_a_finished_live_reply_gets_its_hover_actions():
     Regenerate and Bookmark never showed until a reload. finishTurn must drop the class."""
     from axon.features.dashboard_web import APP_JS
     seg = APP_JS[APP_JS.index("async function finishTurn"):]
-    assert "cur.art.classList.remove('live')" in seg[:seg.index("C.cur = null;")]
+    assert "foldSteps(cur.art)" in seg[:seg.index("C.cur = null;")]
+    fold = APP_JS[APP_JS.index("function foldSteps"):]
+    assert "art.classList.remove('live')" in fold[:fold.index("function syncFold")]
+
+
+def test_failures_stay_visible_and_a_nonzero_shell_exit_counts_as_failed():
+    from axon.features.dashboard_web import APP_JS
+    seg = APP_JS[APP_JS.index("async function finishTurn"):]
+    seg = seg[:seg.index("foldSteps(cur.art)")]
+    # nothing folds when a turn ends any more, so a failed step is never hidden by the end of the turn
+    fold = APP_JS[APP_JS.index("function foldSteps"):]
+    assert "animate" not in fold[:fold.index("function stepsHidden")]
+    assert "dataset.steps = 'closed'" not in seg
+    done = APP_JS[APP_JS.index("function toolDone"):]
+    assert "BASH_EXIT_RE.test" in done[:done.index("setToolState")]

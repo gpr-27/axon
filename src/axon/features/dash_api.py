@@ -53,7 +53,7 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
         info = dash_fs.git_info(ws)
         return {"workspace": str(ws), "name": ws.name, "home": str(Path.home()), "recent": dash_fs.recent_projects(),
                 "git": {"repo": info["repo"], "branch": info["branch"], "changed": worktree_view.changed_count(ws) if info["repo"] else 0},
-                "live": srv.live is not None, "can_switch": srv.live is None,
+                "live": srv.live is not None, "can_switch": srv.can_switch,
                 "extra_dirs": [str(p) for p in srv.extra_dirs()]}
     if route == "/api/fs/dirs":
         return dash_fs.list_subdirs(qs.get("path", ""), qs.get("hidden") == "1")
@@ -295,7 +295,11 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
         return dash_library.handle_post(srv, route, body)
     if route == "/api/chat/send":
         return chat_send(srv, body)
+    if route == "/api/live/switch":
+        return srv.switch_live(_s(body, "session", 300))
     if route == "/api/chat/new":
+        if srv.live is not None and srv.can_switch and not srv.live.busy:
+            return srv.new_live_chat()
         rt = srv.new_runtime()
         return rt.state()
     if route == "/api/chat/stop":
@@ -446,7 +450,11 @@ def chat_send(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
         ready, why = dp.provider_ready(srv, srv.runtime(str(body.get("session") or ""), create=False))
         if not ready:
             raise DashError(why, 412)
-    rt = srv.runtime(str(body.get("session") or ""), create=True)
+    sid = str(body.get("session") or "")
+    if sid and srv.live is not None and srv.can_switch and sid != srv.live.session_id and not srv.live.busy \
+            and srv.runtime(sid, create=False) is None:
+        srv.switch_live(sid)           # continuing an older chat moves the terminal to it, so there is one writer
+    rt = srv.runtime(sid, create=True)
     text = _s(body, "text", 1_000_000).strip()
     if not text:
         raise DashError("message is empty")
@@ -665,6 +673,15 @@ def insights_get(srv: "DashServer", name: str, qs: dict[str, str]) -> dict[str, 
 
 
 def insights_post(srv: "DashServer", name: str, body: dict[str, Any]) -> dict[str, Any]:
+    if name == "ctxinspect":                     # read-only: what is inside each part of the context window
+        from axon.features import context_inspect as ci
+        section = _s(body, "section", 40) or "overview"
+        if section not in ci.KEYS:
+            raise DashError("unknown section", 400)
+        rt = srv.runtime(_s(body, "session", 300), create=False)
+        if rt is None:
+            return ci.empty_result(section)
+        return ci.inspect_section(rt.agent, section)
     agent = _agent(srv, _s(body, "session", 300))
     if name == "review_accept" or name == "review_reject":
         from axon.features import review

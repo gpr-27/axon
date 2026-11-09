@@ -35,6 +35,7 @@ Merging rules:
   **cannot set `api_key` or `base_url`** if that would send your user-level key to another host.
   Axon ignores the value and prints a warning. Local endpoints (`localhost`, `127.0.0.1`) are allowed.
 - The `env` block of `settings.json` cannot override `AXON_API_KEY` or `AXON_BASE_URL`.
+- A project-level file cannot set `vimInsertModeRemaps`: a repository cannot remap your keystrokes.
 - New "don't ask again" approvals are written to `<project>/.axon/settings.local.json`, which is
   personal. Keep it out of version control. Axon's own `.gitignore` ignores `.axon/`.
 
@@ -124,7 +125,7 @@ provider = "anthropic"
 model = "claude-sonnet-4-5"
 small_model = "claude-haiku-4-5"
 mode = "default"              # default | acceptEdits | plan | bypass
-trace_level = "normal"        # compact | normal | detailed | debug
+trace_level = "compact"       # compact | normal | detailed | debug
 fallback_model = ["gpt-5", "deepseek-chat"]
 budget_session_usd = 5.0
 budget_action = "warn"        # warn | stop | downgrade
@@ -205,6 +206,7 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `lsp_diagnostics_after_edit` | `AXON_LSP_DIAGNOSTICS_AFTER_EDIT` | – | `true` |
 | `tool_output_cap` | `AXON_TOOL_OUTPUT_CAP` | – | `150000` |
 | `permissions` | `AXON_PERMISSIONS` | `permissions` | `empty` |
+| `settings_file` | `AXON_SETTINGS_FILE` | – | `none` |
 | `hooks` | `AXON_HOOKS` | `hooks` | `empty` |
 | `append_system_prompt` | `AXON_APPEND_SYSTEM_PROMPT` | `appendSystemPrompt` | `none` |
 | `dangerously_skip_permissions` | `AXON_DANGEROUSLY_SKIP_PERMISSIONS` | – | `false` |
@@ -226,6 +228,10 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `reply_language` | `AXON_REPLY_LANGUAGE` | `replyLanguage` | `""` |
 | `status_line` | `AXON_STATUS_LINE` | `statusLine` | `none` |
 | `vim_mode` | `AXON_VIM_MODE` | `editorMode`, `vimMode` | `false` |
+| `vim_insert_mode_remaps` | `AXON_VIM_INSERT_MODE_REMAPS` | `vimInsertModeRemaps` | `none` |
+| `emoji_completion_enabled` | `AXON_EMOJI_COMPLETION_ENABLED` | `emojiCompletionEnabled` | `true` |
+| `spellcheck` | `AXON_SPELLCHECK` | `spellcheck` | `none` |
+| `editor_show_last_response` | `AXON_EDITOR_SHOW_LAST_RESPONSE` | `editorShowLastResponse` | `false` |
 | `theme` | `AXON_THEME` | `theme` | `"auto"` |
 | `cleanup_period_days` | `AXON_CLEANUP_PERIOD_DAYS` | `cleanupPeriodDays` | `0` |
 | `verify_commands` | `AXON_VERIFY_COMMANDS` | `verifyCommands` | `[]` |
@@ -258,6 +264,59 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 
 `permissions` takes `allow`, `deny` and `ask` lists. `hooks` maps event names to hook groups.
 `budget` in `settings.json` maps to `budget_turn_usd`, `budget_session_usd` and `budget_action`.
+
+### Status line refresh (`statusLine.refreshInterval`)
+
+The status line command runs when the session data it receives changes (a new message, `/compact`, a mode or vim
+mode change) and each time the prompt opens. For a clock or other outside data, `refreshInterval` also re-runs it
+every N seconds while the prompt is idle. The minimum is 1; leave it out and nothing re-runs on a timer.
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.axon/statusline.sh", "refreshInterval": 5 } }
+```
+
+### Vim INSERT-mode remaps (`vimInsertModeRemaps`)
+
+Maps a two-key sequence typed in INSERT mode to Esc. Each key is exactly two printable characters and `"<Esc>"` is
+the only target; other entries are ignored.
+
+```json
+{ "editorMode": "vim", "vimInsertModeRemaps": { "jk": "<Esc>" } }
+```
+
+The first key goes in as usual. The second, within one second, takes it back and switches to NORMAL mode, leaving
+neither in the prompt. After a second, or with another key between them, both stay as text. Read from
+`~/.axon/settings.json`, `~/.axon/config.toml`, `--settings` and the environment only, never from a project.
+
+### Scheduled prompts in a session (`/loop`, `CronCreate`, `ScheduleWakeup`)
+
+`/loop <prompt>` with no interval is self-paced: after each run the model picks the next delay, from 1 minute to 1
+hour, and the reason is printed. `Esc` during the wait stops the loop (so does `Ctrl+C` on an empty prompt); the
+model can also end it with `ScheduleWakeup` and `stop: true`. A run that neither reschedules nor stops gets one more
+try 20 minutes later. A bare `/loop` runs the first non-empty of `.axon/loop.md`, `.claude/loop.md`,
+`~/.axon/loop.md` and `~/.claude/loop.md` (read again on each run, cut at 25,000 bytes), else a built-in maintenance
+prompt. `/loop 15m` runs the same on a fixed interval. `/loop list` lists, `/loop stop [id]` stops.
+
+An interval becomes a cron step after its first run, which goes at once: `/loop 5m` is `*/5 * * * *`, so later runs land on the 5-minute marks. Seconds round up to
+a minute, and an interval no step can hold, such as `7m` or `90m`, goes to the nearest one, and Axon says which.
+
+The model schedules with `CronCreate`, `CronList` and `CronDelete`: a standard 5-field cron expression in local time
+(`*`, `5`, `1-5`, `*/15`, lists; 0 or 7 is Sunday; day of month and day of week match if either does), recurring or
+one-shot. A session holds at most 50 jobs, `/loop` jobs included. A recurring job (or loop) fires one final time at
+its first run 7 days after creation, then deletes itself.
+
+Jobs fire only between turns, when the prompt is empty, and only while the terminal session is open. A missed time
+fires once, not once per miss. `/clear`, `/resume` and leaving the session end them in that session. Resuming it
+(`--resume`, `--continue` or `/resume`) restores its `CronCreate` jobs and fixed-interval `/loop` jobs under the same ids, except
+recurring jobs past their expiry and one-shots whose time has passed; the next run is the first one due from then. A
+self-paced `/loop` is not restored, so run `/loop` again. In `-p`
+mode, the SDK and the app without a terminal `CronCreate` refuses, because nothing would ever fire. `AXON_DISABLE_CRON=1`
+removes the tools and `/loop` and stops anything scheduled.
+
+Scheduling needs no permission, like `Task`: what a prompt leads to is checked when it runs, under the mode in force
+then. Plan mode refuses `CronCreate` and `CronDelete`; deny rules apply as usual. A prompt from `CronCreate` or
+`loop.md` reaches the model as labelled plain text, so a `/`, `!`, `#` or `@file` in it does nothing. Subagents do not
+get these tools.
 
 ### Next-prompt suggestion (`prompt_suggestions`)
 
@@ -329,6 +388,7 @@ block with `/marketplace auto on|off|status|set <name> <value>`; every key is de
 | Variable | Effect |
 |---|---|
 | `AXON_HOME` | Root of all Axon state (default `~/.axon`) |
+| `AXON_DISABLE_CRON` | `1`: no `/loop` or scheduling tools, and scheduled prompts stop firing |
 | `AXON_SHELL` | Shell for tool commands: `bash`, `pwsh`, `powershell`, `cmd` or a path |
 | `AXON_THEME` | `auto`, `dark`, `light`, `high-contrast` or `mono` |
 | `AXON_TRACE_LEVEL` | Default trace level for the renderer |
@@ -344,6 +404,14 @@ block with `/marketplace auto on|off|status|set <name> <value>`; every key is de
 | Provider keys | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `CEREBRAS_API_KEY`, `AZURE_OPENAI_API_KEY`, `AGENTROUTER_API_KEY` |
 
 ## Keyboard shortcuts
+
+At a permission prompt, `Tab` on **Yes** or **No** opens a comment field for a note to the model. `Enter` answers with
+the note; `Tab` or `Shift+Tab` closes the field and keeps the text for when you answer that option; `Esc` declines
+without it. In the plain-text prompt, type the note after a colon: `y: use staging` or `n: not on main`. After **Yes** the model gets the note after the result, after **No** as the reason, and it carries on.
+**No** without a note stops the turn, along with the rest of that step, and waits for you; the model learns what
+happened with your next message. A subagent's prompt and an SDK callback do not stop the turn. The options that allow
+more than this one call and the `WebFetch` and `Http` prompts offer no field. Keys typed in the first 0.35 seconds of
+a prompt are dropped, Tab included, so type-ahead can never answer one or open the field.
 
 `/keybindings` lists the shortcuts in effect. To remap them, edit `~/.axon/keybindings.json`:
 

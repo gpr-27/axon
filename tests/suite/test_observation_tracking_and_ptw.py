@@ -138,7 +138,7 @@ def test_renderer_tool_plan_and_invocation(capsys):
     """Normal level: the plan line, each call with its arguments, and permission decisions."""
     from axon.agent.trace import PermissionDecisionEvent
 
-    renderer = Renderer()
+    renderer = Renderer(trace_level="normal")
     assert renderer.trace_level == "normal"
     renderer.on_event(LLMCallStart(iteration=1, max_iterations=10, model="deepseek-v4-flash", message_count=1,
                                    tokens_in=500, user_prompt="Test tool calling", mode="bypass"))

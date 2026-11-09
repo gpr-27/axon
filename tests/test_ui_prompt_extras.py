@@ -313,15 +313,11 @@ def test_linux_clipboard_image(monkeypatch, tmp_path):
     assert clipboard.paste_image_to(tmp_path / "none.png") is False
 
 
-def test_invisible_characters_warning(monkeypatch):
-    from axon.ui.input import PromptChrome, build_frame
-    from axon.ui.theme import strip_ansi
-    monkeypatch.setattr(plat, "term_size", lambda: (100, 30))
-    monkeypatch.setattr(ui_input, "registered_slash_commands", lambda cwd=None: [])
-    st = EditorState()
-    st.set_text("rm ‮exe.txt")
-    lines, _ = build_frame(st, PromptChrome())
-    assert any("invisible / bidi" in strip_ansi(l) for l in lines)
+def test_invisible_characters_are_removed_on_enter():
+    assert ui_input.strip_invisible("rm \u202eexe\u200b.txt\U000e0041") == ("rm exe.txt", 3)
+    # the joiners Persian writes and the selector inside an emoji are text, not a hiding place
+    assert ui_input.strip_invisible("می\u200cخواهم ❤\ufe0f") == ("می\u200cخواهم ❤\ufe0f", 0)
+    assert ui_input.invisible_notice(3) == "Removed 3 invisible characters · review and press Enter to send"
 
 
 def test_prompt_color(monkeypatch):

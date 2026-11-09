@@ -213,7 +213,7 @@ class PinnedFooter:
             if target is not None:
                 rows += self._peek_rows(target, w)
             else:
-                panel = agent_panel_rows(self.agent, w, max_rows=4, selected=self._focus)
+                panel = agent_panel_rows(self.agent, w, max_rows=4, selected=self._focus, arrow_keys=True)
                 rows += panel
         except Exception:
             pass

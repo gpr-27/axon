@@ -1,140 +1,167 @@
 """
-The agent panel: the running subagents listed under the input, with keyboard control.
+The console: the agent list and transcripts of subagent_monitor.py, opened from the idle prompt (/subagents, /tasks).
 
-One panel per agent session, shared by the pinned footer (while a response streams) and the idle
-prompt, so the selection and the open feed carry over between the two. ``↓`` on an empty input
-selects the first agent (a ``❯`` marks it), ``↑``/``↓`` move, ``Enter`` opens its live feed,
-``x`` stops it, ``Esc``/``←`` go back. With a feed open, what you type is sent to that agent.
+/tasks lists background shells and background turns beside the subagents, with the same keys: Enter opens the
+output of a shell or a turn, x stops it. They appear as rows with the fields of a subagent task, so the list and
+the transcript do not care what they show. ``open_console`` is also what a key at the prompt calls.
 """
 from __future__ import annotations
 
 import time
 from typing import Any
 
-from axon.ui.theme import CYAN, RST, truncate
+from axon import platform as plat
+from axon.ui.subagent_monitor import MonitorKeys, _keep_unsent, _visible, drive
+
+_active = False
+_cleared: set[str] = set()     # shells and turns cleared from the list with x (the session keeps them)
+_QUIET_EVENTS = ("SubagentEvent", "SubagentStep", "RetryEvent", "ProviderRetry")
 
 
-class AgentPanel:
-    def __init__(self, agent: Any) -> None:
-        self.agent = agent
-        self.focus: int | None = None          # selected row (index into the running agents)
-        self.peek: str | None = None           # task id whose live feed is open
-        self.message = ""                      # one-line result of the last action (for the caller to show)
-        self._history: dict[str, list[int]] = {}   # token totals over time, per subagent (the chart)
+class ShellRow:
+    """A background shell as a row of the list."""
+    kind = "shell"
+    tool_calls = None
+    tokens_consumed = 0
+    steps = max_steps = retries = resumes = runs = 0
+    agent_type = "shell"
+    model = prompt = result_text = ""
+    timeline: list[Any] = []
 
-    # ── state ──────────────────────────────────────────────────────────────
-    def running(self) -> list[Any]:
-        from axon.ui.statusline import running_tasks
-        return running_tasks(self.agent)
+    def __init__(self, shell: Any, number: int) -> None:
+        self.shell = shell
+        self.id = self.label = shell.id
+        self.index = 10_000 + number          # never a subagent's number, so digit keys only open subagents
+        self.title = " ".join(str(shell.command).split())
+        state = str(shell.status)
+        killed = state.endswith(("code -15", "code -9"))
+        self.status = "running" if state == "running" else ("completed" if state.endswith("code 0") else "cancelled" if killed else "error")
+        self.error_msg = state if self.status == "error" else None
+        self.start_time = float(shell.started or 0.0) if self.status == "running" else 0.0
+        self.elapsed_s = max(0.0, time.time() - float(shell.started or 0.0))
+        tail = self.transcript()
+        self.activity = tail[-1] if tail else ""
+        if self.status == "completed":
+            self.result_text = self.activity or state
 
-    def active(self) -> bool:
-        """Something to show or control: running agents, or a feed that is open."""
-        return bool(self.running()) or self.peek is not None
+    def transcript(self) -> list[str]:
+        with self.shell.stream.lock:
+            text = self.shell.stream.buf
+        return [ln for ln in str(text).splitlines() if ln.strip()][-400:]
 
-    @property
-    def reply_to(self) -> str | None:
-        """Id of the agent whose feed is open: what you type goes to it."""
-        return self.peek
-
-    def sample(self) -> None:
-        from axon.ui.statusline import ordered_tasks
-        for t in ordered_tasks(self.agent):
-            hist = self._history.setdefault(t.id, [])
-            hist.append(int(t.tokens_consumed or 0))
-            del hist[:-60]
-
-    def send(self, text: str) -> bool:
-        """Hand *text* to the agent whose feed is open."""
-        mgr = getattr(self.agent, "subagents", None)
-        task = mgr.send(self.peek, text) if mgr is not None and self.peek and hasattr(mgr, "send") else None
-        self.message = f"sent to {self.peek}" if task is not None else f"{self.peek} has finished"
-        return task is not None
-
-    # ── keys ───────────────────────────────────────────────────────────────
-    def nav(self, key: str, draft_empty: bool) -> bool:
-        """True when the key was used by the panel."""
-        order = self.running()
-        if self.focus is not None and self.focus >= len(order):
-            self.focus = len(order) - 1 if order else None
-        if self.peek is not None:
-            if key in ("esc", "left"):
-                self.peek = None
-                return True
-            return False
-        if self.focus is None:
-            if key == "down" and draft_empty and order:
-                self.focus = 0
-                return True
-            return False
-        if not order:
-            self.focus = None
-            return False
-        if key == "down":
-            self.focus = min(len(order) - 1, self.focus + 1)
-        elif key == "up":
-            self.focus = None if self.focus == 0 else self.focus - 1
-        elif key in ("enter", "right"):
-            self.peek = order[self.focus].id
-        elif key in ("esc", "left"):
-            self.focus = None
-        elif key == "x":
-            task = order[self.focus]
-            mgr = getattr(self.agent, "subagents", None)
-            if mgr is not None and task.status == "running" and mgr.cancel(task.id):
-                self.message = f"stopped {task.id}"
-        else:
-            self.focus = None             # any other key goes back to typing
-            return False
+    def stop(self) -> bool:
+        from axon.tools.shell import BACKGROUND
+        BACKGROUND.kill(self.shell.id)
         return True
 
-    # ── rows ───────────────────────────────────────────────────────────────
-    def target(self) -> Any:
-        """The task whose feed is open (it stays open after it finishes), or None."""
-        from axon.ui.statusline import ordered_tasks
-        task = next((t for t in ordered_tasks(self.agent) if t.id == self.peek), None)
-        if self.peek and task is None:
-            self.peek = None
-        return task
-
-    def rows(self, width: int) -> list[str]:
-        """The roster (with the ``❯`` on the selected agent) or the open feed."""
-        from axon.ui.statusline import agent_panel_rows
-        task = self.target()
-        if task is not None:
-            return self._feed_rows(task, width)
-        return agent_panel_rows(self.agent, width, max_rows=4, selected=self.focus)
-
-    def _feed_rows(self, task: Any, w: int) -> list[str]:
-        from axon.ui.statusbar import generate_sparkline
-        from axon.ui.theme import GOLD, MINT, ROSE, SLATE, WHITE
-        colour = {"running": GOLD, "completed": MINT}.get(task.status, ROSE)
-        secs = (time.time() - task.start_time) if task.status == "running" and task.start_time else float(task.elapsed_s or 0.0)
-        hist = self._history.get(task.id, [])
-        rate = [max(0, b - a) for a, b in zip(hist, hist[1:])][-40:]
-        tok = int(task.tokens_consumed or 0)
-        mark = "◐◓◑◒"[int(time.monotonic() * 6) % 4] + " " if task.status == "running" else ""
-        rows = [truncate(f"  {CYAN}◂ esc{RST} {WHITE}{task.id}{RST} {SLATE}{task.agent_type}{RST} {colour}{mark}{task.status}{RST}"
-                         f" {SLATE}· {int(secs // 60)}m {int(secs % 60):02d}s · {task.steps}/{task.max_steps} steps · "
-                         f"{task.tool_calls} tools · {tok / 1000:.1f}k tokens{RST}", w),
-                f"  {SLATE}tokens/s{RST} {CYAN}{generate_sparkline(rate) or '·'}{RST}"]
-        glyph = {"step": "◆", "tool": "▸", "result": "↳", "thinking": "…", "retry": "↻", "resume": "↻",
-                 "error": "✗", "note": "✎"}
-        entries = list(task.timeline)[-8:] or [{"kind": "step", "text": task.activity or task.title, "is_error": False}]
-        for e in entries:
-            c = ROSE if e.get("is_error") else SLATE
-            rows.append(truncate(f"  {c}{glyph.get(e['kind'], '·')} {str(e['text']).replace(chr(10), ' ')}{RST}", w))
-        if task.status != "running" and task.result_text:
-            rows.append(truncate(f"  {MINT}result:{RST} {SLATE}{' '.join(task.result_text.split())}{RST}", w))
-        return rows
+    def clear(self) -> None:
+        _cleared.add(self.shell.id)
 
 
-def get_panel(agent: Any) -> AgentPanel:
-    """The agent session's panel (created on first use, shared by the footer and the prompt)."""
-    panel = getattr(agent, "_agent_panel", None)
-    if not isinstance(panel, AgentPanel):
-        panel = AgentPanel(agent)
-        try:
-            agent._agent_panel = panel
-        except Exception:
-            pass
-    return panel
+class TurnRow:
+    """A turn detached with Ctrl+B as a row of the list."""
+    kind = "turn"
+    tool_calls = None
+    tokens_consumed = 0
+    steps = max_steps = retries = resumes = runs = 0
+    agent_type = "turn"
+    model = result_text = ""
+    timeline: list[Any] = []
+
+    def __init__(self, tid: str, rec: Any, number: int) -> None:
+        self.rec = rec
+        self.id = self.label = str(tid)
+        self.index = 20_000 + number
+        self.prompt = str(getattr(rec, "prompt", ""))
+        self.title = " ".join(self.prompt.split()) or self.id
+        state = str(getattr(rec, "status", "running"))
+        self.status = {"running": "running", "completed": "completed", "interrupted": "cancelled"}.get(state, "error")
+        self.error_msg = str(getattr(rec, "error", "") or state) if self.status == "error" else None
+        self.start_time = float(getattr(rec, "started_at", 0.0) or 0.0) if self.status == "running" else 0.0
+        self.elapsed_s = float(getattr(rec, "elapsed_s", 0.0) or 0.0)
+        log = list(getattr(rec, "log", []) or [])
+        self.activity = str(log[-1]) if log else ""
+        final = str(getattr(getattr(rec, "result", None), "final_text", "") or "")
+        if self.status == "completed":
+            self.result_text = final or self.activity
+
+    def clear(self) -> None:
+        _cleared.add(self.id)
+
+    def transcript(self) -> list[str]:
+        lines = list(getattr(self.rec, "log", []) or [])
+        final = str(getattr(getattr(self.rec, "result", None), "final_text", "") or "")
+        return lines + (["", *final.splitlines()] if final else [])
+
+
+def shell_rows() -> list[Any]:
+    try:
+        from axon.tools.shell import BACKGROUND
+        return [ShellRow(sh, i) for i, sh in enumerate(BACKGROUND.all()) if sh.id not in _cleared]
+    except Exception:
+        return []
+
+
+def turn_rows(agent: Any) -> list[Any]:
+    turns = getattr(agent, "background_tasks", None)
+    if not isinstance(turns, dict):
+        return []
+    return [TurnRow(tid, rec, i) for i, (tid, rec) in enumerate(list(turns.items())) if str(tid) not in _cleared]
+
+
+def subagent_rows(agent: Any) -> list[Any]:
+    mgr = getattr(agent, "subagents", None)
+    try:
+        return _visible(list(mgr.all_tasks())) if mgr is not None else []
+    except Exception:
+        return []
+
+
+def task_rows(agent: Any) -> list[Any]:
+    """Everything /tasks lists, in a stable order (a row must not jump while it is being selected)."""
+    return shell_rows() + turn_rows(agent) + subagent_rows(agent)
+
+
+def available() -> bool:
+    """The console needs the whole terminal: not without one, not inside itself, not beside a running turn."""
+    from axon.agent.subagent import SCREEN_GATE
+    if _active or SCREEN_GATE.attached() or not plat.is_interactive():
+        return False
+    try:
+        from axon.ui import in_flight
+        return not list(getattr(in_flight, "_active", []) or [])
+    except Exception:
+        return True
+
+
+def open_console(agent: Any, *, everything: bool = False, target: Any = None) -> bool:
+    """Run the list until Esc. *everything* adds shells and background turns (/tasks); *target* opens that row's
+    transcript first. False when the console cannot open here: the caller then prints a table instead."""
+    global _active
+    if not available():
+        return False
+    rows = (lambda: task_rows(agent)) if everything else (lambda: subagent_rows(agent))
+    keys = MonitorKeys(agent, console=True, title="Tasks" if everything else "Subagents")
+    if target is not None:
+        keys.view = target.index
+        current = rows()
+        keys.selected = next((i for i, t in enumerate(current) if t.index == target.index), 0)
+    _active = True
+    held = getattr(agent, "_held_events", False) is None     # the main agent prints nothing while this owns the screen
+    if held:
+        agent._held_events = []
+    try:
+        with plat.raw_terminal(isig=True):
+            try:
+                drive(keys, rows, agent, lambda: True)
+            except KeyboardInterrupt:
+                pass
+    finally:
+        _active = False
+        if held:
+            events, agent._held_events = agent._held_events or [], None
+            for ev in events:         # for the trace; their lines were this screen's rows
+                agent._deliver(ev, show=type(ev).__name__ not in _QUIET_EVENTS)
+    if keys.buf.strip():
+        _keep_unsent(keys.buf)
+    return True

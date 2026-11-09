@@ -96,14 +96,14 @@ def test_writing_the_answer_and_a_tool_call() -> None:
     assert "is writing a Bash call" in now_line(live, clock)
 
 
-def test_running_bash_uses_the_description_elapsed_and_step() -> None:
+def test_running_bash_shows_the_command_elapsed_and_step() -> None:
     live, clock = make_live()
     start_step(live, step=3)
     live.observe(ToolBatchStart(1, []))
     live.observe(ToolExecutionStart("b1", "Bash", {"command": "pytest -q", "description": "Run the unit tests"}))
     clock.t = T0 + 4
     line = now_line(live, clock)
-    assert line.startswith("running Bash: Run the unit tests") and "4s" in line and "step 3" in line
+    assert line.startswith("running Bash: pytest -q") and "4s" in line and "step 3" in line
 
 
 def test_running_a_tool_without_description_falls_back_to_what_it_does() -> None:
@@ -298,7 +298,7 @@ def test_tool_running_tip_names_trace_and_transcript() -> None:
     live, clock = make_live(facts=TipFacts(used=frozenset({"queue"}), commands=frozenset({"transcript"})))
     start_step(live)
     live.observe(ToolExecutionStart("b", "Bash", {"command": "sleep 9"}))
-    assert tip_at(live, clock, 4) == "ctrl+o changes trace detail; /transcript opens the full view"
+    assert tip_at(live, clock, 4) == "ctrl+o opens the full transcript; alt+l changes trace detail"
 
 
 def test_high_context_tip_uses_the_live_percent() -> None:
@@ -495,7 +495,7 @@ def test_live_status_off_means_no_explainer(workspace: Any) -> None:
 
 # ─── spinner rows ─────────────────────────────────────────────────────────
 
-def test_spinner_rows_now_then_tip_and_they_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spinner_row_says_now_a_tip_goes_under_it_and_they_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     from axon.ui import render
 
     live, clock = make_live()
@@ -507,8 +507,10 @@ def test_spinner_rows_now_then_tip_and_they_fit(monkeypatch: pytest.MonkeyPatch)
     spinner = render.Spinner()
     spinner.live = live
     rows = [strip_ansi(r) for r in spinner.status_rows()]
-    assert len(rows) == 2 and "Now: waiting for" in rows[0] and "Tip: Esc stops" in rows[1]
-    assert all(display_width(r) <= 49 for r in rows)
+    assert len(rows) == 1 and "Tip: Esc stops" in rows[0]            # the status is on the spinner row itself
+    line = strip_ansi(spinner.render_line("x"))
+    assert "waiting for" in line and "Now:" not in line and "interrupt" in line
+    assert all(display_width(r) <= 49 for r in rows + [line])
 
 
 def test_spinner_rows_fall_back_to_the_plain_tip_row_when_off(monkeypatch: pytest.MonkeyPatch, workspace: Any) -> None:

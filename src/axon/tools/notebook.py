@@ -95,8 +95,8 @@ class NotebookEditTool(Tool):
     name: ClassVar[str] = "NotebookEdit"
     description: ClassVar[str] = (
         "Edit a Jupyter notebook (.ipynb) by cell. Read the notebook first (Read shows cell indices and ids). "
-        "edit_mode: \"replace\" (default; set new_source of the cell), \"insert\" (new cell at cell_index, or "
-        "appended when omitted; creates the notebook if missing), \"delete\", or \"clear_outputs\" (one cell or "
+        "edit_mode: \"replace\" (default; set new_source of the cell), \"insert\" (new cell after cell_id, at cell_index, or "
+        "appended at the end when neither is given; cell_type defaults to code; creates the notebook if missing), \"delete\", or \"clear_outputs\" (one cell or "
         "all). Cells can be addressed by 0-based cell_index or by cell_id. Replacing a code cell clears its outputs."
     )
     schema: ClassVar[dict[str, Any]] = {
@@ -145,7 +145,13 @@ class NotebookEditTool(Tool):
             raise ToolError(f"Unknown edit_mode '{mode}'. Use replace, insert, delete or clear_outputs.")
 
         if p.exists():
+            from axon.tools.fs_write import _is_utf8, check_perforce
+            check_perforce(p, raw_path)
             ctx.file_state.check_writable(p)
+            if not _is_utf8(p):
+                raise ToolError(f"{raw_path} is not valid UTF-8, so NotebookEdit refuses it and writes nothing: saving it back "
+                                f"would replace bytes it cannot decode. Make the change with a shell command that keeps the "
+                                f"file's encoding, or ask the user about converting it to UTF-8 first.")
             nb = load_notebook(p)
         elif mode == "insert":
             nb = {
@@ -167,6 +173,8 @@ class NotebookEditTool(Tool):
             idx = next((i for i, c in enumerate(cells) if str(c.get("id")) == cid), None)
             if idx is None:
                 raise ToolError(f"No cell with id '{cid}' in {rel}.")
+            if mode == "insert":
+                idx += 1      # insert goes after the target cell
         elif args.get("cell_index") is not None:
             idx = _index(args["cell_index"], len(cells), allow_end=(mode == "insert"))
 

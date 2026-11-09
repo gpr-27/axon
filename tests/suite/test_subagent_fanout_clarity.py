@@ -73,7 +73,7 @@ def test_monitor_shows_what_was_asked_and_why_it_failed():
     frame = strip_ansi("\n".join(build_monitor_frame(1, tasks, agent, "", 90)))
     rows = {ln.split()[0]: " ".join(ln.split()[1:]) for ln in frame.splitlines() if ln.strip()}
     assert rows["asked"] == "count docs in docs/"
-    assert rows["model"] == "gpt-4o"
+    assert "explore · gpt-4o" in frame
     assert rows["reason"] == "HTTP 400 Bad Request"
 
 
@@ -214,10 +214,11 @@ def test_a_note_typed_in_the_monitor_says_it_goes_to_the_main_agent():
 def test_steps_read_against_the_limit_only_while_running():
     done = _task(1, "Read docs", "completed", steps=2, max_steps=25, result_text="ok")
     running = _task(2, "Read more", "running", steps=12, max_steps=25)
-    frame = strip_ansi("\n".join(build_monitor_frame(0, [done, running], None, "", 120)))
-    row1 = next(l for l in frame.splitlines() if "2 steps" in l)
-    assert "/25" not in row1 and "▱" not in row1                  # finished: a count, no half-empty bar
-    assert "step 12 · limit 25" in frame
+    tasks = [done, running]
+    finished = strip_ansi("\n".join(build_monitor_frame(1, tasks, None, "", 120)))
+    assert "2 steps" in finished and "limit" not in finished      # finished: a count, no limit
+    live = strip_ansi("\n".join(build_monitor_frame(2, tasks, None, "", 120)))
+    assert "step 12 · limit 25" in live
 
 
 def test_queue_commands_typed_in_the_monitor_answer_inside_it():

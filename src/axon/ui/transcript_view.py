@@ -32,7 +32,7 @@ from axon.ui import theme as T
 from axon.ui.theme import display_width, glyph, hard_wrap_ansi, sanitize, strip_ansi, truncate, wrap_ansi
 
 FOLDABLE = ("turn", "step")
-OPEN_KEY = "ctrl-f"  # default binding of app:transcript (see axon.ui.keybindings)
+OPEN_KEYS = ("ctrl-o", "ctrl-f")  # default bindings of app:transcript (see axon.ui.keybindings)
 RESPONSE_PREVIEW_LINES = 3
 
 
@@ -553,7 +553,7 @@ class Layout:
 
 def footer_help() -> str:
     d = glyph("dot")
-    return f"click/enter expand {d} e/c all {d} / search {d} y copy {d} q close"
+    return f"click/enter expand {d} e/c all {d} {{ }} prompts {d} / search {d} y copy {d} v editor {d} q close"
 
 
 class TranscriptViewer:
@@ -574,6 +574,7 @@ class TranscriptViewer:
         self.entries: list[Any] = []
         self.nodes: list[Node] = []
         self.sel: int | None = None
+        self.want_editor = False
         self.top = 0
         self.query = ""
         self.searching = False
@@ -722,6 +723,47 @@ class TranscriptViewer:
         self.expanded.clear()
         self.auto_expanded.clear()
         self.ensure_visible()
+
+    def jump_turn(self, delta: int) -> None:
+        """{ and }: the previous or next prompt of the conversation."""
+        turns = [n.key for n in self.nodes if n.kind == "turn"]
+        if not turns:
+            return
+        order = {n.key: i for i, n in enumerate(self.nodes)}
+        here = order.get(self.sel, 0)
+        ahead = [k for k in turns if order[k] > here] if delta > 0 else [k for k in turns if order[k] < here]
+        if not ahead:
+            self.message = "Already at the last prompt." if delta > 0 else "Already at the first prompt."
+            return
+        self.sel = ahead[0] if delta > 0 else ahead[-1]
+        self.ensure_visible()
+
+    def open_in_editor(self) -> None:
+        """v: the whole conversation as text in $EDITOR (a temporary file, removed afterwards)."""
+        import subprocess
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".txt", prefix="axon_transcript_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                full = TranscriptViewer(self.entries, width=max(60, self.width), height=10_000, registry=getattr(self, "registry", None))
+                full.expand_all()
+                full.sel = None
+                f.write("\n".join(strip_ansi(r.text) for r in full.rows()) + "\n")
+            mouse = plat.mouse_reporting()
+            plat.set_mouse_reporting(False)
+            _write(plat.EXIT_ALT_SCREEN + plat.SHOW_CURSOR)
+            try:
+                with plat.cooked_terminal():
+                    subprocess.call(plat.editor_command() + [path])
+            except (FileNotFoundError, OSError):
+                self.message = "Could not start the editor. Set $EDITOR."
+            _write(plat.ENTER_ALT_SCREEN + plat.HIDE_CURSOR)
+            plat.set_mouse_reporting(mouse)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def toggle_turns(self) -> None:
         turns = {n.key for n in self.nodes if n.kind == "turn"}
@@ -911,8 +953,12 @@ class TranscriptViewer:
         if self.searching:
             self._search_key(key)
             return True
+        from axon.ui.keybindings import translate
+        key = translate("Transcript", key)
+        if not key:
+            return True
         self.message = ""
-        if key in ("q", "Q", "esc", "ctrl-c", OPEN_KEY):  # the key that opened the view closes it too
+        if key in ("q", "Q", "esc", "ctrl-c", *OPEN_KEYS):  # the key that opened the view closes it too
             self.done = True
             return False
         if key in ("down", "j", "ctrl-n"):
@@ -962,6 +1008,10 @@ class TranscriptViewer:
                 self.find(forward=False)
         elif key == "y":
             self.copy_selected()
+        elif key in ("{", "}"):
+            self.jump_turn(1 if key == "}" else -1)
+        elif key == "v":
+            self.want_editor = True
         return True
 
     # ── terminal loop ──────────────────────────────────────────────────
@@ -1001,6 +1051,9 @@ class TranscriptViewer:
                         continue
                     if not self.handle_key(key):
                         break
+                    if self.want_editor:
+                        self.want_editor = False
+                        self.open_in_editor()
                     self.refresh()
                     self.draw()
             finally:

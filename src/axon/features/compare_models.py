@@ -120,12 +120,23 @@ class Compare:
             if col.status == "queued":
                 col.status, col.ended = "stopped", time.time()
             agent = col.agent
-        if agent is not None:
-            try:
-                agent.cancel_current_turn()
-            except Exception:
-                pass
+        if agent is not None and not self._cancel(agent):
+            # The agent exists but its turn thread has not started, so there was nothing to interrupt yet.
+            threading.Thread(target=self._cancel_once_started, args=(col, agent), name=f"axon-compare-stop-{idx}", daemon=True).start()
         return True
+
+    @staticmethod
+    def _cancel(agent: Any) -> bool:
+        try:
+            return bool(agent.cancel_current_turn())
+        except Exception:
+            return True                  # retrying a cancel that raises would only raise again
+
+    def _cancel_once_started(self, col: Column, agent: Any) -> None:
+        while col.status == "running":
+            if self._cancel(agent):
+                return
+            time.sleep(0.05)
 
     def stop_all(self) -> None:
         for i in range(len(self.columns)):

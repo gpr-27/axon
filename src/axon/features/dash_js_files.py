@@ -18,7 +18,7 @@ const COM = { python: '#', sh: '#', yaml: '#', toml: '#', ruby: '#', js: '//', g
 const hlCache = {};
 function hlRegex(lang) {
   if (hlCache[lang]) return hlCache[lang];
-  const com = COM[lang] ? '(' + COM[lang].replace(/[/#-]/g, '\\$&') + '.*$)' : '(?!x)x';
+  const com = COM[lang] ? '(' + COM[lang].replace(/[/#-]/g, '\\$&') + '.*$)' : '((?!x)x)';
   return (hlCache[lang] = new RegExp(com + '|("(?:[^"\\\\]|\\\\.)*"?|\'(?:[^\'\\\\]|\\\\.)*\'?|`(?:[^`\\\\]|\\\\.)*`?)|(\\b\\d[\\d._xa-fA-F]*\\b)|([A-Za-z_$][\\w$]*)', 'g'));
 }
 function hlLine(text, lang) {
@@ -344,7 +344,8 @@ async function folderChooser() {
       locked ? h('p', { class: 'notice warn' }, 'This page is attached to a running terminal session, so its folder cannot change here. Run axon open --workspace DIR (or /open in another project) to look at a different folder.') : null,
       h('p', { class: 'muted' }, 'Current: ', h('b', null, ws.workspace || '')),
       ws.recent && ws.recent.length ? h('div', null, h('div', { class: 'lbl' }, 'Recent projects'), h('div', { class: 'dirpick' }, ...ws.recent.map(r => h('button', { class: 'node', type: 'button', disabled: locked, onclick: () => pick(r.path) }, h('span', { class: 'nm rn' }, r.name), h('span', { class: 'muted rpath' }, r.path))))) : null,
-      h('div', { class: 'lbl' }, 'Browse'), h('div', { class: 'formrow' }, h('code', { style: 'overflow-wrap:anywhere' }, d.path), h('span', { style: 'flex:1' }), h('button', { class: 'btn', onclick: () => show(d.home) }, 'Home')),
+      h('div', { class: 'lbl' }, 'Browse'), h('input', { type: 'text', style: 'width:100%;margin-bottom:8px', 'aria-label': 'Folder path', placeholder: 'Type or paste a path, then press Enter', spellcheck: 'false', onkeydown: (e) => { if (e.key === 'Enter' && e.target.value.trim()) { e.preventDefault(); show(e.target.value.trim()); } } }),
+      h('div', { class: 'formrow' }, h('code', { style: 'overflow-wrap:anywhere' }, d.path), h('span', { style: 'flex:1' }), h('button', { class: 'btn', onclick: () => show(d.home) }, 'Home')),
       h('div', { class: 'dirpick' }, d.parent ? h('button', { class: 'node', type: 'button', onclick: () => show(d.parent) }, h('span', { class: 'nm' }, '..')) : null,
         ...d.dirs.map(x => h('button', { class: 'node', type: 'button', onclick: () => show(x.path) }, h('span', { class: 'nm' }, x.name), x.git ? h('span', { class: 'gbadge' }, 'git') : null)), !d.dirs.length ? h('div', { class: 'muted', style: 'padding:8px 12px' }, 'No sub-folders.') : null),
       h('p', { class: 'muted', style: 'font-size:12px' }, 'Credential folders such as .ssh and .aws are never listed.'),

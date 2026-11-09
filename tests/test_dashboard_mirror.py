@@ -110,7 +110,8 @@ def test_open_from_a_running_repl_mirrors_terminal_and_web_turns(tmp_path):
         assert code == 200 and res["queued"] is False
         s.expect("WEB-REPLY-SEEN", timeout=40, since=mark)
         _wait(lambda: "WEB-REPLY-SEEN" in "".join(e.get("text", "") for e in seen[n_before:] if e["type"] == "text_delta"))
-        _wait(lambda: not web.req("GET", f"/api/chat/state?session={sid}")[1]["busy"])
+        # the terminal's main loop runs this turn, so keep reading its output, as a real terminal does
+        _wait(lambda: s.drain(0.02) is not None and not web.req("GET", f"/api/chat/state?session={sid}")[1]["busy"])
         transcript = next(Path(env.axon_home).rglob(f"{sid}/session.jsonl"))
         users = [json.loads(line)["data"]["content"] for line in transcript.read_text().splitlines()
                  if '"user_message"' in line]

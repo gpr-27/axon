@@ -43,7 +43,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 | `/files` | `/attachments` | Files, images and documents you gave this session, and where each is saved |
 | `/history` |  | List the messages in the conversation |
 | `/library` | `/saved` | Everything saved: sessions, subagent runs, skills, agents, memory, hooks, plans |
-| `/loop` | `/repeat` | Repeat a prompt N times or on an interval |
+| `/loop` | `/repeat` | Repeat a prompt N times, on an interval, or at a pace the model picks |
 | `/overview` |  | This project at a glance: files, git, tests, spend this week, last chats, memory |
 | `/project` | `/where` | Current project: name, path, data folder, sessions, journal, memory |
 | `/rename` | `/title` | Rename the current session (no name: generate one) |
@@ -153,10 +153,12 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /loop <N>x <prompt>          run a prompt N times in a row (e.g. /loop 3x run the tests and fix one failure)
-/loop <interval> <prompt>    re-run every interval while idle: 30s, 5m, 1h (min 10s)
+/loop <interval> <prompt>    re-run on a schedule while idle: 5m, 1h, 1d (1 minute at least); or end with "every 2 hours"
 /loop <interval> <N>x <prompt>   ... at most N times
-/loop                         list loops
-/loop stop [id]               stop all loops (or one)
+/loop <prompt>               self-paced: after each run the model picks the next delay (1 minute to 1 hour); esc stops it
+/loop [interval]             the same with .axon/loop.md (or .claude/loop.md, ~/.axon/loop.md), else a built-in maintenance prompt
+/loop list                   list loops and scheduled tasks
+/loop stop [id]              stop all loops (or one)
 ```
 
 </details>
@@ -573,7 +575,7 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/simplify` |  | Simplify the changed code (reuse, dead code, efficiency) and apply fixes |
 | `/test` | `/tests` | Detect and run the project's test suite |
 | `/todos` | `/todo` | Show the agent's task checklist |
-| `/transcript` | `/tr` `/scrollback` | Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+F) |
+| `/transcript` | `/tr` `/scrollback` | Full-screen transcript: click or Enter expands a tool call's full output (Ctrl+O) |
 | `/worktree` | `/wt` `/worktrees` | Git worktrees: list with changes, switch, create, remove |
 
 <details><summary><code>/btw</code> usage</summary>
@@ -707,10 +709,10 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 | `/skill-doctor` | `/skills-doctor` | Token cost, usage and problems of every skill |
 | `/skills` | `/skill` | Browse, create, install and manage skills |
 | `/stop` |  | Stop running subagents (their transcripts are kept) |
-| `/subagents` | `/sub` `/subagent` | Open a subagent's transcript from this session as a chat |
+| `/subagents` | `/sub` `/subagent` | List subagents, open their live transcripts, message and stop them |
 | `/subtask` |  | Fork the conversation into a background subagent; the result comes back here |
 | `/tasks` | `/bashes` `/jobs` | Background shells, background turns and subagent tasks |
-| `/tell` | `/msg` | Send a message to a running subagent; it reads it before its next step |
+| `/tell` | `/msg` | Send a message to a subagent: a running one reads it before its next step, a finished one resumes |
 | `/tools` | `/tool` | Tools the model can use and their permission |
 | `/trust` |  | Review and allow project hooks, plugins and MCP servers for this folder |
 
@@ -832,9 +834,15 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/subagents</code> usage</summary>
 
 ```text
-/subagents [n | main | queue]
-/subagents edit <n>   edit a finished subagent's report (the main conversation sees the edit)
-/tell <n> <message>   talk to a running subagent
+/subagents                       the agent list: ↑↓ select, ⏎ open, x stop or clear, esc back
+/subagents <name|n>              open its live transcript; what you type there goes to that agent
+/subagents send <name|n> <text>  message it: a running agent reads it before its next step, a finished one resumes
+/subagents stop <name|n>         stop it
+/subagents info <name|n>         type, model, cost, what it was asked, its report, permission decisions, what is recorded
+/subagents log <name|n>          print its whole transcript into the scrollback
+/subagents chat <n>              continue its transcript as your own chat (/main returns)
+/subagents edit <n>              edit a finished subagent's report (the main conversation sees the edit)
+/subagents main | queue
 ```
 
 </details>
@@ -850,9 +858,11 @@ Rule examples: Bash(git status:*)  Bash(npm run *)  Edit(src/**)  Read(~/.ssh/**
 <details><summary><code>/tasks</code> usage</summary>
 
 ```text
-/tasks                   background shells, background turns (Ctrl+B) and subagent tasks
-/tasks log <id>          last output lines of a shell (bash_1) or background turn
-/tasks kill <id>         stop a background shell
+/tasks                   background shells, background turns (Ctrl+B) and subagents together:
+                         ↑↓ select, ⏎ open, x stop, esc back
+/tasks log <id|name|n>   last output lines of a shell (bash_1), a background turn or a subagent's transcript
+/tasks kill <id|name|n>  stop a background shell or a subagent
+/tasks send <name|n> <text>   message a subagent
 ```
 
 </details>
@@ -1477,7 +1487,8 @@ background, and `dark` and `light` are the older palettes.
 | `!command` | Run a shell command and add its output to the conversation |
 | `# note` / `#~ note` | Save a project memory, or a memory for all projects |
 | `Shift+Tab` | Cycle permission mode |
-| `Ctrl+O` | Cycle trace level |
+| `Ctrl+O` | Open the full transcript (also `Ctrl+F`) |
+| `Alt+L` | Cycle trace level |
 | `Ctrl+B` | Move the running turn to the background (`/tasks`) |
 | `Ctrl+G` | Edit the prompt in `$EDITOR` |
 | `Ctrl+R` | Reverse-search prompt history |

@@ -85,13 +85,13 @@ def test_custom_command_frontmatter_args_namespace_and_include(agent: Agent, wor
 def test_custom_command_shell_injection_needs_permission(agent: Agent, workspace: Path):
     d = workspace / ".claude" / "commands"
     d.mkdir(parents=True)
-    (d / "ctx.md").write_text("Status: !`echo injected-ok`\n", encoding="utf-8")
-    (d / "ctx2.md").write_text("---\nallowed-tools: Bash(echo:*)\n---\nStatus: !`echo injected-ok`\n", encoding="utf-8")
+    (d / "ctx.md").write_text("Status: !`python3 --version`\n", encoding="utf-8")      # not a read-only command, so it asks
+    (d / "ctx2.md").write_text("---\nallowed-tools: Bash(python3:*)\n---\nStatus: !`python3 --version`\n", encoding="utf-8")
     before = len(agent.conversation.messages)
     dispatch_command("/ctx", agent)  # default mode, no TTY -> not approved -> the command is aborted
     assert len(agent.conversation.messages) == before
     dispatch_command("/ctx2", agent)
-    assert "injected-ok" in _last_user(agent)
+    assert "Python" in _last_user(agent)
 
 
 def test_skills_reachable_with_prefix_and_args(agent: Agent, workspace: Path):
@@ -151,13 +151,13 @@ def test_init_creates_but_never_overwrites(agent: Agent, workspace: Path, capsys
 
 
 def test_permissions_command_persists_local_settings(agent: Agent, workspace: Path):
-    dispatch_command("/permissions allow Bash(git status:*)", agent)
+    dispatch_command("/permissions allow Bash(npm test:*)", agent)
     data = json.loads((workspace / ".axon" / "settings.local.json").read_text(encoding="utf-8"))
-    assert data["permissions"]["allow"] == ["Bash(git status:*)"]
+    assert data["permissions"]["allow"] == ["Bash(npm test:*)"]
     bash = agent.registry.get("Bash")
-    assert agent.permissions.check(bash, {"command": "git status -s"}).outcome == "allow"
-    dispatch_command("/permissions remove allow Bash(git status:*)", agent)
-    assert agent.permissions.check(bash, {"command": "git status -s"}).outcome == "ask"
+    assert agent.permissions.check(bash, {"command": "npm test -- -x"}).outcome == "allow"
+    dispatch_command("/permissions remove allow Bash(npm test:*)", agent)
+    assert agent.permissions.check(bash, {"command": "npm test -- -x"}).outcome == "ask"
 
 
 def test_trace_inspect_explain_with_trace(agent: Agent, capsys):

@@ -151,7 +151,7 @@ def test_compact_level_is_one_line_per_tool(out):
     text, _ = out("compact")
     plain = strip_ansi(text)
     assert "◆ Step" not in plain and "┊" not in plain
-    assert "● Read(src/app.py)" in plain and "✓ Done" in plain
+    assert "✓ Read  src/app.py  200 lines" in plain and "✓ Done" in plain
 
 
 def test_stored_trace_replay_has_nested_steps_and_gauges(out, monkeypatch):

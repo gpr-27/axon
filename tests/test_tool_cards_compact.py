@@ -161,7 +161,7 @@ def test_step_header_is_short_and_the_model_is_named_once_per_step(capsys):
 
 
 def test_thinking_tools_and_answer_sections_come_in_that_order_with_air_between(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     r.on_event(ThinkingDelta("The user wants Bash tested. I will run an echo."))
     _calls(r, [("t1", "Bash", {"command": "echo hi"}, "hi", False)])
@@ -170,47 +170,52 @@ def test_thinking_tools_and_answer_sections_come_in_that_order_with_air_between(
     r.on_event(TurnComplete(stop_reason="end_turn", usage=Usage(input=3900, output=20)))
     out = _out(capsys)
     assert out.index("✻ THINKING") < out.index("▣ TOOLS · 1 call") < out.index("▍ ANSWER") < out.index("▎ Bash works.")
-    assert "THINKING  0.1s · The user wants Bash tested. I will run an echo." in out
+    assert "THINKING  0.1s\n│   The user wants Bash tested. I will run an echo." in out      # the thought, wrapped under its label
     assert "I will run an echo.\n│ \n│ ▣ TOOLS" in out                       # one blank row before the TOOLS block
     assert out.count("\n│ \n") == 2                                          # ... and one between the steps
     assert "▣ TOOLS · 1 call · allowed: bypass mode\n│" in out
     assert "→ 1 result (" in out
 
 
-def test_thinking_is_one_short_line_at_normal_and_the_whole_text_at_detailed(capsys):
-    thought = "word " * 60                                # 300 characters
-    r = Renderer(show_thinking=True)
+def test_thinking_is_shown_as_written_at_normal_with_a_pointer_when_it_is_very_long(capsys):
+    short = "word " * 60                                # 300 characters: all of it is shown
+    r = Renderer(trace_level="normal", show_thinking=True)
     _step(r, 1)
-    r.on_event(ThinkingDelta(thought))
+    r.on_event(ThinkingDelta(short))
     r.on_event(TextDelta("done\n"))
     out = _out(capsys)
-    line = next(row for row in out.splitlines() if "THINKING" in row)
-    assert line.endswith("…") and len(line) < 150 and "thought for" not in out
-    assert out.count("word") <= 21                      # about the first 100 characters
+    assert "✻ THINKING" in out and out.count("word") == 60 and "more lines" not in out and "thought for" not in out
+    long = "word " * 600                                 # more than the rows allowed: the rest is one pointer
+    r = Renderer(trace_level="normal", show_thinking=True)
+    _step(r, 1)
+    r.on_event(ThinkingDelta(long))
+    r.on_event(TextDelta("done\n"))
+    out = _out(capsys)
+    assert 0 < out.count("word") < 600 and "more lines" in out and "/transcript" in out
     r = Renderer(trace_level="detailed", show_thinking=True)
     _step(r, 1)
-    r.on_event(ThinkingDelta(thought))
+    r.on_event(ThinkingDelta(long))
     r.on_event(TextDelta("done\n"))
     detailed = _out(capsys)
-    assert "Thinking" in detailed and "thought for" in detailed and detailed.count("word") >= 60
+    assert "Thinking" in detailed and "thought for" in detailed and detailed.count("word") >= 600
 
 
 def test_parallel_batches_say_so_in_the_section_header_and_print_in_call_order(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     _calls(r, [("a", "Read", {"path": "a.py"}, "     1→x = 1", False),
                ("b", "Glob", {"pattern": "*.py"}, "a.py\nb.py", False)], order=["b", "a"])
     out = _out(capsys)
     assert "▣ TOOLS · 2 calls · in parallel" in out
     assert out.index(" 1 Read") < out.index(" 2 Glob")                 # the model's order, not the finishing order
-    sequential = Renderer()
+    sequential = Renderer(trace_level="normal")
     _step(sequential, 1)
     _calls(sequential, [("a", "Bash", {"command": "ls"}, "a", False), ("b", "Bash", {"command": "pwd"}, "/", False)])
     assert "▣ TOOLS · 2 calls · one after another" in _out(capsys)
 
 
 def test_the_call_number_is_shown_only_when_the_step_has_several_calls(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     _calls(r, [("a", "Bash", {"command": "ls"}, "a", False)])
     one = _out(capsys)
@@ -288,7 +293,7 @@ def test_choose_is_shown_only_for_a_real_reason():
 # ─── the run phase ─────────────────────────────────────────────────────────
 
 def test_permission_is_said_in_the_header_and_on_a_card_only_when_it_differs(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     r.on_event(ToolBatchStart(total_count=3, tools=[ToolUseBlock(id=i, name="Bash", input={"command": c})
                                                     for i, c in (("a", "ls"), ("b", "pwd"), ("c", "rm x"))]))
@@ -392,7 +397,7 @@ def test_edit_keeps_its_diff_but_collapses_a_long_one():
 @pytest.mark.parametrize("cols", [50, 60, 80, 100, 120])
 def test_every_row_fits_the_terminal_without_breaking_words(cols, capsys, monkeypatch):
     _columns(monkeypatch, cols)
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     r.on_event(ThinkingDelta("A long thought " * 20))
     _calls(r, [("t1", "Bash", {"command": "echo " + "very-long-argument " * 12}, "x" * 300, False),
@@ -452,10 +457,10 @@ def test_detailed_level_keeps_the_full_explainer(capsys):
     assert "▣ TOOLS" not in out and "choose" not in out
 
 
-def test_compact_level_is_still_one_line_per_call(capsys):
+def test_compact_level_is_one_header_row_per_call(capsys):
     _bash_and_ls("compact")
     out = _out(capsys)
-    assert "● Bash(" in out and "● Ls(" in out
+    assert "Bash  echo" in out and "Ls  .  15 dirs, 11 files" in out
     for absent in ("▣ TOOLS", "choose", "THINKING", "chosen by", "exact call", "→ 2 results"):
         assert absent not in out
 
@@ -463,7 +468,7 @@ def test_compact_level_is_still_one_line_per_call(capsys):
 # ─── /output K and the live phase ──────────────────────────────────────────
 
 def test_output_details_give_the_full_explainer_of_one_call(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     r.on_event(LLMCallStart(iteration=2, max_iterations=9, model=MODEL, message_count=2, tokens_in=100))
     _calls(r, [("t1", "Bash", {"command": ECHO}, "bash works", False)],
@@ -480,7 +485,7 @@ def test_output_details_give_the_full_explainer_of_one_call(capsys):
 
 
 def test_live_phase_follows_the_model_from_choosing_to_running():
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     assert r.tool_phase["phase"] == "idle"
     r.on_event(ToolUseStart(id="t1", name="Bash"))
@@ -498,7 +503,7 @@ def test_live_phase_follows_the_model_from_choosing_to_running():
 
 
 def test_a_call_that_never_finished_still_gets_a_card(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1)
     _calls(r, [("t1", "Bash", {"command": "sleep 100"}, "", False)], finish=False)
     r.on_event(LLMCallStart(iteration=2, max_iterations=9, model=MODEL, message_count=3, tokens_in=10))

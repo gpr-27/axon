@@ -13,6 +13,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, ClassVar, Iterable
 
+from axon import envvars
 from axon.errors import ToolError
 from axon.tools._files import HEAVY_DIRS, JUNK_FILES, glob_to_regex, iter_files
 from axon.tools.base import (
@@ -20,7 +21,14 @@ from axon.tools.base import (
 )
 from axon.tools.textio import is_binary_bytes, decode_bytes
 
-RG_TIMEOUT_S = 30
+def search_timeout() -> int:
+    """Glob and Grep timeout: AXON_GLOB_TIMEOUT_SECONDS, else 20 seconds (60 on WSL)."""
+    val = envvars.integer("AXON_GLOB_TIMEOUT_SECONDS")
+    if val and val > 0:
+        return val
+    return 60 if os.environ.get("WSL_DISTRO_NAME") else 20
+
+
 MAX_GREP_FILE_BYTES = 10 * 1024 * 1024
 
 # ripgrep --type names → extensions, used by the Python fallback.
@@ -44,6 +52,8 @@ def find_rg() -> str | None:
     found = shutil.which("rg")
     if found:
         return found
+    if envvars.off("USE_BUILTIN_RIPGREP"):   # system-installed rg only, not the copy Axon keeps
+        return None
     exe = "rg.exe" if os.name == "nt" else "rg"
     from axon.storage import axon_home
     cand = axon_home() / "bin" / exe
@@ -70,7 +80,7 @@ class GlobTool(Tool):
     description: ClassVar[str] = (
         "Find files by glob pattern, e.g. \"**/*.py\", \"src/**/*.{ts,tsx}\", \"*.md\" (no slash = top level of `path` "
         "only; use **/ to recurse). Respects .gitignore and skips .git/node_modules/venvs. Results are sorted by "
-        "modification time, newest first. Use this to locate files by name; use Grep to search contents."
+        "modification time, newest first, and capped at 100. Use this to locate files by name; use Grep to search contents."
     )
     schema: ClassVar[dict[str, Any]] = {
         "type": "object",
@@ -89,6 +99,8 @@ class GlobTool(Tool):
         pattern = str(args.get("pattern") or "").strip()
         if not pattern:
             raise ToolError("Glob requires 'pattern'.")
+        if "\x00" in pattern or "\x00" in str(args.get("path") or ""):
+            raise ToolError("Glob 'pattern' and 'path' must not contain a null byte; remove it.")
         limit = int_arg(args, "head_limit", 100, lo=1, hi=2000)
         root = resolve_path(ctx, args.get("path") or ".", allow_git_read=True)
 
@@ -115,9 +127,10 @@ class GlobTool(Tool):
         regex = glob_to_regex(pattern, ignore_case=(os.name == "nt"))
 
         wanted_heavy = {seg for seg in pattern.split("/") if seg in HEAVY_DIRS}
+        no_ignore = envvars.on("AXON_GLOB_NO_IGNORE")      # opt in: also list files .gitignore hides
         matches: list[tuple[float, str]] = []
-        for rel in self._candidates(root):
-            if any(seg in HEAVY_DIRS and seg not in wanted_heavy for seg in rel.split("/")[:-1]):
+        for rel in self._candidates(root, no_ignore, not envvars.off("AXON_GLOB_HIDDEN")):
+            if not no_ignore and any(seg in HEAVY_DIRS and seg not in wanted_heavy for seg in rel.split("/")[:-1]):
                 continue
             if regex.match(rel):
                 fp = root / rel
@@ -145,13 +158,15 @@ class GlobTool(Tool):
         return plural(len(paths) + extra, "file") + (f" (showing {len(paths)})" if extra else "")
 
     @staticmethod
-    def _candidates(root: Path) -> Iterable[str]:
+    def _candidates(root: Path, no_ignore: bool = True, hidden: bool = True) -> Iterable[str]:
         rg = find_rg()
         if rg:
-            cmd = [rg, "--files", "--hidden", "--no-config", "--no-require-git", "-g", "!.git", "--no-messages"]
+            cmd = [rg, "--files", "--no-config", "--no-require-git", "-g", "!.git", "--no-messages"]
+            cmd += ["--hidden"] if hidden else []
+            cmd += ["--no-ignore"] if no_ignore else []
             try:
                 res = subprocess.run(
-                    cmd + ["."], cwd=str(root), capture_output=True, timeout=RG_TIMEOUT_S,
+                    cmd + ["."], cwd=str(root), capture_output=True, timeout=search_timeout(),
                     stdin=subprocess.DEVNULL,
                 )
                 if res.returncode in (0, 1):
@@ -160,7 +175,7 @@ class GlobTool(Tool):
             except (OSError, subprocess.SubprocessError):
                 pass
         out: list[str] = []
-        for fp in iter_files(root, include_hidden=True):
+        for fp in iter_files(root, include_hidden=hidden, respect_gitignore=not no_ignore, skip_heavy=not no_ignore):
             try:
                 out.append(fp.relative_to(root).as_posix())
             except ValueError:
@@ -176,11 +191,12 @@ class GrepTool(Tool):
     name: ClassVar[str] = "Grep"
     description: ClassVar[str] = (
         "Search file contents with a regular expression (ripgrep syntax; literal braces/parens need escaping, "
-        "e.g. \"interface\\{\\}\"). Respects .gitignore. output_mode: \"content\" (default; matching lines as "
+        "e.g. \"interface\\{\\}\"). Respects .gitignore (pass a gitignored file's path to search it). output_mode: "
+        "\"content\" (default; matching lines as "
         "path:line:text, with optional context -A/-B/-C), \"files_with_matches\" (paths only, cheapest), or "
-        "\"count\" (matches per file). Filter with `glob` (e.g. \"*.py\", \"src/**/*.ts\") or `type` (py, js, ts, go, "
+        "\"count\" (matches per file, then a total). Filter with `glob` (e.g. \"*.py\", \"src/**/*.ts\") or `type` (py, js, ts, go, "
         "rust, java...). Use -i for case-insensitive, multiline=true for patterns spanning lines. Results are "
-        "capped by head_limit (default 100 entries). Always use this instead of grep/rg via Bash."
+        "capped by head_limit (default 100 entries); page with offset. Always use this instead of grep/rg via Bash."
     )
     schema: ClassVar[dict[str, Any]] = {
         "type": "object",
@@ -198,6 +214,7 @@ class GrepTool(Tool):
             "-C": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Lines of context before and after each match (content mode)"},
             "multiline": {"type": "boolean", "description": "Let . match newlines and patterns span lines (default false)"},
             "head_limit": {"type": "integer", "minimum": 1, "maximum": 5000, "description": "Max output entries (lines/files/counts); default 100"},
+            "offset": {"type": "integer", "minimum": 0, "description": "Skip this many entries before head_limit applies"},
         },
         "required": ["pattern"],
         "additionalProperties": False,
@@ -229,6 +246,8 @@ class GrepTool(Tool):
         if opts["type"] and opts["type"] not in TYPE_EXTENSIONS and not find_rg():
             raise ToolError(f"Unknown file type '{opts['type']}'. Known: {', '.join(sorted(TYPE_EXTENSIONS))}.")
         limit = int_arg(args, "head_limit", 100, lo=1, hi=5000)
+        offset = int_arg(args, "offset", 0, lo=0)
+        fetch = 10**9 if mode == "count" else limit + offset   # the count total covers every match
 
         target = resolve_path(ctx, args.get("path") or ".", allow_git_read=True)
         if not target.exists():
@@ -237,18 +256,25 @@ class GrepTool(Tool):
         entries: list[str] | None = None
         rg = find_rg()
         if rg:
-            entries = self._rg(rg, pattern, target, ctx, mode, opts, limit)
+            entries = self._rg(rg, pattern, target, ctx, mode, opts, fetch)
         if entries is None:
-            entries = self._python(pattern, target, ctx, mode, opts, limit)
+            entries = self._python(pattern, target, ctx, mode, opts, fetch)
 
         if not entries:
             return f"No matches found for pattern '{pattern}'."
-        truncated = len(entries) > limit
-        body = "\n".join(entries[:limit])
+        if offset >= len(entries) and offset:
+            return f"No entries at this offset (offset={offset}; the pattern has {len(entries)}{'+' if len(entries) >= fetch else ''} entries). Reset or widen the offset."
+        page = entries[offset:offset + limit]
+        truncated = len(entries) > offset + limit
+        body = "\n".join(page)
         if mode == "files_with_matches":
-            body = f"Found {min(len(entries), limit)}{'+' if truncated else ''} file(s)\n" + body
+            body = f"Found {len(page)}{'+' if truncated else ''} file(s)\n" + body
         if truncated:
             body += f"\n\n[... results truncated at head_limit={limit}. Narrow the pattern/path/glob ...]"
+        if mode == "count":
+            nums = [ln.rsplit(":", 1)[1] for ln in entries if ":" in ln]
+            total = sum(int(n) for n in nums if n.isdigit())
+            body += f"\n\nTotal: {plural(total, 'match', 'matches')} across {plural(len(nums), 'file')}"
         return cap_text(body, output_cap(ctx, 30_000), "Narrow the search or use files_with_matches")
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
@@ -257,7 +283,7 @@ class GrepTool(Tool):
         if output.startswith("No matches"):
             return "no matches"
         mode = str(args.get("output_mode") or "content")
-        lines = [ln for ln in output.split("\n") if ln and not ln.startswith(("[", "Found ")) and ln != "--"]
+        lines = [ln for ln in output.split("\n") if ln and not ln.startswith(("[", "Found ", "Total: ")) and ln != "--"]
         more = "+" if "truncated at head_limit" in output else ""
         if mode == "files_with_matches":
             return plural(len(lines), "file") + more
@@ -334,7 +360,7 @@ class GrepTool(Tool):
 
         out_lines: list[str] = []
         budget = limit + 1
-        timer = threading.Timer(RG_TIMEOUT_S, _kill)
+        timer = threading.Timer(search_timeout(), _kill)
         timer.daemon = True
         timer.start()
         capped = False
@@ -364,8 +390,8 @@ class GrepTool(Tool):
 
         if timed_out.is_set() and not capped:
             if not out_lines:
-                raise ToolError(f"Grep timed out after {RG_TIMEOUT_S}s. Narrow 'path', 'glob' or 'type'.")
-            out_lines.append(f"[search timed out after {RG_TIMEOUT_S}s; results are partial]")
+                raise ToolError(f"Grep timed out after {search_timeout()}s. Narrow 'path', 'glob' or 'type'.")
+            out_lines.append(f"[search timed out after {search_timeout()}s; results are partial]")
         elif not out_lines and code == 2:
             raise ToolError(f"Grep failed for pattern '{pattern}': {stderr.strip() or 'invalid regex or path'}")
         result = []

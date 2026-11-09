@@ -87,6 +87,7 @@ class MCPClient:
         self.close_reason = ""
         self.progress: dict[Any, dict[str, Any]] = {}      # progressToken -> latest progress (in-flight calls)
         self._tracked: set[Any] = set()
+        self._thread_calls: dict[int, Any] = {}             # thread ident -> id of the tools/call it waits on
         self.log_path = log_path_for(name)
         self._ids = itertools.count(1)
         self._pending: dict[int | str, Future] = {}
@@ -94,6 +95,7 @@ class MCPClient:
         self._tool_cache: list[dict[str, Any]] | None = None
         self._resource_cache: list[dict[str, Any]] | None = None
         self._prompt_cache: list[dict[str, Any]] | None = None
+        self._stale: set[str] = set()                     # lists a list_changed notification made out of date
 
     # ── logging ─────────────────────────────────────────────────────────
     def _log(self, text: str) -> None:
@@ -215,6 +217,7 @@ class MCPClient:
             self._pending[req_id] = fut
             if track_progress:
                 self._tracked.add(req_id)
+                self._thread_calls[threading.get_ident()] = req_id
         try:
             return self._send_and_wait(msg, fut, req_id, method, params, timeout, _retry, idle_timeout, track_progress)
         finally:
@@ -222,6 +225,7 @@ class MCPClient:
                 with self._lock:
                     self._tracked.discard(req_id)
                     self.progress.pop(req_id, None)
+                    self._thread_calls.pop(threading.get_ident(), None)
 
     def _send_and_wait(self, msg: dict[str, Any], fut: Future, req_id: int, method: str,
                        params: dict[str, Any] | None, timeout: float | None, _retry: bool,
@@ -287,6 +291,24 @@ class MCPClient:
             params = {"requestId": req_id, "reason": why}
             threading.Thread(target=self.notify, args=("notifications/cancelled", params), daemon=True,
                              name=f"mcp-{self.name}-cancel").start()
+
+    def cancel_thread_call(self, thread_id: int, why: str) -> None:
+        """Stop the tools/call a thread is waiting on and tell the server."""
+        with self._lock:
+            req_id = self._thread_calls.get(thread_id)
+            fut = self._pending.get(req_id) if req_id is not None else None
+        if req_id is None:
+            return
+        self._give_up(req_id, "tools/call", why)
+        if fut is not None and not fut.done():
+            fut.set_exception(MCPError(why))
+
+    def progress_of_thread(self, thread_id: int) -> str:
+        seen = self.progress.get(self._thread_calls.get(thread_id))
+        if not seen:
+            return ""
+        total = f"/{seen['total']}" if seen.get("total") else ""
+        return f"{seen.get('progress')}{total} {seen.get('message') or ''}".strip()
 
     def _request_with_retry(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Discovery requests retry transient network/server errors (not auth, 4xx or timeouts)."""
@@ -380,11 +402,11 @@ class MCPClient:
             if self.on_tools_changed:
                 threading.Thread(target=self._safe_tools_changed, daemon=True).start()
         elif method == "notifications/resources/list_changed":
-            self._resource_cache = None
+            self._stale.add("resources")
             if self.on_resources_changed:
                 threading.Thread(target=self.on_resources_changed, args=(self,), daemon=True).start()
         elif method == "notifications/prompts/list_changed":
-            self._prompt_cache = None
+            self._stale.add("prompts")
             if self.on_prompts_changed:
                 threading.Thread(target=self.on_prompts_changed, args=(self,), daemon=True).start()
         elif method == "notifications/progress":
@@ -438,9 +460,14 @@ class MCPClient:
                             track_progress=True)
 
     def list_resources(self, refresh: bool = False) -> list[dict[str, Any]]:
-        if self._resource_cache is None or refresh:
-            self._resource_cache = (self._paginate("resources/list", "resources")
-                                    if self.has("resources") else [])
+        if self._resource_cache is None or refresh or "resources" in self._stale:
+            try:
+                self._resource_cache = (self._paginate("resources/list", "resources")
+                                        if self.has("resources") else [])
+                self._stale.discard("resources")
+            except MCPError:  # keep what was discovered until a later refresh succeeds
+                if self._resource_cache is None:
+                    raise
         return list(self._resource_cache)
 
     def list_resource_templates(self) -> list[dict[str, Any]]:
@@ -457,8 +484,13 @@ class MCPClient:
         return self.request("resources/read", {"uri": uri})
 
     def list_prompts(self, refresh: bool = False) -> list[dict[str, Any]]:
-        if self._prompt_cache is None or refresh:
-            self._prompt_cache = self._paginate("prompts/list", "prompts") if self.has("prompts") else []
+        if self._prompt_cache is None or refresh or "prompts" in self._stale:
+            try:
+                self._prompt_cache = self._paginate("prompts/list", "prompts") if self.has("prompts") else []
+                self._stale.discard("prompts")
+            except MCPError:  # keep what was discovered until a later refresh succeeds
+                if self._prompt_cache is None:
+                    raise
         return list(self._prompt_cache)
 
     def get_prompt(self, name: str, arguments: dict[str, str] | None = None) -> dict[str, Any]:

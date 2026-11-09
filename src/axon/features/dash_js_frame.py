@@ -2,7 +2,7 @@
 
 JS_FRAME = r"""
 // ---------- IDE frame ----------
-const UI = { tabs: [], active: null, split: null, building: null, bg: false, built: false, left: 320, right: 340, bottom: 300,
+const UI = { tabs: [], active: null, split: null, building: null, bg: false, built: false, left: 320, right: 300, bottom: 300,
   leftOpen: false, rightOpen: true, bottomOpen: false, chat: null, status: {} };
 const TAB_ICON = { chat: 'chat', files: 'file', agents: 'sessions', agent: 'sessions', sessions: 'sessions', usage: 'usage', commands: 'commands', memory: 'memory', extensions: 'extensions', settings: 'settings', shell: 'shell', terminal: 'terminal', insights: 'usage' };
 const PAGE_TITLE = { chat: 'Chat', sessions: 'Sessions', usage: 'Usage', commands: 'Commands', memory: 'Memory', extensions: 'Extensions', settings: 'Settings', agents: 'Subagents', insights: 'Insights' };
@@ -38,7 +38,7 @@ function applySizes() {
 }
 function togglePanel(which, force) {
   if (which !== 'right') return;                       // Progress is the only panel of this kind now; Files and Terminal are workbench panels
-  UI.rightOpen = force != null ? force : !UI.rightOpen; applySizes(); savePrefs();
+  UI.rightOpen = force != null ? force : !UI.rightOpen; applySizes(); savePrefs(); drawStatus();
   document.body.classList.toggle('drawer-right', UI.rightOpen && innerWidth <= 900);
   syncToggles();
 }
@@ -97,6 +97,7 @@ function drawChip() {
 }
 function drawStatus() {
   const el = document.getElementById('statusbar'); if (!el) return; const s = UI.status || {}; const info = state.info || {};
+  el.classList.toggle('in-chat', !!(UI.active && UI.active.route === 'chat') || !!UI.rightOpen);   // the message box and Progress already show all of this: the bar steps aside
   const item = (label, val, cls, title) => h('span', { class: 'sb ' + (cls || ''), title: title || '' }, label ? h('span', { class: 'muted' }, label + ' ') : null, h('b', null, val));
   // In a chat the model, mode, effort and context sit under the message box and cost and branch in Progress; other pages keep them here.
   const chat = !!(UI.active && UI.active.route === 'chat'); const ws = state.ws || {};
@@ -163,6 +164,7 @@ function setActive(t) {
 }
 function drawTabs() {
   const sc = document.getElementById('tabscroll'); if (!sc) return;
+  const strip = document.getElementById('tabstrip'); if (strip) strip.hidden = UI.tabs.length < 2;   // one tab needs no tab bar
   sc.replaceChildren(...UI.tabs.map(t => {
     const el = h('div', { class: 'tab' + (t === UI.active ? ' on' : '') + (UI.split === t ? ' split' : ''), role: 'presentation', title: t.title },
       h('button', { class: 'tl', type: 'button', role: 'tab', 'aria-selected': String(t === UI.active), onclick: () => { location.hash = t.hash || '#/chat'; setActive(t); } }, svgIcon(ICONS[TAB_ICON[t.route]] || ICONS.files), h('span', null, t.title)),
@@ -191,7 +193,7 @@ function shell(route, bodyFn, opts) {
   const r = bodyFn(t.pane, t);
   return Promise.resolve(r).then(() => {
     if (typeof helpPageHook === 'function') helpPageHook(t.pane, route);
-    if (PAGE_HINT[route] && !t.pane.querySelector(':scope > .page-hint')) t.pane.prepend(h('div', { class: 'page-hint' }, h('b', null, labelFor(route) + ': '), PAGE_HINT[route]));
+    if (PAGE_HINT[route] && !t.pane.querySelector(':scope > .page-hint')) { const hint = h('div', { class: 'page-hint' }, PAGE_HINT[route]); const hd = t.pane.querySelector(':scope > .head'); if (hd) hd.after(hint); else t.pane.prepend(hint); }
     savePrefs();
   });
 }

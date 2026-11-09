@@ -114,10 +114,15 @@ def tests_outcome(trace: Any) -> str:
 def tool_errors(trace: Any) -> list[str]:
     """Names of failed tool calls, but only when the turn's LAST tool call failed (errors the
     model already recovered from are not worth a /fix)."""
+    def failed(step: Any) -> bool:    # a shell command that exited non-zero failed too, as the tool rows show it
+        d = _data(step)
+        return bool(d.get("is_error")) or (d.get("name") in ("Bash", "bash", "run_command")
+                                           and str(d.get("result_preview", "")).lstrip().startswith("Command exited with non-zero code"))
+
     tools = _steps(trace, "tool")
-    if not tools or not _data(tools[-1]).get("is_error"):
+    if not tools or not failed(tools[-1]):
         return []
-    return [str(_data(s).get("name") or "tool") for s in tools if _data(s).get("is_error")]
+    return [str(_data(s).get("name") or "tool") for s in tools if failed(s)]
 
 
 def context_pct(trace: Any) -> float:

@@ -189,6 +189,9 @@ def run_one(agent: Any, name: str, tty: bool, seconds: int = 20, line: str = "")
     except BaseException as exc:  # a command must never break the sweep
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
+        from axon.commands.workspace_cmds import stop_loops
+        stop_loops(agent)                       # a bare /loop starts one: what it queued must not show in the next command
+        agent.message_queue.clear()
         if has_alarm:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_alarm)

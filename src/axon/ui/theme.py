@@ -107,9 +107,9 @@ STRIKE = _sgr("9")
 
 # ─── Palettes ──────────────────────────────────────────────────────────────
 # name -> ((r, g, b), xterm-256 index). "dark" is the base "Axon dusk" palette (teal primary,
-# violet accent); other themes override some entries. Backgrounds end in _BG.
+# grey accent); other themes override some entries. Backgrounds end in _BG.
 _DARK: dict[str, tuple[tuple[int, int, int], int]] = {
-    "PRIMARY": ((94, 210, 200), 80), "ACCENT": ((180, 160, 255), 183), "SUCCESS": ((134, 222, 140), 114),
+    "PRIMARY": ((94, 210, 200), 80), "ACCENT": ((206, 209, 216), 252), "SUCCESS": ((134, 222, 140), 114),
     "WARNING": ((246, 196, 92), 221), "ERROR": ((255, 120, 120), 210), "INFO": ((122, 182, 255), 111),
     "TEXT": ((228, 230, 236), 254), "MUTED": ((140, 146, 160), 245), "SUBTLE": ((100, 106, 120), 241),
     "BORDER": ((72, 78, 92), 239), "CODE_FG": ((240, 190, 140), 216), "CODE_BG": ((38, 41, 50), 236),
@@ -124,7 +124,7 @@ _DARK: dict[str, tuple[tuple[int, int, int], int]] = {
     "DIFF_ADD_WORD_BG": ((44, 110, 62), 28), "DIFF_DEL_WORD_BG": ((128, 44, 52), 88), "MATCH_BG": ((92, 74, 18), 58),
 }
 _LIGHT = {
-    "PRIMARY": ((0, 128, 120), 30), "ACCENT": ((110, 70, 200), 98), "SUCCESS": ((20, 130, 50), 28),
+    "PRIMARY": ((0, 128, 120), 30), "ACCENT": ((58, 62, 72), 238), "SUCCESS": ((20, 130, 50), 28),
     "WARNING": ((165, 105, 0), 136), "ERROR": ((190, 40, 40), 160), "INFO": ((20, 90, 200), 26),
     "TEXT": ((30, 32, 40), 235), "MUTED": ((88, 94, 108), 242), "SUBTLE": ((125, 130, 145), 245),
     "BORDER": ((180, 184, 192), 250), "CODE_FG": ((150, 70, 20), 130), "CODE_BG": ((236, 238, 242), 255),
@@ -680,6 +680,8 @@ def _can_encode(text: str, encoding: str) -> bool:
 
 
 def supports_unicode() -> bool:
+    if os.environ.get("AXON_ASCII"):
+        return False
     return _can_encode("╭─●⎿✓…", _encoding())
 
 

@@ -45,8 +45,8 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
     ("bypass", "Never ask (fastest; only for trusted repos / sandboxes)"),
 )
 TRACE_LEVELS: tuple[tuple[str, str], ...] = (
-    ("compact", "One line per tool call + a footer"),
-    ("normal", "Step timeline: LLM calls, tools, permissions, cost (recommended)"),
+    ("compact", "One tidy row per tool call + a footer"),
+    ("normal", "Every step shown: thinking, LLM calls, tools with input and result, permissions, cost (recommended)"),
     ("detailed", "Also full tool inputs, result previews, prompt token breakdown"),
     ("debug", "Also raw provider request summaries and usage"),
 )

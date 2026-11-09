@@ -318,7 +318,7 @@ def test_result_rows_link_to_full_output_and_card_paths_to_the_file(monkeypatch,
 # ─── footer after a failed turn ────────────────────────────────────────────
 
 def test_failed_turn_footer_says_continue_or_retry(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     r.on_event(LLMCallStart(iteration=1, max_iterations=5, model="m", message_count=1, user_prompt="hi"))
     r.turn_footer(0, Usage(), 0.0, 1.0, 1, stop_reason="error", error="boom")
     out = strip_ansi(capsys.readouterr().out)
@@ -336,7 +336,7 @@ def test_failed_turn_footer_says_continue_or_retry(capsys):
 def test_turn_and_step_headers_name_the_provider(capsys, monkeypatch):
     monkeypatch.setattr(theme, "term_width", lambda: 120)
     monkeypatch.setattr(render, "term_width", lambda: 120)
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     r._agent = SimpleNamespace(settings=SimpleNamespace(base_url="https://agentrouter.org/v1", provider=None))
     r.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1,
                             user_prompt="hi", mode="bypass"))
@@ -348,11 +348,11 @@ def test_turn_and_step_headers_name_the_provider(capsys, monkeypatch):
     d.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1,
                             user_prompt="hi", mode="bypass"))
     assert "◆ Step 1  LLM call · claude-opus-5-5 (AgentRouter) · reads 1 message" in strip_ansi(capsys.readouterr().out)
-    r2 = Renderer()
+    r2 = Renderer(trace_level="normal")
     r2._agent = SimpleNamespace(settings=SimpleNamespace(base_url="", provider="anthropic"))
     r2.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=1, user_prompt="x"))
     assert "claude-opus-5-5 via Anthropic" in strip_ansi(capsys.readouterr().out)
-    r3 = Renderer()                                    # no agent attached: no provider label
+    r3 = Renderer(trace_level="normal")                                    # no agent attached: no provider label
     r3.on_event(LLMCallStart(iteration=1, max_iterations=5, model="m", message_count=1, user_prompt="x"))
     assert " via " not in strip_ansi(capsys.readouterr().out)
 
@@ -366,7 +366,7 @@ def test_step_header_drops_provider_when_narrow(capsys, monkeypatch):
                             tokens_in=12_000, user_prompt="hi"))
     out = strip_ansi(capsys.readouterr().out)
     assert "(AgentRouter)" not in out and "LLM call · claude-opus-5-5 · reads 12 messages" in out
-    n = Renderer()
+    n = Renderer(trace_level="normal")
     n.on_event(LLMCallStart(iteration=1, max_iterations=5, model="claude-opus-5-5", message_count=12,
                             tokens_in=12_000, user_prompt="hi"))
     assert "◆ Step 1 · claude-opus-5-5 · 12 messages · ~12.0k tokens" in strip_ansi(capsys.readouterr().out)

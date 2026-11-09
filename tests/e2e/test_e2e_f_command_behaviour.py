@@ -397,10 +397,10 @@ def _prompt(c: Ctx) -> None:
     t = c.user_texts()
     assert any("Investigate and fix this bug: login fails." in x for x in t), t      # value with a space kept
     tpl = c.env.workspace / ".axon" / "prompts" / "greet.md"
-    assert tpl.is_file() and "Saved template greet" in c.o(1), c.o(1)
+    assert tpl.is_file() and "Saved prompt greet" in c.o(1), c.o(1)
     assert any("Say hi to Bob Smith" in x for x in t), t
     assert "Say hi to {who}" in c.o(3), c.o(3)
-    assert "No template 'nope'" in c.o(4), c.o(4)
+    assert "No prompt 'nope'" in c.o(4), c.o(4)
 
 
 def _retry(c: Ctx) -> None:

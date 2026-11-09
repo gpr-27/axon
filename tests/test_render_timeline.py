@@ -53,7 +53,7 @@ def test_trace_level_cycle_and_names():
 
 
 def test_normal_timeline_with_stats_and_answer(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _turn(r, "fix the failing test")
     r.on_event(ThinkingDelta("I need to read the file. Then edit."))
     r.on_event(TextDelta("All **good**.\n"))
@@ -73,7 +73,7 @@ def test_normal_timeline_with_stats_and_answer(capsys):
 
 def test_glass_box_events(capsys):
     trace = pytest.importorskip("axon.agent.trace")
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _turn(r)
     r.on_event(TurnComplete(stop_reason="tool_use", usage=Usage(input=100, output=10)))
     r.on_event(trace.LLMCallEnd(iteration=1, model="claude-opus-5", usage=Usage(input=100, output=10), cost=0.5,
@@ -107,7 +107,7 @@ def test_edit_deletion_and_multiedit_diffs(capsys, tmp_path, monkeypatch):
     r.on_event(ToolExecutionStart(id="e1", name="Edit", input={"path": "f.py", "old_string": "gone\n", "new_string": ""}))
     r.on_event(ToolExecutionResult(id="e1", name="Edit", input={}, content="ok"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "✎ Edited f.py · +0 −1" in out and "- gone" not in out     # compact: the card header row only
+    assert "Edit  f.py  −1" in out and "- gone" in out                # compact: the stat on the row, then the diff
     r = Renderer(trace_level="normal")
     r.on_event(ToolExecutionStart(id="e1", name="Edit", input={"path": "f.py", "old_string": "gone\n", "new_string": ""}))
     r.on_event(ToolExecutionResult(id="e1", name="Edit", input={}, content="ok"))
@@ -164,7 +164,7 @@ def test_footer_narrow_and_tip_once(capsys, monkeypatch):
     monkeypatch.setattr("axon.ui.render.term_width", lambda: 30)
     monkeypatch.setattr("axon.ui.theme.term_width", lambda: 30)
     Renderer._tip_shown = False
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     r.turn_footer(1, Usage(input=6835, output=52), 0.0166, 2.8, 1)
     first = strip_ansi(capsys.readouterr().out)
     assert "6.8k in" in first and "52 out" in first and "Tip:" in first
@@ -174,7 +174,7 @@ def test_footer_narrow_and_tip_once(capsys, monkeypatch):
 
 
 def test_banner_adapts_to_width(capsys, monkeypatch):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     for w in (40, 100):
         monkeypatch.setattr("axon.ui.render.term_width", lambda w=w: w)
         r.print_banner("1.2.3", "claude-opus-5", "high", "/tmp/ws", "plan", "http://localhost:11434")
@@ -208,7 +208,7 @@ def test_format_trace_from_real_turn_trace():
 
 
 def test_render_errors_never_propagate(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     r.on_event(ToolExecutionResult(id="x", name="Read", input=None, content=None))  # type: ignore[arg-type]
     assert isinstance(capsys.readouterr().out, str)
 
@@ -250,7 +250,7 @@ def test_turn_numbers_restart_after_clear(capsys):
     """Turn labels follow the agent's own turn history, so /clear (traces reset) starts at Turn 1 again."""
     from types import SimpleNamespace
     agent = SimpleNamespace(traces=[object()] * 21, registry=None, settings=None)
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     r.attach(agent)
     agent.traces.append(object())
     _turn(r)
@@ -285,7 +285,7 @@ def test_restored_conversation_replay_shows_tools_results_and_answers():
 
 def test_tool_rows_say_what_the_tool_does_and_why(capsys):
     trace = pytest.importorskip("axon.agent.trace")
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _turn(r)
     r.on_event(ToolExecutionStart(id="g", name="Grep", input={"pattern": "x"}, rationale="find the handler"))
     r.on_event(ToolExecutionResult(id="g", name="Grep", input={"pattern": "x"}, content="a.py:1:x\nb.py:2:x"))

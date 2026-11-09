@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypass")
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "bypass")
 INTERRUPTED_TEXT = "[Response interrupted]"
 _FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_budget", "max_iterations"}
 # Options a remote caller (e.g. `axon serve`) may set; code-only hooks are excluded.

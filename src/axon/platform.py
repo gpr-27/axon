@@ -630,7 +630,9 @@ def _keycode_name(code: int, mod: int) -> str:
     alt = bool((mod - 1) & 2) if mod > 1 else False
     ctrl = bool((mod - 1) & 4) if mod > 1 else False
     if code in (13, 10):
-        if shift or ctrl:
+        if ctrl:
+            return "ctrl-enter"
+        if shift:
             return "shift-enter"
         return "alt-enter" if alt else "enter"
     if code == 9:

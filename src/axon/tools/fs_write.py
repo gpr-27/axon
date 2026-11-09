@@ -5,12 +5,14 @@ guarded by the read-before-edit invariant and checkpointed for /rewind.
 from __future__ import annotations
 
 import re
+import stat
 from pathlib import Path
 from typing import Any, ClassVar
 
+from axon import envvars
 from axon.agent.filechanges import diff_counts
 from axon.agent.state import path_lock
-from axon.errors import ToolError
+from axon.errors import StaleFileError, ToolError
 from axon.tools.base import (
     Tool, ToolContext, bool_arg, capture_checkpoint, default_summary, display_path, human_size, plural, resolve_path,
 )
@@ -23,17 +25,33 @@ from axon.tools.textio import (
 )
 
 
+def _is_utf8(p: Path) -> bool:
+    try:
+        p.read_bytes().decode("utf-8")
+        return True
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _atomic_write(target: Path, content: str) -> None:
     """Back-compat helper: atomic UTF-8 write of `content` exactly as given (no newline translation)."""
     atomic_write_text(target, content, encoding="utf-8", newline="")
 
 
-def _load_for_edit(p: Path, raw_path: str, ctx: ToolContext) -> TextFile:
+def check_perforce(p: Path, raw_path: Any) -> None:
+    """AXON_PERFORCE_MODE: Perforce clears the owner-write bit on synced files until ``p4 edit`` opens them."""
+    if envvars.on("AXON_PERFORCE_MODE") and p.exists() and not (p.stat().st_mode & stat.S_IWUSR):
+        raise ToolError(f"{raw_path} is read-only under Perforce. Run `p4 edit {p}` first, then retry.")
+
+
+def _load_for_edit(p: Path, raw_path: str, ctx: ToolContext, allow_changed: bool = False) -> TextFile:
     if not p.exists():
         raise ToolError(f"Cannot edit non-existent file {raw_path}. Use Write to create new files.")
     if p.is_dir():
         raise ToolError(f"{raw_path} is a directory, not a file.")
-    ctx.file_state.check_writable(p)
+    check_perforce(p, raw_path)
+    if not allow_changed:
+        ctx.file_state.check_writable(p)
     return read_text_file(p)
 
 
@@ -163,7 +181,12 @@ class WriteTool(Tool):
         encoding, newline = "utf-8", "\n"
         old_text: str | None = None
         if existed:
+            check_perforce(p, raw_path)
             ctx.file_state.check_writable(p)
+            if "\ufffd" in content and not _is_utf8(p):
+                raise ToolError(f"{raw_path} is not valid UTF-8 and the new content contains U+FFFD, the character Read shows "
+                                f"for bytes it cannot decode. Refusing to write back garbled text; keep the original bytes with a "
+                                f"shell command, or remove U+FFFD from the content.")
             try:
                 tf = read_text_file(p)
                 encoding, newline, old_text = tf.encoding, tf.newline or "\n", tf.text
@@ -240,18 +263,26 @@ class EditTool(Tool):
 
         p = resolve_path(ctx, raw_path)
         with path_lock(p):
-            tf = _load_for_edit(p, raw_path, ctx)
+            changed = ctx.file_state.changed_since_read(p)
+            tf = _load_for_edit(p, raw_path, ctx, allow_changed=changed)
             rel = display_path(p, ctx.workspace)
-
-            new_text, count = _apply_edit(
-                tf.text, _prepare(tf, str(old_str)), _prepare(tf, str(new_str)), replace_all, "Edit failed", rel
-            )
+            try:
+                new_text, count = _apply_edit(
+                    tf.text, _prepare(tf, str(old_str)), _prepare(tf, str(new_str)), replace_all, "Edit failed", rel
+                )
+            except ToolError as e:
+                if changed:   # a stale old_string, or one that is ambiguous now: only a fresh read can settle it
+                    raise StaleFileError(f"{p.name} has changed on disk since you read it. Re-read the file to see the "
+                                         f"latest version before editing. ({e})") from e
+                raise
             capture_checkpoint(ctx, p)
             memory_note = _write_back(p, new_text, tf, ctx)
             ctx.file_state.record_read(p)
+        carries = (" Note: the file also carries changes made since you last read it; re-read it before edits that depend "
+                   "on the surrounding content.") if changed else ""
         return (
             f"Successfully applied edit to {rel} ({count} occurrence{'s' if count != 1 else ''} replaced, "
-            f"{_summarize_change(tf.text, new_text)}).{reencoding_note(new_text, tf.encoding)}{memory_note}"
+            f"{_summarize_change(tf.text, new_text)}).{reencoding_note(new_text, tf.encoding)}{memory_note}{carries}"
         )
 
 

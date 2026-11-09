@@ -37,6 +37,7 @@ def _platform_extra_tools() -> list[Tool]:
     for mod_name, cls_names in (
         ("axon.tools.shell", ("BashOutputTool", "KillShellTool")),
         ("axon.tools.monitor", ("MonitorTool",)),
+        ("axon.tools.cron", ("CronCreateTool", "CronListTool", "CronDeleteTool", "ScheduleWakeupTool")),
         ("axon.tools.git_tool", ("GitTool",)),
         ("axon.tools.lsp", ("LspTool",)),
         ("axon.tools.checkpoint_tool", ("CheckpointListTool", "CheckpointUndoTool")),
@@ -45,6 +46,8 @@ def _platform_extra_tools() -> list[Tool]:
         try:
             mod = __import__(mod_name, fromlist=list(cls_names))
         except ImportError:
+            continue
+        if getattr(mod, "cron_disabled", lambda: False)():
             continue
         for cn in cls_names:
             cls = getattr(mod, cn, None)

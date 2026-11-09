@@ -252,6 +252,7 @@ function openHash(hash, activate) {
     if (name === 'shell' || (name === 'terminal' && !rest)) { wbOpen('terminal'); if (!UI.active) return viewChat(''); return; }   // old links: the Terminal panel
     if (name === 'terminal') return viewTerminal(rest);
     if (name === 'insights') return viewInsights(rest);
+    if (name === 'context') return viewContext(rest);
     if (name === 'commands') return viewCommands();
     if (name === 'sessions') return viewSessions();
     if (name === 'session' && rest) { location.replace('#/chat/' + rest); return; }
@@ -308,7 +309,9 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('hashchange', route);
 const savedTheme = lsGet('axon-theme'); if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme);
-const savedTrace = lsGet('axon-trace'); if (['compact', 'normal', 'detailed', 'debug'].includes(savedTrace)) state.trace = savedTrace;
+const savedTrace = lsGet('axon-trace2'); if (['compact', 'normal', 'detailed', 'debug'].includes(savedTrace)) state.trace = savedTrace;
+try { applyStepsView(); } catch (e) { /* the steps view is a convenience */ }
+try { applyStepsView(); } catch (e) { /* the steps view is a convenience */ }
 Promise.all([api('/api/info'), api('/api/ws')]).then(async ([i, w]) => {
   state.info = i; state.ws = w;
   try { const r = await fetch('/static/logo.svg', { credentials: 'same-origin' }); state.logo = await r.text(); } catch (e) { state.logo = ''; }

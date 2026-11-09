@@ -21,6 +21,7 @@ from test_e2e_d_helpers import PROMPT_READY, SGR_RE, TRACEBACK, open_repl, posix
 pytestmark = [pytest.mark.e2e, posix_only]
 
 UP, DOWN, SHIFT_TAB, ESC = "\x1b[A", "\x1b[B", "\x1b[Z", "\x1b"
+ALT_L = "\x1bl"
 CTRL_C, CTRL_D, CTRL_O, CTRL_R, CTRL_U, CTRL_J, CTRL_L = "\x03", "\x04", "\x0f", "\x12", "\x15", "\x0a", "\x0c"
 ALT_ENTER = "\x1b\r"
 
@@ -86,10 +87,10 @@ def test_banner_shows_version_model_workspace_and_hints(idle) -> None:
 
 
 def test_banner_shows_permission_mode_and_trace_level(axon_env: AxonEnv) -> None:
-    """The banner reports the permission mode and the Ctrl+O trace hint."""
+    """The banner reports the permission mode and the Alt+L trace hint."""
     with open_repl(axon_env, ("--mode", "plan")) as s:
         assert "plan mode" in s.screen
-        assert "trace normal (ctrl+o)" in s.screen
+        assert "trace normal (alt+l)" in s.screen
 
 
 def test_status_line_initial_model_ctx_cost(idle) -> None:
@@ -138,7 +139,7 @@ def timeline_out(tmp_path_factory: pytest.TempPathFactory) -> str:
     try:
         env = create_axon_env(tmp_path_factory.mktemp("timeline"), server)
         server.enqueue(*tool_turn("echo hi-from-tool", "FINAL **bold** ANSWER"))
-        with open_repl(env, ("--mode", "bypass")) as s:
+        with open_repl(env, ("--mode", "bypass", "--trace", "normal")) as s:
             return s.turn("run the tool")
     finally:
         server.stop()
@@ -189,7 +190,7 @@ def test_timeline_feedback_row_between_steps(timeline_out: str) -> None:
 # ─── trace levels via /trace ───────────────────────────────────────────────
 
 TRACE_MARKERS = {
-    "compact": (["● Bash(echo hi-from-tool)", "✓ Done"], ["┌ Turn", "◆ Step", "request: system", "LLMCallStart"]),
+    "compact": (["✓ Bash  echo hi-from-tool", "✓ Done"], ["┌ Turn", "◆ Step", "request: system", "LLMCallStart"]),
     "normal": (["┌ Turn", "◆ Step 1", "▣ TOOLS", "Bash  input   echo hi-from-tool", "└ ✓ Done"],
                ["request: system", "result #1 [", "LLMCallStart", "usage: input="]),
     "detailed": (["┌ Turn", "request: system", "runs 1 tool may change files", "result #1"],
@@ -232,23 +233,23 @@ def test_trace_invalid_level_shows_usage(idle) -> None:
         assert "trace normal" in s.screen[-400:]
 
 
-def test_ctrl_o_cycles_through_all_trace_levels(idle) -> None:
-    """Ctrl+O cycles normal → detailed → debug → compact → normal, announced each time."""
+def test_alt_l_cycles_through_all_trace_levels(idle) -> None:
+    """Alt+L cycles normal → detailed → debug → compact → normal, announced each time."""
     with _shared(idle) as s:
         for lv in ("detailed", "debug", "compact", "normal"):
             m = s.mark()
-            s.send(CTRL_O)
+            s.send(ALT_L)
             s.expect(f"Trace level {lv}:", timeout=8, since=m)
             s.expect(f"trace {lv}", timeout=8, since=m)
             s.drain(0.3)
 
 
-def test_ctrl_o_detailed_applies_to_next_turn(axon_env: AxonEnv) -> None:
-    """After one Ctrl+O the next turn renders the detailed trace (batch row, what goes back) but no debug fields."""
+def test_alt_l_detailed_applies_to_next_turn(axon_env: AxonEnv) -> None:
+    """After one Alt+L the next turn renders the detailed trace (batch row, what goes back) but no debug fields."""
     axon_env.llm.enqueue(*tool_turn())
     with open_repl(axon_env, ("--mode", "bypass")) as s:
         m = s.mark()
-        s.send(CTRL_O)
+        s.send(ALT_L)
         s.expect("Trace level detailed:", since=m)
         s.ready(since=m)
         out = s.turn("go")
@@ -297,7 +298,7 @@ def test_shift_tab_cycles_permission_modes(idle) -> None:
 def test_shift_tab_mode_applies_to_next_turn(axon_env: AxonEnv) -> None:
     """After cycling to plan mode the next turn header is tagged `plan`."""
     axon_env.llm.enqueue([{"text": "planning only"}])
-    with open_repl(axon_env) as s:
+    with open_repl(axon_env, ("--trace", "normal")) as s:
         for label in ("manual mode on", "auto-accept edits on", "plan mode on"):
             m = s.mark()
             s.send(SHIFT_TAB)
@@ -507,7 +508,7 @@ def test_ctrl_r_reverse_search_runs_match(axon_env: AxonEnv) -> None:
         s.expect("❯ alpha query", since=m)
         time.sleep(0.3)
         s.send("\r")
-        s.expect("Turn 3", timeout=15, since=m)
+        s.expect("✓ Done", timeout=15, since=m)
         s.expect("✓ Done", timeout=15, since=m)
     assert axon_env.llm.completion_requests()[-1].last_user_text() == "alpha query"
 
@@ -827,7 +828,7 @@ def test_typing_during_text_turn_is_queued_as_next_prompt(axon_env: AxonEnv) -> 
     # (typing starts while the spinner is up; see the xfail below for typing during the turn->prompt handover)
     with open_repl(axon_env) as s:
         m = s.submit("slow one")
-        s.expect("responding", timeout=10, since=m)
+        s.expect("writing the answer", timeout=10, since=m)
         for ch in "follow up":
             s.send(ch)
             time.sleep(0.03)
@@ -844,13 +845,13 @@ def test_typing_during_tool_round_steers_model(axon_env: AxonEnv) -> None:
                          [{"text": "AFTER-STEER"}])
     with open_repl(axon_env) as s:
         m = s.submit("go")
-        s.expect("responding|working", timeout=10, since=m)
+        s.expect("writing the answer|working", timeout=10, since=m)
         for ch in "steer msg":
             s.send(ch)
             time.sleep(0.03)
         time.sleep(0.3)
         s.send("\r")
-        s.expect("Queued #1", timeout=10, since=m)
+        s.expect("› steer msg", timeout=10, since=m)
         s.expect("AFTER-STEER", timeout=20, since=m)
         s.expect("✓ Done", timeout=10, since=m)
         assert "message you typed during the turn sent to the model" in s.screen[m:]
@@ -864,12 +865,12 @@ def _start_slow(axon_env: AxonEnv, s, kind: str) -> int:
     if kind == "stream":
         axon_env.llm.enqueue([{"text": "long "}, {"delay": 3.0}, {"text": "never shown"}])
         m = s.submit("long task")
-        s.expect("responding", timeout=10, since=m)
+        s.expect("writing the answer", timeout=10, since=m)
     else:
         axon_env.llm.enqueue([{"tool": "Bash", "args": {"command": "sleep 3; echo SLEPT-$((40+2))", "description": "s"}}],
                              [{"text": "after tool"}])
         m = s.submit("long tool")
-        s.expect(r"Running Bash sleep 3", timeout=10, since=m)     # the live label of a running tool
+        s.expect(r"running Bash", timeout=10, since=m)             # the live status of a running tool
     time.sleep(0.5)
     return m
 
@@ -950,11 +951,14 @@ def test_approval_quick_pick_3_denies(axon_env: AxonEnv) -> None:
     with s:
         s.send("3")
         s.expect("Denied", timeout=8, since=m)
-        s.expect("User declined this action", timeout=8, since=m)
-        s.expect(r"└ ✓ Done", timeout=15, since=m)
+        s.expect("Declined", timeout=8, since=m)
+        s.expect("tell Axon what to do instead", timeout=8, since=m)
+        assert len(axon_env.llm.completion_requests()) == 1                # the turn stopped at the answer
+        s.sendline("never mind")
+        s.expect(r"✓ Done", timeout=15, since=m)
     assert not (axon_env.workspace / "approved.txt").exists()
     res = axon_env.llm.completion_requests()[1].tool_results()
-    assert res and "declined" in res[0].lower(), res
+    assert res and "declined" in res[0].lower(), res                       # the model still learns what happened
 
 
 def test_approval_esc_denies(axon_env: AxonEnv) -> None:
@@ -1022,13 +1026,14 @@ def _turn_sgr(s, text: str) -> set[str]:
     s.turn(text)
     raw = s.raw_since(off)
     i, j = raw.find("Turn"), raw.find("Done")
+    assert i >= 0 and j > i, "these tests read the colours of the normal level's turn"
     return set(SGR_RE.findall(raw[i:j]))
 
 
 def test_theme_command_light_then_dark_changes_escape_codes(axon_env: AxonEnv) -> None:
     """`/theme light` then `/theme dark` switch the palette used by each following turn's escape codes."""
     axon_env.llm.enqueue([{"text": "a"}], [{"text": "b"}])
-    with open_repl(axon_env) as s:
+    with open_repl(axon_env, ("--trace", "normal")) as s:
         s.command("/theme light", "Theme light")
         s.ready()
         light = _turn_sgr(s, "hello")
@@ -1042,7 +1047,7 @@ def test_theme_command_light_then_dark_changes_escape_codes(axon_env: AxonEnv) -
 def test_theme_mono_strips_colours(axon_env: AxonEnv) -> None:
     """`/theme mono` leaves only bold/reset SGR codes in the turn output."""
     axon_env.llm.enqueue([{"text": "mono"}])
-    with open_repl(axon_env) as s:
+    with open_repl(axon_env, ("--trace", "normal")) as s:
         s.command("/theme mono", "Theme mono")
         s.ready()
         codes = _turn_sgr(s, "hello")
@@ -1055,7 +1060,7 @@ def test_theme_persists_to_next_session(axon_env: AxonEnv) -> None:
     with open_repl(axon_env) as s:
         s.command("/theme light", "Theme light")
     assert '"theme": "light"' in (axon_env.axon_home / "settings.json").read_text()
-    with open_repl(axon_env) as s2:
+    with open_repl(axon_env, ("--trace", "normal")) as s2:
         assert "\x1b[38;5;28m" in _turn_sgr(s2, "hi")
 
 
@@ -1158,5 +1163,8 @@ def test_narrow_pty_turn_fits_width(axon_env: AxonEnv) -> None:
         out = s.turn("go")
         i = out.find("┌ Turn")
         body = out[i:out.find("✓ Done", i) + 80]
-        too_wide = [ln for ln in body.splitlines() if display_width(ln) > 60]
+        # A spinner frame can be captured just before its erase code, glued to the next row: measure the row after it.
+        # (The spinner row itself is kept narrower than the window by Renderer._live_rows.)
+        rows = [ln.split("esc to interrupt")[-1] for ln in body.splitlines()]
+        too_wide = [ln for ln in rows if display_width(ln) > 60]
         assert not too_wide, too_wide

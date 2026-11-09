@@ -142,8 +142,8 @@ def test_axon_ascii_env_in_repl_banner(axon_env: AxonEnv) -> None:
     """With AXON_ASCII=1 the REPL banner uses the ASCII logo and prompt glyph."""
     with open_repl(axon_env, extra_env={"AXON_ASCII": "1"}) as s:
         scr = s.screen
-        assert "/^\\" in scr and "|A|" in scr
-        assert "▲█▲" not in scr
+        assert "\\|/" in scr and "--O==-==-==--" in scr
+        assert "╲│╱" not in scr and "●" not in scr
 
 
 def test_python_utf8_mode_disabled_runs(axon_env: AxonEnv) -> None:
@@ -484,7 +484,7 @@ def test_win32_paste_burst_coalesced() -> None:
 
 @pytest.mark.parametrize("seq,expected", [
     ("[Z", "shift-tab"), ("[1;5C", "ctrl-right"), ("[1;5D", "ctrl-left"), ("[3~", "delete"), ("[13;2u", "shift-enter"),
-    ("[27;5;13~", "shift-enter"), ("OA", "up"), ("[H", "home"), ("\r", "alt-enter"), ("b", "ctrl-left"), ("x", "alt-x"),
+    ("[27;5;13~", "ctrl-enter"), ("OA", "up"), ("[H", "home"), ("\r", "alt-enter"), ("b", "ctrl-left"), ("x", "alt-x"),
 ])
 def test_vt_escape_sequence_decoding(seq: str, expected: str) -> None:
     """VT sequences sent by Windows Terminal / xterm decode to the same key names on every OS."""

@@ -475,6 +475,13 @@ def defer_threshold(context_window: int, fraction: float) -> int:
     return max(1, min(int(context_window * fraction), DEFER_MAX_TOKENS))
 
 
+def tool_search_enabled() -> bool:
+    """Is MCP tool search on? (``CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`` does not apply: Axon's ToolSearch is an
+    ordinary tool, so it needs no pre-release API feature.)"""
+    import os
+    return parse_tool_search_mode(os.environ.get("ENABLE_TOOL_SEARCH", ""))[0] != "off"
+
+
 def forget_deferred(registry: Any, names: list[str]) -> None:
     """Drop tools of a server that disconnected (or is reconnecting) from the ToolSearch list."""
     search = registry.tools.get("ToolSearch") if hasattr(registry, "tools") else None
@@ -529,4 +536,4 @@ def defer_mcp_tools(registry: Any, context_window: int, *, fraction: float | Non
 
 
 __all__ = ["SkillTool", "AskUserQuestionTool", "ToolSearchTool", "defer_mcp_tools", "defer_threshold",
-           "forget_deferred", "schema_tokens"]
+           "forget_deferred", "schema_tokens", "tool_search_enabled"]

@@ -76,9 +76,9 @@ def test_no_outside_loads_or_proprietary_font_names():
 def test_defaults_set_every_variable():
     r = _run(STATE + "console.log(JSON.stringify({p: P(), theme: A('data-theme'), motion: A('data-motion')}))")
     p = r["p"]
-    assert p["--size-response"] == "16px" and p["--size-code"] == "13px" and p["--measure-chat"] == "780px"
-    assert p["--font-response"] == '"Iowan Old Style",Charter,"Source Serif 4",Georgia,serif'
-    assert p["--font-code"].startswith("ui-monospace") and p["--font-ui"].startswith("ui-sans-serif")
+    assert p["--size-response"] == "16px" and p["--size-code"] == "13px" and p["--measure-chat"] == "720px"
+    assert p["--font-response"] == "var(--font-ui)"              # one type system unless the reader asks for a serif
+    assert p["--font-code"].startswith("ui-monospace") and p["--font-ui"].startswith('"Avenir Next"') and "ui-sans-serif" in p["--font-ui"]
     assert r["theme"] is None and r["motion"] is None          # follow the system, no overrides
 
 
@@ -122,7 +122,7 @@ def test_tampered_storage_is_ignored():
     r = _run("localStorage.setItem('axon-appearance', JSON.stringify({theme: 'x', cfont: '};evil{', rsize: 5000, ui: '__proto__', codeDark: 'nope'}));\n"
              + STATE.replace("const AP = window.AxonAppearance;", "AP0 = window.AxonAppearance;").replace("const P", "const P")
              + "AP0.apply(); const n = AP0.normalize(JSON.parse(localStorage.getItem('axon-appearance'))); console.log(JSON.stringify(n))")
-    assert r == {"theme": "system", "contrast": False, "ui": "system", "response": "serif", "rsize": 16, "width": 780, "motion": "system",
+    assert r == {"theme": "system", "contrast": False, "ui": "system", "response": "match", "rsize": 16, "width": 720, "motion": "system",
                  "codeLight": "axon-light", "codeDark": "axon-dark", "cfont": "evil", "csize": 13}
 
 
@@ -132,9 +132,9 @@ def test_fonts_are_detected_by_measuring_and_hidden_when_missing():
     none = _run(base)
     assert none["inter"] is False and none["sf"] is False and none["serif"] == "the browser serif"
     some = _run(STATE + "AP.set({ui: 'inter'}); console.log(JSON.stringify({inter: AP.installed('Inter'), serif: AP.serifInUse(), ui: P()['--font-ui']}))", fonts=["Inter", "Charter", "Georgia"])
-    assert some["inter"] is True and some["serif"] == "Charter" and some["ui"].startswith('"Inter",ui-sans-serif')
+    assert some["inter"] is True and some["serif"] == "Charter" and some["ui"].startswith('"Inter","Avenir Next"')
     missing = _run(STATE + "AP.set({ui: 'sfpro'}); console.log(JSON.stringify({ui: P()['--font-ui'], attr: A('data-ap-ui')}))")
-    assert missing["ui"].startswith("ui-sans-serif") and missing["attr"] is None      # an uninstalled choice does nothing
+    assert missing["ui"].startswith('"Avenir Next"') and missing["attr"] is None      # an uninstalled choice does nothing
 
 
 @needs_node
@@ -157,7 +157,7 @@ def test_reset_restores_defaults_and_clears_storage():
     r = _run(STATE + """
     AP.set({theme: 'dark', rsize: 20, cfont: 'Menlo', motion: 'reduced', contrast: true}); AP.reset();
     console.log(JSON.stringify({p: AP.get(), theme: A('data-theme'), motion: A('data-motion'), hc: A('data-contrast'), size: P()['--size-response'], saved: localStorage.getItem('axon-appearance')}))""")
-    assert r["p"] == {"theme": "system", "contrast": False, "ui": "system", "response": "serif", "rsize": 16, "width": 780, "motion": "system",
+    assert r["p"] == {"theme": "system", "contrast": False, "ui": "system", "response": "match", "rsize": 16, "width": 720, "motion": "system",
                       "codeLight": "axon-light", "codeDark": "axon-dark", "cfont": "", "csize": 13}
     assert (r["theme"], r["motion"], r["hc"], r["size"], r["saved"]) == (None, None, None, "16px", None)
 
@@ -189,7 +189,7 @@ def test_settings_page_has_every_row_and_controls_work():
                   "Light code theme", "Dark code theme", "Code font", "Code font size"):
         assert label in r["labels"], label
     assert r["t1"] == ["dark", ["dark"]] and r["themeBtns"] == ["System", "Light", "Dark"]
-    assert r["uiOptions"] == ["System default"]                          # Inter and SF Pro are hidden when not installed
+    assert r["uiOptions"] == ["Axon default", "System font"]                          # Inter and SF Pro are hidden when not installed
     s = r["state"]
     assert (s["rsize"], s["width"], s["motion"], s["csize"], s["response"], s["cfont"]) == (20, "full", "reduced", 14, "match", "Fira Code")
     assert r["resp"] == "var(--font-ui)" and r["after"] == 16 and r["pressedAfter"] == ["16"] and r["font"] == ""

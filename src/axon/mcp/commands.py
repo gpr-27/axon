@@ -40,7 +40,10 @@ from typing import TYPE_CHECKING, Any
 from axon.mcp import approval, state
 from axon.mcp.bridge import MCPToolBridge, get_bridge
 from axon.mcp.catalog import MCP_CATALOG, MCPServerPreset, get_mcp_preset
-from axon.mcp.config import MCPConfig, ServerSpec, normalize_scope, valid_server_name
+from axon.mcp.config import (
+    MCPConfig, ServerSpec, normalize_scope, valid_server_name,
+)
+from axon.mcp.headers import HeadersHelperError, helper_allowed, run_headers_helper
 from axon.mcp.oauth import OAuthError, OAuthManager, forget, store_client_secret
 from axon.mcp.transports import log_path_for
 
@@ -200,6 +203,8 @@ def _cmd_list(ctx: _Ctx, _args: list[str]) -> None:
              f"or /mcp add --transport http <name> <url>   or /mcp install{RST}\n")
         return
     for name, spec in sorted(specs.items()):
+        if ctx.cli and spec.approval == "rejected":  # shown only by `axon mcp get <name>`
+            continue
         row = rows.get(name)
         if spec.disabled:
             status = "disabled"
@@ -213,11 +218,13 @@ def _cmd_list(ctx: _Ctx, _args: list[str]) -> None:
         extra = f" · {tools} tools" if status == "connected" else ""
         if status == "connected" and row and row.get("advertises_tools") and tools == 0:
             extra = " · advertises tools but exposes none"
+        detail = ""
+        if row and row.get("error") and status not in ("connected", "pending-approval", "rejected", "disabled"):
+            detail = f": {str(row['error'])[:200]}"
         _out(f"  {_dot(status)} {TEAL}{BOLD}{name}{RST} {SLATE}[{transport} · {origin}]{RST} "
-             f"{WHITE}{status_label(status) if status != 'not connected' else status}{RST}{extra}")
-        _out(f"      {DIM}{('host only: ' + _host_only(spec.url)) if spec.managed and spec.url else spec.describe_target()[:100]}{RST}")
-        if row and row.get("error") and status != "connected":
-            _out(f"      {ROSE}Issue: {str(row['error'])[:200]}{RST}")
+             f"{WHITE}{status_label(status) if status != 'not connected' else status}{detail}{RST}{extra}")
+        shown = "ws" if spec.scope == "plugin" and spec.type == "ws" else spec.describe_target()[:100]
+        _out(f"      {DIM}{('host only: ' + _host_only(spec.url)) if spec.managed and spec.url else shown}{RST}")
         for w in (row["warnings"] if row else spec.config_warnings()):
             _out(f"      {GOLD}Warning: {w}{RST}")
     for name, defs in ctx.config.conflicts.items():
@@ -267,7 +274,7 @@ def _cmd_get(ctx: _Ctx, args: list[str]) -> None:
         f"{spec.scope} ({spec.source})" if spec.source else spec.scope)
     _out(f"    Scope: {where}")
     _out(f"    Status: {status_label(status)}")
-    if conn and conn.error and status not in ("connected", "disabled"):
+    if conn and conn.error and status not in ("connected", "disabled", "pending-approval", "rejected"):
         _out(f"    Issue: {conn.error[:300]}")
     _out(f"    Type: {spec.type}")
     if spec.type == "stdio":
@@ -279,11 +286,13 @@ def _cmd_get(ctx: _Ctx, args: list[str]) -> None:
             for k, v in spec.env.items():
                 _out(f"      {k}={'[REDACTED]' if redact else _show_value(k, v)}")
     else:
-        _out(f"    URL: {_host_only(spec.url) if spec.managed else spec.url}")
+        redact = spec.scope == "plugin" and spec.type == "ws"
+        _out(f"    URL: {'ws' if redact else _host_only(spec.url) if spec.managed else spec.url}")
         if spec.headers:
             _out("    Headers:")
             for k, v in spec.headers.items():
-                _out(f"      {k}{'' if spec.managed else ': ' + _show_value(k, v)}")
+                shown = ": [REDACTED]" if redact else "" if spec.managed else ": " + _show_value(k, v)
+                _out(f"      {k}{shown}")
         if spec.headers_helper:
             _out(f"    headersHelper: {spec.headers_helper}")
         if spec.oauth or spec.type in ("http", "sse"):
@@ -390,6 +399,10 @@ def _parse_add(tokens: list[str]) -> dict[str, Any]:
     return opts
 
 
+def args_named_transport(args: list[str]) -> bool:
+    return any(a in ("-t", "--transport") or a.startswith("--transport=") for a in args)
+
+
 def _client_secret(flag: bool) -> str | None:
     """--client-secret: MCP_CLIENT_SECRET when set, else a masked prompt (interactive only)."""
     if not flag:
@@ -428,6 +441,10 @@ def _cmd_add(ctx: _Ctx, args: list[str]) -> None:
         _err("usage: /mcp add <name> <command|url> ...")
         return
     transport = {"streamable-http": "http"}.get(o["transport"], o["transport"])
+    if transport == "ws" and args_named_transport(args):
+        _err("--transport does not accept ws. Add a WebSocket server with: "
+             "axon mcp add-json <name> '{\"type\":\"ws\",\"url\":\"wss://...\"}'")
+        return
     if transport not in ("stdio", "http", "sse", "ws"):
         _err(f"unknown transport '{o['transport']}' (use stdio, http or sse)")
         return
@@ -485,8 +502,8 @@ def _save_and_connect(ctx: _Ctx, name: str, raw: dict[str, Any], scope: str, *,
     for w in spec.config_warnings():
         _out(f"  {GOLD}Warning: {w}{RST}")
     winner = ctx.config.get_spec(name)
-    if winner is not None and winner.source != path:
-        _out(f"  {GOLD}Note: '{name}' is also defined in {winner.source}, which takes precedence.{RST}")
+    if winner is not None and winner.scope != scope:
+        _out(f"  {GOLD}Note: '{name}' is also defined in {winner.scope} scope, which takes precedence.{RST}")
     ctx.connect(name)
 
 
@@ -672,6 +689,12 @@ def _cmd_login(ctx: _Ctx, args: list[str]) -> None:
     conn = ctx.bridge.connections.get(spec.name)
     if conn is not None:
         mgr.challenge = dict(conn.auth_challenge)
+    if spec.headers_helper and helper_allowed(spec, ctx.workspace):  # a proxy in front of the server may need them
+        try:
+            mgr.helper_headers = run_headers_helper(spec, ctx.workspace)
+        except HeadersHelperError as e:
+            _err(str(e))
+            return
     manual = no_browser or _no_browser_available()
     paste = None
     if manual or _interactive():
@@ -702,7 +725,7 @@ def _cmd_logout(ctx: _Ctx, args: list[str]) -> None:
 
 def _cmd_approve(ctx: _Ctx, args: list[str]) -> None:
     specs = ctx.config.load_specs()
-    project = {n: s for n, s in specs.items() if s.scope == "project"}
+    project = {n: s for n, s in specs.items() if s.needs_approval}
     if not project:
         _out(f"  {SLATE}This project has no .mcp.json servers.{RST}")
         return
@@ -726,6 +749,8 @@ def _cmd_approve(ctx: _Ctx, args: list[str]) -> None:
             return
         approval.review(ctx.workspace, specs, out=_out)
         names = [n for n, s in specs.items() if s.approval == "approved" and s.scope == "project"]
+    if args and _interactive():
+        approval.ask_helper_trust(ctx.workspace, [project[n] for n in names if n in project], out=_out)
     for n in names:
         sp = ctx.config.get_spec(n)
         if sp is not None and not sp.disabled and sp.approval == "approved":
@@ -752,32 +777,53 @@ def _cmd_serve(ctx: _Ctx, _args: list[str]) -> None:
     serve_stdio(ctx.workspace)
 
 
+def _select_servers(names: list[str]) -> list[str]:
+    """Which Claude Desktop servers to import: a checklist in a terminal, all of them otherwise."""
+    if not _interactive() or not names:
+        return names
+    _out(f"\n  {GOLD}Claude Desktop servers{RST}")
+    for i, name in enumerate(names, 1):
+        _out(f"    {i}. {name}")
+    try:
+        answer = input("  Import which? Numbers separated by spaces, Enter for all, n for none: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return []
+    if not answer:
+        return names
+    if answer in ("n", "none"):
+        return []
+    picked = [names[int(tok) - 1] for tok in answer.replace(",", " ").split()
+              if tok.isdigit() and 0 < int(tok) <= len(names)]
+    return list(dict.fromkeys(picked))
+
+
 def _cmd_add_from_desktop(ctx: _Ctx, args: list[str]) -> None:
     path = ctx.config.find_claude_desktop_config()
     if path is None:
         _err("Claude Desktop's configuration was not found (macOS, Windows and WSL only).")
         return
     scope = "user"
-    if "--scope" in args and args.index("--scope") + 1 < len(args):
-        try:
-            scope = normalize_scope(args[args.index("--scope") + 1])
-        except ValueError as e:
-            _err(str(e))
-            return
-    from axon.mcp.config import _read_json, _servers_in
+    for flag in ("--scope", "-s"):
+        if flag in args and args.index(flag) + 1 < len(args):
+            try:
+                scope = normalize_scope(args[args.index(flag) + 1])
+            except ValueError as e:
+                _err(str(e))
+                return
+    from axon.mcp.config import _read_json, _servers_in, repair_type
     existing = set(ctx.config.load_specs())
     added = 0
-    for name, raw in _servers_in(_read_json(path)).items():
-        if not isinstance(raw, dict):
-            continue
-        if not valid_server_name(str(name)):
+    servers = {str(k): v for k, v in _servers_in(_read_json(path)).items() if isinstance(v, dict)}
+    for name in _select_servers(list(servers)):
+        raw = servers[name]
+        if not valid_server_name(name):
             _err(f"skipped '{name}': names can contain only letters, numbers, hyphens and underscores")
             continue
-        final, n = str(name), 1
+        final, n = name, 1
         while final in existing:
             final, n = f"{name}_{n}", n + 1
         try:
-            ctx.config.add_raw(final, raw, scope)
+            ctx.config.add_raw(final, repair_type(raw), scope)
         except (ValueError, OSError) as e:
             _err(f"skipped '{name}': {e}")
             continue
@@ -1218,11 +1264,13 @@ def handle_mcp_command(agent: "Agent", arg: "str | list[str]" = "") -> None:
     ctx.cli = cli
     if cli:
         before = state._session["interactive"]
-        if before is None:  # `axon mcp ...` from a terminal shows pending approvals like the REPL would
+        if before is None:  # `axon mcp ...` from a terminal can ask questions like the REPL would
             state.set_interactive(state.terminal_attached())
+        state.set_listing(True)     # with or without a terminal: an unapproved server stays unstarted
         try:
             _dispatch(ctx, [str(a) for a in arg])
         finally:
+            state.set_listing(False)
             state.set_interactive(before)
             try:  # `axon mcp ...` ends here: do not leave server processes behind
                 ctx.bridge.disconnect_all()

@@ -4,7 +4,7 @@ MCP server configuration: discovery, merging, variable expansion and persistence
 Config files (later entries override earlier ones, per server name):
   0. .mcp.json of every enabled plugin  scope "plugin" (lowest; ${AXON_PLUGIN_ROOT} /
      ${CLAUDE_PLUGIN_ROOT} expand to the plugin directory)
-  1. ~/.axon/mcp.json             scope "user"    (alias "global")
+  1. ~/.axon/mcp.json, top level  scope "user"    (alias "global")
   2. <workspace>/.mcp.json        scope "project" (Claude Code compatible)
   3. <workspace>/.axon/mcp.json   scope "local"
 
@@ -20,6 +20,7 @@ project (.mcp.json) servers wait for your approval in an interactive session (:m
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -32,6 +33,8 @@ from axon.mcp.catalog import get_mcp_preset
 
 if TYPE_CHECKING:
     from axon.mcp.policy import McpPolicy
+
+logger = logging.getLogger(__name__)
 
 SCOPES = ("user", "project", "local")
 _SCOPE_ALIASES = {"global": "user", "user": "user", "project": "project", "local": "local",
@@ -48,7 +51,11 @@ CREDENTIAL_VARS = frozenset({
     "CEREBRAS_API_KEY", "AGENTROUTER_API_KEY", "AZURE_OPENAI_API_KEY",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
     "GOOGLE_APPLICATION_CREDENTIALS", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NPM_TOKEN",
+    "https_proxy", "http_proxy", "all_proxy", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_FOUNDRY_API_KEY",
+    "AWS_PROFILE", "AZURE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "PYPI_TOKEN", "NODE_AUTH_TOKEN",
 })
+# A provider base URL still expands into a remote server's url, unless its value embeds a credential.
+_BASE_URL_VARS = frozenset({"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "AXON_BASE_URL"})
 RESERVED_NAMES = frozenset({"workspace", "claude-in-chrome", "computer-use", "claude preview",
                             "claude browser"})
 
@@ -74,6 +81,8 @@ def expand_vars(value: str, env: dict[str, str] | None = None, mask: frozenset[s
         val = source.get(m.group(1))
         if val is None or (val == "" and m.group(2) is not None):
             return m.group(2) if m.group(2) is not None else ""
+        if mask and m.group(1) in _BASE_URL_VARS and urlsplit(val).username:
+            return ""
         return val
 
     return _VAR_RE.sub(_sub, value)
@@ -92,6 +101,14 @@ def valid_server_name(name: str) -> bool:
 
 def is_placeholder(value: str) -> bool:
     return bool(_PLACEHOLDER_RE.match(str(value).strip()))
+
+
+def repair_type(raw: dict[str, Any]) -> dict[str, Any]:
+    """An entry written for another client: give a ``url`` with no ``type`` the type its URL implies. Only for
+    importing configuration from other tools (Axon's own files must say ``type``, as the docs require)."""
+    if (raw.get("url") or raw.get("serverUrl")) and not (raw.get("type") or raw.get("transport")):
+        return {**raw, "type": infer_type(raw)}
+    return raw
 
 
 def infer_type(raw: dict[str, Any]) -> str:
@@ -148,7 +165,7 @@ class ServerSpec:
             timeout = float(timeout)
         except (TypeError, ValueError):
             timeout, explicit = DEFAULT_TIMEOUT, False
-        if timeout > 1000:  # Claude-Code style milliseconds
+        if timeout > 1000:  # milliseconds (Claude Code style); up to 1000 is seconds
             timeout = timeout / 1000.0
         args = raw.get("args") or []
         if isinstance(args, str):
@@ -219,6 +236,11 @@ class ServerSpec:
         return None
 
     @property
+    def needs_approval(self) -> bool:
+        """Defined by a file a repository can deliver, so it waits for your consent."""
+        return self.scope == "project"
+
+    @property
     def remote(self) -> bool:
         return self.type != "stdio"
 
@@ -232,13 +254,14 @@ class ServerSpec:
     def resolved(self, project_dir: Path | str | None = None) -> "ServerSpec":
         """Copy with ${VAR} references expanded. ``project_dir`` makes ${AXON_PROJECT_DIR} /
         ${CLAUDE_PROJECT_DIR} resolve to the project root."""
-        env = {k: expand_vars(v) for k, v in self.env.items()}
         lookup = dict(os.environ)
         if project_dir:
             lookup.setdefault("AXON_PROJECT_DIR", str(project_dir))
             lookup.setdefault("CLAUDE_PROJECT_DIR", str(project_dir))
+        env = {k: expand_vars(v, lookup) for k, v in self.env.items()}
         lookup.update(env)
         mask = self._mask()
+        _log_masked(self, lookup)
         out = ServerSpec(
             name=self.name, type=self.type,
             command=expand_vars(self.command, lookup),
@@ -308,6 +331,17 @@ class ServerSpec:
         if self.type == "stdio":
             return " ".join([self.command, *self.args]).strip()
         return self.url
+
+
+def _log_masked(spec: "ServerSpec", env: dict[str, str]) -> None:
+    """A debug line when a remote server's url/headers name a credential variable you have set."""
+    if not spec.remote or not logger.isEnabledFor(logging.DEBUG):
+        return
+    for text in [spec.url, *spec.headers.values()]:
+        for m in _VAR_RE.finditer(text):
+            if m.group(1) in CREDENTIAL_VARS and env.get(m.group(1)):
+                logger.debug("mcp %s: credential variable %s is never expanded toward a remote server",
+                             spec.name, m.group(1))
 
 
 def normalize_url(url: str) -> str:
@@ -380,7 +414,7 @@ class MCPConfig:
         for plug in plugins:
             if plug.scope == "project" and not project_ok:
                 continue
-            for name, raw in plugin_mcp_servers(plug).items():
+            for name, raw in plugin_mcp_servers(plug, self.workspace).items():
                 out.append((plug.path / ".mcp.json", name, raw))
         return out
 
@@ -450,11 +484,11 @@ class MCPConfig:
                 del merged[name]
 
         off = mcp_state.disabled_servers(self.workspace)
-        interactive = mcp_state.is_interactive()
+        interactive = mcp_state.approval_required()
         for name, spec in merged.items():
             if name in off and not spec.disabled:
                 spec.disabled, spec.disabled_by = True, "project"
-            if spec.scope == "project":
+            if spec.needs_approval:
                 verdict = settings_approval(self.workspace, name) or mcp_state.project_choice(self.workspace, name)
                 if verdict is None:
                     verdict = "pending" if interactive else "approved"
@@ -604,6 +638,9 @@ class MCPConfig:
             candidate = Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
         else:
             candidate = Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+            if not candidate.is_file():  # WSL: the app lives on the Windows side
+                for found in sorted(Path("/mnt/c/Users").glob("*/AppData/Roaming/Claude/claude_desktop_config.json")):
+                    return found
         return candidate if candidate and candidate.is_file() else None
 
     def find_all_external_mcp_configs(self) -> list[tuple[str, Path]]:
@@ -649,7 +686,7 @@ class MCPConfig:
                 if name in existing or not isinstance(raw, dict):
                     continue
                 try:
-                    spec = ServerSpec.from_dict(str(name), raw)
+                    spec = ServerSpec.from_dict(str(name), repair_type(raw))
                     if spec.validate():
                         continue
                     self.save_spec(spec, scope)

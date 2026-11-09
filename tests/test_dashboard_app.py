@@ -263,12 +263,13 @@ def test_chat_turn_events_approval_and_replayable_log(c, env, llm):
 
 
 def test_deny_never_runs_the_tool_and_always_grants_the_session(c, env, llm):
-    llm.enqueue([{"tool": "Write", "args": {"path": "no.txt", "content": "x"}}], [{"text": "ok denied"}])
+    llm.enqueue([{"tool": "Write", "args": {"path": "no.txt", "content": "x"}}])      # a plain No ends the turn: no second call
     sid = json.loads(c.post("/api/chat/send", {"text": "write no.txt"})[2])["session"]
     rt = c.srv.runtime(sid, create=False)
     c.post("/api/chat/approval", {"session": sid, "id": wait_for(lambda: list(rt.pending))[0], "choice": "deny"})
     wait_for(lambda: not rt.busy)
     assert not (env.ws / "no.txt").exists()
+    assert len(llm.completion_requests()) == 1 and rt.last_result["stop"] == "declined" and not rt.last_result["is_error"]
     llm.enqueue([{"tool": "Write", "args": {"path": "yes.txt", "content": "y"}}], [{"text": "wrote"}])
     c.post("/api/chat/send", {"session": sid, "text": "now yes.txt"})
     c.post("/api/chat/approval", {"session": sid, "id": wait_for(lambda: list(rt.pending))[0], "choice": "always"})

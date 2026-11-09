@@ -84,3 +84,9 @@ def test_browser_css_carries_the_same_colours():
 def test_svg_uses_the_theme_variables():
     assert "var(--axon-primary" in brand.LOGO_SVG and "var(--axon-accent" in brand.LOGO_SVG
     assert "<script" not in brand.LOGO_SVG
+
+
+def test_axon_ascii_also_switches_the_logo(monkeypatch):
+    monkeypatch.setenv("AXON_ASCII", "1")
+    assert theme.supports_unicode() is False
+    assert all(theme.strip_ansi(r).isascii() for r in brand.logo_rows())

@@ -119,19 +119,18 @@ def test_monitor_header_counts_every_status():
     assert "◆ Subagents" in out[0]
     assert "▶ 1 running" in out[0] and "✓ 1 done" in out[0] and "✗ 2 failed" in out[0] and "! 1 step limit" in out[0]
     assert "12.3k tok" in out[0]
-    assert "4/5 finished" in out[1]
 
 
-def test_monitor_overview_shows_full_failure_reason_wrapped():
-    text = "\n".join(_plain(build_monitor_frame(0, _fleet(), None, "", 100)))
+def test_monitor_list_shows_each_outcome_and_the_full_reason_of_the_selected_failure():
+    text = "\n".join(_plain(build_monitor_frame(0, _fleet(), None, "", 100, selected=0)))
     flat = " ".join(text.split())
-    assert "FINAL-WORD" in flat  # the whole reason, not cut at 60 chars
+    assert "FINAL-WORD" in flat  # the whole reason of the selected row, not cut at the column
     assert "AgentRouter rejected the request as invalid (HTTP 500)" in flat
     assert "Read src/axon/ui/render.py" in text  # running activity
-    assert "⟳ 6 retries" in text and "⟳ 2 retries" in text
     assert "Found 4 test files." in text  # first body line of the result, not the heading
     assert "stopped at the step limit" in text
-    assert "explore · deepseek-v4-flash" in text
+    other = "\n".join(_plain(build_monitor_frame(0, _fleet(), None, "", 100, selected=3)))
+    assert "FINAL-WORD" not in other  # only the selected row gets the extra lines
 
 
 def test_monitor_detail_view_renders_each_timeline_kind():
@@ -161,25 +160,9 @@ def test_monitor_detail_falls_back_to_live_logs_and_caps_long_prompts():
     t = _mk(1, "Old task", "running", live_logs=["legacy log line"], prompt="\n".join(f"row {i}" for i in range(20)))
     text = "\n".join(_plain(build_monitor_frame(1, [t], None, "", 88)))
     assert "│ legacy log line" in text
-    assert "row 6" in text and "row 7" not in text and "… 13 more lines" in text
-
-
-def test_monitor_tab_bar_fits_width_60_with_nine_tasks():
-    statuses = ["running", "error", "completed", "exhausted", "pending", "running", "error", "completed", "cancelled"]
-    tasks = [_mk(i, f"Inspect a fairly long subagent title {i}", s, error_msg=_LONG_ERR if s == "error" else None)
-             for i, s in enumerate(statuses, 1)]
-    for view in (0, 5, "Q"):
-        lines = build_monitor_frame(view, tasks, None, "", 60)
-        tab = strip_ansi(lines[2])
-        for i, glyph in zip(range(1, 10), "▶✗✓!○▶✗✓⊘"):
-            assert f"{i}{glyph}" in tab or f"{i} {glyph}" in tab
-        assert plat.str_width(lines[2]) <= 60
-
-
-def test_monitor_selected_tab_is_bracketed_and_titles_distinct():
-    out = _plain(build_monitor_frame(2, _fleet(), None, "", 120))
-    assert "[2 ▶" in out[2] and "[0 Main]" not in out[2]
-    assert "subagent" in out[2] and "result" in out[2]  # shared leading verb "Inspect" dropped in tabs
+    assert "row 1" in text and "row 2" not in text and "… 18 more lines" in text
+    full = "\n".join(_plain(build_monitor_frame(1, [t], None, "", 88, expanded=True, height=60)))
+    assert "row 19" in full
 
 
 def test_monitor_every_line_fits_width():
@@ -191,10 +174,10 @@ def test_monitor_every_line_fits_width():
                 assert plat.str_width(ln) <= width, (width, view, strip_ansi(ln))
 
 
-def test_monitor_compacts_many_tasks_to_two_lines_each():
-    tasks = [_mk(i, f"Task {i}", "running", activity=f"Read f{i}.py") for i in range(1, 10)]
-    out = _plain(build_monitor_frame(0, tasks, None, "", 100))
-    rules = [i for i, ln in enumerate(out) if ln.strip() and set(ln.strip()) == {"─"}]
-    body = out[rules[0] + 1:rules[1]]
-    assert len(body) == 18
-    assert any("Read f9.py" in ln for ln in body)
+def test_monitor_many_tasks_scroll_with_the_selection_inside_the_window():
+    tasks = [_mk(i, f"Task {i}", "running", activity=f"Read f{i}.py") for i in range(1, 30)]
+    out = _plain(build_monitor_frame(0, tasks, None, "", 100, selected=20, height=16))
+    assert len(out) <= 16
+    picked = next(ln for ln in out if "❯" in ln)
+    assert "Task 21" in picked and "Read f21.py" in picked
+    assert any("above" in ln and "below" in ln for ln in out)

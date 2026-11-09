@@ -181,7 +181,7 @@ def test_end_of_turn_table_and_totals_follow_the_final_answer(capsys):
 
 
 def test_stopped_turn_still_shows_what_was_used(capsys):
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     _step(r, 1, "tool_use")
     _search_call(r, _search_output(1))
     _step(r, 2, "end_turn", end=False)               # interrupted while the model was writing
@@ -195,10 +195,10 @@ def test_stopped_turn_still_shows_what_was_used(capsys):
     assert out.index("Tool use works by") < out.index("used so far")
 
 
-def test_compact_level_is_unchanged(capsys):
+def test_compact_level_leaves_the_accounting_out(capsys):
     _two_step_turn("compact")
     out = _plain(capsys)
-    assert "● WebSearch(" in out and "results via DuckDuckGo" in out
+    assert "WebSearch  " in out and "results via DuckDuckGo" in out
     for absent in ("exact call", "exact result", "usage by step", "replied in", "% of 128k", "Snippet number 1"):
         assert absent not in out
 

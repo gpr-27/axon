@@ -276,9 +276,11 @@ class InFlightInputListener:
                 self._footer.poke()          # repaint on the footer's own thread: never stall key reading
 
     def _handle_key(self, key: str) -> None:
+        from axon.ui.keybindings import translate
         footer = self._footer
-        if footer is not None and footer.nav(key, not self._ed.buf):
+        if footer is not None and footer.nav(translate("Footer", key) or key, not self._ed.buf):
             return
+        key = translate("Task", key) or key
         if self._pending_ctrl_x:
             self._pending_ctrl_x = False
             if key == "ctrl-s":
@@ -286,6 +288,16 @@ class InFlightInputListener:
                 return
             if key == "ctrl-k":
                 self._stop_background_agents()
+                return
+            if key == "ctrl-b":
+                self._background_running()
+                return
+            if key == "enter":              # chat:queueSubmit: wait its turn, never interrupt
+                with self._lock:
+                    line = self._ed.buf.strip()
+                    self._ed.set_text("")
+                if line:
+                    self._submit_line(line)
                 return
         elif key == "ctrl-x":
             self._pending_ctrl_x = True
@@ -304,15 +316,7 @@ class InFlightInputListener:
             self._interrupt_turn()
             return
         if key == "ctrl-b":
-            background = getattr(self.agent, "background_current_turn", None)
-            if callable(background):
-                try:
-                    background()
-                    _say(f"\n  {CYAN}⇢ Moved the running task to the background.{RST}\n")
-                except Exception as e:
-                    _say(f"\n  {ROSE}Could not background the task: {e}{RST}\n")
-            else:
-                _say(f"\n  {SLATE}Backgrounding is not available for this turn.{RST}\n")
+            self._background_running()
             return
         if key.startswith(plat.PASTE_PREFIX):
             from axon.ui.input import strip_paste_controls
@@ -364,6 +368,17 @@ class InFlightInputListener:
                 ed.insert(key)
         if line:
             self._submit_line(line)
+
+    def _background_running(self) -> None:
+        background = getattr(self.agent, "background_current_turn", None)
+        if callable(background):
+            try:
+                background()
+                _say(f"\n  {CYAN}⇢ Moved the running task to the background.{RST}\n")
+            except Exception as e:
+                _say(f"\n  {ROSE}Could not background the task: {e}{RST}\n")
+        else:
+            _say(f"\n  {SLATE}Backgrounding is not available for this turn.{RST}\n")
 
     def _pull_back_queued(self) -> None:
         """Up on an empty draft: take the most recently queued message back into the editor."""
@@ -440,8 +455,12 @@ class InFlightInputListener:
         target = footer.reply_to if footer is not None and not line.startswith("/") else None
         mgr = getattr(self.agent, "subagents", None)
         if target and mgr is not None and hasattr(mgr, "send"):
-            task = mgr.send(target, line)
-            footer.notice(f"sent to {target}" if task is not None else f"{target} has finished", 2.0)
+            try:
+                from axon.agent.subagent import user_message
+                kind, _task = user_message(self.agent, target, line)
+                footer.notice(f"sent to {target}" if kind == "queued" else f"resumed {target}", 2.0)
+            except Exception as e:  # noqa: BLE001 - ToolError says why it cannot be delivered
+                footer.notice(f"not sent: {e}", 4.0)
             return
         if is_instant_command(line):
             threading.Thread(target=self._run_instant, args=(line,), daemon=True, name="InstantCommand").start()

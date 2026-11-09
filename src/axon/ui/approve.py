@@ -27,6 +27,76 @@ _RULE_TOOLS = ("Bash", "Git", "WebFetch", "Http")
 # Letter shortcuts accepted by the picker (and the plain-text fallback).
 _KEYS = {"y": "once", "a": "always", "n": "deny"}
 
+# Answers that can carry a comment for the model, and the prompts that do not offer the field.
+_COMMENT_ANSWERS = {"once": "Yes", "deny": "No"}
+_NO_COMMENT_TOOLS = frozenset({"WebFetch", "Http"})
+_COMMENT_MAX = 4000
+
+
+class Answer(str):
+    """An approval answer with the note the person typed. It compares as the plain answer, so every caller and
+    approver in between keeps working; the agent loop reads ``comment``."""
+    comment: str
+
+    def __new__(cls, value: str, comment: str = "") -> "Answer":
+        self = super().__new__(cls, value)
+        self.comment = comment
+        return self
+
+
+class _CommentField:
+    """The comment field of the permission prompt. Tab on Yes or No opens it; Enter answers that option with the
+    comment; Tab or Shift+Tab closes it and keeps the text for when that option is answered. Open, it takes every key,
+    so nothing typed into it can answer the prompt by accident; Esc declines, as it always does here."""
+
+    def __init__(self, footer: str) -> None:
+        self.footer = footer
+        self.open_on: str | None = None
+        self.notes: dict[str, str] = {}
+
+    def _show(self, sel: Selector) -> None:
+        if self.open_on is None:
+            sel._prompt = None
+            sel.footer = self.footer
+            return
+        room = max(10, plat.term_size()[0] - 30)
+        sel._prompt = (f"{GOLD}Comment on {_COMMENT_ANSWERS[self.open_on]}:{RST} ", self.notes.get(self.open_on, "")[-room:])
+        sel.footer = "enter answer with the comment · tab close, keep the text · esc deny"
+
+    def extra_lines(self, sel: Selector) -> list[str]:
+        return [f"    {SLATE}Comment on {_COMMENT_ANSWERS[k]}: {plat.truncate_ansi(_clean(v), max(20, plat.term_size()[0] - 24))}{RST}"
+                for k, v in self.notes.items() if v.strip() and k != self.open_on]
+
+    def on_key(self, sel: Selector, key: str) -> bool:
+        """True when the key belongs to the field (the Tab that opens it included)."""
+        if self.open_on is None:
+            current = sel.current()
+            if key != "tab":
+                return False
+            if current is not None and current.value in _COMMENT_ANSWERS:
+                self.open_on = current.value
+                self._show(sel)
+            return True
+        if key in ("esc", "ctrl-c"):
+            self.notes.clear()
+            sel._prompt = None
+            sel.finish(None)
+        elif key == "enter":
+            sel._prompt = None
+            sel.finish(sel.current())
+        elif key in ("tab", "shift-tab"):
+            self.open_on = None
+        elif key == "backspace":
+            self.notes[self.open_on] = self.notes.get(self.open_on, "")[:-1]
+        elif key == "ctrl-u":
+            self.notes[self.open_on] = ""
+        else:
+            text = sanitize(key[len(plat.PASTE_PREFIX):].replace("\n", " ")) if key.startswith(plat.PASTE_PREFIX) else key
+            if key.startswith(plat.PASTE_PREFIX) or (len(key) == 1 and key >= " "):
+                self.notes[self.open_on] = (self.notes.get(self.open_on, "") + text)[:_COMMENT_MAX]
+        self._show(sel)
+        return True
+
 
 def narrow_rule_label(tool_name: str, args: dict[str, Any]) -> str:
     """The exact rule a "rule" approval would save, e.g. ``Bash(git status:*)`` ('' when unavailable)."""
@@ -89,6 +159,7 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
         import contextlib
         pause_spinners = contextlib.nullcontext  # type: ignore[assignment]
 
+    comment = ""
     tool_name_s = _clean(tool_name)
     header = [f"  {GOLD}{BOLD}⚠ Allow {tool_name_s}?{RST}", *_detail_lines(tool_name, args, reason), ""]
     rule = narrow_rule_label(tool_name, args)
@@ -105,7 +176,14 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
                 items.append(SelectItem(f"Yes, always allow {_clean(rule)}", value="rule",
                                         hint="saved for this project (.axon/settings.local.json)"))
 
+            comments = None if tool_name in _NO_COMMENT_TOOLS else _CommentField(
+                f"↑↓ move · enter choose · tab comment · 1-{len(items)} quick pick · y yes · a session · n/esc deny")
+            footer = comments.footer if comments is not None else (
+                f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny")
+
             def on_key(sel: Selector, key: str) -> bool:
+                if comments is not None and comments.on_key(sel, key):
+                    return True
                 value = _KEYS.get(key.lower()) if len(key) == 1 else None
                 if value is None:
                     return False
@@ -120,21 +198,31 @@ def ask_approval(tool_name: str, args: dict[str, Any], reason: str = "") -> Appr
             time.sleep(_SETTLE_SECONDS)
             plat.flush_input()
             with decision_help.shown(explain):
-                chosen = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key,
-                                  footer=f"↑↓ move · enter choose · 1-{len(items)} quick pick · y yes · a session · n/esc deny").run()
+                selector = Selector(items, title="Permission", subtitle=tool_name_s, on_key=on_key, footer=footer,
+                                    extra_lines=comments.extra_lines if comments is not None else None)
+                selector.key_context = "Confirmation"
+                chosen = selector.run()
             result: ApprovalResult = chosen.value if isinstance(chosen, SelectItem) else "deny"
+            if comments is not None and isinstance(chosen, SelectItem):
+                comment = comments.notes.get(result, "").strip()
         else:
             print("\n" + "\n".join(header))
             decision_help.show(explain)
             print(f"  {MINT}[y]{RST} yes (this call)   {GOLD}[a]{RST} every {tool_name_s} call this session   {ROSE}[n]{RST} no")
+            if tool_name not in _NO_COMMENT_TOOLS:
+                print(f"  {SLATE}to add a note for the model: y: use staging   or   n: not on main{RST}")
             try:
-                answer = input(f"  {BOLD}› {RST}").strip().lower()
+                typed = input(f"  {BOLD}› {RST}").strip()
             except (KeyboardInterrupt, EOFError):
-                answer = "n"
+                typed = "n"
+            answer, _, note = typed.partition(":")
+            answer = answer.strip().lower()
             result = "once" if answer in ("y", "yes") else ("always" if answer in ("a", "always") else "deny")
+            if result != "always" and tool_name not in _NO_COMMENT_TOOLS:    # the same options take a note as in the picker
+                comment = " ".join(note.split())
     label = {"once": f"{MINT}✓ Allowed once",
              "always": f"{GOLD}✓ Allowed for this session (all {tool_name_s} calls)",
              "rule": f"{GOLD}✓ Allowed {_clean(rule)} for this project",
              "deny": f"{ROSE}✗ Denied"}[result]
-    print(f"  {label}{RST}\n")
-    return result
+    print(f"  {label}{RST}" + (f"{SLATE} · comment sent to the model: {_clean(comment)}{RST}" if comment else "") + "\n")
+    return Answer(result, comment) if comment else result

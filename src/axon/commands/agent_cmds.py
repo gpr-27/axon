@@ -483,13 +483,188 @@ def _open_subagent(agent: Any, task: Any, parent_id: str) -> None:
     print()
 
 
-@command("subagents", category=CAT, description="Open a subagent's transcript from this session as a chat",
-         aliases=("sub", "subagent"), usage="/subagents [n | main | queue]\n/subagents edit <n>   edit a finished subagent's report (the main conversation sees the edit)\n/tell <n> <message>   talk to a running subagent")
+SUBAGENTS_USAGE = """/subagents                       the agent list: ↑↓ select, ⏎ open, x stop or clear, esc back
+/subagents <name|n>              open its live transcript; what you type there goes to that agent
+/subagents send <name|n> <text>  message it: a running agent reads it before its next step, a finished one resumes
+/subagents stop <name|n>         stop it
+/subagents info <name|n>         type, model, cost, what it was asked, its report, permission decisions, what is recorded
+/subagents log <name|n>          print its whole transcript into the scrollback
+/subagents chat <n>              continue its transcript as your own chat (/main returns)
+/subagents edit <n>              edit a finished subagent's report (the main conversation sees the edit)
+/subagents main | queue"""
+
+
+def _agent_list_table(tasks: list[Any]) -> None:
+    from axon.ui.subagent_monitor import agent_table
+    from axon.ui.theme import term_width
+    for line in agent_table(tasks, max(50, min(160, term_width() - 2))):
+        print(line)
+    print()
+
+
+def _subagent_send(agent: Any, query: str, text: str) -> CommandResult:
+    from axon.agent.subagent import user_message
+    from axon.errors import ToolError
+    try:
+        kind, task = user_message(agent, query, text)
+    except ToolError as e:
+        err(str(e))
+        return CommandResult(handled=True, success=False)
+    ok(f"Sent to {task.id} ({clip(task.title, 40)}): it reads this before its next step" if kind == "queued"
+       else f"Resumed {task.id} ({clip(task.title, 40)}) with your message: its report goes to the main agent")
+    return CommandResult(handled=True)
+
+
+def _subagent_stop(agent: Any, query: str) -> CommandResult:
+    mgr = getattr(agent, "subagents", None)
+    task = mgr.get_task(query) if mgr is not None else None
+    if task is None:
+        err(f"No subagent '{query}'.")
+        return CommandResult(handled=True, success=False)
+    if task.status != "running":
+        info(f"{task.id} is not running ({task.status}).")
+        return CommandResult(handled=True)
+    if not mgr.cancel(task.id):
+        err(f"{task.id} cannot be stopped right now.")
+        return CommandResult(handled=True, success=False)
+    ok(f"Stopping {task.id} ({clip(task.title, 50)})")
+    return CommandResult(handled=True)
+
+
+def _subagent_log(task: Any) -> None:
+    from axon.ui.subagent_monitor import _detail_head, transcript_lines
+    from axon.ui.theme import term_width
+    width = max(50, min(160, term_width() - 2))
+    for line in _detail_head(task, width, time.time(), width - 13, True) + transcript_lines(task, width, expanded=True):
+        print(line)
+    print()
+
+
+def _subagent_records(agent: Any, parent_id: str, index: int) -> tuple[dict[str, int], list[dict[str, Any]], Path | None]:
+    """(record counts, permission decisions, file) of a subagent's transcript, as far as it was saved."""
+    from axon.session.store import iter_records
+    counts: dict[str, int] = {}
+    perms: list[dict[str, Any]] = []
+    try:
+        path = Path(agent.session._file(f"{parent_id}_sub_{index}"))
+    except Exception:
+        return counts, perms, None
+    if not path.exists():
+        return counts, perms, path
+    names: dict[str, str] = {}
+    for rec in iter_records(path):
+        kind, data = str(rec.get("type")), rec.get("data")
+        counts[kind] = counts.get(kind, 0) + 1
+        if kind == "assistant_turn" and isinstance(data, dict):
+            for tu in data.get("tool_uses") or []:
+                if isinstance(tu, dict):
+                    names[str(tu.get("id"))] = str(tu.get("name") or "")
+        elif kind == "permission" and isinstance(data, dict):
+            perms.append({"tool": str(data.get("tool") or names.get(str(data.get("tool_use_id")), "")),
+                          "outcome": str(data.get("outcome") or ""), "source": str(data.get("source") or ""),
+                          "reason": str(data.get("reason") or "")})
+    return counts, perms, path
+
+
+def _parent_step(agent: Any, call_id: str) -> int | None:
+    """Which step of the parent's conversation made this Task call (None when the call id is unknown)."""
+    if not call_id:
+        return None
+    steps = 0
+    for m in getattr(getattr(agent, "conversation", None), "messages", None) or []:
+        if m.get("role") != "assistant":
+            continue
+        steps += 1
+        content = m.get("content")
+        ids = [(b.get("id") if isinstance(b, dict) else getattr(b, "id", None)) for b in content] if isinstance(content, list) else []
+        ids += [c.get("id") for c in m.get("tool_calls") or [] if isinstance(c, dict)]
+        if call_id in ids:
+            return steps
+    return None
+
+
+def _subagent_info(agent: Any, parent_id: str, t: Any) -> None:
+    from axon.ui.subagent_monitor import _clock, _elapsed, _one_line
+    header(f"Subagent {t.id}" + (f" · {t.name}" if t.name else ""), clip(t.title, 70))
+    kv("Status", t.status + (f" · {t.error_msg}" if t.error_msg else ""))
+    kv("Type", t.agent_type)
+    kv("Model", t.model or "not recorded")
+    kv("Runs", str(t.runs) + (" · in the background" if t.background else ""))
+    kv("Steps", f"{t.steps} of {t.max_steps}")
+    kv("Tool calls", str(t.tool_calls))
+    kv("Tokens", f"{fmt_tokens(t.tokens_consumed)} ({fmt_tokens(t.input_tokens)} in · {fmt_tokens(t.output_tokens)} out)")
+    kv("Cost", fmt_usd(t.cost) if t.cost else "not recorded")
+    kv("Time", _clock(_elapsed(t, time.time())))
+    if t.isolation:
+        kv("Isolation", t.isolation)
+    step = _parent_step(agent, t.call_id)
+    kv("Started by", f"Task call in step {step} of the main session" if step else "not recorded")
+    if t.worktree_note:
+        kv("Worktree", _one_line(t.worktree_note))
+    section("Task given", CYAN)
+    print(f"    {WHITE}{t.prompt or 'not recorded'}{RST}")
+    if t.result_text:
+        section("Final report", MINT)
+        print(f"    {WHITE}{t.result_text}{RST}")
+    counts, perms, path = _subagent_records(agent, parent_id, t.index)
+    section(f"Permission decisions ({len(perms)})", GOLD)
+    for p in perms[:100]:
+        print(f"    {WHITE}{p['tool'] or 'tool'}{RST} {p['outcome']} {SLATE}{' · '.join(x for x in (p['source'], p['reason'][:120]) if x)}{RST}")
+    if not perms:
+        print(f"    {SLATE}No permission decision was recorded for this subagent.{RST}")
+    section("What is recorded", SLATE)
+    print(f"    {SLATE}Saved in its transcript: {', '.join(f'{k} ×{v}' for k, v in counts.items()) or 'nothing yet'}.{RST}")
+    if path is not None:
+        print(f"    {SLATE}{path}{RST}")
+    try:
+        from axon.features.dash_subagents import NOT_RECORDED
+        for line in NOT_RECORDED:
+            print(f"    {DARK_SLATE}Not recorded: {line}{RST}")
+    except Exception:
+        pass
+    print()
+
+
+@command("subagents", category=CAT, description="List subagents, open their live transcripts, message and stop them",
+         aliases=("sub", "subagent"), usage=SUBAGENTS_USAGE)
 def handle_subagents(agent: Any, arg: str) -> CommandResult:
     curr_id = agent.session.active_session_id
     parent_id = curr_id.rsplit("_sub_", 1)[0]
     tasks = _parent_tasks(agent, curr_id, parent_id)
     a = arg.strip()
+    words = a.split(maxsplit=2)
+    verb = words[0].lower() if words else ""
+    if verb == "send":
+        if len(words) < 3:
+            usage("/subagents send <name|n> <message>")
+            return CommandResult(handled=True)
+        return _subagent_send(agent, words[1], words[2])
+    if verb == "stop":
+        if len(words) < 2:
+            usage("/subagents stop <name|n>")
+            return CommandResult(handled=True)
+        return _subagent_stop(agent, words[1])
+    if verb in ("info", "log") and len(words) > 1:
+        mgr = getattr(agent, "subagents", None)
+        found = mgr.get_task(words[1]) if mgr is not None else None
+        if found is None:
+            err(f"Subagent '{words[1]}' not found.")
+            return CommandResult(handled=True, success=False)
+        if verb == "info":
+            _subagent_info(agent, parent_id, found)
+        else:
+            _subagent_log(found)
+        return CommandResult(handled=True)
+    if verb == "chat" and len(words) > 1:
+        chat = next((t for t in tasks if str(t.index) == words[1] or t.id == words[1] or t.name.lower() == words[1].lower()), None)
+        if chat is None:
+            err(f"Subagent '{words[1]}' not found.")
+            return CommandResult(handled=True, success=False)
+        if f"{parent_id}_sub_{chat.index}" == curr_id:
+            info(f"Already viewing subagent #{chat.index}.")
+            return CommandResult(handled=True)
+        _open_subagent(agent, chat, parent_id)
+        return CommandResult(handled=True)
     if a.lower() in ("main", "root", "parent", "0"):
         return handle_main(agent, "")
     if a.lower().split(maxsplit=1)[:1] == ["edit"]:   # the word "edit", not a title that starts with "edit..."
@@ -503,11 +678,22 @@ def handle_subagents(agent: Any, arg: str) -> CommandResult:
         return CommandResult(handled=True)
     target = None
     if a:
-        target = next((t for t in tasks if str(t.index) == a or t.id == a or t.title.lower().startswith(a.lower())), None)
+        q = a.lstrip("#@").lower()
+        target = next((t for t in tasks if str(t.index) == q or t.id == q or t.name.lower() == q or t.title.lower().startswith(q)), None)
         if target is None:
             err(f"Subagent '{a}' not found.")
             return CommandResult(handled=True)
-    else:
+    from axon.ui.agent_panel import open_console
+    if "_sub_" not in curr_id and open_console(agent, target=target):
+        return CommandResult(handled=True)
+    if not a and is_tty() and "_sub_" not in curr_id:       # the console cannot open beside a running turn
+        _agent_list_table(tasks)
+        return CommandResult(handled=True)
+    if not a and not is_tty() and "_sub_" not in curr_id:
+        _agent_list_table(tasks)
+        typed_hint("    /subagents send <name|n> <message> · /subagents stop <name|n> · /subagents log <name|n>")
+        return CommandResult(handled=True)
+    if not a:
         from axon.ui.picker import pick
         icons = {"completed": "✓", "exhausted": "!", "error": "✗"}
         options = [f"[Main] {parent_id}"] + [
@@ -568,9 +754,11 @@ def _tail(text: str, n: int = 15) -> list[str]:
     return [ln for ln in text.splitlines() if ln.strip()][-n:]
 
 
-TASKS_USAGE = """/tasks                   background shells, background turns (Ctrl+B) and subagent tasks
-/tasks log <id>          last output lines of a shell (bash_1) or background turn
-/tasks kill <id>         stop a background shell"""
+TASKS_USAGE = """/tasks                   background shells, background turns (Ctrl+B) and subagents together:
+                         ↑↓ select, ⏎ open, x stop, esc back
+/tasks log <id|name|n>   last output lines of a shell (bash_1), a background turn or a subagent's transcript
+/tasks kill <id|name|n>  stop a background shell or a subagent
+/tasks send <name|n> <text>   message a subagent"""
 
 
 @command("tasks", category=CAT, description="Background shells, background turns and subagent tasks",
@@ -581,8 +769,24 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
     shells = {sh.id: sh for sh in _background_shells()}
     turns = getattr(agent, "background_tasks", None)
     turns = turns if isinstance(turns, dict) else {}
+    mgr = getattr(agent, "subagents", None)
+    has_mgr = mgr is not None and hasattr(mgr, "get_task") and hasattr(mgr, "all_tasks")
+    if sub == "send" and len(words) > 2:
+        return _subagent_send(agent, words[1], arg.split(maxsplit=2)[2])
+    from axon.mcp import background as mcp_background
+    if sub in ("kill", "stop") and len(words) > 1 and mcp_background.get(words[1]) is not None:
+        task = mcp_background.stop(words[1])
+        ok(f"Stopped {words[1]} ({task.server}/{task.tool}); the server may still finish the work.")
+        return CommandResult(handled=True)
+    if sub in ("log", "logs", "tail", "output") and len(words) > 1 and mcp_background.get(words[1]) is not None:
+        task = mcp_background.get(words[1])
+        header(f"{task.id} · {task.status}", f"{task.server}/{task.tool}")
+        print(f"    {SLATE}{task.result or task.latest_progress() or '(no progress reported yet)'}{RST}\n")
+        return CommandResult(handled=True)
     if sub in ("kill", "stop") and len(words) > 1:
         sid = words[1]
+        if sid not in shells and has_mgr and mgr.get_task(sid) is not None:
+            return _subagent_stop(agent, sid)
         if sid not in shells:
             err(f"No background shell '{sid}'. Known: {', '.join(shells) or 'none'}")
             return CommandResult(handled=True)
@@ -607,6 +811,9 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
             if final.strip():
                 lines += ["", f"{getattr(rec, 'status', 'done')} after {float(getattr(rec, 'elapsed_s', 0.0) or 0.0):.1f}s:"]
                 lines += _tail(final, 25)
+        elif has_mgr and mgr.get_task(tid) is not None:
+            _subagent_log(mgr.get_task(tid))
+            return CommandResult(handled=True)
         else:
             err(f"No task '{tid}'.")
             return CommandResult(handled=True)
@@ -618,8 +825,18 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
         usage(TASKS_USAGE)
         return CommandResult(handled=True)
 
-    mgr = getattr(agent, "subagents", None)
     tasks = mgr.all_tasks() if mgr is not None and hasattr(mgr, "all_tasks") else []
+    mcp_calls = mcp_background.tasks()
+    if mcp_calls:
+        section("MCP tool calls", TEAL)
+        for task in mcp_calls:
+            note = task.latest_progress() if task.status == "running" else ""
+            print(f"    {WHITE}{task.id}{RST} {task.status} {SLATE}{task.server}/{task.tool} {note}{RST}")
+        print()
+    if (shells or turns or tasks) and not mcp_calls:
+        from axon.ui.agent_panel import open_console
+        if open_console(agent, everything=True):
+            return CommandResult(handled=True)
     header("Tasks", f"{len(shells)} shell(s) · {len(turns)} background turn(s) · {len(tasks)} subagent task(s)")
     colors = {"running": GOLD, "completed": MINT, "error": ROSE, "exhausted": ROSE, "pending": SLATE, "interrupted": ROSE}
     if shells:
@@ -653,7 +870,7 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
     if not (shells or turns or tasks):
         print(f"    {SLATE}No background work. Shells start with Bash run_in_background; Ctrl+B backgrounds a turn.{typed_only(' Checklist: /todos')}{RST}\n")
         return CommandResult(handled=True)
-    typed_hint("\n    /tasks log <id> · /tasks kill <shell id> · /subagents <n> opens a subagent transcript")
+    typed_hint("\n    /tasks log <id> · /tasks kill <id> · /tasks send <name|n> <text> · /subagents <n> opens a subagent transcript")
     print()
     return CommandResult(handled=True)
 

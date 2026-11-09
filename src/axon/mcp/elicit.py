@@ -6,8 +6,8 @@ MCP elicitation in the terminal: a server can ask you for structured input mid-t
 * url mode: the server wants you to finish something in a browser (sign-in); you choose whether to open
   the link.
 
-Dialogs only appear in an interactive session; ``-p`` runs and SDK runs decline (the handler is not
-installed, so the capability is not even advertised).
+Dialogs only appear in an interactive session. In ``-p`` and SDK runs an ``Elicitation`` hook can still answer;
+without one the request is cancelled.
 """
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ from typing import Any, Callable
 
 _dialog_lock = threading.Lock()
 MAX_URL_CHARS = 8000   # Claude Code's cap on a URL passed to the system URL handler (escaped, 4x for specials)
+
+
+def dialog_open() -> bool:
+    return _dialog_lock.locked()
+
+
+def no_terminal_elicitation(server: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Nobody can answer here (``-p``, SDK): reached only when no Elicitation hook answered."""
+    return {"action": "cancel"}
 
 
 def _ask(prompt: str) -> str:

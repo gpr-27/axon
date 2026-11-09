@@ -8,7 +8,7 @@ MCP tool output limits.
   characters); that value replaces both limits for text content.
 * Over 10,000 tokens a warning goes to the server's log.
 * An error result longer than about 11,000 characters keeps its first and last 5,000.
-* PNG/JPEG/GIF/WebP images are saved as files (the model gets the path; Axon's tool results are text).
+* PNG/JPEG/GIF/WebP images are saved as files; the model gets the path and sees the image inline.
 """
 from __future__ import annotations
 
@@ -105,9 +105,10 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:100] or "mcp-result"
 
 
-def render_for_model(result: dict[str, Any], *, workspace: Path, label: str) -> tuple[str, bool, bool]:
-    """Like :func:`axon.mcp.client.render_tool_result` but image blocks are saved to files.
-    Returns (text, is_error, has_image)."""
+def render_for_model(result: dict[str, Any], *, workspace: Path, label: str,
+                     images: list[Any] | None = None) -> tuple[str, bool, bool]:
+    """Like :func:`axon.mcp.client.render_tool_result` but image blocks are saved to files, and ``images``
+    collects references the model sees inline. Returns (text, is_error, has_image)."""
     import json
     parts: list[str] = []
     has_image = False
@@ -124,6 +125,9 @@ def render_for_model(result: dict[str, Any], *, workspace: Path, label: str) -> 
             path = save_bytes(workspace, f"{label}-image", ext, raw) if ext and raw else None
             if path is not None:
                 parts.append(f"[image: {mime}, {len(raw)} bytes, saved to {path}]")
+                if images is not None and _inline_size_ok(len(raw)):
+                    from axon.providers.base import ImageRef
+                    images.append(ImageRef(str(path), "image/jpeg" if mime == "image/jpg" else mime))
             else:
                 parts.append(render_content_block(block))
         else:
@@ -141,6 +145,14 @@ def render_for_model(result: dict[str, Any], *, workspace: Path, label: str) -> 
     return text, bool(result.get("isError")), has_image
 
 
+def _inline_size_ok(size: int) -> bool:
+    try:
+        from axon.providers.base import MAX_TOOL_IMAGE_BYTES
+    except ImportError:
+        return False
+    return size <= MAX_TOOL_IMAGE_BYTES
+
+
 def limit_text(text: str, *, is_error: bool, has_image: bool, own_limit: int | None, workspace: Path,
                label: str, log: Callable[[str], None] | None = None) -> str:
     """Apply the error-truncation / persist-to-file rules to rendered tool output."""
@@ -152,10 +164,15 @@ def limit_text(text: str, *, is_error: bool, has_image: bool, own_limit: int | N
     tokens = estimate_tokens(text)
     if tokens > WARN_TOKENS:
         msg = f"large MCP output from {label}: ~{tokens:,} tokens ({len(text):,} characters)"
-        logger.warning(msg)
+        logger.debug(msg)
         if log:
             log(msg)
-    if has_image:
+        from axon import notices
+        notices.post(f"MCP tool output is large: {msg} (MAX_MCP_OUTPUT_TOKENS limits it)")
+    if has_image:  # results with image data stay under the token limit, whatever the tool declares
+        limit = max_output_tokens() * 4
+        if len(text) > limit:
+            return text[:limit] + f"\n\n[... output truncated: {len(text) - limit:,} more characters ...]"
         return text
     if own_limit is not None:
         too_big = len(text) > own_limit

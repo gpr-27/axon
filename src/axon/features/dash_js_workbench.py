@@ -32,7 +32,7 @@ function wbLoad() {
   const ok = (a) => (Array.isArray(a) ? a.filter(id => WB_DEF[id]) : []);
   if (typeof p.wN === 'number') WB.wN = Math.max(240, Math.min(720, p.wN)); if (typeof p.wW === 'number') WB.wW = Math.max(320, Math.min(1100, p.wW));
   if (p.h && typeof p.h === 'object') for (const k of Object.keys(p.h)) if (WB_DEF[k] && typeof p.h[k] === 'number') WB.h[k] = Math.max(0.2, Math.min(6, p.h[k]));
-  if (innerWidth > 900) { WB.narrow = ok(p.narrow); WB.wide = ok(p.wide); if (!lsGet(wbKey())) WB.narrow = ['files']; }   // first run: the project tree is there from the start
+  if (innerWidth > 900) { WB.narrow = ok(p.narrow); WB.wide = ok(p.wide); }   // first run: the chat stands alone with Progress; Files is one click or Ctrl+\\ away
 }
 function wbOpenIds() { return [...WB.narrow, ...WB.wide]; }
 function wbWidth() { const L = rightLayout(); return L.wn + L.ww; }
@@ -197,7 +197,8 @@ function wbTitleSync() {
   const isChat = !!(t && t.route === 'chat' && C);
   if (isChat && C.tab === t && C.meta && C.meta.title && t.title !== C.meta.title.slice(0, 26)) { t.title = C.meta.title.slice(0, 26); drawTabs(); }   // the tab carries the chat's name
   b.hidden = !isChat; b.disabled = !isChat; b.title = 'Chat options: rename, fork, export, find, bookmarks, delete'; b.setAttribute('aria-label', 'Chat options');
-  b.replaceChildren(h('span', { class: 'ct-t' }, 'Chat options'), wbIco('chevd'));
+  const name = isChat ? ((C.meta && C.meta.title) || C.liveName || 'New chat') : '';
+  b.replaceChildren(h('span', { class: 'ct-t' }, name), wbIco('chevd'));
 }
 function wbTitleMenu(anchor) {
   const C = UI.chat; if (!C) return; const sid = C.sid;
@@ -210,7 +211,7 @@ function wbTitleMenu(anchor) {
     { label: 'Find in chat', hint: IS_MAC_WB() ? '⌘F' : 'Ctrl+F', run: () => cxFind(C) },
     { label: 'Bookmarks…', disabled: !sid, run: () => cxBookmarksMenu(C, anchor) },
     { label: 'Compare models…', disabled: !sid, title: 'Ask two to four models the same question side by side. Read-only: nothing in your project changes.', run: () => cfCompareOpen(C) },
-    '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); drawStatus(); document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
+    '-', { head: 'Trace detail' }, ...trace.map(([v, l]) => ({ label: l, on: state.trace === v, keep: true, run: () => { state.trace = v; lsSet('axon-trace2', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); drawStatus(); document.querySelectorAll('.wbmenu .on').forEach(x => x.classList.remove('on')); } })),
     '-', { label: 'Notification settings…', title: 'Choose when Axon tells you a turn finished or needs you', run: () => { location.hash = '#/settings/preferences'; } },
     '-', { label: 'Delete this chat…', cls: 'danger', disabled: !sid, run: () => wbDelete(C) }]);
 }
@@ -576,20 +577,24 @@ function wbContextSection(C, sec) {
   const head = h('div', { class: 'cx-head', title: d.estimate }, h('b', null, pct + '% used'), h('span', { class: 'muted num' }, (d.calibrated || real.used ? '' : '~') + wbTok(used) + ' / ' + wbTok(d.window)));
   const bar = h('div', { class: 'cx-bar', role: 'img', 'aria-label': pct + '% of the context window is used' }, ...d.rows.filter(x => x.key !== 'free' && x.tokens > 0).map(x => h('i', { class: x.key === 'autocompact' ? 'buf' : '', style: 'width:' + Math.max(0.4, 100 * x.tokens / d.window) + '%;background:' + WB_CTX_COLORS[x.key], title: x.label + ': ' + wbTok(x.tokens) })));
   const expandable = { messages: 1, skills: 1, mcp_tools: 1, memory_files: 1, custom_agents: 1 };
+  const ins = (key) => '#/context/' + key + (C.sid ? '?s=' + encodeURIComponent(C.sid) : '');
   const legend = d.rows.map(x => {
-    const can = expandable[x.key] && (d.lists[x.key] || []).length;
-    const el = h(can ? 'button' : 'div', { class: 'cx-row' + (can ? ' can' : ''), type: can ? 'button' : null, title: WB_CTX_HELP[x.key] + (x.key === 'messages' || x.key === 'free' || x.key === 'autocompact' ? '' : ' (estimate)'), onclick: can ? () => { WB_EXP.has(x.key) ? WB_EXP.delete(x.key) : WB_EXP.add(x.key); wbRail(C); } : null },
-      h('span', { class: 'sq' + (x.key === 'free' ? ' free' : ''), style: x.key === 'free' ? '' : 'background:' + WB_CTX_COLORS[x.key] }), h('span', { class: 'cl' }, x.label, can ? h('span', { class: 'cx-n' }, ' ' + (x.key === 'mcp_tools' ? d.lists.mcp_tools.reduce((a, g) => a + g.count, 0) : d.lists[x.key].length)) : null), h('span', { class: 'ct num' }, wbTok(x.tokens)), h('span', { class: 'cp num' }, wbPctTxt(x.pct)));
-    return el;
+    const can = expandable[x.key] && (d.lists[x.key] || []).length; const open = can && WB_EXP.has(x.key);
+    const peek = can ? h('button', { class: 'cx-peek', type: 'button', 'aria-expanded': String(!!open), 'aria-label': 'Quick peek at ' + x.label, title: 'Quick peek here without leaving the chat', onclick: () => { open ? WB_EXP.delete(x.key) : WB_EXP.add(x.key); wbRail(C); } }, '▶') : null;
+    return h('div', { class: 'cx-row lnk', title: WB_CTX_HELP[x.key] + (x.key === 'messages' || x.key === 'free' || x.key === 'autocompact' ? '' : ' (estimate)') + '  Click to see exactly what is inside.' },
+      h('span', { class: 'sq' + (x.key === 'free' ? ' free' : ''), style: x.key === 'free' ? '' : 'background:' + WB_CTX_COLORS[x.key] }),
+      h('span', { class: 'cl' }, h('a', { class: 'cl', href: ins(x.key), 'aria-label': 'Open ' + x.label + ' in the context inspector, ' + wbTok(x.tokens) + ' tokens' }, x.label), can ? h('span', { class: 'cx-n' }, ' ' + (x.key === 'mcp_tools' ? d.lists.mcp_tools.reduce((a, g) => a + g.count, 0) : d.lists[x.key].length)) : null, peek),
+      h('span', { class: 'ct num' }, wbTok(x.tokens)), h('span', { class: 'cp num' }, wbPctTxt(x.pct)));
   });
   const out = [head, bar, h('div', { class: 'cx-legend' }, ...legend)];
   if (d.deferred && d.deferred.mcp_count) out.push(h('div', { class: 'cx-row def', title: 'These MCP tools are listed by name only. Axon fetches a definition with ToolSearch when it needs one, so they cost nothing until then.' }, h('span', { class: 'sq dim' }), h('span', { class: 'cl' }, 'MCP tools (deferred) ', h('span', { class: 'cx-n' }, d.deferred.mcp_count)), h('span', { class: 'ct num' }, wbTok(d.deferred.mcp_tools)), h('span', { class: 'cp num' }, '—')));
+  out.push(h('div', { class: 'cx-more' }, h('a', { href: ins('permissions'), title: 'The mode, every allow, ask and deny rule, and the folders Axon may touch' }, 'Permissions'), h('a', { href: ins('hooks'), title: 'Commands that run on events such as before a tool call' }, 'Hooks'), h('a', { href: ins('overview') }, 'Everything')));
   for (const key of ['messages', 'mcp_tools', 'skills', 'memory_files', 'custom_agents']) {
     if (!WB_EXP.has(key) || !(d.lists[key] || []).length) continue;
     out.push(h('div', { class: 'cx-list' }, ...(key === 'messages' ? wbMsgItems(C, d.lists.messages) : key === 'mcp_tools' ? d.lists.mcp_tools.map(g => h('div', { class: 'cx-item', title: g.count + ' tools from ' + g.name }, h('span', { class: 'ci-n' }, g.name), h('span', { class: 'muted' }, g.count + ' tools' + (g.deferred ? ', ' + g.deferred + ' deferred' : '')), h('span', { class: 'num ci-t' }, '~' + wbTok(g.tokens))))
       : d.lists[key].map(i => h('div', { class: 'cx-item', title: i.name }, h('span', { class: 'ci-n' }, i.name), i.scope ? h('span', { class: 'muted' }, i.scope) : null, h('span', { class: 'num ci-t' }, '~' + wbTok(i.tokens)))))));
   }
-  return sec('Context', out, h('a', { class: 'plink', href: '#/insights/ctxmap' }, 'context map'));
+  return sec('Context', out, h('a', { class: 'plink', href: ins('overview'), title: 'See every message, tool, memory file, rule and hook the model receives' }, 'open inspector'));
 }
 function wbMsgItems(C, items) {
   const post = async (name, id) => { try { await api('/api/insights/' + name, { session: C.sid, id: name === 'ctxmap_drop' ? id : undefined, target: id }); WB_BUSY.ctx.t = 0; wbRail(C); } catch (e) { toast(e.message); } };
@@ -706,10 +711,10 @@ function wbFooterDraw(C) {
   const f = C.foot; if (!f) return; const st = C.st || {};
   const info = state.info || {}; const us = UI.status || {}; f.model.textContent = st.model || us.model || info.model || 'model'; f.effort.textContent = effortWord(st.effort || us.effort || info.effort); const m = WB_MODES.find(x => x[0] === (st.mode || 'default')) || WB_MODES[0];
   f.mode.textContent = m[1]; f.mode.className = 'fw fw-mode mode-' + m[0]; f.mode.title = m[2];
-  const c = st.context || {}; const p = Math.min(100, c.pct || 0); const R = 7, L = 2 * Math.PI * R;
+  const c = st.context || {}; const p = Math.min(100, Math.round(c.pct || 0));
   f.ring.title = c.window ? 'Context: ' + p + '% used, ' + (c.used || 0).toLocaleString() + ' of ' + c.window.toLocaleString() + ' tokens' : 'Context window';
   f.ring.setAttribute('aria-label', f.ring.title);
-  f.ring.innerHTML = '<svg viewBox="0 0 20 20" width="18" height="18"><circle cx="10" cy="10" r="' + R + '" fill="none" stroke="var(--line2,var(--line))" stroke-width="2.4"/><circle cx="10" cy="10" r="' + R + '" fill="none" stroke="' + (p > 90 ? 'var(--bad)' : p > 75 ? 'var(--warn)' : 'var(--primary)') + '" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="' + (L * p / 100).toFixed(1) + ' ' + L.toFixed(1) + '" transform="rotate(-90 10 10)"/></svg>';
+  f.ring.textContent = c.window ? p + '%' : ''; f.ring.hidden = !c.window; f.ring.className = 'ring' + (p > 90 ? ' bad' : p > 75 ? ' warn' : '');   // context in use, plainly: a tiny arc read as a stray spinner
 }
 // ---------- the + menu and dictation ----------
 function wbPlus(C, ta) {

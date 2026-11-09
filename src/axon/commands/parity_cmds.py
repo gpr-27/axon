@@ -105,7 +105,7 @@ def handle_subtask(agent: Any, arg: str) -> CommandResult:
 
 
 @command("tell", category=CAT, aliases=("msg",),
-         description="Send a message to a running subagent; it reads it before its next step",
+         description="Send a message to a subagent: a running one reads it before its next step, a finished one resumes",
          usage="/tell <id|n> <message>")
 def handle_tell(agent: Any, arg: str) -> CommandResult:
     who, _, text = arg.strip().partition(" ")
@@ -113,13 +113,8 @@ def handle_tell(agent: Any, arg: str) -> CommandResult:
     if not who or not text:
         usage("/tell <id|n> <message>   (ids: /list-agents)")
         return CommandResult(handled=True)
-    mgr = getattr(agent, "subagents", None)
-    task = mgr.send(who, text) if mgr is not None and hasattr(mgr, "send") else None
-    if task is None:
-        err(f"No running subagent '{who}'." + typed_only(f" See /list-agents; finished ones can be opened with /subagents {who}."))
-        return CommandResult(handled=True, success=False)
-    ok(f"Sent to {task.id} ({clip(task.title, 40)}): {clip(text, 70)}")
-    return CommandResult(handled=True)
+    from axon.commands.agent_cmds import _subagent_send
+    return _subagent_send(agent, who, text)
 
 
 def edit_subagent_result(agent: Any, query: str) -> CommandResult:

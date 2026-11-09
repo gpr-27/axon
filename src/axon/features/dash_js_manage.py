@@ -175,19 +175,7 @@ if (typeof drawTabs === 'function') {          // a small menu on every chat tab
     });
   };
 }
-if (typeof drawHead === 'function') {          // and a menu on the Chat page itself
-  const baseDrawHead = drawHead;
-  drawHead = function (C) {
-    baseDrawHead.apply(this, arguments);
-    try {
-      if (!C || !C.head || !C.sid || C.head.querySelector('.mg-headmenu')) return;
-      C.head.append(h('button', { class: 'btn mg-headmenu', type: 'button', 'aria-haspopup': 'menu', title: 'Rename, export or delete this chat',
-        onclick: (e) => mgMenu(e.currentTarget, mgChatItems(C.sid, () => (C.meta && C.meta.title) || '', {
-          renamed: (title) => { if (C.meta) C.meta.title = title; if (C.tab) setTabTitle(C.tab, title.slice(0, 26)); drawHead(C); },
-          deleted: (r) => { if (r.deleted && r.deleted.length) mgCloseChatTabs([C.sid]); } })) }, 'More'));
-    } catch (e) { /* the menu is optional */ }
-  };
-}
+// The Chat page's own menu is the title in the top bar (wbTitleMenu): rename, export, delete and the rest.
 
 // ---------- Sessions ----------
 const SS = Object.assign({ q: '', full: false, sort: 'newest', group: true, starred: false, tag: '', model: '' }, (() => { try { return JSON.parse(lsGet('axon-sessions-ui') || '{}'); } catch (e) { return {}; } })());
@@ -272,7 +260,7 @@ async function viewSessions() {
     }
     function draw() {
       const d = lastData;
-      sub.textContent = d ? total.toLocaleString() + (total === d.scope_total ? '' : ' of ' + d.scope_total.toLocaleString()) + ' chats' + (state.sessionScope === 'all' ? ' across all projects' : ' in this project') + (d.cost ? ' · ' + usd(d.cost) : '') : '';
+      sub.textContent = d ? total.toLocaleString() + (total === d.scope_total ? '' : ' of ' + d.scope_total.toLocaleString()) + (d.scope_total === 1 ? ' chat' : ' chats') + (state.sessionScope === 'all' ? ' across all projects' : ' in this project') + (d.cost ? ' · ' + usd(d.cost) : '') : '';
       const note = document.getElementById('sess-note');
       const capNote = d && d.cut_off ? 'Only the newest ' + d.cut_off.limit.toLocaleString() + ' chats of ' + d.cut_off.projects.join(', ') + ' are listed here; older ones are still on disk and are not shown. ' : '';
       if (note) note.textContent = capNote + (d && d.full ? (d.full.truncated ? 'Showing the first matches inside chats; narrow the search to see the rest.' : 'Searched ' + d.full.files.toLocaleString() + ' chats in ' + (d.full.ms / 1000).toFixed(1) + 's') + (d.full.encrypted ? ' · ' + d.full.encrypted + ' encrypted chats cannot be searched' : '') : '');
@@ -461,19 +449,21 @@ async function viewOverview() {
     if (d.empty) {
       body.append(h('div', { class: 'empty' }, h('strong', null, 'No usage in this range yet'), 'Axon logs every model call it makes. Run a prompt in the terminal, or widen the range to all time or all projects.'));
     } else {
-      const cell = (l, v, hint, cls) => h('div', { class: 'kpi' }, h('div', { class: 'l' }, l), h('div', { class: 'v ' + (cls || '') }, v), h('div', { class: 'h', title: hint }, hint));
+      const cell = (l, v, hint, extra) => h('div', { class: 'kpi' }, h('div', { class: 'l' }, l), h('div', { class: 'v' }, v), extra || null, h('div', { class: 'h', title: hint }, hint));
+      const costDays = d.by_day.map(r => ({ name: r.name, cost: r.cost || 0, calls: r.calls }));
+      body.append(h('div', { class: 'u-hero' }, h('div', { class: 'u-fig' }, h('div', { class: 'u-num' }, k.cost_text), h('div', { class: 'u-cap' }, 'Spent, ', d.period_label.toLowerCase()), h('div', { class: 'u-cap dim' }, usd(k.per_day) + ' a day')),
+        h('div', { class: 'u-spark' }, UCH.cost ? null : vzColumns(costDays, [{ key: 'cost', label: 'Cost', color: 'var(--primary)' }], { label: 'Cost per day', fmtY: vzMoney, fmtV: usd, note: r => axPlural(r.calls || 0, 'call') }))));
       body.append(h('div', { class: 'strip' },
-        cell('Spend', k.cost_text, usd(k.per_day) + ' a day', 'sig'),
         cell('Tokens', tok(k.tokens_in + k.tokens_out), tok(k.tokens_in) + ' in, ' + tok(k.tokens_out) + ' out'),
-        cell('Cache hit rate', pct(k.hit_pct), tok(k.cache_read) + ' read, ' + tok(k.cache_write) + ' written'),
-        cell('Cache savings', k.savings_text, 'against the same calls uncached', 'syn'),
-        cell('Calls', k.calls.toLocaleString(), k.sessions + ' sessions'),
+        cell('Cache hit rate', pct(k.hit_pct), tok(k.cache_read) + ' read, ' + tok(k.cache_write) + ' written', vzMeter((k.hit_pct || 0) / 100, '', 'Cache hit rate')),
+        cell('Cache savings', k.savings_text, 'against the same calls uncached'),
+        cell('Calls', k.calls.toLocaleString(), axPlural(k.sessions, 'session')),
         cell('Model time / total', k.has_latency ? dur(k.api_s) + ' / ' + dur(k.wall_s) : 'no data', k.has_latency ? 'avg ' + dur(k.avg_latency) + ', p95 ' + dur(k.p95_latency) : 'older logs lack timings')));
     }
     // ----- session budget -----
     const budget = h('section', { class: 'panel mg-budget' }, h('h2', null, 'Session budget'), h('p', { class: 'muted' }, 'Loading...'));
-    body.append(budget);
-    if (typeof cfProjectBudgetSection === 'function') body.append(cfProjectBudgetSection());
+    const budgets = h('div', { class: 'u-budgets' }, budget, typeof cfProjectBudgetSection === 'function' ? cfProjectBudgetSection() : null);
+    body.append(budgets);
     async function drawBudget() {
       let b; try { b = await api('/api/manage/budget'); } catch (e) { budget.replaceChildren(h('h2', null, 'Session budget'), errorBox(e.message)); return; }
       budget.replaceChildren(h('h2', null, 'Session budget'), h('p', { class: 'muted' }, 'A budget stops new turns in one chat once its spending reaches the limit. It is the same as typing /budget in that chat.'));
@@ -504,14 +494,14 @@ async function viewOverview() {
     };
     const allBtn = h('button', { class: 'btn', type: 'button', onclick: () => { const hide = !anyHidden(); ['cost', 'donut', 'tokens'].forEach(x => { UCH[x] = hide; }); lsSet('axon-usage-charts', JSON.stringify(UCH)); redo(); } }, anyHidden() ? 'Show charts' : 'Hide charts');
     const syncAll = () => { allBtn.textContent = anyHidden() ? 'Show charts' : 'Hide charts'; };
-    const donutList = () => h('ul', { class: 'dl' }, d.charts.donut_parts.map((p, i) => h('li', null,
-      h('span', { class: 'sw', style: 'background:var(--s' + (i + 1) + ')' }), h('span', { class: 'n', title: p.name }, p.name), h('span', { class: 'num' }, usd(p.cost)), h('span', { class: 'muted num' }, p.pct.toFixed(0) + '%'))));
-    const legend = (names) => '<ul class="legend">' + names.map((n, i) => '<li><span class="sw" style="background:var(--s' + (i + 1) + ')"></span>' + n.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) + '</li>').join('') + '</ul>';
-    body.append(h('div', { class: 'mg-chartbar' }, h('span', { class: 'muted' }, 'Charts are drawn from the numbers below, so hiding them removes nothing.'), allBtn));
+    const modelBars = () => vzRanked(d.charts.donut_parts.map(p => ({ name: p.name, value: p.cost, text: usd(p.cost) + '  ' + p.pct.toFixed(0) + '%' })));
+    const TOKEN_SERIES = [{ key: 'input', label: 'Input', color: 'var(--s1)' }, { key: 'output', label: 'Output', color: 'var(--s2)' }, { key: 'cache_read', label: 'Cache read', color: 'var(--s3)' }, { key: 'cache_write', label: 'Cache written', color: 'var(--s4)' }];
+    const tokenChart = () => h('div', null, h('ul', { class: 'vz-legend' }, TOKEN_SERIES.map(s => h('li', null, h('i', { style: 'background:' + s.color }), h('span', null, s.label)))), vzColumns(d.by_day, TOKEN_SERIES, { label: 'Tokens per day', fmtY: tok, fmtV: tok }));
+    body.append(h('div', { class: 'mg-chartbar' }, h('span', { class: 'muted' }, 'Charts are drawn from the numbers below, so hiding them removes nothing.'), allBtn, h('button', { class: 'mini mg-chartbtn', type: 'button', 'aria-expanded': String(!UCH.cost), onclick: () => { UCH.cost = !UCH.cost; lsSet('axon-usage-charts', JSON.stringify(UCH)); redo(); } }, UCH.cost ? 'Show cost chart' : 'Hide cost chart')));
     body.append(h('div', { class: 'cols' },
-      chartBox('cost', 'Cost per day', () => h('div', { html: d.charts.cost })),
-      chartBox('donut', 'Cost by model', () => h('div', null, h('div', { html: d.charts.donut }), donutList()))));
-    body.append(h('div', { class: 'panel' }, chartBox('tokens', 'Tokens per day', () => h('div', null, h('div', { html: legend(d.charts.token_series) }), h('div', { html: d.charts.tokens })))));
+      chartBox('tokens', 'Tokens per day', tokenChart),
+      chartBox('donut', 'Cost by model', modelBars)));
+    body.append(budgets);   // the charts first, then the limits they inform
     // ----- tables: click a column to sort -----
     const section = (title, table, node) => h('section', { class: 'panel' }, h('div', { class: 'mg-sech' }, h('h2', null, title), table ? h('button', { class: 'mini', type: 'button', title: 'Download this table as CSV', onclick: () => mgCsv(table) }, 'CSV') : null), node);
     const aggCols = (first) => [{ label: first, cls: 't', get: r => r.name, fmt: r => r.name }, { label: 'Calls', cls: 'r', get: r => r.calls, fmt: r => r.calls.toLocaleString() }, { label: 'Input', cls: 'r', get: r => r.input, fmt: r => tok(r.input) },

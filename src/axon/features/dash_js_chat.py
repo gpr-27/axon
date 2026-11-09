@@ -86,6 +86,7 @@ function settleSpinners(C, busy) {
     sp.remove(); const tl = art.querySelector('.turnbar .tl'); if (tl) tl.textContent = 'ended';
     if (typeof art.querySelectorAll === 'function') {
       art.querySelectorAll('.mk.run, .mk.wait').forEach(m => setMk(m, 'stop'));
+      art.querySelectorAll('.fib i.run, .fib i.wait').forEach(i => { i.className = 'stop'; });
       art.querySelectorAll('[data-t0]').forEach(e => { e.removeAttribute('data-t0'); e.textContent = ''; });
       art.querySelectorAll('.approve').forEach(a => a.remove());
       const hd = art.querySelector('.turnbar .tel'); if (hd) hd.textContent = '';
@@ -94,7 +95,20 @@ function settleSpinners(C, busy) {
   if (!busy && C.cur) C.cur = null;
 }
 
+// The terminal moved to another chat or folder (from here or by itself): the page goes with it.
+function liveMoved(C, ev) {
+  api('/api/ws').then(w => { state.ws = w; drawChip(); }).catch(() => { });
+  if (!ev.session || ev.session === C.sid) return;
+  const old = '#/chat/' + encodeURIComponent(C.sid), here = location.hash === old || location.hash === '#/chat' || !location.hash;
+  if (C.es) { C.es.close(); C.es = null; } C.runtime = false; C.st = null;
+  if (here) { if (C.tab) closeTab(C.tab); location.hash = '#/chat/' + encodeURIComponent(ev.session); }   // closing the last tab sets its own address, so this comes after
+}
 async function viewChat(sid) {
+  // Attached to a terminal, opening a chat continues it there: one conversation, shown in both. If the terminal is busy, the chat opens to read.
+  // A tab restored in the background after a reload neither moves the terminal nor takes the page from the tab being opened.
+  if (sid && state.ws && state.ws.live && !UI.bg) { try { await api('/api/live/switch', { session: sid }); } catch (e) { /* busy, or no longer there */ } }
+  // The plain chat address means the terminal's chat: use its tab if it has one, rather than a second tab on the same conversation.
+  if (!sid && state.ws && state.ws.live && !UI.bg) { try { const st = await api('/api/chat/state?create=0'); if (st.session && (UI.tabs || []).some(t => t.key === 'chat:' + st.session)) { location.hash = '#/chat/' + encodeURIComponent(st.session); return; } } catch (e) { /* opens below */ } }
   const C = { sid: sid || '', st: null, es: null, seq: 0, cur: null, steps: [], subs: [], chips: {}, closed: false, lastIdx: -1, first: 0,
     cmds: null, runtime: false, meta: null, atBottom: true, hist: [], hpos: -1, files: [], shellMode: false };
   return shell('chat', async (main, tab) => {
@@ -106,7 +120,7 @@ async function viewChat(sid) {
     const head = h('div', { class: 'chat-head' });
     C.head = head;
     const composerEl = buildComposer(C);
-    main.append(h('div', { class: 'chat' }, head, h('div', { class: 'chat-main' }, feed, composerEl)));
+    main.append(h('div', { class: 'chat' }, h('div', { class: 'chat-main' }, feed, composerEl)));
     await loadHistory(C);
     await refreshState(C);
     if (claimRail(C, tab)) setStatus(C.st);
@@ -272,7 +286,7 @@ function connectEvents(C, st) {
   es.onmessage = (m) => {
     const id = Number(m.lastEventId) || 0; if (id && id <= C.lastSeq) return;
     if (id) C.lastSeq = id;
-    try { applyEvent(C, JSON.parse(m.data)); } catch (e) { console.warn('bad event', e); }
+    try { const ev = JSON.parse(m.data); if (ev.type === 'session_changed') liveMoved(C, ev); else applyEvent(C, ev); } catch (e) { console.warn('bad event', e); }
   };
   es.addEventListener('gap', () => { refreshState(C); tailHistory(C); });
   es.onerror = async () => {
@@ -300,8 +314,7 @@ function drawHeadStatus(C) {
       h('button', { class: 'mini', onclick: () => location.reload() }, 'Reload page')));
     setTimeout(() => { if (C.offline) drawHeadStatus(C); }, 5000);
   }
-  else if (st.busy) el.append(h('span', { class: 'pill' }, h('span', { class: 'spin' }), 'working'));
-  if (st.external) el.append(h('span', { class: 'pill', title: 'Events from the terminal session this page is attached to' }, 'terminal session'));
+  if (st.external) el.append(h('span', { class: 'term-note', title: 'Events from the terminal session this page is attached to' }, 'Terminal session'));
   const stop = C.head.querySelector('.stop-btn'); if (stop) stop.hidden = !st.busy;
   C.head.classList.add('slim'); C.head.classList.toggle('idle', !st.busy && !C.offline && !st.external);
   if (UI.chat === C) setStatus(st);
@@ -311,6 +324,7 @@ function drawHead(C) {
   // No header strip any more: the title and its menu live in the top bar (wbTitleMenu). What stays here shows only while it matters.
   const st = C.st || {};
   C.head.replaceChildren(h('span', { class: 'chat-status', style: 'display:contents' }), h('span', { class: 'sp', style: 'flex:1' }),
+    h('button', { class: 'btn steps-all', type: 'button', title: 'Hide or show the steps (thinking, tool calls, notes) of every answer. Remembered in this browser.', onclick: toggleAllSteps }, stepsHidden() ? 'Expand steps' : 'Collapse steps'),
     h('button', { class: 'btn danger stop-btn', hidden: !st.busy, disabled: !!C.stopping, onclick: () => stopTurn(C) }, C.stopping ? 'Stopping' : 'Stop'));
   drawHeadStatus(C);
   if (UI.chat === C) wbTitleSync();
@@ -359,7 +373,7 @@ function modePicker(C) {
   return h('span', { class: 'pill' }, 'mode ', sel);
 }
 function tracePicker(C) {
-  const sel = h('select', { 'aria-label': 'Trace detail', title: 'How much of each step to show', onchange: () => { state.trace = sel.value; lsSet('axon-trace', sel.value); C.feed.className = 'feed t-' + sel.value; } },
+  const sel = h('select', { 'aria-label': 'Trace detail', title: 'How much of each step to show', onchange: () => { state.trace = sel.value; lsSet('axon-trace2', sel.value); C.feed.className = 'feed t-' + sel.value; } },
     [['compact', 'Compact'], ['normal', 'Normal'], ['detailed', 'Detailed'], ['debug', 'Debug (raw events)']].map(([v, l]) => h('option', { value: v, selected: v === state.trace }, l)));
   return h('span', { class: 'pill' }, 'trace ', sel);
 }
@@ -413,26 +427,42 @@ function tickAll(C) {
 }
 function headMeta(cur, done) {
   const m = cur.meta; m.replaceChildren(); const bits = [];
-  if (!done) { if (cur.stepText) bits.push(cur.stepText); if (cur.cost) bits.push(usd(cur.cost)); }
-  else { if (cur.nSteps) bits.push(axPlural(cur.nSteps, 'step')); if (cur.nTools) bits.push(axPlural(cur.nTools, 'tool')); if (cur.costKnown !== false && (cur.cost || cur.nSteps)) bits.push(usd(cur.cost)); if (cur.endNote) bits.push(cur.endNote); }
+  if (!done) { if (cur.stepText) bits.push(cur.stepText); }
+  else { if (cur.nTools) bits.push(axPlural(cur.nTools, 'tool')); if (cur.costKnown !== false && cur.cost) bits.push(usd(cur.cost)); if (cur.endNote) bits.push(cur.endNote); }
   bits.forEach((b, i) => m.append(h('span', { class: 'mi' }, b)));
   if (cur.nFail) m.append(h('span', { class: 'mi bad' }, cur.nFail + ' failed'));
 }
+// One label per kind of step, so Thinking, a Tool call, Narration between calls and the final Answer differ at a glance.
+const KIND_ICON = { think: 'M9 18h6M10 21h4M12 3a6 6 0 00-4 10.5V16h8v-2.5A6 6 0 0012 3z', tool: 'M5 7l5 5-5 5M12 17h7', note: 'M5 7h14M5 12h10M5 17h12', answer: 'M4 5h16v11H9l-5 4z' };
+function kindLabel(kind, text) { return h('span', { class: 'kind k-' + kind }, svgIcon(KIND_ICON[kind]), h('span', { class: 'kt' }, text)); }
 function toggleSteps(art) {
   const sh = art.querySelector('.tsteps'); const shown = sh && getComputedStyle(sh).display !== 'none';
   art.dataset.steps = shown ? 'closed' : 'open'; const b = art.querySelector('.thead'); if (b) b.setAttribute('aria-expanded', String(!shown));
 }
+// The turn's fibre: one node per tool call on a hairline, in the turn header, so a folded turn still shows what happened.
+function fibAdd(cur, card) { if (!cur.fib) return; const i = h('i', { class: 'run' }); card.axFib = i; cur.fib.append(i); }
+// A finished turn keeps every step on screen above its answer. Only the viewer's own "Collapse steps" choice (or the head's chevron) hides them.
+function foldSteps(art) { art.classList.remove('live'); syncFold(art); }
+// Collapse or expand the steps of every turn at once; the choice is remembered in this browser.
+function stepsHidden() { return lsGet('axon-steps-hidden') === '1'; }
+function applyStepsView() {
+  const hid = stepsHidden(); document.documentElement.dataset.stepsView = hid ? 'hidden' : 'shown';
+  document.querySelectorAll('.entry.a').forEach(a => { delete a.dataset.steps; syncFold(a); });
+  document.querySelectorAll('.steps-all').forEach(b => { b.textContent = hid ? 'Expand steps' : 'Collapse steps'; b.setAttribute('aria-pressed', String(hid)); });
+}
+function toggleAllSteps() { lsSet('axon-steps-hidden', stepsHidden() ? '0' : '1'); applyStepsView(); }
+function syncFold(art) { const sh = art.querySelector('.tsteps'), b = art.querySelector('.thead'); if (b && sh) b.setAttribute('aria-expanded', String(getComputedStyle(sh).display !== 'none')); }
 function ensureTurn(C, ts) {
   if (C.cur) return C.cur;
   C.feed.querySelector('.empty-chat')?.remove();
   const art = h('article', { class: 'entry a ' + (C.replaying ? 'replayed' : 'live fresh') });
-  const mk = mkEl('run'), title = h('span', { class: 'tl' }, 'Working'), el = h('span', { class: 'tel' }), meta = h('span', { class: 'tmeta' });
-  const head = h('button', { type: 'button', class: 'turnbar thead', 'aria-expanded': 'true', title: 'Show or hide the steps of this turn', onclick: () => toggleSteps(art) }, mk, title, el, meta, h('span', { class: 'chev', 'aria-hidden': 'true' }));
+  const mk = mkEl('run'), title = h('span', { class: 'tl' }, 'Working'), el = h('span', { class: 'tel' }), meta = h('span', { class: 'tmeta' }), fib = h('span', { class: 'fib', 'aria-hidden': 'true' });
+  const head = h('button', { type: 'button', class: 'turnbar thead', 'aria-expanded': 'true', title: 'Show or hide the steps of this turn', onclick: () => toggleSteps(art) }, mk, title, el, fib, meta, h('span', { class: 'chev', 'aria-hidden': 'true' }));
   const steps = h('div', { class: 'tsteps' }), answer = h('div', { class: 'tanswer' });
   art.append(h('div', { class: 'who' }, 'axon'), head, steps, answer);
   C.feed.append(art);
   const t0 = ts != null ? ts : (C.replaying ? null : nowS(C));
-  C.cur = { art, head, mk, title, el, meta, body: steps, answer, t0, prose: null, proseText: '', think: null, thinkText: '', tools: {}, step: null, group: null,
+  C.cur = { art, head, mk, title, el, meta, fib, body: steps, answer, t0, prose: null, proseText: '', think: null, thinkText: '', tools: {}, step: null, group: null,
     nSteps: 0, n: 0, nTools: 0, nFail: 0, cost: 0, waited: 0, waitStart: 0, stepText: '', running: true };
   headMeta(C.cur, false); startTick(C);
   return C.cur;
@@ -495,15 +525,15 @@ function groupHead(g) {
 function flushProse(cur) { if (cur.live && cur.prose) { liveFlush(null, cur); return; } if (cur.mdTimer) { clearTimeout(cur.mdTimer); cur.mdTimer = 0; } if (cur.prose && cur.proseText.length <= 300000) cur.prose.innerHTML = mdLite(cur.proseText); }
 function moveProse(cur) {
   if (!cur.prose) return;
-  flushProse(cur); const p = cur.prose; p.classList.remove('stream'); p.classList.add('narr');
+  flushProse(cur); const p = cur.prose; p.classList.remove('stream'); p.classList.add('narr'); p.prepend(kindLabel('note', 'Narration')); cur.answer.querySelector(':scope > .kind')?.remove();
   (cur.step ? cur.step.body : cur.body).append(p); decorate(p); cur.prose = null; cur.proseText = '';
 }
 // ----- thinking -----
 function thinkStart(C, cur, ts) {
   const pre = h('pre', { class: 'out nolink' }); const mk = mkEl('run');
-  const sum = h('summary', { class: 'xrow' }, mk, h('span', { class: 'ta think-t' }, 'Thinking'), h('span', { class: 'td' }));
+  const sum = h('summary', { class: 'xrow' }, mk, kindLabel('think', 'Thinking'), h('span', { class: 'ta think-t' }, ''), h('span', { class: 'td' }));
   if (ts != null) sum.querySelector('.td').dataset.t0 = ts;
-  const d = h('details', { class: 'tool think', open: true }, sum, h('div', { class: 'tdet' }, pre));
+  const d = h('details', { class: 'tool think kd-think', open: true }, sum, h('div', { class: 'tdet' }, pre));
   if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts);
   cur.step.body.append(d);
   cur.think = d; cur.thinkPre = pre; cur.thinkMk = mk; cur.thinkT0 = ts; cur.thinkText = '';
@@ -513,8 +543,8 @@ function finishThink(C, cur, ts) {
   if (!cur || !cur.think) return;
   const d = cur.think; const dsec = ts != null && cur.thinkT0 != null ? ts - cur.thinkT0 : null;
   const td = d.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = '';
-  d.querySelector('.think-t').textContent = dsec != null && dsec >= 0.1 ? 'Thought for ' + axDur(dsec) : 'Thought';
-  setMk(cur.thinkMk, 'ok'); d.open = false; cur.think = null;
+  d.querySelector('.think-t').textContent = dsec != null && dsec >= 0.1 ? axDur(dsec) : '';
+  setMk(cur.thinkMk, 'ok'); cur.think = null;
 }
 
 function applyEvent(C, ev) {
@@ -525,20 +555,20 @@ function applyEvent(C, ev) {
   if (C.cur && C.cur.live && t !== 'text_delta' && t !== 'thinking_delta') liveFlush(C, C.cur);   // show every word before the next card, the end or Stop
   if (state.trace === 'debug' && C.cur && !['text_delta', 'thinking_delta'].includes(t)) raw(C, ev);
   switch (t) {
-    case 'user': userEntry(C, ev.text, ev.chars); C.cur = null; C.steps = []; drawRail(C); break;
+    case 'user': userEntry(C, ev.text, ev.chars); C.cur = null; C.steps = []; liveTitle(C, ev.text); drawRail(C); break;
     case 'turn_start': ensureTurn(C, ts); break;
     case 'llm_call_start': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); newStep(C, cur, ev, ts); break; }
     case 'thinking_delta': { const cur = ensureTurn(C, ts);
       if (!cur.think) thinkStart(C, cur, ts);
       cur.thinkText += ev.text; cur.thinkPre.textContent = cur.thinkText.slice(-30000); stick(C); break; }
     case 'text_delta': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts);
-      if (!cur.prose) { cur.proseText = ''; cur.live = null; cur.mdst = null; cur.prose = h('div', { class: 'md stream' }); cur.answer.append(cur.prose); }
+      if (!cur.prose) { cur.proseText = ''; cur.live = null; cur.mdst = null; cur.prose = h('div', { class: 'md stream' }); if (!cur.answer.querySelector('.kind')) cur.answer.append(kindLabel('answer', 'Answer')); cur.answer.append(cur.prose); }
       cur.proseText += ev.text;
       liveText(C, cur);
       if (ev.clipped) cur.answer.append(h('div', { class: 'muted' }, 'Showing the first ' + ev.text.length.toLocaleString() + ' of ' + ev.clipped.total.toLocaleString() + ' characters.'));
       break; }
     case 'tool_use': (C.uses = C.uses || {})[ev.id] = ev; toolStart(C, ev, ts); break;
-    case 'tool_result': trackTouched(C, ev); toolDone(C, ev, ts); break;
+    case 'tool_result': trackTouched(C, ev); toolDone(C, ev, ts); liveFiles(C, ev); break;
     case 'tool_timing': toolTiming(C, ev); break;
     case 'permission': { const cur = C.cur; const card = cur && cur.tools[ev.id]; if (card) permInfo(card, ev); break; }
     case 'approval_request': approvalCard(C, ev, ts); break;
@@ -558,7 +588,7 @@ function applyEvent(C, ev) {
       const sd = Object.assign({ n: ev.iteration, model: ev.model, tin: u.input_tokens || 0 }, { dur: ev.duration_s || 0, cost: ev.cost || 0, tout: u.output_tokens || 0, cread: u.cache_read_tokens || 0, stop: ev.stop_reason, miss: ev.cache_miss_cause || '', detail: ev.cache_miss_detail || '' });
       C.steps.push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
     case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } if (C.cur && C.cur.step && ev.miss) C.cur.step.detail.append(h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : ''))); break; }
-    case 'subagent': subagentEvent(C, ev); break;
+    case 'subagent': subagentEvent(C, ev); if (ev.phase !== 'start') liveFiles(C, { changes: [1] }); break;
     case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
     case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;
     case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), ev.action === 'notice' ? (ev.percent >= 100 ? 'warn' : '') : 'warn')); break;
@@ -582,13 +612,34 @@ function applyEvent(C, ev) {
       card.querySelector('.td').textContent = ev.refused ? '' : axDur(ev.duration);
       const out = ev.refused ? h('div', { class: 'refused' }, ev.refused) : pagedPre(ev.output || '(no output)', 'out'); card.axPanes.out.replaceChildren(out); card.axText = ev.output || '';
       card.axPanes.why.append(h('p', { class: 'why' }, 'You ran this yourself from the message box.'));
-      hostOf(C).append(card); decorate(card); if (failed) cur.nFail++; headMeta(cur, false); break; }
+      hostOf(C).append(card); decorate(card); if (failed) cur.nFail++; headMeta(cur, false); liveFiles(C, { changes: [1] }); break; }
     default: if (C.cur) hostOf(C).append(h('details', { class: 'rawev dtl' }, h('summary', null, 'event: ' + t), h('pre', { class: 'out nolink' }, JSON.stringify(ev, null, 1).slice(0, 4000))));
   }
   if (!C.replaying && ['tool_result', 'llm_call_end', 'compaction'].includes(t)) refreshState(C, true);
   if (!C.replaying) stick(C);
 }
 
+// The tab takes its name from the first message as soon as it is sent; the saved title replaces it once there is one.
+function liveTitle(C, text) {
+  if (C.replaying || (C.meta && C.meta.title) || C.liveName || !C.tab) return;
+  const line = String(text || '').trim().split('\n')[0].replace(/\s+/g, ' '); if (!line) return;
+  C.liveName = line; setTabTitle(C.tab, line.slice(0, 26)); if (typeof wbTitleSync === 'function') wbTitleSync();
+}
+// A tool that may have changed files updates the Files panel, the git marks and the Changes panel while the turn runs, not after it.
+const READ_ONLY_TOOLS = ['Read', 'Ls', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite', 'ToolSearch', 'AskUserQuestion'];
+let LIVE_FILES_T = 0;
+function liveFiles(C, ev) {
+  if (C.replaying) return;
+  const name = ev.name || ((C.uses || {})[ev.tool_use_id] || {}).name || '';
+  if (!(ev.changes && ev.changes.length) && (ev.is_error || !name || READ_ONLY_TOOLS.includes(name))) return;
+  clearTimeout(LIVE_FILES_T);
+  LIVE_FILES_T = setTimeout(() => {
+    GIT_CACHE.t = 0; gitFiles();
+    if (typeof treeReload === 'function' && TREE.cache['']) treeReload().catch(() => { /* the next change or Reload tries again */ });
+    if (typeof wbRefreshChanges === 'function') wbRefreshChanges(true);
+    if (typeof WB_BUSY !== 'undefined' && WB_BUSY.chg) { WB_BUSY.chg.t = 0; renderRightSoon(); }
+  }, 250);
+}
 // What Axon itself changed in this chat, from its own tool calls: it does not depend on the folder being a git repository.
 const EDIT_NAMES = ['Write', 'Edit', 'MultiEdit', 'Patch', 'NotebookEdit', 'Notebook'];
 function relPath(p) { const ws = (state.ws || {}).workspace || ''; p = String(p || ''); return ws && p.startsWith(ws + '/') ? p.slice(ws.length + 1) : p; }
@@ -600,7 +651,7 @@ function trackTouched(C, ev) {
   if (use && EDIT_NAMES.includes(use.name)) { const inp = use.input || {}; const p0 = inp.file_path || inp.path || inp.notebook_path; if (p0) { const p = relPath(p0); T[p] = T[p] || (use.name === 'Write' ? 'A' : 'M'); } }
 }
 // ----- tool rows: marker | name | one plain sentence | chips | duration; Input / Output / Why open underneath -----
-function setToolState(card, state) { card.dataset.state = state; setMk(card.axMk, state); card.classList.toggle('err', state === 'bad'); }
+function setToolState(card, state) { card.dataset.state = state; setMk(card.axMk, state); card.classList.toggle('err', state === 'bad'); if (card.axFib) card.axFib.className = state; }
 function selectTab(card, k) {
   card.axTab = k;
   card.querySelectorAll('.tab2').forEach(b => b.setAttribute('aria-selected', String(b.dataset.k === k)));
@@ -614,9 +665,9 @@ async function copyTab(card, btn) {
 }
 function mkTool(name, input) {
   const mk = mkEl('run');
-  const sum = h('summary', { class: 'xrow' }, mk, h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
+  const sum = h('summary', { class: 'xrow' }, mk, kindLabel('tool', 'Tool call'), h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
   const panes = { in: h('div', { class: 'tpane p-in', hidden: true }), out: h('div', { class: 'tpane p-out', hidden: true }, h('span', { class: 'muted' }, 'Waiting for the result...')), why: h('div', { class: 'tpane p-why', hidden: true }) };
-  const card = h('details', { class: 'tool live-tool', 'data-state': 'run' }, sum);
+  const card = h('details', { class: 'tool live-tool kd-tool both', open: true, 'data-state': 'run' }, sum);
   const bar = h('div', { class: 'tabs2', role: 'tablist' });
   for (const [k, l] of [['in', 'Input'], ['out', 'Output'], ['why', 'Why']]) bar.append(h('button', { type: 'button', role: 'tab', class: 'tab2', 'data-k': k, 'aria-selected': 'false', onclick: () => selectTab(card, k) }, l));
   bar.append(h('button', { type: 'button', class: 'copy', title: 'Copy what this tab shows', onclick: (e) => copyTab(card, e.currentTarget) }, 'Copy'));
@@ -653,7 +704,7 @@ function toolStart(C, ev, ts) {
   if (g) { g.added++; g.cards.push(card); card.axGroup = g; } else st.standalone.push(card);
   cur.tools[ev.id] = card; card.axStep = st; card.axT0 = ts; card.axId = ev.id;
   if (ts != null) card.querySelector('.td').dataset.t0 = ts;
-  st.open++; st.tools++; cur.nTools++;
+  st.open++; st.tools++; cur.nTools++; fibAdd(cur, card);
   cur.stepText = 'Step ' + st.n + ': ' + (RUNNING_WORD(ev.name, inp) || ev.name).slice(0, 60); headMeta(cur, false);
   st.sub.textContent = axPlural(st.tools, 'tool');
   decorate(card);
@@ -681,9 +732,12 @@ function toolTiming(C, ev) {
   const st = card.axStep; if (st) updateStepTime(st);
   const g = card.axGroup; if (g && g.finished) groupHead(g);
 }
+// A shell command that exited non-zero failed, though the tool call itself worked: the same rule as the terminal (tool_cards.is_failed).
+const BASH_TOOLS = new Set(['Bash', 'bash', 'run_command']);
+const BASH_EXIT_RE = /^\s*Command exited with non-zero code -?\d+/;
 function toolDone(C, ev, ts) {
   const cur = C.cur; const card = cur && cur.tools[ev.tool_use_id]; if (!card) return;
-  const failed = !!ev.is_error;
+  const failed = !!ev.is_error || (BASH_TOOLS.has(ev.name) && BASH_EXIT_RE.test(String(ev.content || '')));
   setToolState(card, failed ? 'bad' : 'ok'); card.classList.toggle('denied', card.classList.contains('denied'));
   const td = card.querySelector('.td'); td.removeAttribute('data-t0'); if (!card.axT) td.textContent = '';
   const o = card.axPanes.out; o.replaceChildren();
@@ -843,12 +897,13 @@ async function finishTurn(C, ev, ts, how) {
     setMk(cur.mk, ev && !ev.is_error ? 'ok' : stopped ? 'stop' : 'bad');
     cur.art.querySelectorAll('[data-t0]').forEach(e => { e.removeAttribute('data-t0'); e.textContent = ''; });
     cur.art.querySelectorAll('.step .mk.run, .step .mk.wait, .tool .mk.run, .tool .mk.wait').forEach(m => setMk(m, 'stop'));
+    cur.art.querySelectorAll('.fib i.run, .fib i.wait').forEach(i => { i.className = 'stop'; });
     cur.art.querySelectorAll('.approve').forEach(a => a.remove());
     cur.art.querySelectorAll('.hp').forEach(a => a.classList.remove('hp'));
     cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/ running together$/, ' tools').replace(/^(\d+) tools tools$/, '$1 tools'); });
     headMeta(cur, true);
     cur.art.dataset.done = '1';
-    cur.art.classList.remove('live');   // the reply is finished: its hover actions (Copy, Regenerate, Bookmark...) may show
+    foldSteps(cur.art);   // the reply is finished: its steps stay, and its hover actions (Copy, Regenerate, Bookmark...) may show
     if (stopped) cur.answer.append(notice('Stopped', ''));
     else if (ev && ev.is_error) cur.answer.append(turnError(ev.result || ev.error || 'The turn failed.'));
   }
@@ -856,7 +911,8 @@ async function finishTurn(C, ev, ts, how) {
   settleSpinners(C, false);
   if (C.replaying) return;
   if (C.stopping) { C.stopping = false; drawHead(C); }
-  refreshState(C, true); refreshSubs(C);
+  if (C.st) { C.st.busy = false; drawHeadStatus(C); }   // the composer goes back to Send at once; the state read below confirms it
+  refreshState(C, true); refreshSubs(C); setTimeout(() => { if (!C.closed) refreshState(C, true); }, 900);
   GIT_CACHE.t = 0; if (typeof treeReload === 'function' && TREE.cache['']) treeReload();
   // The turn is already drawn by the same code that draws a stored one: keep it, and only move the stored position forward.
   if (ev && C.sid) await tailHistory(C, true);
@@ -877,7 +933,7 @@ function drawRail(C) {
 
 // ----- composer -----
 function buildComposer(C) {
-  const ta = h('textarea', { id: 'msg', rows: 2, placeholder: 'Message Axon   (/ commands, @ files, ! shell, drop files here)', 'aria-label': 'Message' });
+  const ta = h('textarea', { id: 'msg', rows: 1, placeholder: 'Message Axon   (/ commands, @ files, ! shell, drop files here)', 'aria-label': 'Message' });
   const chips = h('div', { class: 'chips' });
   const pop = h('div', { class: 'pop', hidden: true });
   const send = h('button', { class: 'btn primary', id: 'send-btn', type: 'button' }, 'Send');
@@ -886,7 +942,7 @@ function buildComposer(C) {
   const status = h('span', { class: 'muted', id: 'cstatus' }, 'Enter sends · Shift+Enter for a new line');
   const banner = h('div', { class: 'notice warn provider-banner', hidden: true });
   const heldEl = h('div', { class: 'heldbox', hidden: true });
-  const root = h('div', { class: 'composer' }, banner, heldEl, chips, h('div', { class: 'box' }, pop, ta), h('div', { class: 'cbar' }, wbPlus(C, ta), status, h('span', { class: 'sp' }), queueBtn, sendNow, wbMic(C, ta), send));
+  const root = h('div', { class: 'composer' }, banner, heldEl, chips, h('div', { class: 'box' }, pop, ta), status, h('div', { class: 'cbar' }, wbPlus(C, ta), wbFooter(C), h('span', { class: 'sp' }), C.head, queueBtn, sendNow, wbMic(C, ta), send));
   if (typeof axGhost === 'function') axGhost(C, ta);
   C.heldEl = heldEl; C.ta = ta; C.pop = pop; C.chipsEl = chips; C.sendBtn = send;
   const checkReady = async () => {
@@ -944,7 +1000,7 @@ function buildComposer(C) {
   };
   async function suggest() {
     const v = ta.value, pos = ta.selectionStart;
-    C.shellMode = v.startsWith('!'); ta.classList.toggle('shellmode', C.shellMode);
+    C.shellMode = v.startsWith('!'); ta.classList.toggle('shellmode', C.shellMode); status.classList.toggle('on', C.shellMode);
     if (C.shellMode) { status.textContent = 'Shell mode: runs the command in the project folder, then Axon sees the output.'; closePop(); return; }
     status.textContent = 'Enter sends · Shift+Enter for a new line';
     const first = v.split('\n')[0];
@@ -1018,11 +1074,12 @@ function buildComposer(C) {
   send.addEventListener('click', () => go(true));
   queueBtn.addEventListener('click', () => go(false));
   sendNow.addEventListener('click', async () => { C.lastQueued = null; await go(false); await stopTurn(C, { keep: C.lastQueued }); });
-  const sync = setInterval(() => { const busy = !!(C.st && C.st.busy); queueBtn.hidden = !busy; sendNow.hidden = !busy; send.textContent = busy ? 'Add to this turn' : 'Send'; }, 400);
+  // While Axon works the box offers Stop; once there is text, also the three ways of sending it.
+  const sync = setInterval(() => { const busy = !!(C.st && C.st.busy), typed = !!ta.value.trim(); queueBtn.hidden = !(busy && typed); sendNow.hidden = !(busy && typed); send.hidden = busy && !typed; send.textContent = busy ? 'Add to this turn' : 'Send'; }, 150);
   onLeave(() => clearInterval(sync));
   setTimeout(() => { const pre = lsGet('axon-prefill'); if (pre) { lsSet('axon-prefill', ''); ta.value = pre; auto(); } ta.focus(); }, 50);
   C.upload = upload;
-  return h('div', { class: 'composer-wrap' }, root, (typeof cfForecastLine === 'function' ? cfForecastLine(C, ta) : null), wbFooter(C));
+  return h('div', { class: 'composer-wrap' }, root, (typeof cfForecastLine === 'function' ? cfForecastLine(C, ta) : null));
 }
 function commandResultCard(C, line, r) {
   if (r.open) { location.hash = r.open; return; }

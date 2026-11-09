@@ -19,7 +19,7 @@ from axon.errors import ToolError
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 NEEDS_AGENT = frozenset({"Task", "AskUserQuestion", "Skill", "ToolSearch", "ExitPlanMode", "TodoWrite",
                          "SendMessage", "TaskStop", "TaskOutput", "Monitor", "CronCreate", "CronDelete",
-                         "CronList", "EnterPlanMode"})
+                         "CronList", "ScheduleWakeup", "EnterPlanMode"})
 
 
 def _client_version() -> str:

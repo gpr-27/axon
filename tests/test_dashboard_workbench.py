@@ -378,7 +378,7 @@ def test_left_panel_and_bottom_dock_are_gone_and_files_terminal_live_on_the_righ
     for gone in ("id: 'lpanel'", "id: 'bpanel'", "rz-l'", "rz-b'", "'data-toggle': 'left'", "mountTree(body)", "mountSearch(body)", "ensureBottom();"):
         assert gone not in JS_FRAME, gone
     assert "files: { title: 'Files', kind: 'narrow'" in APP_JS and "terminal: { title: 'Terminal', kind: 'narrow'" in APP_JS
-    assert "if (!lsGet(wbKey())) WB.narrow = ['files']" in APP_JS            # first run: the tree is open
+    assert "WB.narrow = ['files']" not in APP_JS                             # first run: the chat stands alone; the tree is a click away
 
 
 def test_shell_and_terminal_routes_open_the_terminal_panel_and_palette_still_reaches_them():

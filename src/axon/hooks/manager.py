@@ -51,7 +51,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -89,9 +91,7 @@ EVENTS: tuple[str, ...] = (
     "UserPromptExpansion",
     "PreModelSwitch",
     "PostModelSwitch",
-    # Accepted in configuration so Claude Code settings load unchanged; fired only where Axon has the
-    # matching feature (Setup, MessageDisplay, TeammateIdle, ConfigChange, FileChanged and the MCP
-    # Elicitation events need agent teams / a file watcher / the MCP layer: see docs/configuration.md).
+    # Setup runs once per folder at the first start; FileChanged is polled; Elicitation comes from the MCP layer.
     "Setup",
     "MessageDisplay",
     "TeammateIdle",
@@ -168,9 +168,22 @@ _LLM_EVENTS: frozenset[str] = frozenset({
     "SubagentStop", "TaskCompleted", "TaskCreated", "TeammateIdle", "UserPromptExpansion", "UserPromptSubmit",
 })
 _NO_REMOTE_TYPES: dict[str, frozenset[str]] = {   # event -> handler types it does NOT run
-    "SessionStart": frozenset({"http", "prompt", "agent", "mcp_tool"}),
-    "Setup": frozenset({"http", "prompt", "agent", "mcp_tool"}),
+    "SessionStart": frozenset({"http", "prompt", "agent"}),
+    "Setup": frozenset({"http", "prompt", "agent"}),
 }
+# Events where exit code 2 and stderr are dropped without a notice.
+_SILENT_EXIT2: frozenset[str] = frozenset({
+    "Setup", "Notification", "InstructionsLoaded", "StopFailure", "PermissionDenied", "MessageDisplay",
+    "DirectoryAdded",
+})
+_ONCE_PREFIX = "scoped:skill:"       # source prefix of hooks registered from skill frontmatter
+_TOP_ALSO = ("additionalContext", "sessionTitle", "watchPaths", "initialUserMessage", "displayContent",
+             "worktreePath", "reloadSkills", "retry", "suppressOriginalPrompt")
+_OUTPUT_FIELDS = frozenset({"continue", "stopReason", "suppressOutput", "systemMessage", "terminalSequence",
+                            "decision", "reason", "hookSpecificOutput", *_TOP_ALSO})
+# Claude Code's built-in tool and agent names where Axon's own spelling differs.
+_TOOL_ALIASES = {"Task": "Agent"}
+AGENT_TYPE_NAMES = {"explore": "Explore", "plan": "Plan"}
 
 DEFAULT_TIMEOUT_S = 600
 PROMPT_TIMEOUT_S = 30
@@ -205,11 +218,18 @@ def default_timeout(htype: str, event: str) -> float:
     if event == "MessageDisplay":
         return 10
     if event == "SessionEnd":
-        try:
-            return max(0.1, float(os.environ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"]) / 1000.0)
-        except (KeyError, ValueError):
-            return SESSION_END_TIMEOUT_S
+        return _session_end_env() or SESSION_END_TIMEOUT_S
     return DEFAULT_TIMEOUT_S
+
+
+def _session_end_env() -> float:
+    """AXON_SESSIONEND_HOOKS_TIMEOUT_MS / CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS in seconds (0: not set)."""
+    for name in ("AXON_SESSIONEND_HOOKS_TIMEOUT_MS", "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"):
+        try:
+            return max(0.1, float(os.environ[name]) / 1000.0)
+        except (KeyError, ValueError):
+            continue
+    return 0.0
 
 
 def matcher_matches(matcher: str | None, value: str | None, event: str = "") -> bool:
@@ -224,7 +244,7 @@ def matcher_matches(matcher: str | None, value: str | None, event: str = "") -> 
         seps = r"\|" if narrow else r"[|,]"
         return value in [p.strip() for p in re.split(seps, m)]
     try:
-        return re.search(m, value) is not None
+        return re.search(m, value) is not None     # JavaScript RegExp.test: a match anywhere in the value
     except re.error:
         return m == value
 
@@ -282,6 +302,33 @@ def platform_shell_argv(command: str) -> list[str] | str:
         if found:
             return [found, "-c", command]
     return ["sh", "-c", command]
+
+
+# How long the output of a hook that has exited is still read: a process it left behind may hold the pipe open.
+_EXIT_GRACE_S = 0.5
+
+
+def _read_hook_output(proc: subprocess.Popen, stdin_data: str, timeout: float | None) -> tuple[str, str, bool]:
+    """(stdout, stderr, suspect). Reads until the pipes close, or shortly after the hook's own process exited
+    (``suspect``: a background process still holds them). Raises subprocess.TimeoutExpired at the timeout."""
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+    pending: str | None = stdin_data
+    exited_at: float | None = None
+    while True:
+        try:
+            out, err = proc.communicate(pending, timeout=0.1)
+            return out or "", err or "", False
+        except subprocess.TimeoutExpired as e:
+            pending = None
+            now = time.monotonic()
+            if proc.poll() is not None:
+                exited_at = exited_at if exited_at is not None else now
+                if now - exited_at >= _EXIT_GRACE_S:
+                    def text(b: Any) -> str:
+                        return b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else (b or "")
+                    return text(e.output), text(e.stderr), True
+            if deadline is not None and now >= deadline:
+                raise subprocess.TimeoutExpired(proc.args, timeout or 0.0) from None
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -378,6 +425,8 @@ class HookResult:
     classifier_context: str = ""
     feedback: str = ""                      # stderr of exit-2 hooks on events that cannot block
     outputs: list[str] = field(default_factory=list)   # raw stdout of every hook (WorktreeCreate path)
+    compact_instructions: str = ""          # PreCompact: plain stdout, added to the summary instructions
+    ask_source: str = ""                    # where a PreToolUse "ask" came from: settings | skill | plugin:<name>
 
     @property
     def proceed(self) -> bool:
@@ -420,13 +469,14 @@ def _iter_groups(event_cfg: Any) -> Iterable[tuple[str, list[dict[str, Any]]]]:
             yield matcher, [{"type": "command", "command": group["command"], "timeout": group.get("timeout")}]
 
 
-def cap_text(text: str, label: str = "hook output") -> str:
-    """Strings over 10,000 characters are saved to a file and replaced by its path plus a preview."""
+def cap_text(text: str, label: str = "hook output", directory: Path | None = None) -> str:
+    """Strings over 10,000 characters are saved to a file (in the session directory when there is one)
+    and replaced by its path plus a preview."""
     if len(text) <= OUTPUT_CAP:
         return text
     path = ""
     try:
-        d = Path(tempfile.gettempdir()) / "axon-hook-output"
+        d = Path(directory) if directory is not None else Path(tempfile.gettempdir()) / "axon-hook-output"
         d.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix="hook-", suffix=".txt", dir=str(d))
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -449,10 +499,14 @@ class _Outcome:
     http: bool = False
     data: dict[str, Any] | None = None   # prompt / agent hooks: already-parsed decision
     timed_out: bool = False
+    suspect: bool = False         # the hook exited but something it started still holds its output open
 
 
-_TOP_ALSO = ("additionalContext", "sessionTitle", "watchPaths", "initialUserMessage", "displayContent",
-             "worktreePath", "reloadSkills", "retry", "suppressOriginalPrompt")
+def escape_reminder_tags(text: str) -> str:
+    """A hook's text must not open or close the system reminder it is delivered in."""
+    return re.sub(r"<(/?system-reminder)>", r"&lt;\1>", text)
+
+
 _DECISIONS = ("allow", "deny", "ask", "defer", "")
 _ACTIONS = ("accept", "decline", "cancel", "")
 
@@ -506,6 +560,9 @@ def parse_output(stdout: str, lenient: bool = False) -> tuple[str, dict[str, Any
             return None, f"output is not valid JSON ({e.msg})"
         if not isinstance(d, dict):
             return None, ""
+        extra = sorted(set(d) - _OUTPUT_FIELDS)
+        if extra:
+            _log.debug("Hook JSON output had unrecognized keys: %s", ", ".join(extra))
         errs = _validate(d)
         return (d, "") if not errs else (None, "JSON output failed validation: " + "; ".join(errs))
 
@@ -526,11 +583,22 @@ def parse_output(stdout: str, lenient: bool = False) -> tuple[str, dict[str, Any
             d2 = scan()
             if d2 is not None:
                 return "json", d2, ""
+        lines = [ln for ln in s.splitlines() if ln.strip()]
+        if len(lines) >= 2:      # several JSON lines: text, unless one of them is an output object that sets a field
+            try:
+                objs = [json.loads(ln) for ln in lines]
+            except json.JSONDecodeError:
+                objs = None
+            if objs is not None:
+                if any(isinstance(o, dict) and set(o) & _OUTPUT_FIELDS for o in objs):
+                    return "invalid", None, "several JSON values on stdout; print one JSON object and nothing else"
+                return "text", None, ""
         return ("invalid", None, problem) if problem else ("text", None, "")
     if lenient:
         d2 = scan()
         if d2 is not None:
             return "json", d2, ""
+    _log.debug("Hook output does not start with {, treating as plain text")
     return "text", None, ""
 
 
@@ -542,7 +610,7 @@ def _first_line(text: str) -> str:
 
 
 def _subst_vars(text: str, mapping: dict[str, str]) -> str:
-    return re.sub(r"\$\{(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|AXON_PROJECT_DIR|AXON_PLUGIN_ROOT)\}",
+    return re.sub(r"\$\{(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA|AXON_PROJECT_DIR|AXON_PLUGIN_ROOT|AXON_PLUGIN_DATA)\}",
                   lambda m: mapping.get(m.group(1), m.group(0)), text)
 
 
@@ -605,7 +673,7 @@ def config_change(path: Path | str, kind: str = "settings") -> None:
     else:
         source = "user_settings" if user else ("local_settings" if ".local." in p.name else "project_settings")
     res = fire("ConfigChange", {"source": source, "file_path": str(p)})
-    if res is not None and res.blocked:
+    if res is not None and res.blocked and source != "policy_settings":
         raise ValueError(f"a ConfigChange hook blocked the change to {p}" + (f": {res.message}" if res.message else ""))
 
 
@@ -636,11 +704,15 @@ class HookManager:
         self._lock = threading.Lock()
         self._live_procs: set[subprocess.Popen] = set()   # command hooks still running (Esc kills them)
         self._once_done: set[tuple[Any, ...]] = set()     # ``once`` hooks that already ran this session
+        self._async_session_text: dict[tuple[Any, ...], str] = {}
+        self._start_dir = os.getcwd()
         # Built-in handlers: fn(event, payload) -> {"additional_context": str, "system_message": str}.
         # They run for UserPromptSubmit after the configured hooks (see axon.skills.auto).
         self.internal_handlers: list[Callable[[str, dict[str, Any]], dict[str, str]]] = []
         self._file_snapshot: dict[str, int | None] = {}
-        self._in_event_poll = False
+        self._dynamic_watch: list[str] = []               # watchPaths returned by hooks
+        self._poll_lock = threading.Lock()
+        self._launched = False                            # the first SessionStart has run
         if settings is not None:
             import weakref
             _ACTIVE.append(weakref.ref(self, lambda r: _ACTIVE.remove(r) if r in _ACTIVE else None))
@@ -731,7 +803,9 @@ class HookManager:
         return len(out)
 
     def remove_scoped(self, source: str) -> None:
-        if self._scoped.pop(source, None) is not None:
+        removed = self._scoped.pop(source, None)
+        if removed is not None:
+            self._once_done.difference_update(h.key for h in removed)   # registered again: it may run once more
             self._rebuild()
 
     def _add_plugin_hooks(self, out: list[HookCommand]) -> None:
@@ -899,8 +973,14 @@ class HookManager:
             value = payload.get(field_name) if field_name else None
         if value is None and ev in _TOOL_EVENTS:
             value = payload.get("tool")
+        values = [None] if value is None else [str(value)]
+        if value is not None and ev in _TOOL_EVENTS and str(value) in _TOOL_ALIASES:
+            values.append(_TOOL_ALIASES[str(value)])
+        if value is not None and ev in ("SubagentStart", "SubagentStop"):
+            low = {v: k for k, v in AGENT_TYPE_NAMES.items()}.get(str(value))
+            values += [low] if low else ([AGENT_TYPE_NAMES[str(value)]] if str(value) in AGENT_TYPE_NAMES else [])
         return [h for h in self._hooks if h.event == ev and not (h.once and h.key in self._once_done)
-                and h.matches(None if value is None else str(value))]
+                and any(h.matches(v) for v in values)]
 
     def _if_ok(self, hook: HookCommand, event: str, payload: dict[str, Any]) -> bool:
         """``if``: permission-rule syntax, evaluated on tool events only (elsewhere the hook never runs)."""
@@ -942,6 +1022,8 @@ class HookManager:
                 pass
 
     def _start_async(self, hook: HookCommand, event: str, payload: dict[str, Any], stdin_data: str) -> None:
+        _log.debug("Hooks: %s [%s] moved to the background", event, self._label(hook))
+
         def work() -> None:
             out = self._execute(hook, event, payload, stdin_data, timeout=hook.timeout if hook.async_rewake else None)
             if out.failure:
@@ -954,9 +1036,15 @@ class HookManager:
             if kind != "json" or data is None:
                 return
             spec = data.get("hookSpecificOutput") if isinstance(data.get("hookSpecificOutput"), dict) else {}
-            parts = [str(spec.get("additionalContext") or data.get("additionalContext") or ""),
+            parts = [escape_reminder_tags(str(spec.get("additionalContext") or data.get("additionalContext") or "")),
                      str(data.get("systemMessage") or "")]
-            self._push_async("\n".join(p for p in parts if p), False)
+            text = "\n".join(p for p in parts if p)
+            if event == "SessionStart":       # an async SessionStart hook repeats itself on every start: same text, once
+                seen = self._async_session_text.get(hook.key)
+                if seen == text:
+                    return
+                self._async_session_text[hook.key] = text
+            self._push_async(text, False)
 
         threading.Thread(target=work, daemon=True, name="axon-hook-async").start()
 
@@ -966,9 +1054,11 @@ class HookManager:
         if ev == "SessionStart" and (payload or {}).get("source") == "startup":
             self._first_run_setup()
         if ev in ("SessionStart", "UserPromptSubmit", "PostToolUse"):
-            self._poll_watched_files()
+            self.poll_watched_files()
         result = self._run_configured(event, payload)
         self._run_internal(normalize_event(event), dict(payload or {}), result)
+        if ev == "SessionStart":
+            self._launched = True
         return result
 
     # Setup: runs once per folder, the first time Axon starts in it (before that session's SessionStart hooks).
@@ -980,29 +1070,31 @@ class HookManager:
             done = done if isinstance(done, dict) else {}
             if key in done:
                 return
-            done[key] = int(__import__("time").time())
+            done[key] = int(time.time())
             storage.write_state("setup-done", done)
         except Exception:  # noqa: BLE001 - without a marker Setup would repeat every start: skip it instead
             return
         if self.has("Setup"):
             self._run_configured("Setup", {"trigger": "init"})
 
-    # FileChanged: the literal file names in FileChanged matchers are checked (mtime) when a prompt is
-    # submitted, after each tool and at session start; there is no background watcher.
+    # FileChanged: each segment of a matcher (split on ``|``) is a literal file name in the working directory;
+    # hooks add absolute paths with ``watchPaths``. They are checked when a prompt is submitted, after each
+    # tool and at session start; there is no background watcher.
     def _watched_names(self) -> list[str]:
         names: list[str] = []
         for h in self._hooks:
             if h.event == "FileChanged":
-                names += [n.strip() for n in re.split(r"[|,]", h.matcher or "") if n.strip() and "*" not in n]
+                names += [n.strip() for n in (h.matcher or "").split("|") if n.strip()]
         return list(dict.fromkeys(names))
 
-    def _poll_watched_files(self) -> None:
-        if self._in_event_poll or not self.has("FileChanged"):
+    def poll_watched_files(self) -> None:
+        if not self.has("FileChanged") and not self._dynamic_watch:
+            return
+        if not self._poll_lock.acquire(blocking=False):
             return
         base = Path(self.cwd or self.workspace)
-        self._in_event_poll = True
         try:
-            for name in self._watched_names():
+            for name in [*self._watched_names(), *self._dynamic_watch]:
                 path = base / name
                 try:
                     stamp: int | None = path.stat().st_mtime_ns
@@ -1017,15 +1109,27 @@ class HookManager:
                     continue
                 self._file_snapshot[key] = stamp
                 kind = "unlink" if stamp is None else ("add" if before is None else "change")
-                self._run_configured("FileChanged", {"file_path": key, "file_name": name, "event": kind})
+                self._run_configured("FileChanged", {"file_path": key, "file_name": path.name, "event": kind})
         finally:
-            self._in_event_poll = False
+            self._poll_lock.release()
+
+    def _session_end_budget(self, hooks: list[HookCommand]) -> float:
+        """SessionEnd hooks share 1.5 seconds. A longer per-hook timeout in a settings file raises that (up to 60
+        seconds; a plugin's does not), and AXON_SESSIONEND_HOOKS_TIMEOUT_MS sets it outright."""
+        env = _session_end_env()
+        if env:
+            return env
+        longest = [float(h.timeout) for h in hooks if h.explicit_timeout and not h.source.startswith("plugin:")]
+        return min(60.0, max([SESSION_END_TIMEOUT_S, *longest]))
 
     def _run_configured(self, event: str, payload: dict[str, Any] | None = None) -> HookResult:
         ev = normalize_event(event)
         payload = dict(payload or {})
         result = HookResult()
         hooks = [h for h in self.matching(ev, payload) if self._if_ok(h, ev, payload)]
+        if any(h.type == "mcp_tool" for h in hooks) and self._no_mcp_context(ev, payload):
+            _log.debug("mcp_tool hooks are not available for the '%s' hook event (no MCP client context)", ev)
+            hooks = [h for h in hooks if h.type != "mcp_tool"]
         if not hooks:
             return result
         self._once_done.update(h.key for h in hooks if h.once)
@@ -1056,11 +1160,14 @@ class HookManager:
             else:
                 sync.append(hook)
         sem = threading.Semaphore(MAX_PARALLEL_LLM)
+        budget = self._session_end_budget(sync) if ev == "SessionEnd" else None
 
         def task(h: HookCommand) -> _Outcome:
             if h.type in ("prompt", "agent"):
                 with sem:
                     return self._execute(h, ev, payload, stdin_data)
+            if budget is not None:
+                return self._execute(h, ev, payload, stdin_data, timeout=min(float(h.timeout), budget))
             return self._execute(h, ev, payload, stdin_data)
 
         if len(sync) <= 1:
@@ -1072,10 +1179,25 @@ class HookManager:
         for hook, out in zip(sync, outcomes):
             _log.debug("%s %s hook %r -> exit %s failure=%r stdout=%r stderr=%r", ev, hook.type, hook.command, out.code,
                        out.failure, out.stdout[:500], out.stderr[:500])
-            self._process(hook, ev, out, result, messages, contexts)
+            self._process(hook, ev, out, result, messages, contexts, payload)
         result.message = "\n".join(m for m in messages if m).strip()
         result.additional_context = "\n".join(c for c in contexts if c).strip()
+        if result.watch_paths is not None and ev in ("SessionStart", "CwdChanged", "FileChanged"):
+            self._dynamic_watch = [p for p in dict.fromkeys(result.watch_paths) if os.path.isabs(p)]
         return result
+
+    def _no_mcp_context(self, event: str, payload: dict[str, Any]) -> bool:
+        """Setup, and SessionStart at launch, fire before the session's MCP servers are available."""
+        return event == "Setup" or (event == "SessionStart" and not self._launched
+                                    and payload.get("source") in ("startup", "resume", "fork"))
+
+    @staticmethod
+    def _succeeded(out: _Outcome) -> bool:
+        if out.failure or out.timed_out:
+            return False
+        if out.data is not None:
+            return out.data.get("ok") is not False
+        return out.code == 0
 
     def _run_in_parallel(self, task: Callable[[HookCommand], _Outcome], hooks: list[HookCommand]) -> list[_Outcome]:
         """Run the hooks on worker threads and wait for them in short slices, so Esc is not held up."""
@@ -1097,15 +1219,24 @@ class HookManager:
                 if hook.type == "http":
                     return self._exec_http(hook, event, stdin_data, t)
                 if hook.type == "mcp_tool":
-                    return self._exec_mcp(hook, payload)
+                    return self._exec_mcp(hook, payload, t)
                 if hook.type in ("prompt", "agent"):
                     return self._exec_llm(hook, event, stdin_data, t)
-                return self._exec_command(hook, event, stdin_data, t)
+                return self._exec_command(hook, event, stdin_data, t, payload)
         except Exception as e:  # noqa: BLE001 - a hook must never take the agent down
             return _Outcome(failure=f"{type(e).__name__}: {e}")
 
-    def _hook_env(self, hook: HookCommand, event: str) -> dict[str, str]:
-        env = dict(os.environ)
+    def _hook_env(self, hook: HookCommand, event: str, payload: dict[str, Any] | None = None) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("OTEL_")}
+        if (os.environ.get("AXON_SUBPROCESS_ENV_SCRUB") or os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")) == "1":
+            try:
+                from axon.tools.shell import _is_secret_env
+                env = {k: v for k, v in env.items() if not _is_secret_env(k)}
+            except Exception:  # noqa: BLE001
+                pass
+        effort = (payload or {}).get("effort")
+        if isinstance(effort, dict) and effort.get("level"):
+            env["CLAUDE_EFFORT"] = env["AXON_EFFORT"] = str(effort["level"])
         env["AXON_PROJECT_DIR"] = str(self.workspace)
         env["CLAUDE_PROJECT_DIR"] = str(self.workspace)
         env["AXON_HOOK_EVENT"] = event
@@ -1115,9 +1246,11 @@ class HookManager:
             try:
                 from axon import storage
                 name = re.sub(r"[^A-Za-z0-9_.-]", "_", hook.source.split(":", 1)[-1])
-                env["CLAUDE_PLUGIN_DATA"] = str(Path(storage.user_file("plugin-data")) / name)
+                env["CLAUDE_PLUGIN_DATA"] = env["AXON_PLUGIN_DATA"] = str(Path(storage.user_file("plugin-data")) / name)
             except Exception:  # noqa: BLE001
                 pass
+            env.update({f"CLAUDE_PLUGIN_OPTION_{k.upper()}": v for k, v in self._plugin_options(hook).items()})
+            env.update({f"AXON_PLUGIN_OPTION_{k.upper()}": v for k, v in self._plugin_options(hook).items()})
         if event in _ENV_FILE_EVENTS and hook.shell != "powershell":
             from axon.hooks import envfile
             path = envfile.current_path()
@@ -1126,13 +1259,37 @@ class HookManager:
                 env["AXON_ENV_FILE"] = str(path)
         return env
 
+    def _plugin_options(self, hook: HookCommand) -> dict[str, str]:
+        """The plugin's ``userConfig`` values, for ``${user_config.*}`` and CLAUDE_PLUGIN_OPTION_<KEY>."""
+        if not hook.source.startswith("plugin:"):
+            return {}
+        name = hook.source.split(":", 1)[1]
+        try:
+            from axon.commands.plugins import enabled_plugins, plugin_user_config_values
+            for plug in enabled_plugins(self.workspace):
+                if plug.name == name:
+                    return {str(k): str(v) for k, v in plugin_user_config_values(plug, self.workspace).items()}
+        except Exception:  # noqa: BLE001 - no options configured
+            pass
+        return {}
+
     def _argv(self, hook: HookCommand, env: dict[str, str]) -> list[str] | str:
         mapping = {k: env[k] for k in ("CLAUDE_PROJECT_DIR", "AXON_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT",
-                                       "AXON_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA") if k in env}
+                                       "AXON_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA", "AXON_PLUGIN_DATA") if k in env}
         if hook.args is not None:                     # exec form: no shell, placeholders substituted
             exe = _subst_vars(hook.command, mapping)
-            return [exe] + [_subst_vars(a, mapping) for a in hook.args]
+            if not re.search(r"[/\\]", exe) and re.search(r"\s", exe):
+                _log.warning("Hook command %r has whitespace and `args`: there is no executable with that name. "
+                             "Move the extra tokens into args.", exe)
+            options = self._plugin_options(hook)
+
+            def config(text: str) -> str:
+                return re.sub(r"\$\{user_config\.([A-Za-z_]\w*)\}", lambda m: options.get(m.group(1), ""), text)
+            return [config(exe)] + [config(_subst_vars(a, mapping)) for a in hook.args]
         cmd = hook.command
+        if hook.source.startswith("plugin:") and "${user_config." in cmd:
+            raise ValueError("a shell-form plugin hook cannot use ${user_config.*}: read $CLAUDE_PLUGIN_OPTION_<KEY> "
+                             "or set args to use exec form")
         if hook.shell == "powershell":
             cmd = re.sub(r"\$\{(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA)\}", r"${env:\1}", cmd)
             for exe in ("pwsh", "powershell"):
@@ -1145,9 +1302,26 @@ class HookManager:
                 return [found, "-c", cmd]
         return platform_shell_argv(cmd)
 
-    def _exec_command(self, hook: HookCommand, event: str, stdin_data: str, timeout: float | None) -> _Outcome:
-        env = self._hook_env(hook, event)
-        cwd = str(self.workspace) if self.workspace.is_dir() else None
+    def _hook_cwd(self) -> str | None:
+        """The current directory, or the first of these that still exists: the directory the session started
+        in, the project root, the home directory, the system temp directory."""
+        for i, cand in enumerate((self.cwd, str(self.workspace), self._start_dir, str(Path.home()), tempfile.gettempdir())):
+            if cand and os.path.isdir(cand):
+                if i and self.cwd:
+                    _log.warning("Hook working directory %s no longer exists; running from %s", self.cwd, cand)
+                return cand
+        return None
+
+    def _exec_command(self, hook: HookCommand, event: str, stdin_data: str, timeout: float | None,
+                      payload: dict[str, Any] | None = None) -> _Outcome:
+        env = self._hook_env(hook, event, payload)
+        cwd = self._hook_cwd()
+        started = time.monotonic()
+        match = str((payload or {}).get(_MATCH_FIELD.get(event, ""), "") or "")
+        title = f"{event}:{match}" if match else event
+
+        def note(how: str) -> None:
+            _log.debug("Hooks: %s [%s] %s (%dms)", title, hook.command, how, (time.monotonic() - started) * 1000)
         try:  # own process group, so a timeout / Esc kills the hook's children too, not just its shell
             from axon.platform import new_process_group_kwargs
             group = new_process_group_kwargs()
@@ -1167,12 +1341,15 @@ class HookManager:
                 **group,
             )
         except Exception as e:
+            note("failed to start")
             return _Outcome(failure=f"failed to start ({hook.command}): {e}")
         with self._lock:
             self._live_procs.add(proc)
+        suspect = False
         try:
-            stdout, stderr = interruptible.communicate(proc, stdin_data, timeout)
+            stdout, stderr, suspect = _read_hook_output(proc, stdin_data, timeout)
         except subprocess.TimeoutExpired:
+            note(f"timed out after {(timeout or 0) * 1000:.0f}ms")
             _kill_tree(proc)
             try:
                 proc.communicate(timeout=2)
@@ -1188,7 +1365,8 @@ class HookManager:
         finally:
             with self._lock:
                 self._live_procs.discard(proc)
-        return _Outcome(code=proc.returncode, stdout=(stdout or "").strip(), stderr=(stderr or "").strip())
+        note(f"finished with status {proc.returncode}")
+        return _Outcome(code=proc.returncode, stdout=(stdout or "").strip(), stderr=(stderr or "").strip(), suspect=suspect)
 
     def _kill_running_hooks(self) -> None:
         """Esc while several hooks ran on worker threads: stop their processes."""
@@ -1248,11 +1426,19 @@ class HookManager:
             return _Outcome(failure=f"http hook {hook.url} returned HTTP {status}", http=True)
         return _Outcome(code=0, stdout=body.strip(), http=True)
 
-    def _exec_mcp(self, hook: HookCommand, payload: dict[str, Any]) -> _Outcome:
+    def _exec_mcp(self, hook: HookCommand, payload: dict[str, Any], timeout: float | None = None) -> _Outcome:
         if self.mcp_call is None:
             return _Outcome(failure=f"mcp_tool hook {hook.server}:{hook.tool}: MCP is not available")
         args = _fill_input(hook.input, payload)
-        text, is_error = self.mcp_call(hook.server, hook.tool, args if isinstance(args, dict) else {})
+        mcp_call = self.mcp_call
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="axon-hook-mcp")
+        try:
+            text, is_error = interruptible.wait_future(
+                pool.submit(mcp_call, hook.server, hook.tool, args if isinstance(args, dict) else {}), timeout=timeout)
+        except FuturesTimeout:
+            return _Outcome(failure=f"timed out after {timeout:g}s (mcp_tool {hook.server}:{hook.tool})", timed_out=True)
+        finally:
+            pool.shutdown(wait=False)
         if is_error:
             return _Outcome(failure=f"mcp_tool {hook.server}:{hook.tool} returned an error: {_first_line(text)}")
         return _Outcome(code=0, stdout=(text or "").strip())
@@ -1310,8 +1496,20 @@ class HookManager:
             result.blocked = True
             messages.append(note)
 
+    def _cap(self, text: str, label: str = "hook output") -> str:
+        """10,000 character cap; the rest goes to a file in the session directory."""
+        directory = Path(self.transcript_path).parent / "hook-output" if self.transcript_path else None
+        return cap_text(text, label, directory)
+
     def _process(self, hook: HookCommand, event: str, out: _Outcome, result: HookResult,
-                 messages: list[str], contexts: list[str]) -> None:
+                 messages: list[str], contexts: list[str], payload: dict[str, Any] | None = None) -> None:
+        if out.suspect and event in ("PreToolUse", "PermissionRequest") and '"allow"' in out.stdout:
+            result.blocked = True
+            result.permission_decision = "deny"
+            messages.append(f"{event} hook error: [{self._label(hook)}]: the hook exited while a process it started still "
+                            "holds its output open; refusing to honor the suspect capture. Print the decision first and "
+                            "redirect that process's stdout and stderr.")
+            return
         if out.data is not None:
             self._apply_llm(hook, event, out.data, result, messages)
             return
@@ -1331,18 +1529,22 @@ class HookManager:
                 self._fail(hook, event, f"Failed with non-blocking status code: {_first_line(stderr)}", result, messages)
                 return
             before = len(messages)
-            if data:
+            if data and event not in ("Elicitation", "ElicitationResult"):
                 self._apply(hook, event, data, result, messages, contexts)
             if event in CAN_BLOCK or event in _FEEDBACK_EVENTS:
                 result.blocked = True
+                if event in ("Elicitation", "ElicitationResult"):
+                    result.action = "decline"
                 if len(messages) == before:
-                    messages.append(stderr or stdout or f"Blocked by {event} hook: {hook.command}")
-            elif stderr:
+                    text = stderr or stdout or f"Blocked by {event} hook: {hook.command}"
+                    messages.append(text)
+            elif stderr and event not in _SILENT_EXIT2:
                 result.feedback = (result.feedback + "\n" + stderr).strip()
                 result.warnings.append(f"{event} hook: {_first_line(stderr)}")
             return
         if code != 0:
-            if kind == "json" and data is not None and hook.on_failure != "block":
+            if kind == "json" and data is not None and hook.on_failure != "block" \
+                    and event not in ("Elicitation", "ElicitationResult"):
                 self._apply(hook, event, data, result, messages, contexts)
                 return
             detail = _first_line(stderr) or _first_line(stdout) or "no output"
@@ -1357,8 +1559,12 @@ class HookManager:
         if kind == "text" and out.http:
             self._fail(hook, event, "2xx response body is not a JSON object", result, messages)
             return
+        if kind == "text" and event == "PreCompact":
+            cut = stdout if len(stdout) <= OUTPUT_CAP else stdout[:OUTPUT_CAP] + "\n[hook output truncated]"
+            result.compact_instructions = "\n".join(p for p in (result.compact_instructions, cut) if p)
+            return
         if kind == "text" and event in _PLAIN_CONTEXT_EVENTS:
-            contexts.append(cap_text(stdout))
+            contexts.append(self._cap(escape_reminder_tags(stdout)))
 
     def _apply_llm(self, hook: HookCommand, event: str, data: dict[str, Any], result: HookResult,
                    messages: list[str]) -> None:
@@ -1417,16 +1623,18 @@ class HookManager:
             result.stop = True
             result.stop_reason = str(data.get("stopReason") or reason or "Stopped by hook").strip()
         if data.get("systemMessage") and event not in _IGNORE_SYSTEM_MESSAGE:
-            result.system_message = cap_text((result.system_message + "\n" + str(data["systemMessage"])).strip(),
-                                             "systemMessage")
+            result.system_message = self._cap((result.system_message + "\n" + str(data["systemMessage"])).strip(),
+                                              "systemMessage")
 
+        if decision == "block" and event == "PreModelSwitch":
+            self._merge_permission(result, "deny")
         hso = data.get("hookSpecificOutput")
         spec: dict[str, Any] = {k: data[k] for k in _TOP_ALSO if k in data}
         if isinstance(hso, dict):
             spec.update(hso)
         ctx = spec.get("additionalContext")
         if ctx:
-            contexts.append(cap_text(str(ctx), "additionalContext"))
+            contexts.append(self._cap(escape_reminder_tags(str(ctx)), "additionalContext"))
         perm = str(spec.get("permissionDecision") or "").strip().lower()
         # PermissionRequest hooks answer with {"decision": {"behavior": "allow"|"deny", ...}}.
         beh = spec.get("decision")
@@ -1447,8 +1655,11 @@ class HookManager:
                 result.permission_reason = perm_reason
             if perm == "deny":
                 messages.append(perm_reason or f"Denied by {event} hook: {hook.command}")
-            elif perm_reason and perm == "ask":
-                result.system_message = (result.system_message + "\n" + perm_reason).strip()
+            elif perm == "ask":
+                result.ask_source = ("plugin:" + hook.source.split(":", 1)[1] if hook.source.startswith("plugin:")
+                                     else "skill" if hook.source.startswith(_ONCE_PREFIX) else "settings")
+                if perm_reason:
+                    result.system_message = (result.system_message + "\n" + perm_reason).strip()
         upd = spec.get("updatedInput")
         if isinstance(upd, dict):
             result.updated_input = dict(upd)
@@ -1462,7 +1673,7 @@ class HookManager:
         if spec.get("sessionTitle"):
             result.session_title = str(spec["sessionTitle"]).strip()
         if spec.get("initialUserMessage"):
-            result.initial_user_message = cap_text(str(spec["initialUserMessage"]), "initialUserMessage")
+            result.initial_user_message = self._cap(str(spec["initialUserMessage"]), "initialUserMessage")
         if spec.get("suppressOriginalPrompt") is True:
             result.suppress_original_prompt = True
         wp = spec.get("watchPaths")

@@ -302,7 +302,7 @@ def handle_trace(agent: Any, arg: str) -> CommandResult:
     if a in ("last", "inspect"):
         from axon.commands.agent_cmds import handle_inspect
         return handle_inspect(agent, "")
-    levels = (("compact", "one line per tool + footer"), ("normal", "step timeline with args, results, permissions"),
+    levels = (("compact", "one tidy row per tool with a short preview"), ("normal", "step timeline with args, results, permissions"),
               ("detailed", "+ full tool input, result heads, prompt breakdown"), ("debug", "+ raw request and usage"))
     if not a and is_tty():
         from axon.ui.menus import choose_value

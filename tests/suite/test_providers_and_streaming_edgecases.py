@@ -93,7 +93,7 @@ def test_turn_footer_tokens_rendered():
     import io
     import sys
     from axon.ui.render import Renderer
-    r = Renderer()
+    r = Renderer(trace_level="normal")
     usage = Usage(input=6835, output=52, cache_read=6600)
     buf = io.StringIO()
     old_stdout = sys.stdout

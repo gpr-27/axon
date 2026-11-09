@@ -6,7 +6,7 @@ INDEX_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Axon dashboard</title>
+<title>Axon</title>
 <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/appearance.js"></script>
@@ -174,8 +174,9 @@ details.err .ts,details.denied .ts{color:var(--bad)}details.denied{border-color:
 
 from axon.features.dash_appearance import APPEARANCE_CSS, APPEARANCE_JS  # noqa: E402
 from axon.features.dash_css import APP_LAYOUT_CSS  # noqa: E402
-from axon.features.dash_design import DESIGN_CSS, TYPE_TAIL, type_overrides  # noqa: E402
+from axon.features.dash_design import DESIGN_CSS, FINISH_CSS, TYPE_TAIL, type_overrides  # noqa: E402
 from axon.features.dash_js_cards import JS_CARDS  # noqa: E402
+from axon.features.dash_js_context import CONTEXT_CSS, JS_CONTEXT  # noqa: E402
 from axon.features.dash_js_chatx import CHATX_CSS, JS_CHATX  # noqa: E402
 from axon.features.dash_js_compare import COMPARE_CSS, JS_COMPARE  # noqa: E402
 from axon.features.dash_js_cmdcards import CMDCARDS_CSS, JS_CMDCARDS  # noqa: E402
@@ -199,7 +200,7 @@ from axon.features.dash_js_tasks import JS_TASKS, TASKS_CSS  # noqa: E402
 
 from axon.features.dash_js_library import JS_LIBRARY, LIBRARY_CSS  # noqa: E402
 
-APP_JS = '(() => {\n"use strict";\n' + i18n_asset("i18n.js")[0] + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_CMDCARDS + JS_WELCOME + JS_I18N + JS_TASKS + JS_COMPARE + JS_CHATX + JS_LIBRARY + JS_A11Y + "\n})();\n"
+APP_JS = '(() => {\n"use strict";\n' + i18n_asset("i18n.js")[0] + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_CONTEXT + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_CMDCARDS + JS_WELCOME + JS_I18N + JS_TASKS + JS_COMPARE + JS_CHATX + JS_LIBRARY + JS_A11Y + "\n})();\n"
 
 
 def asset(name: str) -> tuple[str, str] | None:
@@ -211,8 +212,8 @@ def asset(name: str) -> tuple[str, str] | None:
     if name == "appearance.js":
         return APPEARANCE_JS, "text/javascript; charset=utf-8"
     if name == "app.css":
-        sheet = d.theme_css() + APP_CSS + APP_LAYOUT_CSS + APPEARANCE_CSS + DESIGN_CSS + WORKBENCH_CSS + CMDCARDS_CSS + COMPARE_CSS + WELCOME_CSS + I18N_CSS + TASKS_CSS + CHATX_CSS + LIBRARY_CSS + A11Y_CSS
-        return sheet + type_overrides(sheet) + TYPE_TAIL + lang_type_scale(sheet), "text/css; charset=utf-8"
+        sheet = d.theme_css() + APP_CSS + APP_LAYOUT_CSS + APPEARANCE_CSS + DESIGN_CSS + WORKBENCH_CSS + CMDCARDS_CSS + COMPARE_CSS + WELCOME_CSS + I18N_CSS + TASKS_CSS + CHATX_CSS + LIBRARY_CSS + CONTEXT_CSS + A11Y_CSS
+        return sheet + type_overrides(sheet) + TYPE_TAIL + FINISH_CSS + lang_type_scale(sheet + FINISH_CSS), "text/css; charset=utf-8"
     if name in ("icon.svg", "logo.svg"):
         svg = d.logo_svg()
         if name == "icon.svg":

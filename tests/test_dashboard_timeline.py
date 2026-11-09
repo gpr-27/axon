@@ -160,7 +160,12 @@ def test_type_scale_and_one_code_face():
     # glyphs), and every one of those is scoped to html:lang(..), so English keeps exactly the scale above.
     cut = css.rfind(TYPE_TAIL)
     assert cut >= 0
-    after = css[cut + len(TYPE_TAIL):]
+    # FINISH_CSS, the look's last word, is written on the same scale (plus the page title and Usage hero sizes).
+    from axon.features.dash_design import FINISH_CSS
+    finish_sizes = {float(x) for x in re.findall(r"font(?:-size)?:(?:[\d]+ )?([\d.]+)px", FINISH_CSS)}
+    assert finish_sizes <= {12, 13, 14, 15, 16, 17, 22, 28, 34, 48, 52}, finish_sizes
+    assert set(re.findall(r"font-weight:(\w+)", FINISH_CSS)) <= {"400", "500", "600"} and "italic" not in FINISH_CSS
+    after = css[cut + len(TYPE_TAIL):].replace(FINISH_CSS, "", 1)
     sels = [x.strip() for head in re.findall(r"(?:^|[{}])\s*([^{}@]+)\{", after) for x in head.split(",") if x.strip()]
     assert sels and all(x.startswith("html:lang(") for x in sels), [x for x in sels if not x.startswith("html:lang(")][:5]
     # labels and figures: the interface face; only code keeps the code face

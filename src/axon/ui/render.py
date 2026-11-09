@@ -1013,13 +1013,14 @@ def turn_summary_rows(steps: list[dict[str, Any]], width: int, stopped: bool = F
 
 
 TRACE_LEVELS = ("compact", "normal", "detailed", "debug")
+DEFAULT_TRACE_LEVEL = "normal"
 
 
 def normalize_trace_level(level: Any) -> str:
     if isinstance(level, int) and 0 <= level < len(TRACE_LEVELS):
         return TRACE_LEVELS[level]
     s = str(level or "").strip().lower()
-    aliases = {"quiet": "compact", "minimal": "compact", "default": "normal", "verbose": "detailed",
+    aliases = {"quiet": "compact", "minimal": "compact", "default": DEFAULT_TRACE_LEVEL, "verbose": "detailed",
                "full": "detailed", "raw": "debug"}
     s = aliases.get(s, s)
     return s if s in TRACE_LEVELS else "normal"
@@ -2091,7 +2092,7 @@ class pause_spinners:
 
 
 class Spinner:
-    """Thread-safe status spinner: '│ ⠋ Step 2 · thinking… 3.2s · 410 tok ↓ · ctrl+c to interrupt'.
+    """Thread-safe status spinner: '⠋ running Bash: List files · 4s · esc to interrupt', and a tip under it at times.
 
     Only active on an interactive TTY.  While running, ``sys.stdout`` is wrapped so any write from
     any thread first erases the spinner line; the spinner is redrawn on the next tick, and only when
@@ -2213,26 +2214,31 @@ class Spinner:
         """New response text arrived: redraw the live row soon (within ~30 ms) instead of at the next tick."""
         self._wake.set()
 
-    def status_rows(self) -> list[str]:
-        """Rows under the spinner line: what is happening now, then a tip. The plain tip row when live status is off."""
+    def _live_rows(self) -> Any:
+        """What the live status says now (``now`` for the spinner row, ``tip`` for the row under it); None when off."""
         live = self.live
-        if live is None or term_height() < 12 or not live.enabled():
+        if live is None or not live.enabled():
+            return None
+        hint = f" {glyph('dot')} {Renderer.interrupt_hint}"
+        # two columns spare: the rail's own prefix is printed right after a redraw, and a log that
+        # keeps the erase codes out must not see a row wider than the window
+        room = max(16, term_width() - 3 - display_width(self.prefix) - 2 - display_width(hint))
+        return live.rows(room, show_tip=term_height() >= 14)
+
+    def status_rows(self) -> list[str]:
+        """The optional row under the spinner: a tip. The spinner row itself says what is happening."""
+        if term_height() < 12:
+            return []
+        rows = self._live_rows()
+        if rows is None or not rows.now:
             hint = self.hint_line()
             return [hint] if hint else []
-        lead = self._row_lead()
-        label = f"{SUBTLE}{glyph('result')} {RST}"
-        room = max(10, term_width() - 1) - display_width(lead) - 2 - len("Now: ")
-        rows = live.rows(room, show_tip=term_height() >= 14)
-        if not rows.now:
-            hint = self.hint_line()
-            return [hint] if hint else []
-        out = [truncate(f"{lead}{label}{MUTED}Now: {RST}{TEXT}{rows.now}{RST}", max(10, term_width() - 1))]
-        if rows.tip:
-            out.append(truncate(f"{lead}{label}{MUTED}Tip: {sanitize(rows.tip)}{RST}", max(10, term_width() - 1)))
-        return out
+        if not rows.tip:
+            return []
+        return [truncate(f"{self._row_lead()}{MUTED}Tip: {sanitize(rows.tip)}{RST}", max(10, term_width() - 1))]
 
     def _row_lead(self) -> str:
-        return self.prefix.rstrip() + ("  " if self.prefix.strip() else "  ")
+        return self.prefix + "  "
 
     def hint_line(self) -> str:
         """Second row under the spinner: a contextual tip, or how to talk to the agent while it works."""
@@ -2252,7 +2258,7 @@ class Spinner:
         if not tip:
             return ""
         lead = self._row_lead()
-        return truncate(f"{lead}{SUBTLE}{glyph('result')} {RST}{MUTED}Tip: {sanitize(tip)}{RST}", max(10, term_width() - 1))
+        return truncate(f"{lead}{MUTED}Tip: {sanitize(tip)}{RST}", max(10, term_width() - 1))
 
     MIN_REDRAW = 0.04       # text-driven redraws are at most ~33 per second; the glyph still turns every interval
 
@@ -2311,10 +2317,14 @@ class Spinner:
         extra = self._status() if self._status else ""
         frame = frame or glyph("spinner")[0]
         dot = f" {glyph('dot')} "
-        phase = max(0.0, time.time() - (self._phase_t0 or self.started_at or time.time()))
-        clock = f"{phase:.1f}s" + (f" (turn {elapsed:.0f}s)" if elapsed - phase >= 1.0 else "")
-        detail = clock + (f"{dot}{extra}" if extra else "") + f"{dot}{Renderer.interrupt_hint}"
-        line = f"{self.prefix}{ACCENT}{frame}{RST} {TEXT}{self._label}{glyph('ellipsis')}{RST} {SUBTLE}{detail}{RST}"
+        rows = self._live_rows()
+        if rows is not None and rows.now:      # it carries its own clock
+            line = f"{self.prefix}{ACCENT}{frame}{RST} {TEXT}{rows.now}{RST} {SUBTLE}{glyph('dot')} {Renderer.interrupt_hint}{RST}"
+        else:
+            phase = max(0.0, time.time() - (self._phase_t0 or self.started_at or time.time()))
+            clock = f"{phase:.1f}s" + (f" (turn {elapsed:.0f}s)" if elapsed - phase >= 1.0 else "")
+            detail = clock + (f"{dot}{extra}" if extra else "") + f"{dot}{Renderer.interrupt_hint}"
+            line = f"{self.prefix}{ACCENT}{frame}{RST} {TEXT}{self._label}{glyph('ellipsis')}{RST} {SUBTLE}{detail}{RST}"
         width = max(10, term_width() - 1)
         draft = ""
         provider = Spinner.draft_provider
@@ -2337,7 +2347,7 @@ class Spinner:
 
 _TIPS: list[tuple[str, str]] = [
     ("/help", "Type /help to list every command, or ? for keyboard shortcuts"),
-    ("/trace", "Press ctrl+o or type /trace detailed to see full tool inputs and results"),
+    ("/trace", "Press alt+l or type /trace detailed to see full tool inputs and results"),
     ("/inspect", "Type /inspect to replay the full timeline of the last turn"),
     ("/model", "Type /model to switch models mid-session"),
     ("/compact", "Type /compact to summarise the conversation and free context"),
@@ -2377,7 +2387,8 @@ class Renderer:
 
     Trace levels (``set_trace_level`` / ``cycle_trace_level`` / ``AXON_TRACE_LEVEL``):
 
-    * ``compact``  - one line per tool call + footer
+    * ``compact``  - the answer, one tidy row per tool call with a short preview, failures with
+      their error, and a short summary row; Ctrl+O opens the transcript with everything else
     * ``normal``   - (default) turn rail with every LLM call (tokens, cache, time, cost), reasoning
       summary, tool calls with arguments, result summaries + what is fed back, diffs, permission /
       hook / retry / compaction events
@@ -2397,12 +2408,13 @@ class Renderer:
         level = trace_level or os.environ.get("AXON_TRACE_LEVEL") or getattr(settings, "trace_level", None)
         if verbose:
             level = "detailed"
-        self.trace_level = normalize_trace_level(level or "normal")
+        self.trace_level = normalize_trace_level(level or DEFAULT_TRACE_LEVEL)
         self._lock = threading.RLock()
         self.registry: Any = getattr(settings, "registry", None)
         self.spinner = Spinner(status=self._spinner_status)
         self.live = _live.LiveStatus(agent_of=lambda: getattr(self, "_agent", None), provider_of=self._provider_for)
         self.live.fallback_tip = self._generic_tip
+        self.live.detail_of = lambda: self.level >= 1
         self.spinner.live = self.live
         self.spinner.preview_provider = self._stream_preview
         _live.set_current(self.live)
@@ -2499,6 +2511,8 @@ class Renderer:
                 vim = True
             if vim is not None:
                 _ui_input.set_vim_mode(bool(vim))
+            from axon.ui.vim import set_insert_remaps
+            set_insert_remaps(getattr(settings, "vim_insert_mode_remaps", None))
             color = getattr(settings, "prompt_color", None) or getattr(agent, "prompt_color", None)
             if color:
                 _ui_input.set_prompt_color(str(color))
@@ -2530,7 +2544,7 @@ class Renderer:
         return self.trace_level
 
     def cycle_trace_level(self) -> str:
-        """Ctrl+O: compact → normal → detailed → debug → compact."""
+        """Alt+L: compact → normal (the default) → detailed → debug → compact."""
         self.trace_level = TRACE_LEVELS[(self.level + 1) % len(TRACE_LEVELS)]
         return self.trace_level
 
@@ -2560,8 +2574,15 @@ class Renderer:
         return self._turn_open and self.level >= 1
 
     def _rail(self, extra: str = "") -> str:
-        """Left prefix for timeline rows (rail when a turn is open, plain indent otherwise)."""
+        """Left prefix for timeline rows (rail when a turn is open, plain indent otherwise). At the compact
+        level there is no step above a row to nest under, so rows of a turn sit one level further left."""
+        if self._turn_open and self.level == 0:
+            extra = extra[2:]
         return (f"{BORDER}{glyph('v')}{RST} " if self._railed else "  ") + extra
+
+    def _step_label(self, what: str) -> str:
+        """The spinner's label: 'Step 2 · thinking', or just 'Thinking' at the compact level."""
+        return f"Step {self._step} {glyph('dot')} {what}" if self.level >= 1 else what[:1].upper() + what[1:]
 
     def _line(self, text: str, extra: str = "", atomic: bool = False, hang: str = "  ") -> None:
         """Write one timeline row, wrapped (with hanging indent *hang*) to the terminal width.
@@ -2647,7 +2668,7 @@ class Renderer:
             (logo[2], project),
         ]
         mode_s = f"{WARNING}{mode}{RST} {MUTED}mode{RST}" if mode else ""
-        trace_s = f"{MUTED}trace {self.trace_level} (ctrl+o){RST}"
+        trace_s = f"{MUTED}trace {self.trace_level} (alt+l){RST}"
         tips = f"{MUTED}/help commands {dot} ! shell {dot} @ files {dot} ? shortcuts{RST}"
         rows: list[str] = []
         for lg, text in lines:                     # logo column + text; long text wraps under itself
@@ -2822,8 +2843,8 @@ class Renderer:
             if self.level >= 3:
                 self._render_debug_fields(e, skip={"iteration", "model", "message_count", "tokens_in", "tools_ingested", "user_prompt"})
         self.spinner.prefix = self._rail() if self._railed else "  "
-        self.spinner.start(f"Step {e.iteration} {glyph('dot')} thinking")
-        self.spinner.set_label(f"Step {e.iteration} {glyph('dot')} thinking")
+        self.spinner.start(self._step_label("thinking"))
+        self.spinner.set_label(self._step_label("thinking"))
 
     def _render_fed_back(self, e: LLMCallStart) -> None:
         items = e.tools_ingested or []
@@ -2997,7 +3018,10 @@ class Renderer:
             return
         if self.level == 1:       # normal: '✻ THINKING  0.1s · first words of the thought…' (the rest: detailed)
             if full_text:
-                self._section(_tool_cards.thinking_line(elapsed, full_text, self._section_width()))
+                head, *body = _tool_cards.thinking_rows(elapsed, full_text, self._card_width(), indent="")
+                self._section(head)
+                if body:
+                    self._card_out(body)
             return
         full = " ".join("".join(self._thinking_lines).split())
         first = re.split(r"(?<=[.!?])\s", full, maxsplit=1)[0] if full else ""
@@ -3025,7 +3049,7 @@ class Renderer:
                 self._answer_label_step = self._step
                 self._section(_tool_cards.answer_label(), gap=True)
             # On the timeline the text is a child of its step (same column as tool calls); no header row.
-            self.spinner.set_label(f"Step {self._step} {glyph('dot')} responding")
+            self.spinner.set_label(self._step_label("responding"))
         self._resp_raw.append(e.text)
         self._turn_text = True
         self._md_out(self._md.feed(e.text))
@@ -3073,7 +3097,7 @@ class Renderer:
     def _on_tool_use_start(self, e: ToolUseStart) -> None:
         self._finish_stream()
         self._set_phase("selected" if e.name else "choosing", _clean(e.name))
-        self.spinner.set_label(f"Step {self._step} {glyph('dot')} writing {_clean(e.name)} call")
+        self.spinner.set_label(self._step_label(f"writing {_clean(e.name)} call"))
 
     def _on_tool_args(self, e: ToolArgsDelta) -> None:
         self._out_chars += len(e.fragment)
@@ -3103,7 +3127,7 @@ class Renderer:
             self._current_user_prompt = e.user_prompt
         if e.mode:
             self._current_permission_mode = e.mode
-        if self.level == 1:
+        if self.level <= 1:
             names = [str(getattr(t, "name", "") or "tool") for t in tools]
             self._batch_name_w = _tool_cards.name_column_width(names, self._card_width())
             self._batch_total = int(e.total_count or len(tools))
@@ -3210,8 +3234,8 @@ class Renderer:
                                                       detail=detail, status="running", started_at=time.time(), id=e.id,
                                                       why=_plain(why), why_source=str(why_source), chosen=chosen))
         self._set_phase("running", _clean(e.name))
-        if self.level == 1:
-            # Normal level: the whole card is drawn when the result is in (see _card_result).
+        if self.level <= 1:
+            # The whole call is drawn when the result is in (see _card_result).
             number = self._batch_order.index(e.id) + 1 if e.id in self._batch_order else self._step_call_no
             self._calls[e.id] = {"name": e.name, "input": inp, "why": _clean(why), "why_source": str(why_source),
                                  "t0": time.time(), "number": number}
@@ -3219,7 +3243,7 @@ class Renderer:
         else:
             call = tool_call_rows(e.name, inp, self.level, _width(160) - 12, self.registry, why, str(why_source), chosen)
             exact = self._exact_call(e, inp)
-        if self.level == 1:
+        if self.level <= 1:
             pass
         elif self._batch_parallel and e.id in self._batch_order:
             b = self._block(e.id)
@@ -3314,7 +3338,7 @@ class Renderer:
             _tag_rows(self._t_tools[e.id].uid)
         out_no = _save_tool_output(e.content, _clean(e.name), tool_target(e.name, inp))
         self._remember_call(out_no, e, inp, info)
-        if self.level == 1:
+        if self.level <= 1:
             self._card_result(e, info, inp, out_no)
             return
         in_block = self._batch_parallel and e.id in self._batch_order
@@ -3374,10 +3398,11 @@ class Renderer:
             self._line(f"{SUBTLE}{glyph('result')}{RST}  " + rows[0], "    ", atomic=True, hang="   ")
             self._lines(rows[1:], "       ")         # under the text after '⎿  '; wraps stay inside
         if not self._active_tools:
-            self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
+            self.spinner.set_label(self._step_label("waiting for model"))
 
-    # ── phased tool cards (normal level) ───────────────────────────────────
-    # A call is drawn once, when its result is in: choose / input / run / output (ui/tool_cards.py).
+    # ── tool calls at the compact and normal levels ────────────────────────
+    # A call is drawn once, when its result is in (ui/tool_cards.py): one tidy row and a preview at compact,
+    # the choose / input / run / output card at normal.
     # Parallel calls finish in any order but their cards are printed in the order the model asked.
     def _section_width(self) -> int:
         return max(20, term_width() - 1 - display_width(self._rail()))
@@ -3392,6 +3417,10 @@ class Renderer:
     def _card_width(self) -> int:
         """Columns a card row may use: never wide enough for the terminal to wrap it."""
         return max(30, term_width() - 1 - display_width(self._rail("  ")))
+
+    def _call_rows(self, call: "_tool_cards.CardCall") -> list[str]:
+        draw = _tool_cards.compact_rows if self.level == 0 else _tool_cards.card_rows
+        return draw(call, self._card_width())
 
     def _card_out(self, rows: list[str]) -> None:
         lead = self._rail("  ")
@@ -3449,10 +3478,10 @@ class Renderer:
         entry.summary = _plain(preview[0]) if preview else ""
         entry.then = self._then_text(e)
         self._round_obs_count += 1
-        self._queue_card(e.id, _tool_cards.card_rows(call, self._card_width()), content)
+        self._queue_card(e.id, self._call_rows(call), content)
         self._set_phase("idle")
         if not self._active_tools:
-            self.spinner.set_label(f"Step {self._current_iteration} {glyph('dot')} waiting for model")
+            self.spinner.set_label(self._step_label("waiting for model"))
 
     def _queue_card(self, call_id: str, rows: list[str], content: str) -> None:
         if call_id in self._batch_order[self._batch_next:]:
@@ -3489,9 +3518,13 @@ class Renderer:
             entry.status, entry.summary = "error", "stopped before it finished"
         call = self._card_call(call_id, str(saved.get("name", "tool")), dict(saved.get("input") or {}), "", False,
                                "stopped", 0, entry.why if entry else "", time.time() - float(saved.get("t0") or time.time()))
-        return _tool_cards.card_rows(call, self._card_width()), ""
+        return self._call_rows(call), ""
 
     def _print_card(self, rows: list[str], content: str, batched: bool = True) -> None:
+        if self.level == 0:         # no sections and no accounting: the rows are the whole story
+            self._card_out(rows)
+            self._step_calls_due -= 1
+            return
         if not batched:
             self._section(_tool_cards.tools_label(1, "", getattr(self, "_card_common", ""), self._section_width()), gap=True)
         elif not self._tools_header_done:
@@ -3581,8 +3614,6 @@ class Renderer:
             if self.level >= 3:
                 self._render_debug_fields(e, skip={"iteration", "system_tokens", "tool_schema_tokens", "conversation_tokens", "tool_count"}, title="request")
         elif kind == "PermissionDecisionEvent" or ("permission" in kind.lower() and hasattr(e, "outcome")):
-            if self.level < 1:
-                return
             outcome = str(_get(e, "outcome", "decision", default="")).lower()
             source = str(_get(e, "source", default=""))
             reason = str(_get(e, "reason", default=""))
@@ -3593,13 +3624,11 @@ class Renderer:
             self._allowed_info[call_id] = allowed_text
             if call_id in self._t_tools:
                 self._t_tools[call_id].allowed = allowed_text
-            if self.level == 1:
-                return          # normal level: the card's 'run' line carries the permission outcome
+            if self.level <= 1:
+                return          # the card says it; the transcript and /output keep it at every level
             self._annotate_tool(call_id, str(_get(e, "tool", default="")), text)
             self._print_exact_call(call_id)
         elif kind == "HookEvent":
-            if self.level < 1:
-                return
             blocked = bool(_get(e, "blocked", default=False))
             ctx = str(_get(e, "additional_context", default="") or "")
             msg = str(_get(e, "message", default="") or "")
@@ -3610,7 +3639,7 @@ class Renderer:
                     + (f" {dot} {_one_line(msg, 100)}" if msg else "") + RST)
             for w in _get(e, "warnings", default=()) or ():
                 text += f"\n{WARNING}{glyph('warn')} {_one_line(w, 120)}{RST}"
-            if self.level == 1:       # normal level: a note on the call's card
+            if self.level <= 1:       # a note on the call's card (compact shows only the ones that matter)
                 self._call_notes.setdefault(str(_get(e, "tool_use_id", default="")), []).append(
                     " ".join(_plain(text).split()))
                 return
@@ -3661,6 +3690,9 @@ class Renderer:
                 if status in ("error", "cancelled"):
                     reason = _one_line(_get(e, "detail", default="") or "failed", 120)
                     self._line(f"{ERROR}{glyph('fail')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} {reason}{RST}", "  ")
+                elif self.level == 0:
+                    self._line(f"{color}{glyph('ok') if color == SUCCESS else glyph('warn')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} "
+                               f"{float(_get(e, 'duration_s', default=0) or 0):.1f}s{RST}", "  ")
                 else:
                     self._line(f"{color}{glyph('ok') if color == SUCCESS else glyph('warn')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} "
                                f"{_get(e, 'iterations', default=0)} steps {dot} {_fmt_tokens(int(_get(e, 'input_tokens', default=0) or 0))} in {dot} "
@@ -3720,22 +3752,21 @@ class Renderer:
                 self._line(f"{SUBTLE}{glyph('info')} memory loaded{RST} {MUTED}{_short_path(str(_get(e, 'path', default='')))}"
                            f" {dot} {_get(e, 'reason', default='')}" + (f" {dot} ~{_fmt_tokens(tok)} tok" if tok else "") + RST, "  ")
         elif kind == "ToolRationale":
-            if self.level >= 1:
-                call_id = str(_get(e, "id", default=""))
-                text = _one_line(_get(e, "text", default=""), _decision.RATIONALE_MAX_CHARS)
-                source = str(_get(e, "source", default=""))
-                if call_id in self._active_tools:
-                    row = tool_why_row(text, source)
-                    if row and self.level >= 2:
-                        self._line(row, "      ")
-                    elif row and call_id in self._calls and not self._calls[call_id].get("why"):
-                        self._calls[call_id]["why"] = _clean(text)
-                        self._calls[call_id]["why_source"] = source
-                    if call_id in self._t_tools and not self._t_tools[call_id].why:
-                        self._t_tools[call_id].why = _plain(text)
-                        self._t_tools[call_id].why_source = source
-                elif text:
-                    self._pending_why[call_id] = (text, source)
+            call_id = str(_get(e, "id", default=""))
+            text = _one_line(_get(e, "text", default=""), _decision.RATIONALE_MAX_CHARS)
+            source = str(_get(e, "source", default=""))
+            if call_id in self._active_tools:
+                row = tool_why_row(text, source)
+                if row and self.level >= 2:
+                    self._line(row, "      ")
+                elif row and call_id in self._calls and not self._calls[call_id].get("why"):
+                    self._calls[call_id]["why"] = _clean(text)
+                    self._calls[call_id]["why_source"] = source
+                if call_id in self._t_tools and not self._t_tools[call_id].why:
+                    self._t_tools[call_id].why = _plain(text)
+                    self._t_tools[call_id].why_source = source
+            elif text:
+                self._pending_why[call_id] = (text, source)
         elif kind == "ToolTiming":
             if self.level >= 3:
                 self._render_debug_fields(e, skip=set(), title="timing")
@@ -3778,10 +3809,10 @@ class Renderer:
 
     def _spinner_status(self) -> str:
         tokens = self._out_chars // 4
-        return f"{_fmt_tokens(tokens)} tok {glyph('down')}" if tokens else ""
+        return f"{_fmt_tokens(tokens)} tok {glyph('down')}" if tokens and self.level >= 1 else ""
 
     # ── footer ────────────────────────────────────────────────────────────
-    _STOP_LABELS = {"error": "Failed", "interrupted": "Interrupted", "blocked": "Blocked",
+    _STOP_LABELS = {"error": "Failed", "interrupted": "Interrupted", "blocked": "Blocked", "declined": "Declined",
                     "budget_exceeded": "Stopped (budget)", "token_budget": "Stopped (token budget)",
                     "max_iterations": "Stopped (iteration limit)"}
 
@@ -3827,13 +3858,15 @@ class Renderer:
             if railed and self._turn_context[0] and self._turn_context[1]:
                 parts.append(context_gauge(*self._turn_context))      # the context gauge, once per turn
             self._turn_steps = []
+            shown = parts if self.level >= 1 else self._compact_footer_parts(tool_count, cost)
             lead = f"{BORDER}{glyph('sq_bl')}{RST} " if railed else "  "
+            sep = f" {SUBTLE}{glyph('dot')}{RST} " if shown else ""
             if failed:
                 label = self._STOP_LABELS.get(stop_reason, "Failed")
-                lead += f"{ERROR}{glyph('fail')} {label}{RST} {MUTED}after {elapsed:.1f}s{RST} {SUBTLE}{glyph('dot')}{RST} "
+                lead += f"{ERROR}{glyph('fail')} {label}{RST} {MUTED}after {elapsed:.1f}s{RST}{sep}"
             else:
-                lead += f"{SUCCESS}{glyph('ok')} Done{RST} {MUTED}in {elapsed:.1f}s{RST} {SUBTLE}{glyph('dot')}{RST} "
-            rows = _join_wrapped(lead, parts, dot, max(20, layout_width(5)))
+                lead += f"{SUCCESS}{glyph('ok')} Done{RST} {MUTED}in {elapsed:.1f}s{RST}{sep}"
+            rows = _join_wrapped(lead, shown, dot, max(20, layout_width(5))) if shown else [lead]
             _tag_rows(self._t_turn.uid if self._t_turn is not None else None)
             if self._t_turn is not None:
                 self._t_turn.status = "error" if failed else "ok"
@@ -3853,6 +3886,8 @@ class Renderer:
                     text += f"    {MUTED}Work done so far is kept {glyph('dot')} type {BOLD}continue{RST}{MUTED} to resume{RST}\n"
                 else:
                     text += f"    {MUTED}Nothing was done yet {glyph('dot')} {BOLD}/retry{RST}{MUTED} sends your message again{RST}\n"
+            if stop_reason == "declined":
+                text += f"    {MUTED}Stopped at your answer {glyph('dot')} tell Axon what to do instead{RST}\n"
             tip = self._footer_tip()
             if tip:
                 tip_rows = wrap_ansi(f"{INFO}{glyph('info')} Tip:{RST} {MUTED}{tip}{RST}", max(20, layout_width(4)))
@@ -3861,6 +3896,19 @@ class Renderer:
             self._turn_open = False
             self._out(text + "\n")
             _tag_rows(None)
+
+    def _compact_footer_parts(self, tool_count: int, cost: Any) -> list[str]:
+        """The compact summary after 'Done in 4.4s': how many tools, what it cost, where the detail is."""
+        parts = [f"{MUTED}{_plural(tool_count, 'tool')}{RST}"] if tool_count else []
+        spent = self._turn_cost if self._turn_cost_known else float(cost or 0)     # the status line has the session's
+        if spent:
+            parts.append(f"{MUTED}${spent:.4f}{RST}")
+        try:
+            if tool_count and sys.stdout.isatty():
+                parts.append(f"{SUBTLE}ctrl+o details{RST}")
+        except Exception:
+            pass
+        return parts
 
     def _note_unfinished_step(self) -> None:
         """A step that never reported its usage (interrupted or failed mid-call) still gets a table row."""
@@ -4262,7 +4310,7 @@ def format_conversation_replay(messages: list[Any], registry: Any = None, width:
                 kind = b.get("type")
                 if kind == "thinking" and str(b.get("thinking") or b.get("text") or "").strip():
                     if phased:
-                        out.append(f"{rail}{_tool_cards.thinking_line(None, str(b.get('thinking') or b.get('text')), width - 2)}")
+                        out += [f"{rail}{r}" for r in _tool_cards.thinking_rows(None, str(b.get('thinking') or b.get('text')), width - 2)]
                         continue
                     first = _one_line(b.get("thinking") or b.get("text"), max(20, width - 20))
                     out.append(f"{rail}  {SUBTLE}{glyph('star')} thought {glyph('chevron')}{RST} {DIM}{ITALIC}{first}{RST}")
@@ -4338,6 +4386,7 @@ def _provider_label(model: str, base_url: str) -> str:
 _SUB_STATES = {  # status -> (glyph name, color, word)
     "completed": ("ok", SUCCESS, "done"), "exhausted": ("warn", AMBER, "step limit"),
     "error": ("fail", ERROR, "failed"), "running": ("play", CYAN, "running"),
+    "cancelled": ("fail", MUTED, "stopped"), "stopped": ("fail", MUTED, "stopped"),
 }
 
 

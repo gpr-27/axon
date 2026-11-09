@@ -299,7 +299,7 @@ def editor(monkeypatch, tmp_path):
     monkeypatch.setattr(plat, "is_interactive", lambda: True)
     monkeypatch.setattr(plat, "raw_terminal", lambda *a, **k: contextlib.nullcontext(True))
     monkeypatch.setattr(plat, "setup_console", lambda: None)
-    monkeypatch.setattr(ui_input, "_status_rows", lambda agent: [])
+    monkeypatch.setattr(ui_input, "_status_rows", lambda agent, idle=False: [])
     monkeypatch.setattr(ui_input.ClickMap, "for_prompt", classmethod(lambda cls, agent=None: None))
     rows: list[str] = []
     timeouts: list[Any] = []

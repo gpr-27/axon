@@ -96,32 +96,32 @@ def test_permission_flow_once_deny_always(axon_env: AxonEnv) -> None:
         axon_env.llm.enqueue([_bash("echo one >> log.txt")], [{"text": "RUN-1"}])
         m = s.submit("first")
         s.expect(r"⚠ Allow Bash\?", timeout=15, since=m)
-        s.drain(0.3)
+        s.expect("quick pick", timeout=5, since=m)   # keys before the picker opens are dropped on purpose (they may be type-ahead)
         s.send("1")
         s.expect("RUN-1", timeout=15, since=m)
         s.ready(since=m)
         assert (axon_env.workspace / "log.txt").read_text() == "one\n"
 
         # the same command is asked again (allow once does not persist); deny it
-        axon_env.llm.enqueue([_bash("echo one >> log.txt")], [{"text": "RUN-2"}])
+        axon_env.llm.enqueue([_bash("echo one >> log.txt")])       # a plain No ends the turn: no second call
         m = s.submit("second")
         s.expect(r"⚠ Allow Bash\?", timeout=15, since=m)
-        s.drain(0.3)
+        s.expect("quick pick", timeout=5, since=m)   # keys before the picker opens are dropped on purpose (they may be type-ahead)
         s.send("3")
         s.expect("Denied", timeout=8, since=m)
-        s.expect("RUN-2", timeout=15, since=m)
+        s.expect("tell Axon what to do instead", timeout=15, since=m)
         s.ready(since=m)
         assert (axon_env.workspace / "log.txt").read_text() == "one\n"
-        denied = axon_env.llm.completion_requests()[-1].tool_results()
-        assert denied and "declined" in denied[-1].lower(), denied
 
         # always: asked once more, then never again for Bash in this session
         axon_env.llm.enqueue([_bash("echo two >> log.txt")], [{"text": "RUN-3"}])
         m = s.submit("third")
         s.expect(r"⚠ Allow Bash\?", timeout=15, since=m)
-        s.drain(0.3)
+        s.expect("quick pick", timeout=5, since=m)   # keys before the picker opens are dropped on purpose (they may be type-ahead)
         s.send("2")
         s.expect("Allowed for this session", timeout=8, since=m)
+        denied = axon_env.llm.completion_requests()[-1].tool_results()     # told with the next message
+        assert denied and "declined" in denied[-1].lower(), denied
         s.expect("RUN-3", timeout=15, since=m)
         s.ready(since=m)
         axon_env.llm.enqueue([_bash("echo three >> log.txt")], [{"text": "RUN-4"}])
@@ -191,7 +191,7 @@ def test_two_messages_queued_during_a_turn_run_in_order(axon_env: AxonEnv) -> No
                          [{"text": "Q2-ANS"}])
     with open_repl(axon_env) as s:
         m = s.submit("slow one")
-        s.expect("responding", timeout=10, since=m)
+        s.expect("writing the answer", timeout=10, since=m)
         for msg in ("queued alpha", "queued beta"):
             for ch in msg:
                 s.send(ch)
@@ -236,7 +236,7 @@ def test_esc_interrupt_then_continue_keeps_progress(axon_env: AxonEnv) -> None:
     axon_env.llm.enqueue([_bash("sleep 4; echo LATE > late.txt", "slow")], [{"text": "RESUMED-OK"}])
     with open_repl(axon_env) as s:
         m = s.submit("start the slow job")
-        s.expect(r"Running Bash sleep 4", timeout=10, since=m)     # the live label of a running tool
+        s.expect(r"running Bash", timeout=10, since=m)             # the live status of a running tool
         started = time.monotonic()
         time.sleep(0.5)
         s.send(ESC)
@@ -315,7 +315,7 @@ def test_clear_resets_turn_numbering_and_history(axon_env: AxonEnv) -> None:
     """Turns are numbered 1, 2; after /clear the next turn is Turn 1 again and its request carries no
     earlier history; the old session file is kept."""
     axon_env.llm.enqueue([{"text": "A-ONE"}], [{"text": "A-TWO"}], [{"text": "A-THREE"}])
-    with open_repl(axon_env) as s:
+    with open_repl(axon_env, ("--trace", "normal")) as s:
         assert re.search(r'Turn 1 · "first prompt"', s.turn("first prompt"))
         assert re.search(r'Turn 2 · "second prompt"', s.turn("second prompt"))
         s.command("/clear scenario", "New session")   # a bare /clear asks in a menu first
@@ -416,7 +416,7 @@ def test_mcp_tool_call_in_repl_with_approval(axon_env: AxonEnv) -> None:
     with open_repl(axon_env, ("--mode", "default")) as s:
         m = s.submit("echo through mcp")
         s.expect(r"Allow .*echo|Allow mcp__srv__echo", timeout=15, since=m)
-        s.drain(0.3)
+        s.expect("quick pick", timeout=5, since=m)
         s.send("1")
         s.expect("MCP-REPL-DONE", timeout=20, since=m)
         out = s.screen[m:]

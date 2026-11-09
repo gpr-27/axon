@@ -38,6 +38,33 @@ HISTORY_LIMIT = 1000
 # In-process history of this session (also persisted to ~/.axon/history).
 _SESSION_HISTORY: list[str] = []
 _SESSION_PASTES: dict[str, dict[int, str]] = {}   # prompt text -> {chip number: stored paste id}
+_STASH: "tuple[str, int, dict[int, str]] | None" = None   # Ctrl+S: text, cursor, paste chips; outlives the prompt
+_CLEARED_DRAFTS: list[str] = []                    # drafts Ctrl+C or Esc Esc cleared; only this process remembers them
+MAX_CLEARED_DRAFTS = 10
+
+
+def remember_cleared_draft(text: str, pastes: dict[int, str] | None = None) -> None:
+    """Keep a cleared draft in this session's history: Up brings it back, also after later prompts. Never saved."""
+    text = text.strip()
+    if not text:
+        return
+    if text in _SESSION_HISTORY:
+        return
+    _SESSION_HISTORY.append(text)
+    _CLEARED_DRAFTS.append(text)
+    if pastes:
+        try:
+            from axon.storage import store_paste
+            used = {int(m.group(1)): pastes[int(m.group(1))] for m in PASTE_CHIP_RE.finditer(text) if int(m.group(1)) in pastes}
+            if used:
+                _SESSION_PASTES[text] = {n: store_paste(c) for n, c in used.items()}
+        except (ImportError, OSError):
+            pass
+    while len(_CLEARED_DRAFTS) > MAX_CLEARED_DRAFTS:
+        old = _CLEARED_DRAFTS.pop(0)
+        if old in _SESSION_HISTORY:
+            _SESSION_HISTORY.remove(old)
+            _SESSION_PASTES.pop(old, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +101,35 @@ def highlight_prompt_syntax(text: str, allow_prefix: bool = True) -> str:
 # Thinking keywords raise the effort for one turn (the agent loop emits ThinkingBoost).
 THINK_KEYWORD_RE = re.compile(r"\b(?:ultrathink|think\s+harder|think\s+hard|megathink)\b", re.IGNORECASE)
 # Zero-width and bidi-control characters that can hide text from the reader.
-INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+INVISIBLE_RE = re.compile("[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufe00-\ufe0f"
+                          "\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
+
+
+def _keeps_invisible(text: str, i: int) -> bool:
+    """Characters that look invisible but carry meaning: joiners in Persian and Indic text, selectors in emoji."""
+    ch, prev = text[i], text[i - 1] if i else ""
+    if ch in "\u200c\u200d":
+        return bool(prev) and ("\u0600" <= prev <= "\u06ff" or "\u0900" <= prev <= "\u0dff" or ord(prev) >= 0x2190)
+    if "\ufe00" <= ch <= "\ufe0f":
+        return bool(prev) and ord(prev) >= 0x2190
+    if "\U000e0000" <= ch <= "\U000e007f":     # the tag sequence of a subdivision flag (England, Scotland, Wales)
+        j = i
+        while j > 0 and "\U000e0000" <= text[j - 1] <= "\U000e007f":
+            j -= 1
+        return j > 0 and text[j - 1] == "\U0001f3f4"
+    return False
+
+
+def strip_invisible(text: str) -> tuple[str, int]:
+    """*text* without the characters a terminal draws as nothing, and how many were removed."""
+    if not INVISIBLE_RE.search(text):
+        return text, 0
+    out = [c for i, c in enumerate(text) if not INVISIBLE_RE.match(c) or _keeps_invisible(text, i)]
+    return "".join(out), len(text) - len(out)
+
+
+def invisible_notice(n: int) -> str:
+    return f"Removed {n} invisible character{'s' if n != 1 else ''} · review and press Enter to send"
 
 
 ECHO_PASTE_HEAD = 3     # lines of a pasted text shown at the start in the echoed prompt
@@ -141,6 +196,7 @@ ALL_SLASH_COMMANDS: list[tuple[str, str, str, str, bool]] = [
     ("/config", "core", "Core & Models", "View and adjust runtime configuration parameters", True),
     ("/status", "core", "Core & Models", "View live system and agent status", False),
     ("/permissions", "core", "Core & Models", "Inspect permission rules and mode", False),
+    ("/add-dir", "core", "Core & Models", "Let tools work in another folder (--save keeps it for this project)", False),
     ("/plan", "core", "Core & Models", "View task checklist or switch to plan mode", True),
     ("/breakdown", "core", "Context & Tokens", "Full input prompt breakdown & token matching", False),
     ("/context", "core", "Context & Tokens", "View context token budget and limits", False),
@@ -204,6 +260,7 @@ _MODE_LABELS = {
     "default": ("manual mode on", SLATE, "⏵"),
     "acceptEdits": ("auto-accept edits on", TEAL, "⏵⏵"),
     "plan": ("plan mode on", PURPLE, "⏸"),
+    "dontAsk": ("don't ask on", TEAL, "⏵⏵"),
     "bypass": ("bypass permissions on", GOLD, "⚠"),
 }
 
@@ -331,6 +388,9 @@ def add_history(text: str, session_id: str = "", pastes: dict[int, str] | None =
         text = redact_command_line(text)
     except Exception:
         pass
+    if text in _CLEARED_DRAFTS:
+        _CLEARED_DRAFTS.remove(text)                 # sent after all: an ordinary history entry from now on
+        _SESSION_HISTORY.remove(text)
     if not _SESSION_HISTORY or _SESSION_HISTORY[-1] != text:
         _SESSION_HISTORY.append(text)
     try:
@@ -381,16 +441,84 @@ def registered_slash_commands(cwd: Path | None = None) -> list[tuple[str, str, s
     return out
 
 
+_NAME_SEP_RE = re.compile(r"[:_-]")
+
+
+def _squash(name: str) -> str:
+    return _NAME_SEP_RE.sub("", name.lower())
+
+
+def _matches_name(q: str, name: str) -> bool:
+    """*q* matches from the start of *name*, or of a word within it, ignoring the separators : _ -."""
+    q = _squash(q)
+    if not q:
+        return False
+    low = name.lower()
+    if _squash(low).startswith(q):
+        return True
+    return any(_squash(low[m.end():]).startswith(q) for m in _NAME_SEP_RE.finditer(low))
+
+
+def name_matches(q: str, name: str, cwd: Path | None = None) -> bool:
+    """True when the top row may be highlighted: typing it names this command or one of its aliases, so Enter
+    runs it. A typo highlights nothing, and Enter then reports the unknown command."""
+    if _matches_name(q, name):
+        return True
+    try:
+        from axon.commands.registry import resolve_builtin
+        cmd = resolve_builtin(name)
+    except Exception:
+        return False
+    return cmd is not None and any(_matches_name(q, a) for a in cmd.aliases)
+
+
+def mid_prompt_matches(query: str, cwd: Path | None = None) -> list[tuple[str, str, str, str, bool]]:
+    """Commands for a /word partway through a prompt: only names starting with those letters. A plugin skill also
+    matches on its bare name, so /deploy finds myplugin:deploy-app."""
+    q = query.lower()
+    cmds = ALL_SLASH_COMMANDS + registered_slash_commands(cwd)
+    if not q:
+        return list(cmds)
+    return [c for c in cmds if c[0][1:].lower().startswith(q) or c[0][1:].lower().partition(":")[2].startswith(q)]
+
+
+def shell_path_matches(token: str, cwd: Path | None = None, limit: int = 50) -> list[str]:
+    """Files and directories for a path token in ! mode (directories end in /). The token's spelling is kept."""
+    head, _sep, leaf = token.rpartition("/")
+    base = os.path.expanduser(head + "/") if head or token.startswith("/") else "./"
+    folder = base if os.path.isabs(base) else os.path.join(str(cwd or os.getcwd()), base)
+    try:
+        names = sorted(os.listdir(folder), key=lambda n: (n.startswith("."), n.lower()))
+    except OSError:
+        return []
+    out: list[str] = []
+    for name in names:
+        if not name.startswith(leaf) or (name.startswith(".") and not leaf.startswith(".")):
+            continue
+        out.append(f"{head}/{name}" + ("/" if os.path.isdir(os.path.join(folder, name)) else ""))
+        if len(out) >= limit:
+            break
+    return [o for o in out if o != token]
+
+
 def match_slash_commands(query: str, cwd: Path | None = None) -> list[tuple[str, str, str, str, bool]]:
-    """Commands for the text after '/': exact, prefix, name-substring, then description matches."""
+    """Commands for the text after '/': exact, prefix, word within a name, name-substring, then description matches.
+    A close spelling stays listed when nothing else matches."""
     q = query.lower().lstrip("/")
     cmds = ALL_SLASH_COMMANDS + registered_slash_commands(cwd)
     if not q:
         return list(cmds)
     prefix = sorted((c for c in cmds if c[0][1:].lower().startswith(q)), key=lambda c: c[0][1:].lower() != q)
-    sub = [c for c in cmds if c not in prefix and q in c[0].lower()]
-    desc = [c for c in cmds if c not in prefix and c not in sub and q in c[3].lower()]
-    return _alias_match(q, cmds) + prefix + sub + desc
+    words = [c for c in cmds if c not in prefix and _matches_name(q, c[0][1:])]
+    aliases = _alias_match(q, cmds)
+    sub = [c for c in cmds if c not in prefix and c not in words and q in c[0].lower()]
+    desc = [c for c in cmds if c not in prefix and c not in words and c not in sub and q in c[3].lower()]
+    found = aliases + prefix + words + sub + desc
+    if found:
+        return found
+    import difflib
+    near = difflib.get_close_matches(q, [c[0][1:].lower() for c in cmds], n=5, cutoff=0.6)
+    return [c for n in near for c in cmds if c[0][1:].lower() == n]
 
 
 def _alias_match(q: str, cmds: list[tuple[str, str, str, str, bool]]) -> list[tuple[str, str, str, str, bool]]:
@@ -403,7 +531,7 @@ def _alias_match(q: str, cmds: list[tuple[str, str, str, str, bool]]) -> list[tu
         cmd = resolve_builtin(q)
     except Exception:
         return []
-    if cmd is None or q not in cmd.aliases:
+    if cmd is None or (q not in cmd.aliases and not cmd.hidden):      # a hidden command shows once typed in full
         return []
     return [(f"/{q}", "builtin", "Aliases", str(cmd.description or "")[:90], True)]
 
@@ -502,13 +630,20 @@ LARGE_PASTE_CHARS = 1200
 LARGE_PASTE_LINES = 12
 
 
+def _no_spaces_script(ch: str) -> bool:
+    """Chinese, Japanese, Korean, Thai and similar text is written without spaces; each character counts as a word."""
+    return "\u0e00" <= ch <= "\u0eff" or "\u1000" <= ch <= "\u109f" or "\u1780" <= ch <= "\u17ff" \
+        or "\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af" or "\uf900" <= ch <= "\ufaff"
+
+
 @dataclass
 class Popup:
-    kind: str                  # "slash" | "file"
+    kind: str                  # "slash" | "file" | "emoji" | "path"
     items: list[Any]
     query: str
     start: int                 # buffer index where the completed token starts
     index: int = 0
+    highlighted: bool = True   # False: Enter sends the text as typed (no name matched; or a mid-prompt list)
 
 
 @dataclass
@@ -523,9 +658,13 @@ class EditorState:
     draft_pastes: dict[int, str] = field(default_factory=dict)       # the draft's chips while browsing history
     history_pastes: dict[str, dict[int, str]] = field(default_factory=dict)   # prompt -> {chip number: paste id}
     undo: list[tuple[str, int]] = field(default_factory=list)
-    stash: str = ""
     dismissed: bool = False    # popup closed with Esc until the buffer changes
     popup_index: int = 0
+    popup_moved: bool = False  # the user picked a row with the arrows, so Enter takes that row
+    mid_list_open: bool = False  # Tab opened the list of commands for a /word partway through the prompt
+    text_width: int = 0        # cells per row of the prompt text, as last laid out (0: not drawn yet)
+    emoji_enabled: bool = True
+    spell: Any = None          # axon.ui.spellcheck.SpellChecker when spell checking is on
     last_esc: float = 0.0
     last_ctrl_d: float = 0.0
     notice: str = ""
@@ -552,6 +691,7 @@ class EditorState:
     def _changed(self) -> None:
         self.dismissed = False
         self.popup_index = 0
+        self.popup_moved = False
         self.hist_idx = -1
         self.yank_span = None
 
@@ -562,6 +702,12 @@ class EditorState:
         self.buf = self.buf[:self.pos] + text + self.buf[self.pos:]
         self.pos += len(text)
         self._changed()
+        if text == ":" and self.emoji_enabled and not self.buf.startswith("!"):
+            from axon.ui.emoji import replace_complete
+            hit = replace_complete(self.buf[:self.pos])
+            if hit is not None:
+                self.buf = self.buf[:hit[0]] + hit[1] + self.buf[self.pos:]
+                self.pos = hit[0] + len(hit[1])
 
     def insert_paste(self, text: str) -> None:
         """Insert pasted text; very large pastes collapse into a [Pasted text #N] chip.
@@ -676,23 +822,39 @@ class EditorState:
             if self.buf.strip() and (not self.history or self.history[-1] != self.buf):
                 self.history.append(self.buf)  # Up restores the cleared draft
                 self._remember_chips(self.buf)
+                remember_cleared_draft(self.buf, self.pastes)
         self.set_text("")
         self._changed()
 
     def word_left(self) -> int:
+        """Start of the previous word: a word is a run of letters and digits, so _ . / separate words."""
+        i = self.pos
+        while i > 0 and not self.buf[i - 1].isalnum():
+            i -= 1
+        if i > 0 and _no_spaces_script(self.buf[i - 1]):
+            return i - 1
+        while i > 0 and self.buf[i - 1].isalnum() and not _no_spaces_script(self.buf[i - 1]):
+            i -= 1
+        return i
+
+    def word_right(self) -> int:
+        """End of the current word, or of the next one when the cursor is between words."""
+        i, n = self.pos, len(self.buf)
+        while i < n and not self.buf[i].isalnum():
+            i += 1
+        if i < n and _no_spaces_script(self.buf[i]):
+            return i + 1
+        while i < n and self.buf[i].isalnum() and not _no_spaces_script(self.buf[i]):
+            i += 1
+        return i
+
+    def space_left(self) -> int:
+        """Back to the previous whitespace (Ctrl+W): one press removes a whole path or --flag=value."""
         i = self.pos
         while i > 0 and self.buf[i - 1].isspace():
             i -= 1
         while i > 0 and not self.buf[i - 1].isspace():
             i -= 1
-        return i
-
-    def word_right(self) -> int:
-        i, n = self.pos, len(self.buf)
-        while i < n and self.buf[i].isspace():
-            i += 1
-        while i < n and not self.buf[i].isspace():
-            i += 1
         return i
 
     def kill(self, start: int, end: int) -> None:
@@ -751,6 +913,21 @@ class EditorState:
             nxt_end = self.buf.find("\n", nxt + 1)
             nxt_end = len(self.buf) if nxt_end == -1 else nxt_end
             self.pos = min(nxt + 1 + col, nxt_end)
+        return True
+
+    def move_visual(self, delta: int) -> bool:
+        """Move one row as drawn, wrapped or multiline, keeping the column. False on the first / last row."""
+        if self.text_width <= 0:
+            return self.move_vertical(delta)
+        base = 1 if self.buf.startswith("!") else 0
+        body = self.buf[base:]
+        cells = visual_cells(body, self.text_width)
+        row, col = cells[max(0, self.pos - base)]
+        target = row + delta
+        if target < 0 or target > cells[-1][0]:
+            return False
+        same = [i for i, c in enumerate(cells) if c[0] == target]
+        self.pos = base + min(same, key=lambda i: (abs(cells[i][1] - col), i))
         return True
 
     # -- history ------------------------------------------------------------------------------
@@ -852,15 +1029,32 @@ class EditorState:
 
     # -- completion ---------------------------------------------------------------------------
     def popup(self) -> Popup | None:
-        if self.dismissed or self.search is not None or self.buf.startswith("!"):
+        if self.dismissed or self.search is not None:
             return None
         before = self.buf[:self.pos]
+        if self.buf.startswith("!"):
+            return self._shell_path_popup(before)
         m = _SLASH_RE.search(before)
-        if m and (m.start(1) == 1 or "/" not in m.group(1)):
+        if m and m.start(1) == 1 and not before[:m.start(1) - 1].strip():      # the message starts with this command
             items = match_slash_commands(m.group(1), self.cwd)
             if items:
-                return Popup("slash", items, m.group(1), m.start(1) - 1, self.popup_index % len(items))
+                lit = self.popup_moved or not m.group(1) or name_matches(m.group(1), items[0][0][1:], self.cwd)
+                return Popup("slash", items, m.group(1), m.start(1) - 1, self.popup_index % len(items), lit)
             return None
+        if m and "/" not in m.group(1):                   # partway through a prompt: a list only after Tab
+            if not self.mid_list_open:
+                return None
+            items = mid_prompt_matches(m.group(1), self.cwd)
+            if items:
+                return Popup("slash", items, m.group(1), m.start(1) - 1, self.popup_index % len(items))
+            self.mid_list_open = False
+            return None
+        self.mid_list_open = False
+        if self.emoji_enabled:
+            from axon.ui.emoji import suggestions
+            found = suggestions(before)
+            if found is not None:
+                return Popup("emoji", found[1], before[found[0]:], found[0], self.popup_index % len(found[1]))
         m = _AT_RE.search(before)
         if m:
             items = match_files(m.group(1), self.cwd)
@@ -868,8 +1062,49 @@ class EditorState:
                 return Popup("file", items, m.group(1), self.pos - len(m.group(1)) - 1, self.popup_index % len(items))
         return None
 
+    def _shell_path_popup(self, before: str) -> Popup | None:
+        """In ! mode a token containing a forward slash lists matching files and directories."""
+        m = re.search(r"(?:^!\s*|\s)([^\s]*/[^\s]*)$", before)
+        if m is None:
+            return None
+        items = shell_path_matches(m.group(1), self.cwd)
+        return Popup("path", items, m.group(1), m.start(1), self.popup_index % len(items)) if items else None
+
+    def mid_prompt_ghost(self) -> tuple[str, int]:
+        """(rest of the top match, how many more match) for a /word partway through the prompt."""
+        if self.dismissed or self.mid_list_open or self.search is not None or self.buf.startswith("!") or self.pos != len(self.buf):
+            return "", 0
+        m = _SLASH_RE.search(self.buf)
+        if m is None or m.start(1) == 1 or not m.group(1) or "/" in m.group(1):
+            return "", 0
+        items = mid_prompt_matches(m.group(1), self.cwd)
+        if not items:
+            return "", 0
+        name = items[0][0][1:]
+        q = m.group(1).lower()
+        low = name.lower()
+        rest = name[len(q):] if low.startswith(q) else name[low.rfind(":" + q) + 1 + len(q):]
+        return rest, len(items) - 1
+
     def accept_completion(self, pop: Popup, for_submit: bool = False) -> bool:
         """Insert the selected completion. Returns True when the buffer should be submitted."""
+        self.popup_moved = False
+        self.mid_list_open = False
+        if pop.kind == "emoji":
+            self._snapshot()
+            glyph_text = pop.items[pop.index][1]
+            self.set_text(self.buf[:pop.start] + glyph_text + self.buf[self.pos:], pop.start + len(glyph_text))
+            self.dismissed = False
+            self.popup_index = 0
+            return False
+        if pop.kind == "path":
+            path = pop.items[pop.index]
+            self._snapshot()
+            new = self.buf[:pop.start] + path + ("" if path.endswith("/") else " ")
+            self.set_text(new + self.buf[self.pos:], len(new))
+            self.dismissed = not path.endswith("/")
+            self.popup_index = 0
+            return False
         if pop.kind == "slash":
             name, _kind, _cat, _desc, takes_args = pop.items[pop.index]
             rest = self.buf[self.pos:]
@@ -915,6 +1150,24 @@ def _save_paste(text: str, replaces: str | None = None) -> None:
 # Rendering
 # ─────────────────────────────────────────────────────────────────────────────
 
+def visual_cells(text: str, width: int) -> list[tuple[int, int]]:
+    """(row, column) of every cursor position in *text* soft-wrapped like :func:`layout_rows`."""
+    width = max(4, width)
+    out: list[tuple[int, int]] = []
+    row, col = 0, 0
+    for ch in text:
+        w = 0 if ch == "\n" else (4 if ch == "\t" else plat.char_width(ch))
+        if ch != "\n" and col + w > width:
+            row, col = row + 1, 0
+        out.append((row, col))
+        if ch == "\n":
+            row, col = row + 1, 0
+        else:
+            col += w
+    out.append((row + 1, 0) if col >= width else (row, col))
+    return out
+
+
 def layout_rows(text: str, width: int, pos: int) -> tuple[list[str], int, int]:
     """Soft-wrap text into rows of at most `width` cells. Returns (rows, cursor_row, cursor_col)."""
     width = max(4, width)
@@ -950,6 +1203,7 @@ class PromptChrome:
     plan_summary: str | None = None
     queue_summary: str | None = None
     subagent_label: str | None = None
+    hide_vim: bool = False     # statusLine.hideVimModeIndicator: the user's script shows vim.mode itself
 
 
 def status_line(mode: str, chrome: PromptChrome, width: int, vim_label: str = "") -> str:
@@ -982,9 +1236,16 @@ def render_popup(pop: Popup, cols: int, max_rows: int) -> list[str]:
     start = max(0, min(pop.index - visible // 2, n - visible))
     lines: list[str] = []
     for i in range(start, start + visible):
-        sel = i == pop.index
+        sel = i == pop.index and pop.highlighted
         mark = f"{MINT}{BOLD}❯{RST}" if sel else " "
-        if pop.kind == "slash":
+        if pop.kind == "emoji":
+            name, emoji = pop.items[i]
+            body = f"{emoji}  " + (f"{BOLD}{WHITE}:{name}:{RST}" if sel else f"{SLATE}:{name}:{RST}")
+        elif pop.kind == "path":
+            path = pop.items[i]
+            leaf = path.rstrip("/").rpartition("/")[2] + ("/" if path.endswith("/") else "")
+            body = f"{BOLD}{WHITE}{leaf}{RST}" if sel else f"{CYAN if path.endswith('/') else WHITE}{leaf}{RST}"
+        elif pop.kind == "slash":
             name, kind, cat, desc, _args = pop.items[i]
             name_s = plat.pad_to(name, 16)
             name_s = f"{BOLD}{WHITE}{name_s}{RST}" if sel else f"{CYAN}{name_s}{RST}"
@@ -1012,6 +1273,12 @@ def render_popup(pop: Popup, cols: int, max_rows: int) -> list[str]:
     if start + visible < n:
         more.append(f"↓ {n - start - visible}")
     hint = "tab complete · enter " + ("run" if pop.kind == "slash" else "insert") + " · esc dismiss"
+    if pop.kind == "slash" and not pop.highlighted:
+        hint = "tab or ↑↓ to pick · enter sends as typed · esc dismiss"
+    elif pop.kind == "slash" and pop.start > 0:
+        hint = "enter or tab insert · esc dismiss"
+    elif pop.kind == "path":
+        hint = "tab complete · esc dismiss"
     if pop.kind == "file" and str(pop.items[pop.index]).endswith("/"):
         hint = "tab open folder · enter mention folder · esc dismiss"
     lines.append(f"    {DARK_SLATE}{'  '.join(more) + ('  ·  ' if more else '')}{hint}{RST}")
@@ -1042,6 +1309,21 @@ def ghost_text(suggestion: str, width: int) -> str:
     return f"{SLATE}{shown}{RST}" + (f"{DARK_SLATE}{hint}{RST}" if hint else "")
 
 
+def _selected_row(row: str, row_no: int, body: str, width: int, span: tuple[int, int], base: int) -> str:
+    """One prompt row with the part inside a vim visual selection in reverse video; '' when none of it is."""
+    cells = visual_cells(body, width)
+    cols = [cells[i][1] for i in range(max(0, span[0] - base), min(len(body), span[1] - base)) if cells[i][0] == row_no]
+    if not cols:
+        return ""
+    lo, hi = min(cols), max(cols)
+    out, col = [], 0
+    for ch in row:
+        w = plat.char_width(ch)
+        out.append(f"\033[7m{ch}\033[27m" if lo <= col <= hi else ch)
+        col += w
+    return f"{WHITE}{''.join(out)}{RST}"
+
+
 def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple[int, int]]:
     cols, rows_total = plat.term_size()
     width = max(20, cols - 4)
@@ -1056,6 +1338,7 @@ def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple
         rule_color = _PROMPT_COLOR or DARK_SLATE
     pw = plat.str_width(prefix)
     text_w = max(8, cols - 3 - pw)
+    st.text_width = text_w
     rows, crow, ccol = layout_rows(body, text_w, pos)
     max_rows = max(3, rows_total - 6)
     first = max(0, min(crow - max_rows // 2, len(rows) - max_rows)) if len(rows) > max_rows else 0
@@ -1071,10 +1354,20 @@ def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple
         for i, row in enumerate(shown):
             lead = prefix if (first + i) == 0 else " " * pw
             styled = (f"{GOLD}{row}{RST}" if bash else highlight_prompt_syntax(row, allow_prefix=(first + i) == 0))
+            span = st.vim.selection(st) if st.vim is not None else None
+            if span is not None:
+                styled = _selected_row(row, first + i, body, text_w, span, 1 if bash else 0) or styled
+            if st.spell is not None and not bash and st.search is None:
+                from axon.ui.spellcheck import underline_row
+                styled = underline_row(styled, row + ("" if first + i == len(rows) - 1 else " "), st.spell)
+            if first + i == crow:
+                rest, more = st.mid_prompt_ghost()
+                if rest and plat.str_width(row) + plat.str_width(rest) + 4 <= text_w:
+                    styled += f"{SLATE}{rest}{RST}" + (f" {DARK_SLATE}+{more}{RST}" if more else "")
             lines.append(f"  {lead}{styled}")
     cursor = (1 + crow - first, 2 + pw + ccol)
     lines.append(f"  {rule_color}{'─' * width}{RST}")
-    lines.append(status_line(st.mode, chrome, width, st.vim.label if st.vim is not None else ""))
+    lines.append(status_line(st.mode, chrome, width, st.vim.label if st.vim is not None and not chrome.hide_vim else ""))
     for row in st.status_rows:
         lines.append(safe_ansi_truncate(row, cols - 1))
     if st.search is not None:
@@ -1083,12 +1376,11 @@ def build_frame(st: EditorState, chrome: PromptChrome) -> tuple[list[str], tuple
                      f"{DARK_SLATE}ctrl+r older · enter run · tab/esc edit · ctrl+c cancel{RST}")
     elif st.notice:
         lines.append(f"  {DARK_SLATE}{st.notice}{RST}")
-    elif INVISIBLE_RE.search(st.buf):
-        n = len(INVISIBLE_RE.findall(st.buf))
-        lines.append(f"  {AMBER}! prompt contains {n} invisible / bidi control character{'s' if n != 1 else ''}{RST}")
     pop = st.popup()
     if pop is not None:
         lines.extend(render_popup(pop, cols, max(1, rows_total - len(lines) - 2)))
+    elif st.search is None and not st.dismissed and re.fullmatch(r"/[\w:.-]+", st.buf):
+        lines.append(f"  {DARK_SLATE}No commands match \"{st.buf}\"{RST}")
     return lines, cursor
 
 
@@ -1171,18 +1463,42 @@ def _clipboard_insert() -> str:
         return ""
 
 
-def _edit_externally(text: str) -> str | None:
+_CONTEXT_MARK = "# ── Axon's last reply, removed when you save ──"
+
+
+def _last_reply_context() -> str:
+    """The previous reply as #-commented lines above the prompt (setting editor_show_last_response)."""
+    agent = _prompt_agent()
+    if not getattr(getattr(agent, "settings", None), "editor_show_last_response", False):
+        return ""
+    for msg in reversed(list(getattr(getattr(agent, "conversation", None), "messages", []) or [])):
+        if msg.get("role") == "assistant" if isinstance(msg, dict) else getattr(msg, "role", "") == "assistant":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if isinstance(content, list):
+                content = "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+            if str(content or "").strip():
+                body = "\n".join(f"# {ln}".rstrip() for ln in str(content).strip().splitlines())
+                return f"{_CONTEXT_MARK}\n{body}\n{_CONTEXT_MARK}\n\n"
+    return ""
+
+
+def _edit_externally(text: str, context: str = "") -> str | None:
     fd, path = tempfile.mkstemp(suffix=".md", prefix="axon_prompt_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+            f.write(context + text)
         with plat.cooked_terminal():
             try:
                 subprocess.call(plat.editor_command() + [path])
             except (FileNotFoundError, OSError):
                 return None
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read().rstrip("\n")
+            result = f.read().rstrip("\n")
+        if context and result.startswith(_CONTEXT_MARK):     # the comment block goes, whatever was edited below it
+            end = result.find(_CONTEXT_MARK, len(_CONTEXT_MARK))
+            if end != -1:
+                result = result[end + len(_CONTEXT_MARK):].lstrip("\n")
+        return result
     finally:
         try:
             os.remove(path)
@@ -1195,7 +1511,7 @@ TRACE_CYCLE = "__TRACE_CYCLE__"
 _last_empty_ctrl_c = 0.0
 
 # Keys that end the prompt and hand a command to the REPL (default bindings; see keybindings.py).
-_SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "ctrl-o": TRACE_CYCLE, "ctrl-f": "/transcript", "alt-p": "/model",
+_SHORTCUT_COMMANDS = {"ctrl-t": "/todos", "alt-l": TRACE_CYCLE, "ctrl-o": "/transcript", "ctrl-f": "/transcript", "alt-p": "/model",
                       "alt-t": "/thinking"}
 _ACTION_COMMANDS = {"app:todos": "/todos", "app:traceCycle": TRACE_CYCLE, "app:transcript": "/transcript",
                     "app:modelPicker": "/model", "app:menu": "/menu",
@@ -1230,12 +1546,12 @@ def vim_mode_enabled() -> bool:
 
 
 def vim_mode_label() -> str:
-    """'insert' / 'normal' while vim mode is on (for the status-line JSON), else ''."""
+    """NORMAL, INSERT, VISUAL or VISUAL LINE while vim mode is on (for the status-line JSON), else ''."""
     if not _VIM_ENABLED:
         return ""
     st = _ACTIVE_EDITOR
     vim = getattr(st, "vim", None) if st is not None else None
-    return getattr(vim, "mode", "insert") if vim is not None else "insert"
+    return getattr(vim, "status_name", "INSERT") if vim is not None else "INSERT"
 
 
 _PROMPT_COLOR = ""
@@ -1303,7 +1619,8 @@ class PromptEditor:
         if key != "ctrl-c":
             _last_empty_ctrl_c = 0.0
         if st.search is not None:
-            return self._search_key(key)
+            from axon.ui.keybindings import translate
+            return self._search_key(translate("HistorySearch", key))
         if key == "resize":
             return None
         if key.startswith(plat.PASTE_PREFIX):
@@ -1313,14 +1630,40 @@ class PromptEditor:
             return None
         if st.vim is not None and not self.resolver.pending and st.vim.handle(st, key):
             return None
+        if st.popup() is not None and not self.resolver.pending:
+            from axon.ui.keybindings import translate
+            key = translate("Autocomplete", key) or key
         action, raw = self.resolver.feed(key)
         if action is not None:
+            if action.startswith("command:"):
+                return ("finish", "/" + action.split(":", 1)[1])
             return self.do(action)
         for k in raw:
             if k == "?" and not st.buf:
                 return ("finish", "/kb")
             if len(k) == 1 and (k >= " " or k == "\t"):
                 st.insert(k)
+        return None
+
+    def _open_mid_prompt_list(self) -> bool:
+        return _open_mid_prompt_list_of(self.st)
+
+    def _kill_agents(self) -> tuple[str, Any] | None:
+        """Ctrl+X Ctrl+K: stop every running background subagent, after a second press within three seconds."""
+        global _KILL_ARMED_AT
+        st = self.st
+        agent = _prompt_agent()
+        if not _agents_running(agent):
+            st.notice = "no background agents are running"
+            return None
+        now = time.monotonic()
+        if now - _KILL_ARMED_AT > KILL_CONFIRM_S:
+            _KILL_ARMED_AT = now
+            st.notice = "press ctrl+x ctrl+k again to stop all background agents"
+            return None
+        _KILL_ARMED_AT = 0.0
+        stopped = agent.subagents.cancel_all()
+        st.notice = f"stopped {stopped} background agent{'s' if stopped != 1 else ''}"
         return None
 
     def _search_key(self, key: str) -> tuple[str, Any] | None:
@@ -1354,9 +1697,11 @@ class PromptEditor:
         pop = st.popup()
         bash = st.buf.startswith("!")
         if action == "chat:submit":
-            if pop is not None:
+            if pop is not None and pop.highlighted:
                 if st.accept_completion(pop, for_submit=True):
                     return ("submit", None)
+            elif pop is not None:
+                return ("submit", None)         # nothing highlighted: the text goes as typed
             elif st.pos == len(st.buf) and st.buf.endswith("\\"):
                 st.buf = st.buf[:-1]
                 st.pos -= 1
@@ -1365,11 +1710,17 @@ class PromptEditor:
                 return ("submit", None)
         elif action == "chat:newline":
             st.insert("\n")
+        elif action in ("chat:queueSubmit", "chat:sendNow"):
+            return ("submit", None)             # nothing is running at the idle prompt, so both just send
+        elif action == "chat:killAgents":
+            return self._kill_agents()
         elif action == "chat:complete":
             if pop is not None:
                 st.accept_completion(pop)
             elif bash:
                 st.shell_history_complete()
+            elif self._open_mid_prompt_list():
+                pass
             else:
                 st.notice = "shift+tab cycles the permission mode"   # Tab only completes (CC parity)
         elif action == "chat:cycleMode":
@@ -1377,8 +1728,9 @@ class PromptEditor:
         elif action in ("cursor:up", "cursor:down"):
             delta = -1 if action == "cursor:up" else 1
             if pop is not None:
-                st.popup_index = (pop.index + delta) % len(pop.items)
-            elif not st.move_vertical(delta):
+                st.popup_index = 0 if not pop.highlighted else (pop.index + delta) % len(pop.items)
+                st.popup_moved = True
+            elif not st.move_visual(delta):
                 st.history_step(delta)
         elif action == "history:prev":
             st.history_step(-1)
@@ -1451,8 +1803,11 @@ class PromptEditor:
             if bash and st.buf == "!":
                 st.set_text("")
             else:
-                st.kill(st.line_bounds()[0], st.pos)
+                start = st.line_bounds()[0]
+                st.kill(start - 1 if st.pos == start and start > 0 else start, st.pos)   # repeat: across lines
         elif action == "edit:killWord":
+            st.kill(st.space_left(), st.pos)
+        elif action == "edit:killWordBack":
             st.kill(st.word_left(), st.pos)
         elif action == "edit:killWordForward":
             st.kill(st.pos, st.word_right())
@@ -1463,14 +1818,20 @@ class PromptEditor:
         elif action == "edit:undo":
             st.undo_last()
         elif action == "chat:stash":
+            global _STASH
             if st.buf:
-                st.stash = st.buf
+                _STASH = (st.buf, st.pos, dict(st.pastes))
                 st._snapshot()
                 st.set_text("")
-                st.notice = "prompt stashed · ctrl+s to restore"
-            elif st.stash:
-                st.set_text(st.stash)
-                st.stash = ""
+                st._changed()
+                st.notice = "prompt stashed · ctrl+s on an empty prompt restores it"
+            elif _STASH is not None:
+                text, pos, pastes = _STASH
+                _STASH = None
+                st.pastes = {**st.pastes, **pastes}
+                st.set_text(text, pos)
+                st._changed()
+                st.dismissed = True
         elif action == "chat:expandPaste":
             m = st.chip_at_cursor()
             if m is None:
@@ -1495,7 +1856,7 @@ class PromptEditor:
                 st.vim = None
             st.notice = f"vim mode {'on' if on else 'off'}"
         elif action in _ACTION_COMMANDS:
-            return ("finish", _ACTION_COMMANDS[action])
+            return ("keep", _ACTION_COMMANDS[action])     # a panel: the draft and vim state come back afterwards
         elif action == "chat:externalEditor":
             return ("ui", "editor")
         elif action == "app:fileFinder":
@@ -1507,14 +1868,49 @@ class PromptEditor:
         return None
 
 
-def _status_rows(agent: Any) -> list[str]:
+def _open_mid_prompt_list_of(st: EditorState) -> bool:
+    """Tab on a /word partway through the prompt: insert the only match, or open the list of several."""
+    if st.search is not None or st.buf.startswith("!"):
+        return False
+    m = _SLASH_RE.search(st.buf[:st.pos])
+    if m is None or m.start(1) == 1 or "/" in m.group(1):
+        return False
+    items = mid_prompt_matches(m.group(1), st.cwd)
+    if not items:
+        return False
+    if len(items) == 1 and m.group(1):
+        st.accept_completion(Popup("slash", items, m.group(1), m.start(1) - 1))
+        return True
+    st.mid_list_open = True
+    st.dismissed = False
+    st.popup_index = 0
+    return True
+
+
+_KILL_ARMED_AT = 0.0
+KILL_CONFIRM_S = 3.0
+
+
+def _status_rows(agent: Any, idle: bool = False) -> list[str]:
     if agent is None:
         return []
     try:
+        from axon.commands.workspace_cmds import loop_status_rows
         from axon.ui.statusline import agent_panel_rows, prompt_status_rows
-        return prompt_status_rows(agent) + agent_panel_rows(agent)
+        return prompt_status_rows(agent, idle=idle) + loop_status_rows(agent) + agent_panel_rows(agent, arrow_keys=True)
     except Exception:
         return []
+
+
+def _cancel_loop_wakeup(agent: Any) -> bool:
+    """Esc or Ctrl+C while a self-paced /loop waits for its next run stops it."""
+    if agent is None:
+        return False
+    try:
+        from axon.commands.workspace_cmds import cancel_wakeup
+        return cancel_wakeup(agent)
+    except Exception:
+        return False
 
 
 def _agents_running(agent: Any) -> bool:
@@ -1588,7 +1984,7 @@ def read_input(
     this return ``("", None, 0)`` so the REPL drains ``agent.message_queue`` (e.g. a /loop run).
 
     Special results: "__SWITCH_SESSION__" (← on empty prompt), "__REWIND__" (Esc Esc on empty
-    prompt), "__TRACE_CYCLE__" (Ctrl+O), "/todos" (Ctrl+T), "/transcript" (Ctrl+F), "/model" (Alt+P), "/thinking"
+    prompt), "__TRACE_CYCLE__" (Alt+L), "/todos" (Ctrl+T), "/transcript" (Ctrl+O or Ctrl+F), "/model" (Alt+P), "/thinking"
     (Alt+T), "/kb" ("?" on empty prompt). Raises KeyboardInterrupt on Ctrl+C with an empty line
     and EOFError on a second Ctrl+C, or Ctrl+D pressed twice, on an empty line.
     """
@@ -1611,9 +2007,24 @@ def read_input(
     history, history_pastes = history_entries(cwd=str(cwd))
     st = EditorState(mode=mode, history=history, history_pastes=history_pastes, cwd=cwd)
     vim_on = kwargs.get("vim_mode")
+    global _RESTORE_VIM
     if vim_on if vim_on is not None else _VIM_ENABLED:
         from axon.ui.vim import VimState
-        st.vim = VimState()
+        st.vim = _RESTORE_VIM if _RESTORE_VIM is not None else VimState()
+    _RESTORE_VIM = None
+    prompt_settings = getattr(agent, "settings", None)
+    st.emoji_enabled = getattr(prompt_settings, "emoji_completion_enabled", True) is not False
+    try:
+        from axon.ui.spellcheck import checker_for
+        st.spell = checker_for(prompt_settings)
+    except Exception:
+        st.spell = None
+    try:
+        from axon.ui.statusline import status_line_config
+        cfg = status_line_config(prompt_settings) or {}
+        chrome.hide_vim = cfg.get("hideVimModeIndicator") is True or cfg.get("hide_vim_mode_indicator") is True
+    except Exception:
+        pass
     try:
         st.window_tokens = int(agent.context.context_window(agent.settings.model))
         st.large_input_setting = int(getattr(agent.settings, "large_input_tokens", 0) or 0)
@@ -1633,7 +2044,8 @@ def read_input(
     if restored is not None:       # what was typed before a window resize redrew the screen
         _RESIZE_DRAFT = None
         initial = ""
-        st.set_text(restored[0], restored[1])
+        # Keys typed while a turn ran follow the draft; they would otherwise be lost with `initial`.
+        st.set_text(restored[0] + ahead, len(restored[0]) + len(ahead) if ahead else restored[1])
         st.pastes = dict(restored[2])   # [Pasted text #N] chips still expand to their content
     if initial:
         st.set_text(str(initial))
@@ -1651,6 +2063,21 @@ def read_input(
     def finish(value: str) -> tuple[str, str | None, int]:
         frame.clear()
         return (value, changed_mode(), 0)
+
+    def clean_invisible() -> bool:
+        """Removes what a terminal draws as nothing, from the prompt and its pasted chips. That Enter sends nothing."""
+        cleaned, removed = strip_invisible(st.buf)
+        clean_pastes = {n: strip_invisible(text) for n, text in st.pastes.items()
+                        if re.search(rf"\[Pasted text #{n}(?: \+\d+ lines)?\]", st.buf)}
+        removed += sum(r for _t, r in clean_pastes.values())
+        if not removed:
+            return False
+        for n, (text, _r) in clean_pastes.items():
+            st.pastes[n] = text
+        st._snapshot()
+        st.set_text(cleaned)
+        st.notice = invisible_notice(removed)
+        return True
 
     def submit() -> tuple[str, str | None, int]:
         shown = st.buf.strip()
@@ -1670,6 +2097,7 @@ def read_input(
 
     width0 = term_width()          # the real window (shutil's size prefers a stale $COLUMNS)
     resized_at = 0.0
+    spell_seen = st.spell.version if st.spell is not None else 0
     clicks = ClickMap.for_prompt(agent)   # click a block above the prompt -> expand it in the transcript
     try:
         with plat.raw_terminal(isig=False, bracketed_paste=True):
@@ -1680,11 +2108,16 @@ def read_input(
             while True:
                 try:
                     waiting_for_suggestion = box is not None and bool(getattr(box, "pending", False))
+                    if st.spell is not None or editor.resolver.pending:    # checker answers and chord timeouts come by themselves
+                        waiting_for_suggestion = True
                     key = plat.read_key(timeout=0.25 if (wake is not None or resized_at or waiting_for_suggestion)
                                         else (1.0 if _agents_running(agent) else None))
                 except EOFError:
                     frame.clear()
                     raise
+                if st.spell is not None and st.spell.version != spell_seen:   # answers arrived: underline them
+                    spell_seen = st.spell.version
+                    frame.render(*build_frame(st, chrome))
                 if key == "resize":
                     resized_at = time.monotonic()      # wait until the user stops dragging the window
                     continue
@@ -1711,6 +2144,9 @@ def read_input(
                             clicks.update(frame)
                     continue
                 if key is None:
+                    if editor.resolver.expire():
+                        st.notice = "chord cancelled: the next key did not come within 3 seconds"
+                        frame.render(*build_frame(st, chrome))
                     if box is not None and not resized_at:
                         shown_before = st.ghost
                         seen = _sync_ghost(st, box, seen)       # a suggestion that arrived while we wait
@@ -1718,7 +2154,7 @@ def read_input(
                             frame.render(*build_frame(st, chrome))
                             if clicks is not None:
                                 clicks.update(frame)
-                    rows_now = _status_rows(agent)       # the bar is live: agents progress while you type
+                    rows_now = _status_rows(agent, idle=True)    # the bar is live: agents progress while you type
                     if rows_now != st.status_rows and not resized_at:
                         st.status_rows = rows_now
                         frame.render(*build_frame(st, chrome))
@@ -1727,6 +2163,26 @@ def read_input(
                     if wake is not None and wake.is_set() and not st.buf:
                         wake.clear()
                         return finish("")
+                    if _inbox_waiting():      # the web page asked for something: step aside, the draft comes back
+                        _RESIZE_DRAFT = _resize_draft(st)
+                        return finish("")
+                    continue
+                if (key == "esc" or (key == "ctrl-c" and not st.buf)) and st.search is None and st.popup() is None \
+                        and _cancel_loop_wakeup(agent):
+                    st.notice = "Pending wakeup cancelled"
+                    st.status_rows = _status_rows(agent)
+                    frame.render(*build_frame(st, chrome))
+                    if clicks is not None:
+                        clicks.update(frame)
+                    continue
+                if key == "down" and not st.buf and st.search is None and _agents_running(agent):
+                    from axon.ui.agent_panel import open_console
+                    frame.clear()                      # the list takes these rows; the prompt comes back after Esc
+                    open_console(agent)
+                    st.status_rows = _status_rows(agent)
+                    frame.render(*build_frame(st, chrome))
+                    if clicks is not None:
+                        clicks.update(frame)
                     continue
                 if st.ghost and box is not None and st.search is None:
                     if key in _GHOST_ACCEPT_KEYS:
@@ -1746,9 +2202,22 @@ def read_input(
                 if outcome is not None:
                     kind, value = outcome
                     if kind == "submit":
+                        if clean_invisible():
+                            frame.render(*build_frame(st, chrome))
+                            continue
                         return submit()
+                    if kind == "keep":
+                        _RESIZE_DRAFT = _resize_draft(st)
+                        _RESTORE_VIM = st.vim
+                        return finish(value)
                     if kind == "finish":
                         return finish(value)
+                    if kind == "ui" and value == "redraw":   # Ctrl+L: draw it all again, input and conversation kept
+                        _RESIZE_DRAFT = _resize_draft(st)
+                        _RESTORE_VIM = st.vim
+                        global _REDRAW_NOTE
+                        _REDRAW_NOTE = "Redrawn"
+                        return (RESIZE_REDRAW, changed_mode(), 0)
                     if kind == "raise":
                         frame.clear()
                         raise value
@@ -1769,6 +2238,14 @@ def read_input(
 RESIZE_REDRAW = "__RESIZE_REDRAW__"
 # (text, cursor, paste chips) of the draft handed back for a resize redraw; None when there is none.
 _RESIZE_DRAFT: "tuple[str, int, dict[int, str]] | None" = None
+_RESTORE_VIM: Any = None      # the vim state (mode, register) to pick up again after a panel closes
+_REDRAW_NOTE = ""             # why the screen was redrawn, when not because of the window size
+
+
+def take_redraw_note() -> str:
+    global _REDRAW_NOTE
+    note, _REDRAW_NOTE = _REDRAW_NOTE, ""
+    return note
 
 
 def _resize_draft(st: EditorState) -> "tuple[str, int, dict[int, str]] | None":
@@ -1859,6 +2336,11 @@ def _open_transcript_from_prompt(agent: Any, target: int) -> None:
         pass
 
 
+def _inbox_waiting() -> bool:
+    from axon.ui.repl_inbox import INBOX
+    return INBOX.active and INBOX.has_pending()
+
+
 def _loop_wake_event() -> Any:
     """The /loop wake-up event (threading.Event) or None when the commands package is unavailable."""
     try:
@@ -1870,12 +2352,9 @@ def _loop_wake_event() -> Any:
 
 def _run_ui_action(name: str, st: EditorState, frame: LiveFrame) -> LiveFrame:
     """Actions that leave the prompt frame (editor, finder, redraw, suspend). Returns a new frame."""
-    if name == "redraw":
-        sys.stdout.write("\033[H\033[2J")
-        return LiveFrame()
     if name == "editor":
         frame.clear()
-        edited = _edit_externally(st.buf)
+        edited = _edit_externally(st.buf, _last_reply_context())
         if edited is None:
             st.notice = f"could not start editor ({' '.join(plat.editor_command())}); set $EDITOR"
         else:

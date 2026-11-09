@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,38 @@ HELPER_TIMEOUT = 10.0
 _CREDENTIAL_NAME = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|AUTH)", re.IGNORECASE)
 _GIT_KEY = re.compile(r"^GIT_CONFIG_KEY_\d+$")
 _ALWAYS_SCRUB = frozenset({"ANTHROPIC_CUSTOM_HEADERS"})
+
+
+_warned: set[str] = set()
+
+
+def helper_allowed(spec: ServerSpec, workspace: Path) -> bool:
+    """A helper is a shell command. For a project ``.mcp.json`` or local-scope server it runs only after you
+    trusted exactly this folder; ``-p`` runs get no automatic trust for this."""
+    if spec.scope not in ("project", "local"):
+        return True
+    from axon.mcp.policy import folder_trusted
+    return folder_trusted(workspace)
+
+
+def _note_not_run(spec: ServerSpec, workspace: Path) -> None:
+    from axon.mcp import state
+    if state.can_prompt() or spec.name in _warned:
+        return
+    _warned.add(spec.name)
+    try:
+        key = str(Path(workspace).resolve())
+        sys.stderr.write(f'MCP server "{spec.name}": headersHelper not run because this folder is not trusted. '
+                         f'Run axon here and accept the trust question, or set projects["{key}"]'
+                         f".hasTrustDialogAccepted to true in {_home_config()}.\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _home_config() -> Path:
+    from axon.storage import user_file
+    return user_file("mcp.json")
 
 
 class HeadersHelperError(Exception):
@@ -93,11 +126,21 @@ class DynamicHeaders:
     def active(self) -> bool:
         return bool(self.spec.headers_helper) or self.oauth is not None
 
+    def _may_run(self) -> bool:
+        if not self.spec.headers_helper:
+            return False
+        if helper_allowed(self.spec, self.workspace):
+            return True
+        _note_not_run(self.spec, self.workspace)
+        return False
+
     def prime(self) -> None:
-        """Run the helper once (at connect). Raises HeadersHelperError."""
-        if self.spec.headers_helper:
+        """Run the helper once (at connect), when the trust rule lets it. Raises HeadersHelperError."""
+        if self._may_run():
             with self._lock:
                 self._helper = run_headers_helper(self.spec, self.workspace)
+            if self.oauth is not None:
+                self.oauth.helper_headers = dict(self._helper)
 
     @property
     def helper_supplies_authorization(self) -> bool:
@@ -112,14 +155,15 @@ class DynamicHeaders:
 
     def on_unauthorized(self) -> bool:
         """A 401/403 came back: re-run the helper (new credential) or refresh the OAuth token."""
-        if self.spec.headers_helper:
+        if self._may_run():
             try:
                 fresh = run_headers_helper(self.spec, self.workspace)
             except HeadersHelperError:
                 return False
             with self._lock:
                 self._helper = fresh
-            return True
+            if self.oauth is None or self.helper_supplies_authorization or self.spec.has_authorization_header:
+                return True
         if self.oauth is not None and not self.spec.has_authorization_header:
             return bool(self.oauth.on_unauthorized())
         return False

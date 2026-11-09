@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, ClassVar
 
-from axon import interruptible
+from axon import envvars, interruptible
 from axon import platform as plat
 from axon.errors import ToolError
 from axon.permissions import sandbox
@@ -28,16 +28,182 @@ from axon.tools.base import Tool, ToolContext, int_arg
 _SCRUB_ENV_SUBSTRINGS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
 # Variables that match a scrub substring but hold no secret, and that tools need: the ssh-agent
 # socket (git over ssh), the X11 cookie path, and git's commit identity (GIT_AUTHOR_*).
-_ENV_KEEP = frozenset({"SSH_AUTH_SOCK", "XAUTHORITY"})
+# Proxy settings and GIT_CONFIG_* stay whatever they hold.
+_ENV_KEEP = frozenset({"SSH_AUTH_SOCK", "XAUTHORITY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"})
+_ENV_KEEP_PREFIX = ("GIT_CONFIG_",)
+# Package-index URLs keep working with the username and password cut out of them.
+_ENV_URL_ONLY = frozenset({"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "NPM_CONFIG_REGISTRY", "UV_INDEX_URL"})
+_URL_CREDS = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/@\s]*:[^/@\s]*@", re.I)
+_SECRET_VALUE = re.compile(r"^(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)")
 
 
 def _is_secret_env(name: str) -> bool:
     up = name.upper()
-    if up in _ENV_KEEP:
+    if up in _ENV_KEEP or up.startswith(_ENV_KEEP_PREFIX):
         return False
     up = up.replace("AUTHOR", "")  # GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL are identity, not credentials
     return any(sub in up for sub in _SCRUB_ENV_SUBSTRINGS)
-MAX_TIMEOUT_S = 1800
+
+
+def _scrub_value(name: str, value: str) -> str | None:
+    """What a variable that is not secret by name may carry into a subprocess: None removes it, because
+    its value looks like a credential; a package-index URL keeps working without its username and password."""
+    if name.upper() in _ENV_KEEP or name.upper().startswith(_ENV_KEEP_PREFIX):
+        return value
+    if _URL_CREDS.match(value):
+        return _URL_CREDS.sub(r"\1", value) if name.upper() in _ENV_URL_ONLY else None
+    return None if _SECRET_VALUE.match(value) else value
+
+
+MAX_TIMEOUT_S = 1800           # the ceiling on what the model may ask for; BASH_MAX_TIMEOUT_MS changes it
+INLINE_OUTPUT_CHARS = 30_000   # output past this is saved to a file; the result shows its head and tail
+MAX_READ_BACK_CHARS = 150_000  # hard ceiling of BASH_MAX_OUTPUT_LENGTH
+MAX_SAVED_CHARS = 64 * 1024 * 1024
+MAX_STREAMED_BYTES = 5 * 1024 ** 3  # a command whose output passes this is killed
+
+
+def _ms_env(name: str) -> int | None:
+    val = envvars.integer(name)
+    return val if val is not None and val > 0 else None
+
+
+def timeout_limits(settings: Any) -> tuple[int, int]:
+    """(default, ceiling) in seconds for a foreground command. BASH_DEFAULT_TIMEOUT_MS replaces the default;
+    the ceiling is the larger of BASH_MAX_TIMEOUT_MS (30 minutes when unset) and the default."""
+    env_default = _ms_env("BASH_DEFAULT_TIMEOUT_MS")
+    default = max(1, env_default // 1000) if env_default else int(getattr(settings, "bash_timeout_s", 0) or 180)
+    env_max = _ms_env("BASH_MAX_TIMEOUT_MS")
+    ceiling = max(1, env_max // 1000) if env_max else MAX_TIMEOUT_S
+    return default, max(default, ceiling)
+
+
+def background_disabled() -> bool:
+    return envvars.on("AXON_DISABLE_BACKGROUND_TASKS")
+
+
+def _bash_output_setting(workspace: Path | None) -> int | None:
+    """The ``bashOutputMaxChars`` key (any settings file; a closer file wins), clamped to 4000-128000."""
+    import json
+    from axon import storage
+    paths = [storage.axon_home() / "settings.json"]
+    if workspace is not None:
+        paths += [Path(workspace) / ".axon" / "settings.json", Path(workspace) / ".axon" / "settings.local.json"]
+    val = None
+    for p in paths:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        got = data.get("bashOutputMaxChars") if isinstance(data, dict) else None
+        if isinstance(got, int) and not isinstance(got, bool) and got > 0:
+            val = got
+    return None if val is None else max(4000, min(128_000, val))
+
+
+def output_limits(settings: Any, workspace: Path | None) -> tuple[int, int]:
+    """(inline ceiling, read-back window) in characters for a Bash result."""
+    chars = _bash_output_setting(workspace)
+    if chars:
+        inline, window = chars, chars
+    else:
+        env = envvars.integer("BASH_MAX_OUTPUT_LENGTH")
+        window = min(env, MAX_READ_BACK_CHARS) if env and env > 0 else INLINE_OUTPUT_CHARS
+        inline = min(INLINE_OUTPUT_CHARS, window)
+    cap = int(getattr(settings, "tool_output_cap", 0) or 0)   # Axon's own per-tool budget still applies when lower
+    if cap > 0:
+        inline, window = min(inline, cap), min(window, cap)
+    return inline, window
+
+
+_BENIGN_EXIT_1 = frozenset({"grep", "rg", "egrep", "fgrep", "diff", "test", "["})
+_CHAIN_RE = re.compile(r"\|\||&&|[|;\n]")
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _last_command_words(cmd: str) -> list[str]:
+    """Words of the last command in a pipeline or chain, without leading VAR=value assignments."""
+    import shlex
+    last = _CHAIN_RE.split(cmd.strip())[-1] if '"' not in cmd and "'" not in cmd else None
+    try:
+        lex = shlex.shlex(cmd.strip() if last is None else last, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words: list[str] = []
+        for tok in lex:
+            if tok and set(tok) <= set("|&;\n"):
+                words = []
+            else:
+                words.append(tok)
+    except ValueError:
+        return []
+    while words and _ASSIGN_RE.match(words[0]):
+        words.pop(0)
+    return words
+
+
+def benign_exit_one(cmd: str) -> bool:
+    """Exit 1 from these reports a result (no match, files differ), not a failure."""
+    words = _last_command_words(cmd)
+    if not words:
+        return False
+    if words[0] == "git":
+        return len(words) > 1 and words[1] == "grep"
+    return Path(words[0]).name in _BENIGN_EXIT_1
+
+
+# ── aliases, functions and options from the user's shell startup file ──
+_snapshots: dict[str, str] = {}
+_SNAP_MARK = "__AXON_SHELL_SNAPSHOT__"
+_SNAP_SCRIPTS = {
+    "zsh": f"printf '\\n{_SNAP_MARK}\\n'; alias -L; typeset -f; setopt 2>/dev/null | sed 's/^/setopt /'",
+    "bash": f"printf '\\n{_SNAP_MARK}\\n'; alias -p; declare -f; shopt -p 2>/dev/null | grep -- ' -s '; echo 'shopt -s expand_aliases'",
+    "sh": f". \"$HOME/.profile\" >/dev/null 2>&1; printf '\\n{_SNAP_MARK}\\n'; alias",
+}
+
+
+def shell_snapshot(info: plat.ShellInfo) -> str:
+    """Opt-in (AXON_SHELL_SNAPSHOT=1): path of a script holding what the user's startup file defines, captured once per process. The commands run
+    with no controlling terminal and no stdin, so an interactive shell cannot stop or hang on the startup file."""
+    if info.path in _snapshots:
+        return _snapshots[info.path]
+    _snapshots[info.path] = ""
+    script = _SNAP_SCRIPTS.get(info.kind)
+    if script is None or plat.IS_WINDOWS or not envvars.on("AXON_SHELL_SNAPSHOT") or os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    argv = [info.path, "-c", script] if info.kind == "sh" else [info.path, "-ic", script]
+    try:
+        res = subprocess.run(argv, capture_output=True, timeout=5, stdin=subprocess.DEVNULL, start_new_session=True,
+                             cwd=str(Path.home()))
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    text = res.stdout.decode("utf-8", errors="replace").split(_SNAP_MARK + "\n", 1)
+    if len(text) != 2 or not text[1].strip() or len(text[1]) > 2_000_000:
+        return ""
+    import tempfile
+    try:
+        fd, path = tempfile.mkstemp(prefix="axon-shell-snapshot-", suffix=".sh")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text[1])
+    except OSError:
+        return ""
+    import atexit
+    atexit.register(lambda: os.path.exists(path) and os.unlink(path))
+    _snapshots[info.path] = path
+    return path
+
+
+def _user_env_file() -> str:
+    """A script the user named in AXON_ENV_FILE / CLAUDE_ENV_FILE before launching; it runs before each command."""
+    raw = os.environ.get("AXON_ENV_FILE") or os.environ.get("CLAUDE_ENV_FILE") or ""
+    return raw if raw and os.path.isfile(raw) else ""
+
+
+def _apply_shell_prefix(argv: Any) -> Any:
+    """AXON_SHELL_PREFIX wraps the command: ``prefix '<full shell invocation>'``; the wrapper re-evaluates $1."""
+    prefix = os.environ.get("AXON_SHELL_PREFIX", "").strip()
+    if not prefix or not isinstance(argv, list):
+        return argv
+    import shlex
+    return shlex.split(prefix) + [shlex.join(argv)]
 
 
 def _find_shell_runner() -> tuple[list[str], str]:
@@ -70,8 +236,9 @@ def _describe() -> str:
         f"Run a shell command and return its combined stdout/stderr and exit code. Active shell: {info.name} on "
         f"{_os_label()}. {shell_syntax_hint(info)} The working directory persists between calls (use cd); "
         f"environment variables and other shell state do not. Commands run non-interactively with stdin closed: "
-        f"never start editors, pagers or prompts. Default timeout {180}s (timeout_s, max {MAX_TIMEOUT_S}); on "
-        f"timeout the whole process tree is killed. Very long output is truncated in the middle. Prefer the "
+        f"never start editors, pagers or prompts. Default timeout {timeout_limits(None)[0]}s (timeout_s, max "
+        f"{timeout_limits(None)[1]}s); on timeout the whole process tree is killed. Output over about 30,000 characters "
+        f"is saved to a file; you get its head and tail and the file path. Prefer the "
         f"dedicated Read/Grep/Glob/Edit tools over cat/grep/find/sed. Always give a short 'description'."
     )
 
@@ -129,8 +296,17 @@ def _python_hint(env: dict[str, str]) -> str:
     return "(note: no Python interpreter is on this PATH; create a .venv in the workspace or activate one before starting axon)"
 
 
-def _child_env(workspace: Path | None = None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not _is_secret_env(k)}
+def _child_env(workspace: Path | None = None, session_id: str = "") -> dict[str, str]:
+    env = {}
+    for k, v in os.environ.items():
+        if _is_secret_env(k):
+            continue
+        kept = _scrub_value(k, v)
+        if kept is not None:
+            env[k] = kept
+    env.update({"AXONCODE": "1", "AXON_CHILD_SESSION": "1", "AXON_PID": str(os.getpid())})
+    if session_id:
+        env["AXON_SESSION_ID"] = session_id
     if workspace is not None:
         _apply_python_env(env, Path(workspace))
     try:   # variables SessionStart/CwdChanged/... hooks persisted through CLAUDE_ENV_FILE
@@ -141,6 +317,15 @@ def _child_env(workspace: Path | None = None) -> dict[str, str]:
     env.update({"TERM": "dumb", "PAGER": "cat", "GIT_PAGER": "cat", "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0"})
     return env
+
+
+def capture_excerpt(text: str, limit: int) -> str:
+    """``text`` within ``limit`` characters: its head and tail with the middle marked as elided."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    marker = "characters elided by Axon"
+    return f"{text[:half]}\n\n[... {len(text) - 2 * half} {marker} ...]\n\n{text[-half:]}"
 
 
 class _ShellDescription:
@@ -155,8 +340,12 @@ class _Capture:
     the budget, everything is also spooled to a temp file (``spill_path``) so the complete
     output can be saved with the session instead of being dropped."""
 
-    def __init__(self, cap: int, on_text: Callable[[str], None] | None = None) -> None:
+    def __init__(self, cap: int, on_text: Callable[[str], None] | None = None, spill_after: int | None = None,
+                 on_overflow: Callable[[], None] | None = None) -> None:
         self.cap = max(1000, cap)
+        self.spill_after = spill_after if spill_after is not None else 2 * (self.cap // 2)
+        self.on_overflow = on_overflow
+        self.spilled = 0
         self.head: list[str] = []
         self.head_len = 0
         self.tail: collections.deque[str] = collections.deque()
@@ -173,7 +362,9 @@ class _Capture:
             fd, path = tempfile.mkstemp(prefix="axon-bash-", suffix=".txt")
             self.spill = os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="")
             self.spill_path = path
-            self.spill.write("".join(self.head) + "".join(self.tail))  # nothing was dropped yet
+            start = "".join(self.head) + "".join(self.tail)  # nothing was dropped yet
+            self.spill.write(start)
+            self.spilled = len(start)
         except OSError:
             self.spill, self.spill_path = None, ""
 
@@ -192,11 +383,12 @@ class _Capture:
             return
         chunk = text
         with self.lock:
-            if self.spill is None and not self.spill_path and self.total + len(text) > 2 * (self.cap // 2):
+            if self.spill is None and not self.spill_path and self.total + len(text) > self.spill_after:
                 self._open_spill()
-            if self.spill is not None:
+            if self.spill is not None and self.spilled < MAX_SAVED_CHARS:   # the saved copy stops at 64 MiB
                 try:
-                    self.spill.write(text)
+                    self.spill.write(text[:MAX_SAVED_CHARS - self.spilled])
+                    self.spilled += len(text)
                 except (OSError, ValueError):
                     pass
             self.total += len(text)
@@ -216,6 +408,9 @@ class _Capture:
                 self.on_text(chunk)
             except Exception:
                 self.on_text = None
+        if self.on_overflow is not None and self.total > MAX_STREAMED_BYTES:
+            overflow, self.on_overflow = self.on_overflow, None
+            overflow()
 
     def text(self) -> str:
         with self.lock:
@@ -299,6 +494,7 @@ class BashTool(Tool):
         self._token = secrets.token_hex(6)
         self._cwd: str | None = None
         self._cwd_ws: str | None = None
+        self._seen_cwd: str | None = None
 
     # ── cwd tracking ──────────────────────────────────────────────────────
     @property
@@ -310,6 +506,18 @@ class BashTool(Tool):
         if self._cwd_ws != ws or not self._cwd or not os.path.isdir(self._cwd):
             self._cwd, self._cwd_ws = ws, ws
         return self._cwd
+
+    def _prelude(self, info: plat.ShellInfo) -> str:
+        """Lines run before the command in the same shell: the user's startup definitions and AXON_ENV_FILE."""
+        import shlex
+        lines = []
+        snap = shell_snapshot(info)
+        if snap:
+            lines.append(f". {shlex.quote(snap)} >/dev/null 2>&1")
+        env_file = _user_env_file()
+        if env_file:
+            lines.append(f". {shlex.quote(env_file)}")
+        return "\n".join(lines) + "\n" if lines else ""
 
     def _wrap(self, cmd: str, info: plat.ShellInfo) -> list[str] | str:
         s = self._sentinel
@@ -328,7 +536,7 @@ class BashTool(Tool):
             one = " & ".join(line for line in cmd.splitlines() if line.strip()) or cmd
             return (f'"{info.path}" /d /s /v:on /c "chcp 65001>nul & {one} & set __AXON_EC=!errorlevel! & '
                     f'echo.& echo {s}!CD!& exit /b !__AXON_EC!"')
-        script = f"{cmd}\n__axon_ec=$?\nprintf '\\n%s%s\\n' '{s}' \"$PWD\"\nexit $__axon_ec"
+        script = f"{self._prelude(info)}{cmd}\n__axon_ec=$?\nprintf '\\n%s%s\\n' '{s}' \"$PWD\"\nexit $__axon_ec"
         return plat.shell_command_argv(script, info)
 
     def _extract_cwd(self, text: str) -> str:
@@ -339,44 +547,82 @@ class BashTool(Tool):
         line_end = text.find("\n", idx)
         new_dir = text[idx + len(s): line_end if line_end != -1 else len(text)].strip()
         if new_dir and os.path.isdir(new_dir):
-            self._cwd = new_dir
+            self._cwd = self._seen_cwd = new_dir
         before = text[:idx]
         if before.endswith("\n"):
             before = before[:-1]
         return before + (text[line_end + 1:] if line_end != -1 else "")
 
     # ── execution ─────────────────────────────────────────────────────────
+    def _keep_cwd(self, ctx: ToolContext, before: str | None) -> str:
+        """Decide what the directory the command ended in means for the next one. Only the main session carries it
+        over, only inside the project or an additional working directory, and not with
+        AXON_BASH_MAINTAIN_PROJECT_WORKING_DIR. Returns a notice for the model."""
+        seen, self._seen_cwd = self._seen_cwd, None
+        if envvars.on("AXON_BASH_MAINTAIN_PROJECT_WORKING_DIR"):
+            self._cwd = str(ctx.workspace)
+            return ""
+        if getattr(getattr(ctx, "agent", None), "parent_agent", None) is not None:
+            self._cwd = before   # subagent sessions never carry over working directory changes
+            return ""
+        if not seen:
+            return ""
+        roots = [Path(ctx.workspace)] + [Path(str(d)) for d in (getattr(ctx.settings, "additional_dirs", None) or [])]
+        try:
+            target = Path(seen).resolve()
+            inside = any(target == r.resolve() or r.resolve() in target.parents for r in roots)
+        except OSError:
+            inside = False
+        if inside:
+            return ""
+        self._cwd = str(ctx.workspace)
+        return f"Shell cwd was reset to {ctx.workspace}"
+
+    def _subagent_cwd(self, ctx: ToolContext) -> str | None:
+        return str(ctx.workspace) if getattr(getattr(ctx, "agent", None), "parent_agent", None) is not None else None
+
+    def _start_background(self, cmd: str, cwd: str, env: dict[str, str], info: plat.ShellInfo, ctx: ToolContext) -> str:
+        log_path: Path | None = None
+        try:
+            from axon import storage
+            ws, sid = _session_of(ctx)
+            log_path = storage.outputs_dir(ws, sid) / f"background-{int(time.time() * 1000)}.log"
+        except Exception:
+            log_path = None
+        try:
+            shell = BACKGROUND.start(self._prelude(info) + cmd if not info.is_powershell and info.kind != "cmd" else cmd,
+                                     cwd, env, info, log_path=log_path,
+                                     wrap=lambda argv: _apply_shell_prefix(sandbox.wrap_argv(argv, ctx.settings)),
+                                     display=cmd)
+        except FileNotFoundError as e:
+            raise ToolError(f"Shell not found ({info.name}): {e}. Set AXON_SHELL to a valid shell.") from e
+        except OSError as e:
+            raise ToolError(f"Failed to start {info.name}: {e}") from e
+        logged = f"\nIts complete output is also logged to {log_path}." if log_path else ""
+        return (f"Started background shell {shell.id} (pid {shell.proc.pid}) in {cwd}.\n"
+                f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.{logged}")
+
+    # ── execution ─────────────────────────────────────────────────────────
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
         cmd = str(args.get("command", "")).strip()
         if not cmd:
             raise ToolError("Bash requires a non-empty 'command'.")
-        default_t = int(getattr(ctx.settings, "bash_timeout_s", 0) or 180)
-        timeout = int_arg(args, "timeout_s", default_t, lo=1, hi=MAX_TIMEOUT_S, strict=True)
-        cap = int(getattr(ctx.settings, "tool_output_cap", 0) or 30000)
-        info = plat.shell_info()
-        cwd = self.current_dir(ctx.workspace)
-        env = _child_env(ctx.workspace)
+        default_t, ceiling = timeout_limits(ctx.settings)
+        timeout = int_arg(args, "timeout_s", default_t, lo=1, hi=ceiling, strict=True)
+        inline, window = output_limits(ctx.settings, Path(ctx.workspace))
+        info = self.shell_for()
+        cwd_before = self._cwd
+        cwd = self._subagent_cwd(ctx) or self.current_dir(ctx.workspace)
+        env = _child_env(ctx.workspace, _session_of(ctx)[1])
         if args.get("run_in_background"):
-            log_path: Path | None = None
-            try:
-                from axon import storage
-                ws, sid = _session_of(ctx)
-                log_path = storage.outputs_dir(ws, sid) / f"background-{int(time.time() * 1000)}.log"
-            except Exception:
-                log_path = None
-            try:
-                shell = BACKGROUND.start(cmd, cwd, env, info, log_path=log_path,
-                                         wrap=lambda argv: sandbox.wrap_argv(argv, ctx.settings))
-            except FileNotFoundError as e:
-                raise ToolError(f"Shell not found ({info.name}): {e}. Set AXON_SHELL to a valid shell.") from e
-            except OSError as e:
-                raise ToolError(f"Failed to start {info.name}: {e}") from e
-            logged = f"\nIts complete output is also logged to {log_path}." if log_path else ""
-            return (f"Started background shell {shell.id} (pid {shell.proc.pid}) in {cwd}.\n"
-                    f"Use BashOutput with shell_id={shell.id!r} to read its output and KillShell to stop it.{logged}")
+            if background_disabled():
+                raise ToolError("Background commands are disabled (AXON_DISABLE_BACKGROUND_TASKS). Run it in the foreground.")
+            return self._start_background(cmd, cwd, env, info, ctx)
         stream_cb = getattr(ctx, "on_output", None)
-        capture = _Capture(cap, stream_cb if callable(stream_cb) else None)
-        argv = sandbox.wrap_argv(self._wrap(cmd, info), ctx.settings)
+        proc_box: list[subprocess.Popen[bytes]] = []
+        capture = _Capture(window, stream_cb if callable(stream_cb) else None, spill_after=inline,
+                           on_overflow=lambda: proc_box and plat.kill_process_tree(proc_box[0]))
+        argv = _apply_shell_prefix(sandbox.wrap_argv(self._wrap(cmd, info), ctx.settings))
         try:
             proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, **plat.new_process_group_kwargs())
@@ -384,6 +630,7 @@ class BashTool(Tool):
             raise ToolError(f"Shell not found ({info.name}): {e}. Set AXON_SHELL to a valid shell.") from e
         except OSError as e:
             raise ToolError(f"Failed to start {info.name}: {e}") from e
+        proc_box.append(proc)
 
         def pump() -> None:
             dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -411,20 +658,24 @@ class BashTool(Tool):
         reader.join(timeout=2.0 if timed_out else 1.0)
         detached = reader.is_alive()  # a background child still holds the pipe; the daemon reader drains it
         output = self._extract_cwd(_clean_output(capture.text())).strip("\n")
+        code = proc.returncode
+        valid = code in (0, None) or (code == 1 and benign_exit_one(cmd))
+        marker = "characters elided by Axon ...]"
+        if len(output) > inline and not (marker in output and window <= inline):   # past the inline budget: head + tail
+            output = capture_excerpt(output, inline)
         full_note = ""
         spill = capture.close_spill()   # also when detached: what was captured so far is kept, not left in the temp dir
         if spill:
             full_note = _persist_spill(spill, ctx, cmd, self._extract_cwd)
-            marker = "characters elided by Axon ...]"
             if full_note and marker in output:  # keep the tail intact: the note goes inside the marker
                 output = output.replace(marker, f"characters elided by Axon {full_note} ...]", 1)
                 full_note = ""
+        cwd_note = self._keep_cwd(ctx, cwd_before)
         elapsed = time.monotonic() - started
         if timed_out:
             tail = output[-4000:]
             raise ToolError(f"Command timed out after {timeout}s; the process tree was killed.\nPartial output:\n{tail}"
                             + (f"\n{full_note}" if full_note else ""))
-        code = proc.returncode
         notes = []
         if sandbox.enabled(ctx.settings):
             failed = sandbox.start_failure(output, code)
@@ -437,12 +688,17 @@ class BashTool(Tool):
             notes.append("(a background process is still running and holds the output pipe; its output is not captured)")
         if "python: command not found" in output or "python: not found" in output:
             notes.append(_python_hint(env))
-        if self._cwd and os.path.normcase(self._cwd) != os.path.normcase(str(ctx.workspace)):
+        if cwd_note:
+            notes.append(cwd_note)
+        elif self._cwd and os.path.normcase(self._cwd) != os.path.normcase(str(ctx.workspace)):
             notes.append(f"(cwd: {self._cwd})")
         if full_note:
             notes.append(full_note)
         suffix = ("\n" + "\n".join(notes)) if notes else ""
-        if code not in (0, None):
+        if valid:
+            if code == 1 and not output:
+                return f"(Command exited with code 1 and no output: no match, or the compared files differ){suffix}"
+        if not valid:
             why = f"non-zero code {code}"
             if code < 0:  # POSIX: terminated by a signal
                 try:
@@ -456,6 +712,9 @@ class BashTool(Tool):
         if not output:
             return f"(Command completed with exit code 0 and no output in {elapsed:.1f}s){suffix}"
         return output + suffix
+
+    def shell_for(self) -> plat.ShellInfo:
+        return plat.shell_info()
 
     def render_call(self, args: dict[str, Any]) -> str:
         desc = args.get("description", "")
@@ -556,13 +815,15 @@ class BackgroundShells:
         self._seq = 0
 
     def start(self, command: str, cwd: str, env: dict[str, str], info: plat.ShellInfo,
-              log_path: Path | None = None, wrap: Callable[[Any], Any] | None = None) -> BackgroundShell:
+              log_path: Path | None = None, wrap: Callable[[Any], Any] | None = None,
+              display: str | None = None) -> BackgroundShell:
         argv = plat.shell_command_argv(command, info)
         proc = subprocess.Popen(wrap(argv) if wrap else argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **plat.new_process_group_kwargs())
         with self._lock:
             self._seq += 1
-            shell = BackgroundShell(f"bash_{self._seq}", command, proc, log_path=log_path)
+            shell = BackgroundShell(f"bash_{self._seq}", display if display is not None else command, proc,
+                                    log_path=log_path)
             self._shells[shell.id] = shell
         return shell
 

@@ -280,12 +280,25 @@ class FileState:
     """Tracks (mtime_ns, sha256) per file for read-before-edit invariants."""
     def __init__(self) -> None:
         self._seen: dict[Path, tuple[int, int, str]] = {}
+        self._partial: set[Path] = set()   # read cut short with a PARTIAL view notice: that does not count as read
 
-    def record_read(self, p: Path) -> None:
+    def record_read(self, p: Path, partial: bool = False) -> None:
         p = p.resolve()
         if p.exists() and p.is_file():
             stat = p.stat()
             self._seen[p] = (stat.st_mtime_ns, stat.st_size, _sha256_of(p))
+            (self._partial.add if partial else self._partial.discard)(p)
+
+    def changed_since_read(self, p: Path) -> bool:
+        """True when ``p`` was read in full in this session and its content is different now."""
+        p = p.resolve()
+        if p not in self._seen or p in self._partial or not p.exists():
+            return False
+        last_mtime, last_size, last_sha = self._seen[p]
+        curr = p.stat()
+        if curr.st_mtime_ns == last_mtime and curr.st_size == last_size:
+            return False
+        return _sha256_of(p) != last_sha
 
     def check_writable(self, p: Path) -> None:
         """Enforces that file was read in this session and is not stale."""
@@ -297,6 +310,10 @@ class FileState:
             raise StaleFileError(
                 f"You have not read {p.name} in this session. "
                 f"You must Read a file before editing it."
+            )
+        if p in self._partial:
+            raise StaleFileError(
+                f"You only saw part of {p.name} (a PARTIAL view). Read the rest with offset and limit before editing it."
             )
         last_mtime, last_size, last_sha = self._seen[p]
         curr_stat = p.stat()
@@ -311,9 +328,11 @@ class FileState:
 
     def invalidate(self, p: Path) -> None:
         self._seen.pop(p.resolve(), None)
+        self._partial.discard(p.resolve())
 
     def clear(self) -> None:
         self._seen.clear()
+        self._partial.clear()
 
 
 @dataclass
@@ -493,6 +512,7 @@ class QueuedMessage:
     id: int
     text: str
     steer: bool = False   # typed mid-turn: delivered inside the running turn between tool rounds
+    plain: bool = False   # not typed by the person (a scheduled prompt): reaches the model as text, never as a command
 
 def _journal_queue(action: str, **data: Any) -> None:
     """Every queue change goes to the activity journal (nothing typed is ever silently lost)."""
@@ -513,10 +533,10 @@ class MessageQueue:
         import threading
         self._lock = threading.RLock()
 
-    def push(self, text: str, steer: bool = False) -> QueuedMessage:
+    def push(self, text: str, steer: bool = False, plain: bool = False) -> QueuedMessage:
         with self._lock:
             self._counter += 1
-            item = QueuedMessage(id=self._counter, text=text.strip(), steer=bool(steer))
+            item = QueuedMessage(id=self._counter, text=text.strip(), steer=bool(steer), plain=bool(plain))
             self.items.append(item)
         _journal_queue("push", id=item.id, text=item.text, steer=item.steer, pending=len(self.items))
         return item

@@ -6,7 +6,8 @@ What counts as executable in a folder (everything a ``git clone`` could have del
 
 * ``hooks`` in ``<ws>/.claude|.axon/settings[.local].json`` and ``<ws>/.axon/config.toml``;
 * hooks and MCP servers of every enabled plugin under ``<ws>/.axon/plugins``;
-* servers in ``<ws>/.axon/mcp.json`` (``<ws>/.mcp.json`` keeps its own per-server approval prompt).
+* servers in ``<ws>/.axon/mcp.json`` (``<ws>/.mcp.json`` keeps its own per-server approval prompt);
+* ``permissions.allow`` rules and ``permissions.additionalDirectories`` apply as they did before: they are not gated.
 
 The decision lives in ``$AXON_HOME/trusted-folders.json`` as ``{folder: {"hash": ...}}``. The hash covers
 the full list of commands, so a ``git pull`` that adds or edits one makes the folder untrusted again
@@ -15,7 +16,8 @@ until you look at the new list. User-scope config (``~/.axon``) is never gated.
 Modes (set once at startup by the CLI via :func:`configure`):
 
 * interactive REPL: untrusted means "do not load"; :func:`prompt_if_needed` asks once and lists everything;
-* ``-p`` / SDK (default): running in a folder non-interactively is an explicit choice, so it loads as before;
+* ``-p`` / SDK: allow rules and additional directories from an untrusted repository are not used, and a warning says so
+  (:func:`grants_allowed`). Hooks and servers load, since running in a folder non-interactively is an explicit choice;
   ``trust.requireForNonInteractive: true`` in ``~/.axon/settings.json`` (or ``AXON_TRUST_REQUIRE=1``)
   refuses until the folder is trusted.
 """
@@ -41,7 +43,7 @@ _session_granted: dict[str, str] = {}      # folder -> hash granted for this pro
 
 @dataclass(frozen=True)
 class Item:
-    kind: str       # hook | mcp | plugin-hook | plugin-mcp
+    kind: str       # hook | mcp | plugin-hook | plugin-mcp | allow-rule | add-dir | env
     source: str     # file (relative to the folder) or plugin name
     detail: str     # the full command / URL
 
@@ -121,6 +123,33 @@ def hook_items(section: Any, source: str, kind: str = "hook") -> list[Item]:
     return out
 
 
+def local_file_is_personal(path: Path) -> bool:
+    """True when a settings.local.json is the user's own: its folder is no symlink and git doesn't track it. fsmonitor
+    is switched off for this one call, so asking git cannot run a program the repository configured."""
+    import subprocess
+    try:
+        if path.parent.is_symlink():
+            return False
+        inside = subprocess.run(["git", "-c", "core.fsmonitor=false", "rev-parse", "--is-inside-work-tree"],
+                                cwd=str(path.parent), capture_output=True, timeout=5)
+        if inside.returncode != 0:
+            return False                       # a folder that arrived without git history may carry the file: ask first
+        done = subprocess.run(["git", "-c", "core.fsmonitor=false", "ls-files", "--error-unmatch", "--", path.name],
+                              cwd=str(path.parent), capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode != 0
+
+
+def _grant_items(data: dict[str, Any], source: str) -> list[Item]:
+    items: list[Item] = []
+    env = data.get("env")
+    if isinstance(env, dict):
+        from axon.config import project_env_needs_trust
+        items += [Item("env", source, str(k)) for k in env if project_env_needs_trust(str(k))]
+    return items
+
+
 def _mcp_items(servers: Any, source: str, kind: str = "mcp") -> list[Item]:
     out: list[Item] = []
     if not isinstance(servers, dict):
@@ -144,12 +173,15 @@ def collect(workspace: Path | str) -> list[Item]:
         data = _read_json(ws / rel)
         if isinstance(data, dict):
             items += hook_items(data.get("hooks"), rel)
+            if "local" not in rel or not local_file_is_personal(ws / rel):
+                items += _grant_items(data, rel)
     toml_path = ws / ".axon" / "config.toml"
     if toml_path.is_file():
         try:
             import tomllib
             tdata = tomllib.loads(toml_path.read_text(encoding="utf-8"))
             items += hook_items(tdata.get("hooks"), ".axon/config.toml")
+            items += _grant_items(tdata, ".axon/config.toml")
         except Exception:  # noqa: BLE001 - an unreadable file defines nothing
             pass
     for rel in _PROJECT_MCP:
@@ -228,6 +260,11 @@ def status(workspace: Path | str, items: list[Item] | None = None) -> str:
 def trust(workspace: Path | str, items: list[Item] | None = None, *, persist: bool = True) -> str:
     items = collect(workspace) if items is None else items
     key, fp = _key(workspace), fingerprint(items)
+    try:
+        from axon.config import apply_held_project_env
+        apply_held_project_env()                 # a project's `env` values that were waiting for this decision
+    except Exception:  # noqa: BLE001
+        pass
     if persist:
         folders = load_store()
         folders[key] = {"hash": fp, "trusted_at": int(time.time()), "items": len(items)}
@@ -262,6 +299,29 @@ def allowed(workspace: Path | str) -> bool:
     if not is_interactive() and not require_for_non_interactive():
         return True
     return status(workspace, items) == "trusted"
+
+
+_warned_untrusted: set[str] = set()
+
+
+def grants_allowed(workspace: Path | str) -> bool:
+    """May repository ``permissions.allow`` rules and additional directories apply? Only once this exact folder is
+    trusted; a -p or SDK run never shows the dialog, so it counts as not trusted unless someone trusted the folder."""
+    items = [i for i in collect(workspace) if i.kind in ("allow-rule", "add-dir")]
+    if not items:
+        return True
+    if status(workspace) == "trusted":
+        return True
+    key = _key(workspace)
+    if not is_interactive() and key not in _warned_untrusted:
+        _warned_untrusted.add(key)
+        try:
+            import sys
+            sys.stderr.write(f"  axon: warning: this workspace has not been trusted: {len(items)} permission allow rule(s) and "
+                             f"additional director(ies) in {key} are not used. Run /trust in an interactive session to allow them.\n")
+        except Exception:  # noqa: BLE001 - a warning must not stop the run
+            pass
+    return False
 
 
 def blocked_line(workspace: Path | str) -> str:
@@ -301,7 +361,7 @@ def prompt_if_needed(workspace: Path | str, *, ask: Callable[[str], str] | None 
     if answer in ("y", "yes"):
         trust(workspace, items)
         return "granted"
-    out("  Not trusted: project hooks, plugins and MCP servers stay off. Axon works as usual; /trust changes this.")
+    out("  Not trusted: project hooks, allow rules, plugins and MCP servers stay off. Axon works as usual; /trust changes this.")
     return "declined"
 
 

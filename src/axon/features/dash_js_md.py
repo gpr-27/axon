@@ -157,5 +157,5 @@ function followJump(C, show) {
   if (show) C.jump.style.bottom = Math.max(8, C.jump.parentNode.clientHeight - feed.offsetTop - feed.offsetHeight + 12) + 'px';
   C.jump.hidden = !show;
 }
-function turnWord(reason) { return ({ end_turn: 'Done', tool_use: 'Done', stop_sequence: 'Done', max_tokens: 'Stopped at the length limit', refusal: 'The model declined', interrupted: 'Stopped', budget_exceeded: 'Stopped at the budget', error: 'Failed', model_context_window_exceeded: 'Context full' }[reason]) || reason || 'Done'; }
+function turnWord(reason) { return ({ end_turn: 'Done', tool_use: 'Done', stop_sequence: 'Done', max_tokens: 'Stopped at the length limit', refusal: 'The model declined', interrupted: 'Stopped', declined: 'Stopped at your No', budget_exceeded: 'Stopped at the budget', error: 'Failed', model_context_window_exceeded: 'Context full' }[reason]) || reason || 'Done'; }
 """

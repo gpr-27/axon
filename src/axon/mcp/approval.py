@@ -62,4 +62,29 @@ def review(workspace: Path, specs: dict[str, ServerSpec], *, ask: Callable[[str]
                 _set(s, "approved")
             elif a in ("n", "no"):
                 _set(s, "rejected")
+    ask_helper_trust(workspace, [s for s in todo if s.approval == "approved"], ask=ask, out=out)
     return decided
+
+
+def ask_helper_trust(workspace: Path, specs: list[ServerSpec], *, ask: Callable[[str], str] | None = None,
+                     out: Callable[[str], None] | None = None) -> bool:
+    """A project or local server's ``headersHelper`` is a shell command and runs only in a folder you trust.
+    Ask once, showing the commands. Returns True when the folder is trusted afterwards."""
+    from axon.mcp.headers import helper_allowed
+    from axon.mcp.policy import set_folder_trusted
+    waiting = [s for s in specs if s.headers_helper and not helper_allowed(s, workspace)]
+    if not waiting:
+        return True
+    ask = ask or input
+    out = out or print
+    out("  These servers get their headers from a shell command, which runs only in a folder you trust:")
+    for s in waiting:
+        out(f"    {s.name}: {s.headers_helper[:200]}")
+    try:
+        answer = ask("  Trust this folder and let them run? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if answer in ("y", "yes"):
+        set_folder_trusted(workspace)
+        return True
+    return False

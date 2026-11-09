@@ -318,9 +318,9 @@ details.cmd-quick{margin-top:22px}details.cmd-quick>summary{cursor:pointer;color
 /* ---- clarity pass: contrast, tabs, phone width, quiet panels ---- */
 /* Secondary text must reach 4.5:1 on every surface in both themes: --muted becomes the same as --ink2. */
 :root{--muted:var(--ink2)}
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--muted:var(--ink2);--primary:#00725F}}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--muted:var(--ink2)}}
 :root[data-theme="dark"]{--muted:var(--ink2)}
-:root[data-theme="light"]{--muted:var(--ink2);--primary:#00725F}
+:root[data-theme="light"]{--muted:var(--ink2);--primary:#00705E}
 ::placeholder{color:var(--ink2);opacity:1}
 .td,.ad{opacity:.92}
 .tabstrip{position:relative;overflow:visible;scrollbar-width:auto}

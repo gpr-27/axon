@@ -94,7 +94,7 @@ def _renderer(monkeypatch, cols: int):
     monkeypatch.setattr(render, "term_width", lambda: cols)
     buf = io.StringIO()
     monkeypatch.setattr(render, "_write", buf.write)
-    r = render.Renderer()
+    r = render.Renderer(trace_level="normal")
     r._turn_open = True
     return r, buf
 

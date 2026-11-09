@@ -225,7 +225,7 @@ def test_vim_mode_override_kwarg_and_toggle_api(keys):
     keys(list("ab") + ["esc", "x", "enter"])
     assert read_input(vim_mode=True)[0] == "a"
     assert ui_input.set_vim_mode(True) is True
-    assert ui_input.vim_mode_enabled() and ui_input.vim_mode_label() == "insert"
+    assert ui_input.vim_mode_enabled() and ui_input.vim_mode_label() == "INSERT"
     assert ui_input.set_vim_mode(False) is False and ui_input.vim_mode_label() == ""
 
 

@@ -60,6 +60,9 @@ LATE_START_RETRIES = ((2.0, 2.0), (5.0, 4.0))   # a stdio server that missed its
 LATE_START_TIMEOUT_CAP = 120.0
 AUTO_CONNECT_BACKOFF = (2.0, 5.0, 15.0, 30.0, 60.0)   # automation.connect_retries: pauses before each retry
 FAILURE_STATES = ("failed", "disconnected")             # states that count towards auto-disable
+BACKGROUND_RETRY_S = 60.0                       # -p: a remote server that stayed down keeps being retried ...
+BACKGROUND_RETRY_FOR_S = 1800.0                 # ... for about half an hour
+MIN_REQUEST_TIMEOUT_S = 60.0                    # HTTP/SSE: each request's wait for the first response byte
 DESC_LIMIT_UPFRONT = 4096                       # tool description loaded upfront / server instructions
 DESC_LIMIT_DEFERRED = 16384                     # tool description loaded through ToolSearch
 _NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
@@ -122,6 +125,22 @@ def tool_call_limits(spec: ServerSpec) -> tuple[float, float | None]:
     if idle is not None and (spec.timeout_explicit or spec.timeout != 60.0):
         idle = max(idle, spec.timeout)
     return wall, idle
+
+
+def request_timeout(spec: ServerSpec) -> float:
+    """HTTP/SSE per-request timer: the greatest of 60 seconds, the tool timeout that applies to the server and
+    MCP_TIMEOUT. The 28-hour default of an unset MCP_TOOL_TIMEOUT does not enter the comparison."""
+    tool_ms = mcp_output.env_int("MCP_TOOL_TIMEOUT", "AXON_MCP_TOOL_TIMEOUT", default=0)
+    start_ms = mcp_output.env_int("MCP_TIMEOUT", "AXON_MCP_TIMEOUT", default=0)
+    own = spec.timeout if (spec.timeout_explicit or spec.timeout != 60.0) else tool_ms / 1000.0
+    return max(MIN_REQUEST_TIMEOUT_S, own, start_ms / 1000.0)
+
+
+def connect_batch_size(remote: bool) -> int:
+    """How many servers of a kind connect in parallel at startup."""
+    n = mcp_output.env_int("MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE" if remote else "MCP_SERVER_CONNECTION_BATCH_SIZE",
+                           default=20 if remote else 3)
+    return max(1, n)
 
 
 def description_limits() -> tuple[int, int]:
@@ -225,6 +244,7 @@ class MCPServerConnection:
         return dyn if dyn.active else None
 
     def _make_transport(self, spec: ServerSpec, kind: str, dyn: DynamicHeaders | None = None) -> Transport:
+        per_request = request_timeout(spec)
         if kind == "stdio":
             cwd = spec.cwd or str(self.workspace)
             if spec.cwd and not os.path.isabs(spec.cwd):
@@ -237,9 +257,9 @@ class MCPServerConnection:
             return WebSocketTransport(spec.url, spec.headers, spec.timeout, name=self.name,
                                       header_provider=provider)
         if kind == "sse":
-            return LegacySSETransport(spec.url, spec.headers, spec.timeout, client=self.http_client,
+            return LegacySSETransport(spec.url, spec.headers, per_request, client=self.http_client,
                                       name=self.name, header_provider=provider, on_unauthorized=unauth)
-        return StreamableHTTPTransport(spec.url, spec.headers, spec.timeout, client=self.http_client,
+        return StreamableHTTPTransport(spec.url, spec.headers, per_request, client=self.http_client,
                                        name=self.name, header_provider=provider, on_unauthorized=unauth)
 
     def _open(self, spec: ServerSpec, kind: str, timeout: float, gen: int,
@@ -286,6 +306,13 @@ class MCPServerConnection:
         cause = exc if isinstance(exc, TransportError) else exc.__cause__
         status = getattr(cause, "status", None)
         return isinstance(cause, TransportError) and (status is None or status >= 500)
+
+    @staticmethod
+    def _helper_auth_failure(exc: Exception, spec: ServerSpec, dyn: DynamicHeaders | None) -> bool:
+        """An auth error when a headersHelper is the only source of ``Authorization``: worth another attempt."""
+        cause = exc if isinstance(exc, TransportError) else exc.__cause__
+        return (isinstance(cause, TransportError) and cause.status in (401, 403) and dyn is not None
+                and dyn.helper_supplies_authorization and not spec.has_authorization_header)
 
     def _auth_error(self, cause: TransportError, spec: ServerSpec, dyn: DynamicHeaders | None) -> str | None:
         """The needs-authentication message for a 401/403 (None when a configured credential was rejected)."""
@@ -352,6 +379,9 @@ class MCPServerConnection:
                 return False
             self.status, self.error = "connecting", None
         spec = self.spec.resolved(self.workspace)
+        if spec.remote and not urlsplit(spec.url).scheme:
+            self.status, self.error = "failed", "'url' is not a valid URL"
+            return False
         init_timeout = mcp_timeout_s(spec.timeout) if timeout is None else timeout
         logger.debug("mcp %s: starting (%s %s, timeout %.1fs)", self.name, spec.type,
                      getattr(spec, "url", "") or getattr(spec, "command", ""), init_timeout)
@@ -400,9 +430,15 @@ class MCPServerConnection:
                     break
                 except Exception as e:
                     failure = e
-                    if not (isinstance(e, (MCPError, TransportError)) and self._transient(e)) \
+                    helper_retry = self._helper_auth_failure(e, spec, dyn)
+                    if not (isinstance(e, (MCPError, TransportError)) and self._transient(e) or helper_retry) \
                             or attempt == len(delays) - 1:
                         break
+                    if helper_retry and dyn is not None:
+                        try:  # the helper may hand out a fresh credential on the next run
+                            dyn.prime()
+                        except HeadersHelperError:
+                            break
                     logger.debug("mcp %s: transient failure (%s); retrying", self.name, e)
             if failure is not None:
                 raise failure
@@ -504,12 +540,38 @@ class MCPServerConnection:
         with self._lock:
             if self._epoch != epoch:
                 return
-            if self.status != "needs-auth":
+            transient = self.status != "needs-auth"
+            if transient:
                 self.status = "failed"
                 self.error = f"MCP server \"{self.name}\" disconnected ({reason}); reconnect from /mcp"
         if self.on_tools_changed:
             self.on_tools_changed(self)
         self._report_outcome()
+        from axon.mcp import state as mcp_state
+        if transient and mcp_state.is_interactive():
+            notices.post(f'MCP server "{self.name}" disconnected · open /mcp to reconnect')
+        elif transient and self.spec.type in ("http", "sse"):
+            self._background_retries(epoch)
+
+    def _background_retries(self, epoch: int) -> None:
+        """``-p`` has no /mcp panel: after a transient failure keep retrying for about half an hour; the
+        server's tools come back when one attempt connects."""
+        end = time.monotonic() + BACKGROUND_RETRY_FOR_S
+        while time.monotonic() < end:
+            pause = time.monotonic() + BACKGROUND_RETRY_S
+            while time.monotonic() < pause:
+                if self._epoch != epoch:
+                    return
+                time.sleep(0.5)
+            if self._epoch != epoch:
+                return
+            if self._start():
+                if self.on_tools_changed:
+                    self.on_tools_changed(self)
+                self._report_outcome()
+                return
+            if self.status == "needs-auth":
+                return
 
     def _report_outcome(self) -> None:
         if self.on_outcome is not None:
@@ -539,13 +601,14 @@ class MCPServerConnection:
             raise ToolError(f"MCP server '{self.name}' is not connected ({self.status}{detail}).")
         return self.client
 
-    def call_tool(self, tool_name: str, arguments: dict[str, Any], tool_spec: dict[str, Any] | None = None) -> str:
+    def call_tool(self, tool_name: str, arguments: dict[str, Any], tool_spec: dict[str, Any] | None = None,
+                  images: list[Any] | None = None) -> str:
         client = self._require_client()
         logger.debug("mcp %s: call %s %s", self.name, tool_name, str(arguments)[:500])
         wall, idle = tool_call_limits(self.spec)
         annotations = (tool_spec or {}).get("annotations") or {}
         safe_to_repeat = bool(annotations.get("readOnlyHint") or annotations.get("idempotentHint")) \
-            and self.spec.type in ("http", "sse", "ws")
+            and self.spec.type == "http"
         t0 = time.time()
         client.idle_timeout = idle
         try:
@@ -561,9 +624,11 @@ class MCPServerConnection:
                     result = client.call_tool(tool_name, arguments, timeout=wall)
         except MCPError as e:
             logger.debug("mcp %s: call %s failed after %.2fs: %s", self.name, tool_name, time.time() - t0, e)
-            raise ToolError(f"MCP tool '{tool_name}' on '{self.name}' failed: {e}") from e
+            message = self._call_failure(e, client)
+            raise ToolError(f"MCP tool '{tool_name}' on '{self.name}' failed: {message}") from e
         label = f"mcp-{self.name}-{tool_name}"
-        text, is_error, has_image = mcp_output.render_for_model(result, workspace=self.workspace, label=label)
+        text, is_error, has_image = mcp_output.render_for_model(result, workspace=self.workspace, label=label,
+                                                                images=images)
         text = mcp_output.limit_text(text, is_error=is_error, has_image=has_image,
                                      own_limit=mcp_output.tool_result_limit(tool_spec), workspace=self.workspace,
                                      label=f"{self.name}/{tool_name}", log=getattr(client, "_log", None))
@@ -572,6 +637,30 @@ class MCPServerConnection:
         if is_error:
             raise ToolError(f"MCP tool '{tool_name}' returned an error:\n{text}")
         return text
+
+    def _call_failure(self, exc: MCPError, client: MCPClient) -> str:
+        """The message for a failed call. A 401/403 that survived the retry marks the server as needing
+        authentication (in /mcp), unless the rejected credential is one you configured yourself."""
+        cause = exc.__cause__
+        if isinstance(cause, TransportError) and cause.status in (401, 403):
+            spec = self.spec
+            helper_auth = False
+            auth = self._auth_error(cause, spec, None)
+            transport_headers = getattr(client.transport, "header_provider", None)
+            if isinstance(transport_headers, DynamicHeaders):
+                helper_auth = transport_headers.helper_supplies_authorization
+            scope_message = self.auth_challenge.get("error") == "insufficient_scope"
+            if auth and (scope_message or not helper_auth):
+                self.status, self.error = "needs-auth", auth
+                if self.on_tools_changed:
+                    self.on_tools_changed(self)
+                return auth
+            if helper_auth:
+                self.status, self.error = "needs-auth", "the credential from headersHelper was rejected"
+                return self.error
+        if client.closed and not isinstance(exc, MCPTimeout):
+            return "connection closed before the tool call was answered"
+        return str(exc)
 
     def resources(self) -> list[dict[str, Any]]:
         return [r for r in self._require_client().list_resources(refresh=True) if not is_ui_resource(r)]
@@ -645,6 +734,76 @@ def normalize_schema(schema: Any) -> tuple[dict[str, Any], str]:
     return out, note
 
 
+_DRAFT_2020 = "https://json-schema.org/draft/2020-12/schema"
+_JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
+_SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
+_SUBSCHEMAS = ("items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames",
+               "unevaluatedItems", "unevaluatedProperties", "additionalItems")
+_SCHEMA_LISTS = ("allOf", "anyOf", "oneOf", "prefixItems")
+_NON_NEGATIVE = ("minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties", "minContains",
+                 "maxContains")
+_NUMBERS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf")
+
+
+def _schema_error(schema: Any, depth: int = 0) -> str | None:  # noqa: PLR0911
+    """The keyword rules of the JSON Schema draft 2020-12 meta-schema that a tool's schema can break."""
+    if isinstance(schema, bool):
+        return None
+    if not isinstance(schema, dict):
+        return "a schema must be an object or a boolean"
+    if depth > 32:
+        return None
+    kind = schema.get("type")
+    kinds = kind if isinstance(kind, list) else [kind] if kind is not None else []
+    if not all(isinstance(k, str) and k in _JSON_TYPES for k in kinds):
+        return f"'type' has an unknown value: {str(kind)[:40]}"
+    if isinstance(kind, list) and (not kind or len(set(map(str, kind))) != len(kind)):
+        return "'type' must list unique types"
+    if "required" in schema and not (isinstance(schema["required"], list)
+                                     and all(isinstance(r, str) for r in schema["required"])
+                                     and len(set(schema["required"])) == len(schema["required"])):
+        return "'required' must be a list of unique strings"
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        return "'enum' must be a list"
+    for key in _NON_NEGATIVE:
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], int) or schema[key] < 0):
+            return f"'{key}' must be a non-negative integer"
+    for key in _NUMBERS:
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], (int, float))):
+            return f"'{key}' must be a number"
+    for key in _SUBSCHEMA_MAPS:
+        if key in schema:
+            if not isinstance(schema[key], dict):
+                return f"'{key}' must be an object"
+            for sub in schema[key].values():
+                problem = _schema_error(sub, depth + 1)
+                if problem:
+                    return problem
+    for key in _SUBSCHEMAS:
+        if key in schema:
+            problem = _schema_error(schema[key], depth + 1)
+            if problem:
+                return problem
+    for key in _SCHEMA_LISTS:
+        if key in schema:
+            if not isinstance(schema[key], list) or not schema[key]:
+                return f"'{key}' must be a non-empty list"
+            for sub in schema[key]:
+                problem = _schema_error(sub, depth + 1)
+                if problem:
+                    return problem
+    return None
+
+
+def _meta_schema_problem(schema: dict[str, Any]) -> str | None:
+    """Schemas that declare no dialect or draft 2020-12 are checked; another dialect skips this check."""
+    declared = str(schema.get("$schema") or "").rstrip("#")
+    if declared and declared != _DRAFT_2020:
+        return None
+    problem = _schema_error(schema)
+    return f"inputSchema is not valid JSON Schema: {problem}" if problem else None
+
+
 def tool_problem(spec: dict[str, Any]) -> str | None:
     """Why a server tool must be left out (the API would reject its whole request), else None."""
     schema = spec.get("inputSchema")
@@ -652,6 +811,10 @@ def tool_problem(spec: dict[str, Any]) -> str | None:
         return None
     if not isinstance(schema, dict):
         return "inputSchema is not an object"
+    meta_problem = _meta_schema_problem(schema)
+    if meta_problem:   # only noted: the tool stays unless the API would reject it (checked below)
+        import logging
+        logging.getLogger("axon.mcp").debug("MCP tool %r: %s", spec.get("name"), meta_problem)
     props = schema.get("properties")
     if props is not None and not isinstance(props, dict):
         return "inputSchema.properties is not an object"
@@ -706,14 +869,22 @@ class MCPToolWrapper(Tool):
         return self._server_name
 
     def loads_upfront(self) -> bool:
-        """alwaysLoad: the server's setting beats the tool's own hint; None = follow tool search."""
-        server = self._connection.spec.always_load
+        """alwaysLoad: the server's setting beats the tool's own hint. A tool that says ``false`` stays deferred
+        under a server's ``true`` when the server came from --mcp-config, the SDK or a plugin."""
+        spec = self._connection.spec
+        server = spec.always_load
+        if server is True and self.always_load is False and spec.scope in ("cli", "plugin", "sdk"):
+            return False
         if server is not None:
             return server
         return bool(self.always_load)
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
-        return self._connection.call_tool(self._mcp_tool_name, args, self._tool_spec)
+        from axon.mcp.background import run_call
+        images = getattr(ctx, "images", None)
+        return run_call(self._connection, self._mcp_tool_name,
+                        lambda: self._connection.call_tool(self._mcp_tool_name, args, self._tool_spec, images=images),
+                        ctx)
 
     def render_call(self, args: dict[str, Any]) -> str:
         short = " ".join(f'{k}:"{v}"' if isinstance(v, str) else f"{k}:{v}"
@@ -804,6 +975,7 @@ class MCPToolBridge:
         self.excluded: dict[str, list[tuple[str, str]]] = {}    # server -> [(tool, reason)] left out
         self.context_window: int = 0                     # set by the CLI; used to decide MCP tool deferral
         self.automation: Any = None                      # axon.marketplace.automation.Automation, once loaded
+        self.no_tool_search = False                      # ToolSearch denied or left out of --tools: load upfront
 
     # ── views ──────────────────────────────────────────────────────────
     @property
@@ -865,7 +1037,9 @@ class MCPToolBridge:
                 problem = tool_problem(spec)
                 if problem:  # one malformed schema would make every API request fail
                     skipped.append((str(spec.get("name", "?")), problem))
-                    logger.warning("mcp %s: tool %s left out: %s", conn.name, spec.get("name"), problem)
+                    logger.debug("mcp %s: tool %s left out: %s", conn.name, spec.get("name"), problem)
+                    if conn.client is not None:  # recorded in the server's log; Claude hears it in the prompt
+                        conn.client._log(f"tool {spec.get('name')} left out: {problem}")
                     continue
                 base = mcp_tool_name(conn.name, str(spec.get("name", "")))
                 name, i = base, 2
@@ -885,6 +1059,8 @@ class MCPToolBridge:
 
     def _defer_tools(self) -> None:
         """Apply MCP tool deferral to tools that arrive after startup (late connect, login, reconnect)."""
+        if self.no_tool_search:
+            return
         try:
             from axon.tools.interactive import defer_mcp_tools
             defer_mcp_tools(self._registry, self.context_window or 200_000)
@@ -905,10 +1081,8 @@ class MCPToolBridge:
         if self.elicitation_handler is not None:
             return self.elicitation_handler
         from axon.mcp import state as mcp_state
-        if mcp_state.can_prompt():
-            from axon.mcp.elicit import terminal_elicitation, with_hooks
-            return with_hooks(terminal_elicitation)
-        return None
+        from axon.mcp.elicit import no_terminal_elicitation, terminal_elicitation, with_hooks
+        return with_hooks(terminal_elicitation if mcp_state.can_prompt() else no_terminal_elicitation)
 
     def _make_connection(self, spec: ServerSpec) -> MCPServerConnection:
         http_client = self.http_client_factory(spec) if self.http_client_factory and spec.type != "stdio" else None
@@ -992,13 +1166,16 @@ class MCPToolBridge:
             self._record_outcome(conn, count_failure=False)
         return conn
 
-    def connect_all(self, servers: dict[str, Any], timeout: float | None = None) -> list[Tool]:
+    def connect_all(self, servers: dict[str, Any], timeout: float | None = None,
+                    wait_for: "set[str] | None" = None) -> list[Tool]:
         """Connect every enabled server in parallel. Waits at most ``timeout`` seconds in
         total; servers still connecting afterwards finish in the background and register
         their tools into the attached registry when ready. Already-connected servers with
-        an unchanged spec are kept (no duplicate processes)."""
+        an unchanged spec are kept (no duplicate processes). ``wait_for`` limits the wait to those names."""
         deadline = time.monotonic() + (_startup_timeout() if timeout is None else timeout)
         threads: list[threading.Thread] = []
+        local_slots = threading.BoundedSemaphore(connect_batch_size(remote=False))
+        remote_slots = threading.BoundedSemaphore(connect_batch_size(remote=True))
         for name, raw in servers.items():
             spec = raw if isinstance(raw, ServerSpec) else ServerSpec.from_dict(name, raw)
             existing = self._connections.get(name)
@@ -1014,20 +1191,35 @@ class MCPToolBridge:
             conn.status = "connecting"
 
             def _run(c: MCPServerConnection = conn) -> None:
-                self._start_with_retries(c)
+                with (remote_slots if c.spec.remote else local_slots):
+                    self._start_with_retries(c)
                 if self._connections.get(c.name) is c:
                     self._publish(c)
                     self._record_outcome(c)
+                    self._note_needs_auth(c)
                 else:
                     c.stop()
 
             t = threading.Thread(target=_run, name=f"mcp-connect-{name}", daemon=True)
             self._threads[name] = t
             t.start()
-            threads.append(t)
+            if wait_for is None or name in wait_for:
+                threads.append(t)
         for t in threads:
             t.join(max(0.0, deadline - time.monotonic()))
         return self.active_tools
+
+    def _note_needs_auth(self, conn: MCPServerConnection) -> None:
+        """A notice for a server that needs sign-in: once, until it has connected and needs sign-in again."""
+        from axon.mcp import state as mcp_state
+        try:
+            if conn.status == "connected":
+                mcp_state.set_auth_announced(self.workspace, conn.name, False)
+            elif conn.status == "needs-auth" and not mcp_state.auth_announced(self.workspace, conn.name):
+                mcp_state.set_auth_announced(self.workspace, conn.name, True)
+                notices.post(f'MCP server "{conn.name}" needs authentication · run /mcp to sign in')
+        except OSError:
+            pass
 
     def connect_single(self, name: str, spec: dict[str, Any]) -> list[MCPToolWrapper]:
         conn = self.connect_server(ServerSpec.from_dict(name, spec))
@@ -1093,9 +1285,24 @@ class MCPToolBridge:
             text = (c.instructions or "").strip()
             if c.connected and text:
                 parts.append(f"### {name}\n{text[:upfront]}")
-        if not parts:
-            return ""
-        return "## MCP server instructions\n\nThese come from connected MCP servers.\n\n" + "\n\n".join(parts)
+        out = ""
+        if parts:
+            out = "## MCP server instructions\n\nThese come from connected MCP servers.\n\n" + "\n\n".join(parts)
+        notes = self._status_notes()
+        return (out + "\n\n" + notes).strip() if notes else out
+
+    def _status_notes(self) -> str:
+        """What the model needs to know about missing tools: tools left out and, with tool search, failures."""
+        lines = [f"- {server}/{tool} was left out: {why}"
+                 for server, left in sorted(self.excluded.items()) for tool, why in left]
+        from axon.tools.interactive import tool_search_enabled
+        if tool_search_enabled() and not self.no_tool_search:
+            for name, status, err in self.failed_servers():
+                if status == "needs-auth":
+                    lines.append(f"- MCP server {name}: its tools are unavailable until you authorize it (/mcp)")
+                elif status in ("failed", "disconnected"):
+                    lines.append(f"- MCP server {name} failed to connect: {err[:200]}")
+        return "## MCP tool status\n\n" + "\n".join(lines) if lines else ""
 
     # ── reporting ───────────────────────────────────────────────────────
     def status_rows(self) -> list[dict[str, Any]]:
@@ -1266,8 +1473,9 @@ def get_prompt(server: str, name: str, args: dict[str, str] | None = None) -> st
 
 
 def prompt_command_name(server: str, prompt: str) -> str:
-    """Slash-command name for an MCP prompt: ``mcp__<server>__<prompt>``."""
-    return mcp_tool_name(server, prompt)
+    """Slash-command name for an MCP prompt: ``mcp__<server>__<prompt>``. Characters of the server name outside
+    A-Z, a-z, 0-9, _ and - become _; the prompt name stays as the server declares it."""
+    return f"mcp__{_NAME_RE.sub('_', server)}__{prompt}"
 
 
 __all__ = [

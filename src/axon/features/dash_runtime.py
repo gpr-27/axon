@@ -309,6 +309,13 @@ class Runtime:
         self.agent.on_event = self._tee
         self.attached = True
         self.hook_turns()
+        if self.external:
+            from axon.ui.repl_inbox import INBOX
+            INBOX.on_session_change = self._live_session_changed
+
+    def _live_session_changed(self, session: str) -> None:
+        """The terminal moved to another chat or folder: open pages follow it."""
+        self.hub.emit("session_changed", {"session": session, "workspace": str(getattr(self.agent.settings, "workspace", ""))})
 
     def hook_turns(self) -> None:
         """Wrap ``agent.run_turn`` so every turn, whoever starts it (the terminal's prompt, this page, a queued
@@ -551,8 +558,34 @@ class Runtime:
                 self.hub.emit("queued", {"id": getattr(item, "id", 0), "text": (display or line)[:2000], "steer": steer})
                 return {"queued": True, "id": getattr(item, "id", 0), "steer": steer}
             self.turn_active = True
+        if self.external:
+            from axon.ui.repl_inbox import INBOX
+            if INBOX.active:         # the terminal's main loop runs it: that thread owns the screen
+                INBOX.post(lambda ctx: self._turn_on_terminal(ctx, line, display), cancel=self._turn_cancelled)
+                return {"queued": False}
         threading.Thread(target=self._turn_loop, args=(line, display), name="axon-dash-turn", daemon=True).start()
         return {"queued": False}
+
+    def _turn_cancelled(self) -> None:
+        self.turn_active = False
+
+    def _turn_on_terminal(self, ctx: Any, line: str, display: str | None) -> None:
+        """A turn sent from the page, shown in the terminal like a typed one. The page still answers its approvals."""
+        agent = self.agent
+        prev_approval = agent.on_approval
+
+        def approve(*args: Any, **kwargs: Any) -> Any:
+            print("\n  Waiting for your answer in the web page (Esc here stops the turn).\n", flush=True)
+            return self.approver(*args, **kwargs)
+
+        agent.on_approval = approve
+        self._next_display = display
+        print("\n  From the web page:", flush=True)
+        try:
+            ctx.run_turn(line)
+        finally:
+            agent.on_approval = prev_approval
+            self.turn_active = False
 
     def _turn_loop(self, line: str, display: str | None) -> None:
         agent = self.agent

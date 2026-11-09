@@ -170,6 +170,7 @@ class Selector:
         self.fullscreen = fullscreen and plat.supports_alt_screen()
         self.footer = footer
         self.on_key = on_key
+        self.key_context = "Select"     # the keybindings context this list answers to
         self.extra_lines = extra_lines
         self.query = ""
         self.message = ""
@@ -367,6 +368,10 @@ class Selector:
                 while not self._done:
                     key = plat.read_key()
                     if key is None:
+                        continue
+                    from axon.ui.keybindings import translate
+                    key = translate(self.key_context, key)
+                    if not key:
                         continue
                     self.message = ""
                     if self.on_key is not None and self.on_key(self, key):

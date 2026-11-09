@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from axon.errors import ConfigError
 
-Mode = Literal["default", "acceptEdits", "plan", "bypass"]
+Mode = Literal["default", "acceptEdits", "plan", "dontAsk", "bypass"]
 TraceLevel = Literal["compact", "normal", "detailed", "debug"]
 Effort = Literal["reflex", "balanced", "synapse", "quantum", "low", "medium", "high", "xhigh", "max", "hyper"]
 
@@ -35,6 +35,94 @@ PROVIDER_KEY_ENV_VARS: tuple[str, ...] = (
 )
 INVALID_KEY_PLACEHOLDERS = {"", "your_api_key_here", "your-api-key-here", "sk-placeholder", "replace_me"}
 _LOCAL_HOST_MARKERS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+
+# Variables a checked-out repository must not control, in an `env` block or a project .env file: where Axon keeps its
+# own files, the programs and configuration of the operating system, and anything that hands out permission.
+_PROJECT_FORBIDDEN_ENV = frozenset({
+    "HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP", "AXON_HOME", "AXON_TMPDIR", "CLAUDE_CONFIG_DIR", "SYSTEMROOT", "COMSPEC", "PROGRAMDATA",
+    "LOCALAPPDATA", "APPDATA", "PATHEXT", "PSMODULEPATH", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+    "AXON_MODE", "AXON_DANGEROUSLY_SKIP_PERMISSIONS", "AXON_PERMISSIONS", "AXON_HOOKS", "AXON_ADDITIONAL_DIRS", "AXON_WORKSPACE",
+    "AXON_TRUST_REQUIRE", "AXON_VIM_INSERT_MODE_REMAPS", "AXON_API_KEY", "AXON_BASE_URL",
+    "OTEL_LOG_RAW_API_BODIES", "ENABLE_BETA_TRACING_DETAILED", "BETA_TRACING_ENDPOINT", "AXON_ENABLE_TELEMETRY",
+    "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_TRACES_EXPORTER", "OTEL_LOG_USER_PROMPTS", "OTEL_LOG_ASSISTANT_RESPONSES",
+    "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_TOOL_DETAILS",
+    "AXON_SHELL_PREFIX", "AXON_SHELL", "AXON_MANAGED_DIR", "AXON_MCP_ALLOWLIST_ENV", "AXON_SUBPROCESS_ENV_SCRUB",
+    "AXON_SERVE_TOKEN", "AXON_TOKEN", "AXON_DISABLE_ALL_HOOKS",
+})
+# Model selection, timeouts, limits and feature toggles apply at startup from every file. Everything else that a project
+# sets (PATH, LD_PRELOAD, NODE_OPTIONS, ...) waits for trust; a -p run has no dialog, so it applies at once.
+_PROJECT_SAFE_ENV_PREFIXES = ("AXON_", "MAX_", "BASH_DEFAULT_", "BASH_MAX_", "DISABLE_", "ENABLE_", "MCP_TIMEOUT", "MCP_TOOL_TIMEOUT", "NO_COLOR", "FORCE_COLOR")
+_held_project_env: dict[str, str] = {}
+
+
+def project_env_forbidden(name: str) -> bool:
+    up = name.upper()
+    return up in _PROJECT_FORBIDDEN_ENV or up.startswith("XDG_") or up in {k.upper() for k in PROVIDER_KEY_ENV_VARS} or up in {k.upper() for k in preset_key_env_vars()}
+
+
+def project_env_needs_trust(name: str) -> bool:
+    return not project_env_forbidden(name) and not name.upper().startswith(_PROJECT_SAFE_ENV_PREFIXES)
+
+
+def apply_held_project_env() -> list[str]:
+    """Set the project `env` values that were waiting for trust. Returns their names."""
+    names = list(_held_project_env)
+    for k, v in _held_project_env.items():
+        os.environ[k] = v
+    _held_project_env.clear()
+    return names
+
+
+def _apply_settings_env(env: Any, level: str, warnings: list[str]) -> None:
+    """A value in a settings `env` block overwrites the same exported variable; among files the highest wins."""
+    if not isinstance(env, dict):
+        return
+    for name, value in env.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if level == "project":
+            if project_env_forbidden(name):
+                warnings.append(f"Ignoring '{name}' from a project settings `env` block: a repository cannot set it.")
+                continue
+            if project_env_needs_trust(name):
+                _held_project_env[name] = str(value)
+                continue
+        elif name.upper() in ("AXON_API_KEY", "AXON_BASE_URL"):
+            continue
+        os.environ[name] = str(value)
+
+
+def repo_root_for_local_settings(ws: Path) -> Path:
+    """Where .axon/settings.local.json lives: the git root (through a worktree, the main checkout's root), or the
+    workspace outside a repository, when the root is the home folder, on Windows, or when the root isn't yours."""
+    if sys.platform == "win32":
+        return ws
+    try:
+        cur = ws.resolve()
+        for folder in [cur, *cur.parents]:
+            marker = folder / ".git"
+            if not (marker.exists() or marker.is_symlink()):
+                continue
+            root = folder
+            if marker.is_file():                # a worktree: .git says "gitdir: <main>/.git/worktrees/<name>"
+                text = marker.read_text(encoding="utf-8", errors="replace").strip()
+                gitdir = Path(text.split(":", 1)[1].strip()) if text.startswith("gitdir:") else None
+                if gitdir is not None and "worktrees" in gitdir.parts:
+                    if not gitdir.is_absolute():
+                        gitdir = (folder / gitdir).resolve()
+                    root = gitdir.parent.parent.parent
+            if root == Path.home().resolve():
+                return ws
+            uid = os.getuid()
+            if root.stat().st_uid != uid or marker.lstat().st_uid != uid:
+                return ws
+            axon_dir = root / ".axon"
+            if axon_dir.exists() and axon_dir.lstat().st_uid != uid:
+                return ws
+            return root
+    except (OSError, ValueError, IndexError):
+        pass
+    return ws
 
 
 class PermissionConfig(BaseModel):
@@ -95,6 +183,7 @@ class Settings(BaseSettings):
     lsp_diagnostics_after_edit: bool = True   # append new language-server errors to Edit, Write and MultiEdit results
     tool_output_cap: int = 150_000
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
+    settings_file: str | None = None     # --settings <file>: its /path rules anchor at that file's folder
     hooks: dict[str, list[HookSpec]] = Field(default_factory=dict)
     append_system_prompt: str | None = None
     # When true the session starts in bypass mode regardless of the configured mode.
@@ -122,6 +211,12 @@ class Settings(BaseSettings):
     reply_language: str = ""             # "" (off) or a language code (te, hi, en): one line in the system prompt asks for replies in it
     status_line: dict[str, Any] | None = None
     vim_mode: bool = False
+    # vimInsertModeRemaps: {"jk": "<Esc>"}. User settings and --settings only: a repository cannot remap your keys.
+    vim_insert_mode_remaps: dict[str, Any] | None = None
+    emoji_completion_enabled: bool = True   # emojiCompletionEnabled: :heart: in the prompt becomes the emoji
+    # spellcheck: {"enabled": true, "checker": "aspell", "language": "en_GB", "color": "yellow"}. Not read from a project.
+    spellcheck: dict[str, Any] | None = None
+    editor_show_last_response: bool = False  # Ctrl+G: the last reply as #-commented context above the prompt
     theme: str = "auto"
     cleanup_period_days: int = 0         # 0 = keep everything forever; N > 0 prunes sessions/traces/todos older than N days
     verify_commands: list[Any] = Field(default_factory=list)
@@ -258,6 +353,10 @@ class Settings(BaseSettings):
                 for ev, items in proj_hooks.items():
                     hooks[ev] = list(hooks.get(ev, [])) + list(items or [])
                 merged["hooks"] = hooks
+            for blocked in ("vim_insert_mode_remaps", "spellcheck"):
+                if proj_data.pop(blocked, None) is not None:
+                    warnings.append(f"Ignoring '{blocked}' from project config {proj_cfg} (set it in user config).")
+            _restrict_project_values(proj_data, str(proj_cfg), warnings)
             merged.update({k: v for k, v in proj_data.items() if k not in ("permissions", "hooks")})
 
         # 2b. JSON settings files (Claude-Code style), lowest -> highest:
@@ -280,6 +379,10 @@ class Settings(BaseSettings):
                 json_layers.append(("project-claude", ws / ".claude" / name))
             if not axon_is_home:
                 json_layers.append(("project", ws / ".axon" / name))
+        local_root = repo_root_for_local_settings(ws)
+        if local_root != ws and not axon_is_home:
+            json_layers.append(("project", local_root / ".axon" / "settings.local.json"))  # the root's value wins
+        _held_project_env.clear()
         if extra_settings:
             json_layers.append(("cli", extra_settings))
         user_level_base_url = user_data.get("base_url", cls.model_fields["base_url"].default)
@@ -287,7 +390,8 @@ class Settings(BaseSettings):
             data = _load_json_settings(src, warnings)
             if not data:
                 continue
-            mapped = map_json_settings(data)
+            mapped = map_json_settings(data, apply_env=False)
+            _apply_settings_env(data.get("env"), "project" if level.startswith("project") else "user", warnings)
             if level == "user" and "base_url" in mapped:
                 user_level_base_url = mapped["base_url"]      # ~/.axon/settings.json beats config.toml
             if level == "project-claude":
@@ -300,10 +404,11 @@ class Settings(BaseSettings):
                         mapped.pop(key)
                 level = "project"
             if level == "project":
-                for blocked in ("api_key", "base_url"):
+                for blocked in ("api_key", "base_url", "vim_insert_mode_remaps", "spellcheck"):
                     if blocked in mapped:
                         warnings.append(f"Ignoring '{blocked}' from project settings file {src} (set it in user config).")
                         mapped.pop(blocked)
+                _restrict_project_values(mapped, str(src), warnings)
                 proj_data.update({k: v for k, v in mapped.items() if k not in ("permissions",)})
             _merge_layer(merged, mapped)
 
@@ -314,6 +419,8 @@ class Settings(BaseSettings):
         for dotenv, is_project in ((ws / ".env", True), (user_env, False)):
             if dotenv.is_file():
                 for k, v in _parse_dotenv(dotenv).items():
+                    if is_project and project_env_forbidden(k) and k not in ("AXON_API_KEY", "AXON_BASE_URL") and k not in key_vars:
+                        continue                 # a repository cannot hand itself permission or move Axon's files
                     if (k.startswith("AXON_") or k in key_vars) and k not in os.environ:
                         os.environ[k] = v
                         if is_project:
@@ -358,6 +465,8 @@ class Settings(BaseSettings):
             clean_overrides["workspace"] = ws
         merged.update(clean_overrides)
 
+        if isinstance(extra_settings, str) and not extra_settings.lstrip().startswith("{"):
+            merged["settings_file"] = str(Path(os.path.expanduser(extra_settings)).resolve())
         if isinstance(merged.get("budget"), dict):
             merged.update(map_json_settings({"budget": merged.pop("budget")}))
         try:
@@ -372,6 +481,21 @@ class Settings(BaseSettings):
             settings = settings.model_copy(update={"mode": "bypass"})
 
         return _resolve_api_key(settings, interactive=require_api_key)
+
+
+def _restrict_project_values(values: dict[str, Any], source: str, warnings: list[str]) -> None:
+    """What a project or local file may not set: bypass (and auto, which Axon has no classifier for) start the session in
+    Manual mode, and a repository cannot switch permission prompts off."""
+    mode = values.get("mode")
+    if mode is not None:
+        normal = normalize_mode(mode)
+        if normal == "bypass" or str(mode).strip().lower() == "auto":
+            warnings.append(f"Ignoring default mode '{mode}' from project settings {source}: set it in your user settings. "
+                            "The session starts in Manual mode.")
+            values["mode"] = "default"
+    if values.pop("dangerously_skip_permissions", None) is not None:
+        warnings.append(f"Ignoring 'dangerously_skip_permissions' from project settings {source}.")
+    values.pop("settings_file", None)
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -427,12 +551,17 @@ _JSON_KEY_MAP = {
     "promptSuggestions": "prompt_suggestions", "prompt_suggestions": "prompt_suggestions",
     "respondToBashCommands": "respond_to_bash_commands", "disableAllHooks": "disable_all_hooks",
     "vimMode": "vim_mode", "vim_mode": "vim_mode", "additionalDirectories": "additional_dirs",
+    "vimInsertModeRemaps": "vim_insert_mode_remaps", "vim_insert_mode_remaps": "vim_insert_mode_remaps",
+    "emojiCompletionEnabled": "emoji_completion_enabled", "emoji_completion_enabled": "emoji_completion_enabled",
+    "spellcheck": "spellcheck",
+    "editorShowLastResponse": "editor_show_last_response", "editor_show_last_response": "editor_show_last_response",
     "systemPrompt": "system_prompt_override",
     "promptColor": "prompt_color", "prompt_color": "prompt_color",
     "mouseClickExpand": "mouse_click_expand", "mouse_click_expand": "mouse_click_expand",
 }
+# "auto" needs a classifier model that Axon does not have; the documented fallback when auto mode isn't available is Manual.
 _MODE_MAP = {"bypassPermissions": "bypass", "bypass": "bypass", "acceptEdits": "acceptEdits", "plan": "plan",
-             "default": "default", "manual": "default"}
+             "default": "default", "manual": "default", "dontAsk": "dontAsk", "auto": "default"}
 
 
 def normalize_mode(value: Any) -> str | None:
@@ -446,13 +575,15 @@ def normalize_mode(value: Any) -> str | None:
     return low.get(v.lower())
 
 
-def map_json_settings(data: dict[str, Any]) -> dict[str, Any]:
+def map_json_settings(data: dict[str, Any], apply_env: bool = True) -> dict[str, Any]:
     """Translate a Claude-Code-style settings.json object into Settings fields.
     (``hooks`` are read by :class:`axon.hooks.HookManager` directly.)"""
     out: dict[str, Any] = {}
     for k, v in data.items():
         if k in _JSON_KEY_MAP:
             out[_JSON_KEY_MAP[k]] = v
+    if not isinstance(out.get("vim_insert_mode_remaps", {}), dict):
+        out.pop("vim_insert_mode_remaps")
     if isinstance(data.get("editorMode"), str):
         out["vim_mode"] = data["editorMode"].strip().lower() == "vim"
     perms = data.get("permissions")
@@ -487,11 +618,8 @@ def map_json_settings(data: dict[str, Any]) -> dict[str, Any]:
             out["budget_action"] = budget["action"]
         if "forecast_usd" in budget:
             out["forecast_threshold_usd"] = budget["forecast_usd"]
-    env = data.get("env")
-    if isinstance(env, dict):
-        for ek, ev in env.items():
-            if isinstance(ek, str) and ek not in os.environ and ek.upper() not in ("AXON_API_KEY", "AXON_BASE_URL"):
-                os.environ[ek] = str(ev)
+    if apply_env:
+        _apply_settings_env(data.get("env"), "user", [])
     return out
 
 

@@ -14,7 +14,7 @@ See every step: every LLM call, tool, token, cache hit and cent.
 [![CI](https://github.com/gpr-27/axon/actions/workflows/ci.yml/badge.svg)](https://github.com/gpr-27/axon/actions/workflows/ci.yml)
 
 <!-- BEGIN GENERATED: counts -->
-144 slash commands · 28 built-in tools · 16 provider presets
+144 slash commands · 32 built-in tools · 16 provider presets
 <!-- END GENERATED: counts -->
 
 </div>
@@ -251,12 +251,12 @@ step as it goes ([what each mark means](#reading-a-turn)). Things to know:
 | Attach a file to your message | `@path/to/file` (`Ctrl+P` opens a fuzzy finder) |
 | Run a shell command | `!command` |
 | Save a note Axon should remember | `# note` (this project) · `#~ note` (every project) |
-| See a tool's full output | `/output 3`, or **Ctrl+F** for the full transcript (click to expand) |
+| See a tool's full output | `/output 3`, or **Ctrl+O** for the full transcript (click to expand) |
 | Undo changes | `/rewind` |
 | Start fresh | `/clear` (the old session stays resumable) |
 | Retry after a provider error | `/retry` or type `continue` |
 | Copy the last answer | `/copy` |
-| Change how much detail is shown | **Ctrl+O** cycles compact → normal → detailed → debug |
+| Change how much detail is shown | **Alt+L** (or **Ctrl+X** then **L**, which needs no setup on a Mac) cycles compact → normal → detailed → debug |
 | Quit | `/exit` or **Ctrl+D** twice |
 
 ```bash
@@ -308,7 +308,7 @@ model *thought*, what it *did* and what it *said*:
 | `⚠`, `✗` | Retries, warnings and failures |
 
 While Axon works, the bottom of the screen shows a spinner with a **live timer** for the current tool
-or step, the tokens streamed so far, and a tip underneath. `Ctrl+F` (or `/transcript`) opens the whole session
+or step, the tokens streamed so far, and a tip underneath. `Ctrl+O` (or `/transcript`) opens the whole session
 full-screen, where every block can be expanded or collapsed with a click.
 
 ## Update or uninstall
@@ -415,18 +415,18 @@ see per-model token prices and `/keys` to check which keys are configured.
 ## Tracing
 
 Every turn is recorded as a structured trace and rendered live at one of four levels. Set the level
-with `--trace`, `/trace`, `Ctrl+O`, or `trace_level` in settings.
+with `--trace`, `/trace`, `Alt+L` / `Ctrl+X L`, or `trace_level` in settings. The default is `normal`: every step is shown, with thinking, each tool call's input and result, and the answer set apart. `compact` is the quiet one-row-per-tool view.
 
 | Level | Shows |
 |---|---|
-| `compact` | One line per tool call, the answer, and the turn footer |
+| `compact` | The answer, one tidy row per tool call with a short preview (failures always show their error), and a one-line footer |
 | `normal` | The step timeline described in [Reading a turn](#reading-a-turn): every LLM call with its tokens, cache, time, cost and context gauge; the thinking; every tool call with what it does, why, a result preview and its timing; what each step feeds back; permission denials, hooks, retries and compaction |
 | `detailed` | Adds full tool input JSON, longer result previews, the exact bytes and tokens sent back to the model, the prompt breakdown, cache-miss causes, the cost split and stop reasons |
 | `debug` | Adds the raw request and usage fields of every event |
 
 Related commands:
 
-- `Ctrl+F` / `/transcript` opens the session full-screen; click or press Enter on a block to expand or collapse it.
+- `Ctrl+O` (or `Ctrl+F`, `/transcript`) opens the session full-screen; click or press Enter on a block to expand or collapse it, `{` and `}` jump between prompts, `v` opens it in `$EDITOR`, `q` or `Esc` closes it.
 - `/output <n>` prints tool call *n* in full (`/output list` shows what is kept); in terminals with
   link support, the `/output n` hint itself is clickable and opens the full output.
 - `/inspect [n]` replays the timeline of a stored turn. The default is the last turn.
@@ -483,6 +483,10 @@ Subcommands run outside the REPL: `axon setup`, `axon doctor`, `axon mcp …`, `
 | `BashOutput` | allow | Read new output from a background shell started with Bash(run_in_background=true) since the last read, plus its status. |
 | `KillShell` | allow | Stop a background shell (and all of its child processes) by shell_id. |
 | `Monitor` | allow | Wait for a background shell (Bash run_in_background) to print output matching `pattern` (regex) or to exit, up to timeout_s (default 60, max 600). |
+| `CronCreate` | allow | Schedule a prompt to run later in this session. |
+| `CronList` | allow | List this session's scheduled tasks, including /loop jobs: id, schedule, next run and prompt. |
+| `CronDelete` | allow | Cancel a scheduled task of this session by its id (see CronList). |
+| `ScheduleWakeup` | allow | End one iteration of a self-paced /loop: pick when the next one runs, from 60 to 3600 seconds out, based on what you saw (short while something is about to finish, long when nothing is pending), with a one-line reason the user sees. |
 | `Git` | ask | Run git in the workspace. |
 | `LSP` | allow | Code intelligence from a language server on PATH (pyright, typescript-language-server, gopls, rust-analyzer, clangd). |
 | `CheckpointList` | allow | List the file-edit checkpoints of this session, newest first (1 = most recent turn's edits), with the files each one changed. |
@@ -548,11 +552,11 @@ to create your own, `/subagents` to open a subagent's transcript, and `--agent <
 whole session as one.
 
 When the model starts several `Task` calls in one step they run in parallel. Each one is numbered
-in the order the model asked for it (`#1`, `#2`, …) and gets a live view: `0` shows the overview,
-`1`–`9` opens one subagent's feed (what it was asked, its model, its steps and its reason if it
-failed), `Q` shows the prompt queue, `Tab` / arrows move between them and `Esc` returns to the
-overview. When they finish, one table lists each subagent with its status, steps, time and tokens;
-a failed subagent shows its reason there and in its own card. `/subagents <n>` opens its transcript.
+in the order the model asked for it (`#1`, `#2`, …) and they appear in a live list. `↑`/`↓` select,
+`Enter` opens a live transcript where whatever you type goes to that agent at its next step, `Esc` goes
+back, and `x` stops the selected agent at once, with no confirmation (`Ctrl+X` inside a transcript). A finished or stopped agent resumes
+when you message it; its report then returns to the main agent, which costs one more model call. Press `↓` at the idle prompt while agents
+run in the background, or use `/subagents` or `/tasks` (which also lists shells). `/subagents send <name|n> <message>` addresses one by name or number.
 
 **Output styles.** Built-in styles are `default`, `explanatory`, `learning` and `concise`, plus any
 custom Markdown style you add. Switch with `/output-style`.
@@ -611,13 +615,15 @@ files may not set `api_key` or `base_url`.
 | `provider`, `base_url` | `https://agentrouter.org` | Provider preset and endpoint |
 | `mode` | `bypass` | `default`, `acceptEdits`, `plan` or `bypass` |
 | `effort`, `thinking` | `quantum`, `true` | Reasoning effort tier and extended thinking |
-| `trace_level` | `normal` | `compact`, `normal`, `detailed` or `debug` |
+| `trace_level` | `compact` | `compact`, `normal`, `detailed` or `debug` |
 | `budget_session_usd`, `budget_turn_usd`, `budget_action` | none, none, `stop` | Live budget guard (`warn`, `stop` or `downgrade`) |
 | `fallback_model` | none | Failover chain for 429, 5xx and overload errors |
 | `context_limit` | `128000` | How much of the model's context window Axon uses: 128k, 256k or 1M (`0` = the model's maximum). Change it with `/context limit` or `--context-limit 256k` |
 | `compact_at` | `0.75` | Auto-compact at this share of the context limit (96k of 128k by default) |
 | `permissions.allow / ask / deny` | `[]` | Rules such as `Bash(git *)`, `Edit(src/**)`, `WebFetch(domain:docs.python.org)` |
 | `output_style`, `theme`, `vim_mode` | `default`, `auto`, `false` | Appearance |
+| `vimInsertModeRemaps` (settings.json) | unset | A two-key INSERT-mode sequence that acts as Esc, such as `{"jk": "<Esc>"}`; user settings only |
+| `statusLine.refreshInterval` (settings.json) | unset | Also re-run the status line command every N seconds while idle |
 | `respond_to_bash_commands` | `true` | After `!cmd`, the model responds to the command's output |
 | `tips`, `tips_llm` | `true`, `true` | Show usage tips; let the model write them (otherwise they come from the command list) |
 | `suggestions` | `true` | Suggested next steps (with reasons) after each turn; `/next <n>` runs one |
@@ -742,7 +748,7 @@ JSON). Binding to a non-loopback address requires `--allow-remote`.
 | A turn failed with an HTTP error from the provider | The work done so far is kept: type `continue` or `/retry`. Persistent errors: try `/model` to switch model, or `axon doctor`. |
 | "rejected the request as invalid" | The provider refused the request itself, not an outage. AgentRouter also sends this for valid requests now and then, so Axon retries it up to 8 times there before showing it. `/retry` once; if it repeats, `/compact` or switch model with `/model`. |
 | Garbled boxes or symbols | Set `AXON_ASCII=1` for plain ASCII output, or use a UTF-8 terminal font. |
-| Too much or too little detail | `Ctrl+O` cycles the trace level; `/trace compact` is the quietest, `/thinking` hides the full reasoning. |
+| Too much or too little detail | `Alt+L` or `Ctrl+X L` cycles the trace level; `/trace compact` is the quietest, `/thinking` hides the full reasoning. |
 | Tips or suggestions are distracting | `/tips off`, or set `suggestions = false`. |
 | Too many (or no) desktop notifications | `/notify` shows when they fire. `/notify off`, `/notify all`, or `/notify after 60` to raise the threshold for finished turns. Notifications only appear while another app is in front. |
 | Wrong model or provider in use | The turn header shows the real model and provider (`deepseek-v4-flash via AgentRouter`). Switch with `/model` or `/provider`; `/status` shows the active model and endpoint. |

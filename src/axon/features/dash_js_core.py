@@ -191,9 +191,9 @@ async function viewExtensions() {
 
     // One block per item: a title line, a small detail line, then its buttons (a table is too narrow for them here).
     const blocks = (rows, title, detail, actions, empty) => !rows.length ? h('p', { class: 'muted' }, empty) :
-      h('div', null, ...rows.map(r => h('div', { class: 'card', style: 'padding:10px 12px;margin:8px 0' },
-        h('div', { style: 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap' }, h('b', null, title(r))),
-        h('div', { class: 'muted', style: 'font-size:12px;word-break:break-word;white-space:pre-line;margin:2px 0 6px' }, detail(r)), actions(r))));
+      h('div', { class: 'xrows' }, ...rows.map(r => h('div', { class: 'xb' },
+        h('div', { class: 'xb-t' }, h('b', null, title(r))),
+        h('div', { class: 'muted xb-d' }, detail(r)), actions(r))));
     const defs = {
       mcp: ['MCP servers', [{ label: 'Server', key: 'name' }, { label: 'Status', fmt: r => (r.approval === 'pending' ? 'waiting for your approval' : r.status) + (r.error ? ': ' + r.error : '') }, { label: 'Type', key: 'type' }, { label: 'Target', cls: 't', key: 'target' }, { label: 'Scope', key: 'scope' }, { label: 'Tools', cls: 'r', fmt: r => r.tools == null ? '' : r.tools }, { label: '', fmt: mcpRow }], 'No MCP servers are configured. Add one above, or install a connector from the Marketplace tab.', [addMcp, () => acts(btn('Reconnect all', '/mcp reconnect all'), btn('Show all in terminal form', '/mcp list'))]],
       skills: ['Skills', [{ label: 'Skill', key: 'name' }, { label: 'Scope', key: 'scope' }, { label: 'From', fmt: r => r.plugin || '' }, { label: 'Description', cls: 't', key: 'description' }, { label: '', fmt: r => acts(btn('Show', '/skills show ' + q(r.name)), ['personal', 'project', 'user', 'local'].includes(r.scope) && !r.plugin ? btn('Delete', '/skills delete ' + q(r.name), 'Delete the skill ' + r.name + '?', 'danger') : null) }], 'No skills are installed.', [addSkill, () => acts(btn('Reload skills', '/reload-skills'), btn('Token cost of each skill', '/skill-doctor'))]],

@@ -73,7 +73,7 @@ def test_format_markdown_checklists_and_callouts():
     assert "ℹ Note:" in formatted
 
 def test_renderer_user_message_and_footer(capsys):
-    renderer = Renderer()
+    renderer = Renderer(trace_level="normal")
     renderer.render_user_message("hello world")
     assert "› hello world" in strip_ansi(capsys.readouterr().out)
 
@@ -191,5 +191,5 @@ def test_renderer_compact_level(capsys):
     renderer.on_event(ToolExecutionStart(id="t1", name="Glob", input={"pattern": "*.py"}))
     renderer.on_event(ToolExecutionResult(id="t1", name="Glob", input={}, content="a.py\nb.py"))
     out = strip_ansi(capsys.readouterr().out)
-    assert "● Glob(*.py)" in out
+    assert "✓ Glob  *.py  2 files" in out
     assert "→ step" not in out

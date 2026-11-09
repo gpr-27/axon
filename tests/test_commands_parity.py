@@ -206,10 +206,10 @@ def test_loop_interval_never_stacks_and_stops(agent: Agent):
     agent.message_queue.pop()
     assert _tick(agent, job, now[0]) is True and job.runs == 2
     agent.message_queue.pop()
-    assert _tick(agent, job, now[0] + 10) is False  # not due yet
-    assert _tick(agent, job, now[0] + 61) is True and job.runs == 3 and not job.active  # max_runs reached
+    assert _tick(agent, job, job.next_at - 1) is False  # not due yet
+    assert _tick(agent, job, job.next_at) is True and job.runs == 3 and not job.active  # max_runs reached
     job2 = start_interval_loop(agent, "again", 5, clock=lambda: now[0], start_thread=False)
-    assert job2.interval_s == 10  # minimum interval
+    assert job2.interval_s == 60  # minimum interval
     assert stop_loops(agent) == 1 and not job2.active and len(agent.message_queue) == 1
 
 
@@ -217,7 +217,7 @@ def test_loop_interval_thread_and_command(agent: Agent, capsys):
     dispatch_command("/loop 10s ping", agent)
     jobs = [j for j in agent.loops if j.active]
     assert len(jobs) == 1 and jobs[0].thread is not None and jobs[0].thread.daemon
-    dispatch_command("/loop", agent)
+    dispatch_command("/loop list", agent)
     assert "ping" in capsys.readouterr().out
     dispatch_command("/loop stop", agent)
     assert not any(j.active for j in agent.loops)
@@ -597,10 +597,11 @@ def test_effort_auto_status_and_autocompact_tokens(agent: Agent, capsys):
 def test_feedback_alias_and_focus(agent: Agent, isolate_user_home: Path):
     dispatch_command("/feedback tool output was cut off", agent)
     assert list((isolate_user_home / ".axon" / "bug-reports").glob("bug-*.md"))
+    dispatch_command("/trace detailed", agent)
     dispatch_command("/focus", agent)
     assert agent.settings.trace_level == "compact"
     dispatch_command("/focus off", agent)
-    assert agent.settings.trace_level == "normal"
+    assert agent.settings.trace_level == "detailed"
 
 
 # ─── skills frontmatter / plugins / bypass lock ────────────────────────────

@@ -18,7 +18,7 @@ from axon.config import ConfigError, PermissionConfig, Settings
 from axon.errors import AxonError
 
 SUBCOMMANDS = ("mcp", "doctor", "purge", "agents")
-_FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_budget", "max_iterations"}
+_FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_budget", "max_iterations", "declined"}
 _ESCAPE_FRAGMENTS = {"[A", "[B", "[C", "[D", "OA", "OB", "OC", "OD", "\x1b"}
 
 
@@ -162,7 +162,7 @@ def _permission_mode(value: str) -> str:
     mode = normalize_mode(value)
     if mode is None:
         raise argparse.ArgumentTypeError(
-            f"invalid permission mode '{value}' (choose default, acceptEdits, plan, bypass, bypassPermissions, manual)")
+            f"invalid permission mode '{value}' (choose default, acceptEdits, plan, dontAsk, bypass, bypassPermissions, manual)")
     return mode
 
 
@@ -343,10 +343,14 @@ def setup_debug_logging(filter_spec: str | None, file: str | None, session_id: s
     return path
 
 
+MCP_CONFIG_ERRORS: list[dict[str, str]] = []     # --mcp-config entries that were skipped (stream-json init event)
+
+
 def _mcp_specs_from_args(values: list[str], workspace: Path) -> dict[str, Any]:
     """--mcp-config values (files or inline JSON) -> {name: ServerSpec}."""
     from axon.mcp.config import ServerSpec, _servers_in
     specs: dict[str, Any] = {}
+    MCP_CONFIG_ERRORS.clear()
     for raw in values:
         text = raw.strip()
         source: Path | None = None
@@ -363,9 +367,31 @@ def _mcp_specs_from_args(values: list[str], workspace: Path) -> dict[str, Any]:
         for name, spec in servers.items():
             try:
                 specs[str(name)] = ServerSpec.from_dict(str(name), spec, "cli", source)
-            except ValueError as e:
-                raise ConfigError(f"--mcp-config: server '{name}': {e}") from e
+            except ValueError as e:  # one bad entry skips that server; the run goes on and reports it
+                MCP_CONFIG_ERRORS.append({"name": str(name), "error": str(e)})
+                sys.stderr.write(f"axon: --mcp-config: {e}\n")
     return specs
+
+
+def _settings_arg_data(value: str | None) -> dict[str, Any]:
+    """The JSON given to ``--settings`` (a file or inline), for the MCP approval rules."""
+    if not value:
+        return {}
+    try:
+        text = value if value.lstrip().startswith("{") else Path(os.path.expanduser(value)).read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _skip_dangerous_prompt() -> bool:
+    """``skipDangerousModePermissionPrompt`` from your user settings or managed settings (never a project file)."""
+    from axon.mcp.policy import _first_file, _read_json as read_settings
+    from axon.storage import user_file
+    managed = _first_file("managed-settings.json")
+    sources = [user_file("settings.json"), *([managed] if managed else [])]
+    return any(read_settings(p).get("skipDangerousModePermissionPrompt") is True for p in sources)
 
 
 def _apply_tool_rules(settings: Settings, allowed: list[str], disallowed: list[str]) -> Settings:
@@ -378,6 +404,17 @@ def _apply_tool_rules(settings: Settings, allowed: list[str], disallowed: list[s
         ask=list(settings.permissions.ask),
     )
     return settings.model_copy(update={"permissions": perms})
+
+
+def _tool_search_denied(settings: Settings, tools_spec: Any, disallowed: Any) -> bool:
+    """A deny rule on ToolSearch, or leaving it out of ``--tools``: MCP tools load upfront instead."""
+    deny = {str(r) for r in (settings.permissions.deny or [])} | {str(r) for r in (disallowed or [])}
+    if "ToolSearch" in deny:
+        return True
+    if tools_spec is None:
+        return False
+    named = [t.strip() for t in tools_spec.split(",")] if isinstance(tools_spec, str) else [str(t) for t in tools_spec]
+    return tools_spec != "default" and "ToolSearch" not in named
 
 
 # ─── agent construction ────────────────────────────────────────────────────
@@ -445,6 +482,9 @@ def build_agent(
                 announce(f"MCP bridge unavailable: {e}")
 
     bare = {d for d in (disallowed_tools or []) if "(" not in d}
+    _gate = PermissionEngine(settings)
+    _gate.warn_unknown_rule_tools(t.name for t in tools.all_tools())
+    bare |= {t.name for t in tools.all_tools() if _gate.removes_tool(t.name)}  # a bare deny rule removes the tool from what the model sees
     if agent_def is not None:
         bare |= {str(t) for t in getattr(agent_def, "disallowed_tools", []) or []}
     # A read-only definition (explore, plan, ...) keeps only read-only tools, exactly as it does when
@@ -463,7 +503,13 @@ def build_agent(
             get_bridge().context_window = window   # servers that connect later use the same rule
         except Exception:
             pass
-        search = defer_mcp_tools(tools, window)
+        no_search = _tool_search_denied(settings, tools_spec, disallowed_tools)
+        try:
+            from axon.mcp.bridge import get_bridge
+            get_bridge().no_tool_search = no_search
+        except Exception:
+            pass
+        search = None if no_search else defer_mcp_tools(tools, window)
         if search is not None and announce and settings.verbose:
             announce(f"MCP: {len(search.deferred)} tool schema(s) deferred behind ToolSearch")
     except Exception:
@@ -645,6 +691,8 @@ def _resume(agent: Any, session_id: str, say: Callable[[str], None], restore_mod
         return False
     from axon.session.store import restore_retry_state
     restore_retry_state(agent, session_id)
+    from axon.commands.workspace_cmds import restore_cron_jobs
+    restore_cron_jobs(agent, session_id)
     bind = getattr(agent, "_bind_checkpoints", None)
     if callable(bind):
         bind()
@@ -1139,6 +1187,8 @@ def _open_session_switcher(agent: Any, renderer: Any) -> str | None:
         agent.ledger = agent.session.load_ledger(selected, agent.settings.model)
         from axon.session.store import restore_retry_state
         restore_retry_state(agent, selected)
+        from axon.commands.workspace_cmds import restore_cron_jobs
+        restore_cron_jobs(agent, selected)
         from axon.agent.subagent import sync_subagents_for_session
         sync_subagents_for_session(agent)
         _journal("resume", {"session": selected, "via": "switcher", "messages": len(agent.conversation.messages)}, agent=agent)
@@ -1183,7 +1233,7 @@ def render_turn_footer(renderer: Any, agent: Any, res: Any, elapsed: float) -> b
     if res.stop_reason not in _FAILED_STOPS:
         renderer.turn_footer(**kwargs)
         return False
-    error = str(res.error or res.final_text or "")
+    error = "" if res.stop_reason == "declined" else str(res.error or res.final_text or "")
     try:
         params = inspect.signature(renderer.turn_footer).parameters
     except (TypeError, ValueError, AttributeError):
@@ -1342,8 +1392,12 @@ def report_background(agent: Any, renderer: Any) -> int:
 _BUSY_BLOCKED = ("/clear", "/new", "/reset", "/compact", "/resume", "/rewind", "/branch", "/fork", "/model", "/exit", "/quit")
 
 
-def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False) -> bool:
-    """Handle one REPL input line. Returns False when the session should end."""
+def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False, plain: bool = False) -> bool:
+    """Handle one REPL input line. Returns False when the session should end.
+
+    *plain*: the text was not typed by the person (a scheduled prompt the model wrote, a loop.md from the repository).
+    It goes to the model as it is: no shell, command, memory or @file handling, each of which would skip the
+    permission check that a tool call gets."""
     from axon.commands.builtin import dispatch_command
     from axon.ui.theme import BOLD, CYAN, GOLD, MINT, RST, SLATE, TEAL, WHITE
 
@@ -1360,12 +1414,12 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
             except Exception:
                 pass
             what = {
-                "compact": "one line per tool call, no step details",
+                "compact": "one tidy row per tool call with a short preview",
                 "normal": "each step: model, thinking summary, tools and results, timing and cost",
                 "detailed": "adds full tool inputs, result previews, what is sent to the model, cost split",
                 "debug": "adds raw request and usage fields of every event",
             }.get(level, "")
-            print(f"  {SLATE}Trace level {WHITE}{level}{RST}{SLATE}: {what} (ctrl+o for the next level){RST}")
+            print(f"  {SLATE}Trace level {WHITE}{level}{RST}{SLATE}: {what} (alt+l for the next level){RST}")
         return True
     if line == "__REWIND__":
         line = "/rewind"
@@ -1375,6 +1429,13 @@ def process_line(agent: Any, renderer: Any, line: str, from_queue: bool = False)
         if not new_prompt:
             return True
         line = new_prompt
+
+    if plain:
+        _journal("prompt", {"text": line, "source": "scheduled"}, agent=agent)
+        agent._model_written_prompt = True          # image paths in it are not attachments either
+        _run_agent_turn(agent, renderer, line, "Queued prompt")
+        agent.__dict__.pop("_model_written_prompt", None)    # a hook blocked it before the turn read the flag
+        return True
 
     if line.startswith("!"):
         _shell_into_context(agent, renderer, line[1:])
@@ -1451,12 +1512,16 @@ def drain_queue(agent: Any, renderer: Any) -> bool:
         except Exception:
             banner = nxt.text
         print(f"\n  {CYAN}[Queued #{nxt.id}{rem_str}]{RST}\n{banner}\n")
+        from axon.commands.workspace_cmds import after_queued_run, before_queued_run
+        before_queued_run(agent, nxt.id)
         try:
-            if not process_line(agent, renderer, nxt.text, from_queue=True):
+            if not process_line(agent, renderer, nxt.text, from_queue=True, plain=getattr(nxt, "plain", False)):
                 return False
         except KeyboardInterrupt:
             print("\n  Stopped queued prompt.\n")
             return True
+        finally:
+            after_queued_run(agent, nxt.id)
     return True
 
 
@@ -1492,7 +1557,7 @@ def _stop_screen_log(log: Any) -> None:
         pass
 
 
-def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
+def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None, note: str = "") -> None:
     """The window changed width: the terminal has re-wrapped everything already printed into ragged rows.
     Clear the screen and draw the banner and the conversation again at the new width."""
     from axon.ui.render import format_conversation_replay
@@ -1536,8 +1601,12 @@ def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
                 sys.stdout.write(row + "\n")
             if set_tag is not None:
                 set_tag(None)
-            print(f"  {SLATE}Redrawn for the new window width ({term_width()} columns) · earlier output is still above "
-                  f"in your scrollback · Ctrl+F opens the full transcript{RST}\n")
+            why = note or f"Redrawn for the new window width ({term_width()} columns)"
+            import textwrap
+            text = f"{why} · earlier output is still above in your scrollback · Ctrl+O opens the full transcript"
+            for row in textwrap.wrap(text, max(20, term_width() - 4)):
+                print(f"  {SLATE}{row}{RST}")
+            print()
         sys.stdout.flush()
     finally:
         if log is not None:
@@ -1547,10 +1616,31 @@ def _redraw_for_new_size(agent: Any, renderer: Any, log: Any = None) -> None:
 def run_repl(agent: Any, renderer: Any) -> int:
     """Interactive terminal REPL (everything shown is also kept in the project's screen log)."""
     log = _start_screen_log(agent)
+    from axon.ui.repl_inbox import INBOX
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        INBOX.activate(str(getattr(agent.session, "active_session_id", "") or ""))
     try:
         return _run_repl(agent, renderer, log)
     finally:
+        INBOX.deactivate()
         _stop_screen_log(log)
+
+
+def _serve_page_requests(agent: Any, renderer: Any, log: Any) -> bool:
+    """Do what the web page asked of this terminal, on this thread, which owns the screen.
+    Returns False if a queued prompt that followed ended the session."""
+    from axon.ui.repl_inbox import INBOX, ReplContext
+    from axon.ui.theme import RST, TEAL
+    if not INBOX.has_pending():
+        return True
+    ctx = ReplContext(agent, lambda text: _run_agent_turn(agent, renderer, text, "Turn"),
+                      lambda: _redraw_for_new_size(agent, renderer, log, note="Chat opened from the web page"))
+    try:
+        INBOX.run_pending(ctx)
+    except KeyboardInterrupt:
+        print(f"\n\n  {TEAL}Stopped by user.{RST}\n")
+    INBOX.note_session(str(agent.session.active_session_id or ""))
+    return drain_queue(agent, renderer)
 
 
 def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
@@ -1574,6 +1664,13 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
         start_in_terminal(agent)         # scheduled tasks run while this terminal is open
     except Exception:
         pass
+    agent.fires_scheduled_tasks = True   # the prompt below wakes for prompts that CronCreate jobs queue
+    agent.decline_ends_turn = True       # a person is answering: a plain No means stop and wait for them
+    try:
+        from axon.commands.workspace_cmds import restore_cron_jobs
+        restore_cron_jobs(agent)         # --resume / --continue: the session's tasks come back
+    except Exception:
+        pass
 
     from axon.ui.input import RESIZE_REDRAW
     from axon.ui.theme import term_width
@@ -1584,6 +1681,10 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
         if term_width() != layout_width and sys.stdout.isatty():
             layout_width = term_width()   # resized while a turn was running: tidy up before the prompt
             _redraw_for_new_size(agent, renderer, log)
+        if not _serve_page_requests(agent, renderer, log):
+            return 0
+        from axon.ui.repl_inbox import INBOX
+        INBOX.note_session(str(agent.session.active_session_id or ""))   # /resume or /clear typed here: the page follows
         if log is not None and str(agent.session.active_session_id or "") != logged_session:
             logged_session = str(agent.session.active_session_id or "")
             log.mark(f"session {logged_session}")
@@ -1620,7 +1721,8 @@ def _run_repl(agent: Any, renderer: Any, log: Any = None) -> int:
             line, toggled_mode = res_input[0], res_input[1]
             if line == RESIZE_REDRAW:
                 layout_width = term_width()
-                _redraw_for_new_size(agent, renderer, log)
+                from axon.ui.input import take_redraw_note
+                _redraw_for_new_size(agent, renderer, log, note=take_redraw_note())
                 continue
             if log is not None and (line or "").strip() and not str(line).startswith("__"):
                 log.note("\n".join(f"{'›' if i == 0 else ' '} {r}" for i, r in enumerate(str(line).strip().splitlines())))
@@ -1924,6 +2026,8 @@ def main(argv: list[str] | None = None) -> int:
     try:  # approval prompts and elicitation dialogs only in the REPL; -p and SDK runs never block on one
         from axon.mcp import state as _mcp_state
         _mcp_state.set_interactive(bool(interactive and not headless))
+        _mcp_state.set_cli_settings(_settings_arg_data(args.settings_file))
+        _mcp_state.set_skip_approval(settings.permission_mode == "bypassPermissions" and _skip_dangerous_prompt())
     except Exception:
         pass
     try:  # folder trust (axon.hooks.trust): project hooks, plugins and MCP servers load only in a trusted folder
@@ -1931,8 +2035,14 @@ def main(argv: list[str] | None = None) -> int:
         _trust.configure(bool(interactive and not headless))
         if interactive and not headless:
             _trust.prompt_if_needed(settings.workspace)
-        elif _trust.blocked_line(settings.workspace):
-            sys.stderr.write("axon: " + _trust.blocked_line(settings.workspace) + "\n")
+            if _trust.status(settings.workspace) in ("none", "trusted"):
+                from axon.config import apply_held_project_env
+                apply_held_project_env()
+        else:
+            from axon.config import apply_held_project_env
+            apply_held_project_env()             # -p never shows the dialog, so a project's `env` applies at startup
+            if _trust.blocked_line(settings.workspace):
+                sys.stderr.write("axon: " + _trust.blocked_line(settings.workspace) + "\n")
     except Exception:
         pass
     on_approval = None

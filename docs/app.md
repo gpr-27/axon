@@ -18,8 +18,11 @@ axon dash                       # same thing under its older name
 ```
 
 Inside a session, `/open` does the same (aliases `/dash`, `/web`); `/open stop` stops it. A page opened from
-`/open` is attached to that running session, so replies you send from the page are queued onto it rather than
-written by a second process. `axon open` on its own starts a separate server that is not tied to a terminal
+`/open` is attached to that running session: the page and the terminal show one conversation, and the terminal's own
+loop runs what you send from the page, so nothing draws over its prompt and a half-typed draft is kept. Opening another
+chat or folder on the page moves the terminal there too, and `/resume`, `/clear` or `/cd` in the terminal moves the page.
+While the terminal is working, another chat opens to read only. A turn started on the page asks for approval on the page.
+`axon open` on its own starts a separate server that is not tied to a terminal
 session; `Ctrl+C` stops it. The browser is not opened over SSH, in CI, on a Linux machine with no display, or
 when `AXON_NO_BROWSER` is set; the link is printed instead.
 
@@ -54,7 +57,8 @@ server that asks for input shows a form in the chat. `@file`, `@agent-name` and 
   last chats and memory notes, each linking to where it lives. The terminal has the same facts in `/overview`.
 - **Recent projects.** The project name in the top bar opens a menu of projects that have saved chats, newest first. Click
   one to switch. A folder that no longer exists is greyed out with a Remove button (the chats are kept). `Cmd+K` also
-  lists them. This page cannot switch folders when it is attached to a running terminal session.
+  lists them. **Choose another folder** browses, or takes a typed path. On a page attached to a terminal, the terminal
+  moves to that folder and starts a new chat there.
 
 ## Scheduled tasks and notifications
 
@@ -92,6 +96,18 @@ server that asks for input shows a form in the chat. `@file`, `@agent-name` and 
   by what the usage log says was spent today or this month. Once used up, new turns do not start until you raise it.
 - **Spending.** Today, this week (from Monday) and this month show in Progress > Usage and in the `/usage` card and screen,
   for this project (and all projects in the card).
+
+## Steps in a chat and the colours
+
+- **Every step stays.** While Axon works, each step shows as it happens, and it all stays above the answer when the turn
+  finishes: **Thinking** (the text streams in), each **Tool call** (a running mark at once, then its input, its result and
+  how long it took), **Narration** (the text between tool calls) and finally the **Answer**. Each kind has its own label
+  and icon. Opening an old chat shows exactly the same thing.
+- **Collapse steps.** The button by the message box hides the steps of every answer, or shows them again; the head of one
+  answer also folds just that one. The choice is remembered in this browser only. The trace level (Chat options > Trace
+  detail, or Settings) still has a `compact` option, but it is never the default.
+- **Colours.** The dark and light themes use neutral grays, with one teal accent for actions, links and focus, and the usual
+  green, red and amber for status. Nothing is tinted purple.
 
 ## Messages, find, bookmarks and export
 
@@ -191,9 +207,25 @@ The Shell panel is more limited: it runs one command at a time, applies the shel
 and credential access are refused) and, when enabled, the Bash sandbox. As with the Bash tool, the guard reads
 command text only; see [Shell guard and the sandbox](architecture.md#shell-guard-and-the-sandbox).
 
+## Context inspector
+
+`POST /api/insights/ctxinspect` with `{"session", "section"}` returns what is inside one part of the context
+window: `overview`, `messages`, `system_prompt`, `system_tools`, `mcp_tools`, `mcp_instructions`, `skills`,
+`custom_agents`, `memory_files`, `autocompact`, `free`, `permissions` or `hooks`. Each answer has a plain
+introduction, token and share figures for every section, and items with the full text (`body`, capped at 200000
+characters with `body_truncated`), metadata, badges and an explanation. Messages carry full tool results and tool-call
+JSON with Pin and Drop actions; memory files return their complete contents; permissions list every rule with the
+file it came from. The route is read-only, uses the same token and origin checks as the other insight views, and
+masks API keys and other secrets. A session with no live agent returns the same shape with no items.
+
+The page for it is `#/context/<section>` (add `?s=<session id>` to link to one chat). Every row of the right-hand
+Context panel opens it: a section list with usage bars on the left, and on the right the section's introduction, a
+search box over titles and full text, Expand all and Refresh. Each item is a card that, when opened, shows what it
+does, its details, the full text with syntax colour (JSON, Markdown with a Raw/Rendered switch, Python, shell, diff),
+a Copy button and, for messages, Pin and Drop. Long texts draw 300 lines at a time with a Show more button. On a
+phone the section list becomes a menu.
+
 ## Known limits
 
 - The app is in development; see the status note above.
 - If a tab shows "signed out", run `axon open` or `/open` again for a fresh link.
-- A page attached to a running terminal session cannot change folder; run `axon open --workspace DIR` for
-  another project.

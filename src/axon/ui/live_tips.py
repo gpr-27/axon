@@ -81,7 +81,7 @@ def _rules() -> list[TipRule]:
         TipRule("wait-long", "queue", _waiting_long,
                 lambda f: "Esc stops the turn; type to queue a message that is sent between steps"),
         TipRule("tool-trace", "transcript", _tool_running,
-                lambda f: "ctrl+o changes trace detail; /transcript opens the full view", command="transcript"),
+                lambda f: "ctrl+o opens the full transcript; alt+l changes trace detail", command="transcript"),
         TipRule("many-mcp", "tools", lambda v, f, n: f.mcp_tools >= MANY_MCP_TOOLS,
                 lambda f: "MCP tools load on demand via ToolSearch; /tools lists them", command="tools"),
         TipRule("cost-rising", "cost", lambda v, f, n: f.session_cost >= COST_HIGH_USD,

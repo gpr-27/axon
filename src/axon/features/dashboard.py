@@ -937,15 +937,15 @@ def _theme_tokens() -> tuple[dict[str, str], dict[str, str]]:
         return {
             "--page": bg["page"], "--surface": bg["surface"], "--raised": bg["raised"],
             "--ink": g("TEXT", "#e4e6ec"), "--ink2": g("MUTED", "#8c92a0"), "--muted": g("SUBTLE", "#646a78"),
-            "--line": g("BORDER", "#484e5c"), "--primary": g("PRIMARY", "#5ed2c8"), "--accent": g("ACCENT", "#b4a0ff"),
+            "--line": g("BORDER", "#484e5c"), "--primary": g("PRIMARY", "#5ed2c8"), "--accent": "#b4b4b4" if p is pal_d else "#4a4a4a",
             "--ok": g("SUCCESS", "#86de8c"), "--warn": g("WARNING", "#f6c45c"), "--bad": g("ERROR", "#ff7878"),
             "--info": g("INFO", "#7ab6ff"), "--code-bg": g("CODE_BG", bg["raised"]), "--code-fg": g("CODE_FG", "#f0be8c"),
             "--add": g("DIFF_ADD", "#86de8c"), "--del": g("DIFF_DEL", "#ff7878"),
             "--add-bg": g("DIFF_ADD_BG", "#183a24"), "--del-bg": g("DIFF_DEL_BG", "#461c20"),
-            "--s1": g("PRIMARY", "#5ed2c8"), "--s2": g("ACCENT", "#b4a0ff"), "--s3": g("WARNING", "#f6c45c"),
+            "--s1": g("PRIMARY", "#5ed2c8"), "--s2": g("ORANGE", "#e8793c"), "--s3": g("WARNING", "#f6c45c"),
             "--s4": g("INFO", "#7ab6ff"), "--s5": g("SUCCESS", "#86de8c"), "--s6": g("ERROR", "#ff7878"),
-            "--s7": g("LAVENDER", "#d2c8ff"), "--s8": g("CYAN", "#6edcf0"),
-            "--axon-primary": g("PRIMARY", "#38E8C6"), "--axon-accent": g("ACCENT", "#FF6FB5"),
+            "--s7": g("CYAN", "#6edcf0"), "--s8": g("CYAN", "#6edcf0"),
+            "--axon-primary": g("PRIMARY", "#38E8C6"), "--axon-accent": g("PRIMARY", "#38E8C6"),
             "--grid": g("BORDER", "#484e5c"), "--axis": g("SUBTLE", "#646a78"), "--ring": g("BORDER", "#484e5c"),
         }
     return build(pal_d, bg_d), build(pal_l, bg_l)
@@ -1082,9 +1082,10 @@ class DashServer(ThreadingHTTPServer):
     def __init__(self, port: int, workspace: Path, agent: Any = None, token: str | None = None) -> None:
         stored_token, self.cookie = load_secrets()
         self.token = token or stored_token
-        self.workspace = Path(workspace).expanduser().resolve()
+        self.live: Any = None
         self.agent = agent
-        self.index = SessionIndex(self.workspace)
+        self._workspace = Path(workspace).expanduser().resolve()
+        self.index = SessionIndex(self._workspace)
         self.runs: dict[str, Run] = {}
         self.busy: set[str] = set()
         self.exports: "OrderedDict[str, tuple[str, str]]" = OrderedDict()
@@ -1093,7 +1094,6 @@ class DashServer(ThreadingHTTPServer):
         from axon.features.dash_runtime import Attachments, CommandRunner, ShellRunner
         self.rts: dict[str, Any] = {}
         self.default_rt: Any = None
-        self.live: Any = None
         self.commands = CommandRunner(self)
         self.shell = ShellRunner()
         self.attach = Attachments()
@@ -1113,6 +1113,76 @@ class DashServer(ThreadingHTTPServer):
                 add_secret(s.api_key.get_secret_value())
         except Exception:
             pass
+
+    @property
+    def workspace(self) -> Path:
+        """The project shown. When attached to a terminal that is wherever the terminal is now (it may have used /cd)."""
+        if self.live is not None:
+            now = getattr(getattr(self.agent, "settings", None), "workspace", None)
+            if isinstance(now, (str, Path)) and Path(now).resolve() != self._workspace:
+                self._workspace = Path(now).resolve()
+                self.index = SessionIndex(self._workspace)
+                self.live.workspace = self._workspace
+        return self._workspace
+
+    @workspace.setter
+    def workspace(self, value: Path) -> None:
+        self._workspace = Path(value)
+
+    @property
+    def can_switch(self) -> bool:
+        """Whether the page can move to another folder or chat: on its own, or through the terminal's main loop."""
+        from axon.ui.repl_inbox import INBOX
+        return self.live is None or INBOX.active
+
+    def on_terminal(self, fn: Any, timeout: float = 30.0) -> Any:
+        """Run ``fn(ctx)`` on the terminal's main loop and wait for it."""
+        from axon.ui.repl_inbox import INBOX
+        if self.live is None or not INBOX.active:
+            raise DashError("No terminal session can do this right now.", 409)
+        req = INBOX.post(fn)
+        if not req.done.wait(timeout):
+            raise DashError("The terminal did not respond. Close any menu open there and try again.", 409)
+        if req.error is not None:
+            raise DashError(f"The terminal could not do that: {req.error}", 409)
+        return req.result
+
+    def switch_live(self, sid: str) -> dict[str, Any]:
+        """Move the attached terminal to chat ``sid``, so the terminal and the page show the same conversation.
+        A chat from another project moves the terminal to that folder too."""
+        live = self.live
+        if live is None:
+            raise DashError("This page is not attached to a terminal session.", 409)
+        if sid == live.session_id:
+            return live.state()
+        if live.busy:
+            raise DashError("The terminal is working. Stop the turn before switching chats.", 409)
+        ref = self.index.lookup(sid)
+        other = held_by(ref.path.parent)
+        if other:
+            raise DashError(f"This session is open in another terminal (pid {other['pid']}).", 423)
+        target = Path(ref.workspace).resolve() if ref.workspace and Path(ref.workspace).is_dir() else None
+
+        def go(ctx: Any) -> None:
+            from axon.commands.session_cmds import handle_resume_cmd
+            if target is not None and target != self._workspace:
+                from axon.commands.workspace_cmds import change_workspace
+                change_workspace(ctx.agent, target)
+            handle_resume_cmd(ctx.agent, sid)
+            ctx.redraw()
+
+        self.on_terminal(go)
+        if live.session_id != sid:
+            raise DashError("The terminal could not open that chat.", 409)
+        return live.state()
+
+    def new_live_chat(self) -> dict[str, Any]:
+        """A new chat from the page starts a new session in the attached terminal."""
+        def go(ctx: Any) -> None:
+            from axon.commands.session_cmds import handle_clear
+            handle_clear(ctx.agent, "")
+        self.on_terminal(go)
+        return self.live.state()
 
     @property
     def port(self) -> int:
@@ -1212,6 +1282,7 @@ class DashServer(ThreadingHTTPServer):
         rt.attached = True
         rt.hook_turns()
         agent.on_approval = rt.approver
+        agent.decline_ends_turn = True      # a person answers on the page: a plain No means stop and wait for them
         rt.install_web_tools()
         rt.key = rt.session_id
         try:
@@ -1253,9 +1324,6 @@ class DashServer(ThreadingHTTPServer):
         return rt
 
     def set_workspace(self, raw: str) -> dict[str, Any]:
-        if self.live is not None:
-            raise DashError("This page is attached to a running terminal session, whose folder cannot change. "
-                            "Run `axon open --workspace DIR` for another project.", 409)
         from axon.permissions.paths import is_protected_path
         p = Path(raw).expanduser()
         try:
@@ -1271,6 +1339,17 @@ class DashServer(ThreadingHTTPServer):
         broad = too_broad_for_workspace(p)
         if broad:
             raise DashError(broad, 400)
+        if self.live is not None:
+            if self.live.busy or any(r.busy for r in self.rts.values()):
+                raise DashError("A turn is still running. Stop it before changing folders.", 409)
+
+            def go(ctx: Any) -> None:     # the terminal moves too, and starts a fresh chat in the new project
+                from axon.commands.session_cmds import handle_clear
+                from axon.commands.workspace_cmds import change_workspace
+                change_workspace(ctx.agent, p)
+                handle_clear(ctx.agent, "")
+
+            self.on_terminal(go)
         with self.lock:
             busy = [r for r in self.rts.values() if r.busy]
             if busy:
@@ -2105,7 +2184,7 @@ def _dash_command(agent: Any, arg: str) -> None:
     if reused:
         print("Dashboard already running; reusing it.")
     _announce(srv, opened, sys.stdout)  # type: ignore[arg-type]
-    print("  Replies you send from the page to this terminal's session are queued onto it, not run by a second writer.")
+    print("  The page and this terminal share one session: messages, chats and folders changed in either show in both.")
 
 
 CLI_SUBCOMMANDS = {"open": dash_main, "dash": dash_main}

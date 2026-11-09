@@ -13,22 +13,23 @@ APPEARANCE_JS = r"""
 (function () {
 "use strict";
 var KEY = 'axon-appearance', LEGACY = 'axon-theme';
-var UI_STACK = 'ui-sans-serif,-apple-system,"Segoe UI Variable","Segoe UI",system-ui,sans-serif';
+var UI_STACK = '"Avenir Next",Avenir,"Segoe UI Variable Text","Segoe UI",Cantarell,"Noto Sans",ui-sans-serif,-apple-system,system-ui,sans-serif';
+var SYS_STACK = 'ui-sans-serif,-apple-system,"Segoe UI Variable","Segoe UI",system-ui,sans-serif';
 var SERIFS = ['Iowan Old Style', 'Charter', 'Source Serif 4', 'Georgia'];
 var CODE_TAIL = 'ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace';
-var UI_FONTS = { system: { label: 'System default', family: '' }, inter: { label: 'Inter', family: 'Inter' }, sfpro: { label: 'SF Pro', family: 'SF Pro Text' } };
+var UI_FONTS = { system: { label: 'Axon default', family: '' }, plain: { label: 'System font', family: '', stack: SYS_STACK }, inter: { label: 'Inter', family: 'Inter' }, sfpro: { label: 'SF Pro', family: 'SF Pro Text' } };
 var SIZES = [[14, 'Small'], [16, 'Default'], [18, 'Large'], [20, 'Extra large']];
-var WIDTHS = [[680, 'Narrow'], [780, 'Default'], [960, 'Wide'], ['full', 'Full']];
+var WIDTHS = [[620, 'Narrow'], [720, 'Default'], [960, 'Wide'], ['full', 'Full']];
 var CODE_SIZES = [12, 13, 14, 15];
 var TOKENS = ['c', 's', 'n', 'k', 'f'];
 // Syntax palettes. Axon Light / Axon Dark mirror the app's own colours; the others are optional pairs.
 var CODE_THEMES = {
-  'axon-light': { mode: 'light', label: 'Axon Light', bg: '#F6F7F9', c: '#555D69', s: '#26741C', n: '#8F5800', k: '#B5186A', f: '#1259C3', add: '#DDF4E2', del: '#FBE4E4' },
+  'axon-light': { mode: 'light', label: 'Axon Light', bg: '#F4F4F4', c: '#595959', s: '#1B7340', n: '#8A5600', k: '#00705E', f: '#2B58BC', add: '#DCF3E4', del: '#FBE4E4' },
   'paper-light': { mode: 'light', label: 'Paper', bg: '#FDF6E3', c: '#5F6F70', s: '#1F7F78', n: '#B03E0C', k: '#667A00', f: '#1B6FB0', add: '#E6EBC8', del: '#F8DAD0' },
-  'axon-dark': { mode: 'dark', label: 'Axon Dark', bg: '#0D0F13', c: '#A3ABB7', s: '#8BDD72', n: '#F2BE5C', k: '#F27DB5', f: '#7DBBFF', add: '#12352A', del: '#40202B' },
+  'axon-dark': { mode: 'dark', label: 'Axon Dark', bg: '#101010', c: '#A8A8A8', s: '#74E0A0', n: '#F4C25E', k: '#4FE3C4', f: '#93BBFF', add: '#14332C', del: '#3F1F24' },
   'ink-dark': { mode: 'dark', label: 'Deep Ink', bg: '#002B36', c: '#8FA3A8', s: '#3CC0B6', n: '#E8793C', k: '#B4C72B', f: '#58AEEA', add: '#0F3D2E', del: '#4A2428' }
 };
-var DEFAULTS = { theme: 'system', contrast: false, ui: 'system', response: 'serif', rsize: 16, width: 780, motion: 'system', codeLight: 'axon-light', codeDark: 'axon-dark', cfont: '', csize: 13 };
+var DEFAULTS = { theme: 'system', contrast: false, ui: 'system', response: 'match', rsize: 16, width: 720, motion: 'system', codeLight: 'axon-light', codeDark: 'axon-dark', cfont: '', csize: 13 };
 
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* blocked storage: preferences last for this tab only */ } }
@@ -45,7 +46,7 @@ function normalize(o) {
     theme: oneOf(o.theme, ['system', 'light', 'dark'], DEFAULTS.theme), contrast: o.contrast === true,
     ui: oneOf(o.ui, Object.keys(UI_FONTS), DEFAULTS.ui), response: oneOf(o.response, ['serif', 'match'], DEFAULTS.response),
     rsize: oneOf(Number(o.rsize), SIZES.map(function (x) { return x[0]; }), DEFAULTS.rsize),
-    width: o.width === 'full' ? 'full' : oneOf(Number(o.width), [680, 780, 960], DEFAULTS.width),
+    width: o.width === 'full' ? 'full' : oneOf(Number(o.width), [620, 720, 960], DEFAULTS.width),
     motion: oneOf(o.motion, ['system', 'reduced', 'on'], DEFAULTS.motion),
     codeLight: oneOf(o.codeLight, lightIds, DEFAULTS.codeLight), codeDark: oneOf(o.codeDark, darkIds, DEFAULTS.codeDark),
     cfont: sanitizeFont(o.cfont), csize: oneOf(Number(o.csize), CODE_SIZES, DEFAULTS.csize)
@@ -55,6 +56,8 @@ function load() {
   var raw = lsGet(KEY), o = null;
   if (raw) { try { o = JSON.parse(raw); } catch (e) { o = null; } }
   if (!o) { var legacy = lsGet(LEGACY); o = (legacy === 'dark' || legacy === 'light') ? { theme: legacy } : {}; }
+  // Saved before version 2, 'serif' and the old widths were only the defaults of the time, not choices: they follow the new default.
+  else if (o.v !== 2) { delete o.response; if (o.width === 780 || o.width === 680) delete o.width; }
   return normalize(o);
 }
 
@@ -77,7 +80,7 @@ function installed(name) {
   cache[name] = ok; return ok;
 }
 function serifInUse() { for (var i = 0; i < SERIFS.length; i++) if (installed(SERIFS[i])) return SERIFS[i]; return 'the browser serif'; }
-function uiStack(p) { var f = UI_FONTS[p.ui].family; return f && installed(f) ? '"' + f + '",' + UI_STACK : UI_STACK; }
+function uiStack(p) { var u = UI_FONTS[p.ui], f = u.family; if (u.stack) return u.stack; return f && installed(f) ? '"' + f + '",' + UI_STACK : UI_STACK; }
 function serifStack() { return SERIFS.map(function (n) { return n.indexOf(' ') >= 0 ? '"' + n + '"' : n; }).join(',') + ',serif'; }
 function codeStack(p) { return (p.cfont ? '"' + p.cfont + '",' : '') + CODE_TAIL; }
 function scheme(p) { return (p || prefs).theme !== 'system' ? (p || prefs).theme : (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
@@ -98,10 +101,10 @@ function apply() {
   st.setProperty('--size-response', p.rsize + 'px');
   st.setProperty('--size-code', p.csize + 'px');
   st.setProperty('--measure-chat', p.width === 'full' ? '100%' : p.width + 'px');
-  a('data-ap-ui', p.ui !== 'system' && installed(UI_FONTS[p.ui].family));
+  a('data-ap-ui', p.ui !== 'system' && (!!UI_FONTS[p.ui].stack || installed(UI_FONTS[p.ui].family)));
   a('data-ap-resp', p.response);
   a('data-ap-size', p.rsize !== 16);
-  a('data-ap-width', p.width !== 780);
+  a('data-ap-width', p.width !== 720);
   a('data-ap-code', p.cfont !== '' || p.csize !== 13);
   var id = scheme(p) === 'dark' ? p.codeDark : p.codeLight, plain = id === 'axon-light' || id === 'axon-dark';
   ['--code-bg', '--add-bg', '--del-bg'].concat(TOKENS.map(function (k) { return '--tk-' + k; })).forEach(function (n) { st.removeProperty(n); });
@@ -110,7 +113,7 @@ function apply() {
   // keep the older Light/Dark toggle's own memory in step with this one
   if (p.theme === 'system') lsDel(LEGACY); else lsSet(LEGACY, p.theme);
 }
-function save() { lsSet(KEY, JSON.stringify(prefs)); }
+function save() { lsSet(KEY, JSON.stringify(Object.assign({ v: 2 }, prefs))); }
 function emit() { subs.slice().forEach(function (f) { try { f(prefs); } catch (e) { /* a broken listener must not stop the rest */ } }); }
 function set(patch) { prefs = normalize(Object.assign({}, prefs, patch)); apply(); save(); emit(); return prefs; }
 function reset() { prefs = normalize({}); apply(); lsDel(KEY); lsDel(LEGACY); emit(); return prefs; }
@@ -152,10 +155,10 @@ html[data-ap-code] .md pre code{font-size:inherit}
 [data-code-theme] .code,[data-code-theme] .editor{background:var(--code-bg)}
 html[data-motion=reduced] *,html[data-motion=reduced] *::before,html[data-motion=reduced] *::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
 /* high contrast: stronger text and borders in whichever scheme is showing */
-html[data-contrast=high]:not([data-theme=dark]){--page:#fff;--surface:#fff;--canvas:#fff;--raised:#EDEFF2;--raised2:#DDE1E6;--ink:#000;--ink2:#14171C;--muted:#14171C;--line:rgba(0,0,0,.55);--line2:#000;--primary:#004D3F;--code-bg:#fff;--info:#0A3D91;--accent:#8F0F52;--ok:#1B5C13;--warn:#6B4000;--bad:#9C1229}
-@media (prefers-color-scheme:dark){html[data-contrast=high]:not([data-theme=light]){--page:#000;--surface:#000;--canvas:#000;--raised:#15181C;--raised2:#22262C;--ink:#fff;--ink2:#F2F4F7;--muted:#F2F4F7;--line:rgba(255,255,255,.5);--line2:rgba(255,255,255,.85);--primary:#5CF0D2;--code-bg:#000;--info:#9CD0FF;--accent:#FF9CCB;--ok:#A6F08E;--warn:#FFD27A;--bad:#FF9AA4}}
-html[data-contrast=high][data-theme=dark]{--page:#000;--surface:#000;--canvas:#000;--raised:#15181C;--raised2:#22262C;--ink:#fff;--ink2:#F2F4F7;--muted:#F2F4F7;--line:rgba(255,255,255,.5);--line2:rgba(255,255,255,.85);--primary:#5CF0D2;--code-bg:#000;--info:#9CD0FF;--accent:#FF9CCB;--ok:#A6F08E;--warn:#FFD27A;--bad:#FF9AA4}
-html[data-contrast=high][data-theme=light]{--page:#fff;--surface:#fff;--canvas:#fff;--raised:#EDEFF2;--raised2:#DDE1E6;--ink:#000;--ink2:#14171C;--muted:#14171C;--line:rgba(0,0,0,.55);--line2:#000;--primary:#004D3F;--code-bg:#fff;--info:#0A3D91;--accent:#8F0F52;--ok:#1B5C13;--warn:#6B4000;--bad:#9C1229}
+html[data-contrast=high]:not([data-theme=dark]){--page:#fff;--surface:#fff;--canvas:#fff;--float:#fff;--field:#fff;--you:#EDEFF2;--link:#004D3F;--raised:#EDEFF2;--raised2:#DDE1E6;--ink:#000;--ink2:#14171C;--muted:#14171C;--line:rgba(0,0,0,.55);--line2:#000;--primary:#004D3F;--code-bg:#fff;--info:#0A3D91;--accent:#333333;--ok:#1B5C13;--warn:#6B4000;--bad:#9C1229}
+@media (prefers-color-scheme:dark){html[data-contrast=high]:not([data-theme=light]){--page:#000;--surface:#000;--canvas:#000;--float:#15181C;--field:#000;--you:#22262C;--link:#5CF0D2;--raised:#15181C;--raised2:#22262C;--ink:#fff;--ink2:#F2F4F7;--muted:#F2F4F7;--line:rgba(255,255,255,.5);--line2:rgba(255,255,255,.85);--primary:#5CF0D2;--code-bg:#000;--info:#9CD0FF;--accent:#E0E0E0;--ok:#A6F08E;--warn:#FFD27A;--bad:#FF9AA4}}
+html[data-contrast=high][data-theme=dark]{--page:#000;--surface:#000;--canvas:#000;--float:#15181C;--field:#000;--you:#22262C;--link:#5CF0D2;--raised:#15181C;--raised2:#22262C;--ink:#fff;--ink2:#F2F4F7;--muted:#F2F4F7;--line:rgba(255,255,255,.5);--line2:rgba(255,255,255,.85);--primary:#5CF0D2;--code-bg:#000;--info:#9CD0FF;--accent:#E0E0E0;--ok:#A6F08E;--warn:#FFD27A;--bad:#FF9AA4}
+html[data-contrast=high][data-theme=light]{--page:#fff;--surface:#fff;--canvas:#fff;--float:#fff;--field:#fff;--you:#EDEFF2;--link:#004D3F;--raised:#EDEFF2;--raised2:#DDE1E6;--ink:#000;--ink2:#14171C;--muted:#14171C;--line:rgba(0,0,0,.55);--line2:#000;--primary:#004D3F;--code-bg:#fff;--info:#0A3D91;--accent:#333333;--ok:#1B5C13;--warn:#6B4000;--bad:#9C1229}
 /* the Appearance tab */
 .ap-group{margin:0 0 22px}
 .ap-group>h2{margin:0 0 6px}
