@@ -9,6 +9,7 @@
 - Web chat, stalls: while a turn is quiet for 12 seconds the header says what it waits on (your answer, with a button that jumps to the card; the tool that is running; or the model) and for how long.
 - Web chat, errors: a turn that stops on an unexpected error now shows that error on the page. Before, the page was told nothing and the answer just stopped.
 - Web, Hooks panel: hooks are grouped by event and show each one's timeout, `if` condition, async flag and status message; an empty list now explains how to add a hook.
+- Web, Connectors panel: an opened MCP server now shows its transport, scope, timeout, whether your organization manages it, and the command or URL it runs (secrets redacted).
 
 ## 0.31.0
 

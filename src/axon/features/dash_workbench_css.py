@@ -206,4 +206,5 @@ button.rrow:hover,a.rrow:hover{color:var(--ink);background:var(--raised);box-sha
 /* the rail labels must fit their column */
 .side-nav a .lbl{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;letter-spacing:-.01em}
 @media (max-width:720px){.top .ctitle .ct-t{display:none}}
+.cn-meta{font-size:12px;margin:2px 0}.cn-target{display:block;font-size:12px;overflow-wrap:anywhere;margin-bottom:6px}
 """

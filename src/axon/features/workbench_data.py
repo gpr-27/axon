@@ -163,7 +163,9 @@ def connectors(ws: Path | str) -> dict[str, Any]:
         if not s.disabled and getattr(s, "approval", "") in ("pending", "rejected"):
             status = "pending-approval" if s.approval == "pending" else "rejected"
         rows.append({"name": name, "status": status, "tools": lv.get("tools"), "tool_names": sorted(names.get(name, [])),
-                     "scope": s.scope, "error": redact_text(str(lv.get("error") or ""))[:300],
+                     "scope": s.scope, "transport": s.type,
+                     "target": redact_text((s.url if s.url else " ".join([s.command, *s.args]).strip()))[:160],
+                     "timeout": s.timeout, "managed": bool(s.managed), "error": redact_text(str(lv.get("error") or ""))[:300],
                      "needs_reconnect": status in NEEDS_ACTION and status != "pending-approval", "needs_auth": status == "needs-auth",
                      "needs_approval": status == "pending-approval"})
     return {"servers": rows, "reconnect": sum(1 for r in rows if r["needs_reconnect"]),
