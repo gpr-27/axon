@@ -132,11 +132,19 @@ def build(ver: str) -> list[Path]:
 
 
 def twine_cmd() -> list[str]:
-    for tool in (["twine"], ["uvx", "twine"]):
-        found = shutil.which(tool[0])
-        if found:
-            return [found, *tool[1:]]
-    die("twine is not installed (pip install twine, or install uv)")
+    """The first way of running twine that works here: this Python's module, uvx, then a twine on PATH."""
+    candidates = [[sys.executable, "-m", "twine"]]
+    if shutil.which("uvx"):
+        candidates.append([shutil.which("uvx"), "twine"])
+    if shutil.which("twine"):
+        candidates.append([shutil.which("twine")])
+    for cmd in candidates:
+        try:
+            if subprocess.run([*cmd, "--version"], capture_output=True, timeout=120).returncode == 0:
+                return cmd
+        except (OSError, subprocess.SubprocessError):
+            continue
+    die("twine does not run here: install it (pip install twine) or install uv (then uvx twine is used)")
     return []
 
 
