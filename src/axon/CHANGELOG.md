@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.31.0
+
 - New Context Inspector page in the web app (`#/context/<section>`): every row of the Context panel (and Permissions and Hooks) opens it, with a section list and usage bars, search over full text, collapsible cards with the exact text the model receives, syntax colour, Copy, a Raw/Rendered switch for Markdown, heat bars, sticky group headers, Pin and Drop on messages, and a phone layout. JSON strings in the Files viewer are now coloured as strings instead of comments.
 - New `POST /api/insights/ctxinspect` for the web Context panel: every part of the context window (messages with full tool results and tool-call JSON, system prompt blocks, built-in and MCP tool schemas, MCP instructions, skills, agents, memory files with full contents, autocompact, free space) plus permissions (every rule with its source file) and hooks. Read-only, secrets masked, bodies capped at 200000 characters.
 - The web app's dark and light themes are now true neutral grays (no purple tint, no magenta); the teal accent and the green, red and amber status colours stay. Anything that was magenta (a running mark, the current page dot, charts, code keywords) is now light gray or teal.
