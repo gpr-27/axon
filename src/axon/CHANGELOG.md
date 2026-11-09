@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.32.0
+
+- Web chat, subagents: every Task card now shows its subagent live (each model call and tool call with time and cost, a running count, and the final state), and a "Fanned out" board lists all subagents running together with status and step count. Each running subagent has a message box (Tell) and Stop right in the chat. Before, the page dropped these step events and showed only "Waiting for the result...".
+- Web chat, recordings: opening a saved chat shows, inside each Task card, a recording of that subagent: the task it was given, every step, and its final report, loaded when you open it, with a link to the full transcript. The roster now reports the exact Task call id for each subagent.
+- Web chat, stalls: while a turn is quiet for 12 seconds the header says what it waits on (your answer, with a button that jumps to the card; the tool that is running; or the model) and for how long.
+- Web chat, errors: a turn that stops on an unexpected error now shows that error on the page. Before, the page was told nothing and the answer just stopped.
+
 ## 0.31.0
 
 - New Context Inspector page in the web app (`#/context/<section>`): every row of the Context panel (and Permissions and Hooks) opens it, with a section list and usage bars, search over full text, collapsible cards with the exact text the model receives, syntax colour, Copy, a Raw/Rendered switch for Markdown, heat bars, sticky group headers, Pin and Drop on messages, and a phone layout. JSON strings in the Files viewer are now coloured as strings instead of comments.
