@@ -491,10 +491,23 @@ function wbMemory(P) {
   };
   P.onShow = draw; P.redraw = draw; draw();
 }
+function hooksView(list) {
+  if (!list.length) return [h('p', { class: 'muted' }, 'No hooks are configured.'), h('p', { class: 'muted' }, 'A hook is a command that runs on an event such as PreToolUse. Add one under "hooks" in .axon/settings.json, then reopen this panel.')];
+  const by = {}; list.forEach(k => { (by[k.event] = by[k.event] || []).push(k); });
+  const out = [h('p', { class: 'muted' }, list.length + (list.length === 1 ? ' hook' : ' hooks') + ' across ' + Object.keys(by).length + (Object.keys(by).length === 1 ? ' event' : ' events'))];
+  Object.keys(by).forEach(ev => {
+    out.push(h('div', { class: 'hk-ev' }, ev));
+    by[ev].forEach(k => {
+      const bits = [k.type, k.timeout ? k.timeout + 's timeout' : '', k.async ? 'async' : '', k.if ? 'if ' + k.if : '', k.source].filter(Boolean).join(' · ');
+      out.push(h('div', { class: 'hk' }, h('b', null, k.matcher && k.matcher !== '*' ? 'matches ' + k.matcher : 'every call'), h('code', null, k.command), k.statusMessage ? h('span', { class: 'muted' }, '“' + k.statusMessage + '”') : null, h('span', { class: 'muted' }, bits)));
+    });
+  });
+  return out;
+}
 async function wbHooks(P) {
   P.onShow = () => wbHooks(P);
   try { const d = await api('/api/workbench/hooks?session=' + encodeURIComponent((UI.chat && UI.chat.sid) || ''));
-    P.body.replaceChildren(h('div', { class: 'wp-pad' }, ...(d.hooks.length ? d.hooks.map(k => h('div', { class: 'hk' }, h('b', null, k.event + (k.matcher ? ' · ' + k.matcher : '')), h('code', null, k.command), h('span', { class: 'muted' }, k.type + ' · ' + k.source))) : [h('p', { class: 'muted' }, 'No hooks are configured.')]))); }
+    P.body.replaceChildren(h('div', { class: 'wp-pad' }, ...hooksView(d.hooks || []))); }
   catch (e) { P.body.replaceChildren(errorBox(e.message)); }
 }
 """

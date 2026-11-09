@@ -8,6 +8,7 @@
 - Web chat, recordings: opening a saved chat shows, inside each Task card, a recording of that subagent: the task it was given, every step, and its final report, loaded when you open it, with a link to the full transcript. The roster now reports the exact Task call id for each subagent.
 - Web chat, stalls: while a turn is quiet for 12 seconds the header says what it waits on (your answer, with a button that jumps to the card; the tool that is running; or the model) and for how long.
 - Web chat, errors: a turn that stops on an unexpected error now shows that error on the page. Before, the page was told nothing and the answer just stopped.
+- Web, Hooks panel: hooks are grouped by event and show each one's timeout, `if` condition, async flag and status message; an empty list now explains how to add a hook.
 
 ## 0.31.0
 

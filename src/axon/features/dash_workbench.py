@@ -291,7 +291,9 @@ def hooks_list(srv: "DashServer", session: str) -> dict[str, Any]:
         from axon.hooks.manager import HookManager
         hm = HookManager(getattr(agent, "settings", None) or srv.settings_obj(), srv.workspace)
     return {"hooks": [{"event": h["event"], "matcher": h["matcher"], "type": h["type"], "source": redact_text(str(h["source"])),
-                       "command": redact_text(str(h["command"]))[:200]} for h in hm.describe()]}
+                       "command": redact_text(str(h["command"]))[:200], "timeout": h.get("timeout"), "if": redact_text(str(h.get("if") or "")),
+                       "async": bool(h.get("async")), "statusMessage": redact_text(str(h.get("statusMessage") or ""))[:120]}
+                      for h in hm.describe()]}
 
 
 # ─── the chat title menu: rename and delete (delete moves to the project trash; /restore undoes it) ──

@@ -185,7 +185,7 @@ button.rrow:hover,a.rrow:hover{color:var(--ink);background:var(--raised);box-sha
 .br-msg{padding:6px 12px;font-size:12px;color:var(--ink2);min-height:0}.br-msg:empty{display:none}
 .br-stage{flex:1;min-height:0;position:relative;background:var(--page)}
 .br-frame{position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff}
-.hk{display:flex;flex-direction:column;gap:2px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}.hk code{font-size:12px;overflow-wrap:anywhere}
+.hk-ev{margin:12px 0 2px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.hk{display:flex;flex-direction:column;gap:2px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}.hk code{font-size:12px;overflow-wrap:anywhere}
 .wp-pad .row{display:flex;gap:10px;align-items:center;padding:4px 0;font-size:13px}.wp-pad .row .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* phone: panels are sheets */
 @media (max-width:900px){
