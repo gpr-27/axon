@@ -125,8 +125,7 @@ def test_text_before_a_cut_is_not_kept_once_the_model_moves_on_to_a_tool(workspa
 
 
 def test_max_tokens_continuation_is_capped(workspace: Path) -> None:
-    cut = lambda: AssistantTurn(blocks=[TextBlock(text="more ")], stop_reason="max_tokens")
-    prov = FakeProvider([cut() for _ in range(10)])
+    prov = FakeProvider([AssistantTurn(blocks=[TextBlock(text="more ")], stop_reason="max_tokens") for _ in range(10)])
     agent = make_agent(prov, workspace)
     res = agent.run_turn("go")
     assert res.stop_reason == "max_tokens"

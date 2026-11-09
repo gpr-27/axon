@@ -117,9 +117,18 @@ def test_max_tokens_mid_tool_call_does_not_execute_truncated_call(ext_env: AxonE
     assert _pairs_valid(ext_env.llm.completion_requests()[-1].messages)
 
 
-def test_max_tokens_plain_text_reports_stop_reason(ext_env: AxonEnv) -> None:
-    """A text answer cut by finish_reason=length is surfaced with stop_reason=max_tokens in JSON output."""
-    ext_env.llm.enqueue([{"text": "partial answer"}, {"finish": "length"}])
+def test_max_tokens_plain_text_continues_and_joins_the_answer(ext_env: AxonEnv) -> None:
+    """A text answer cut by finish_reason=length is continued, and the JSON result holds the whole answer."""
+    ext_env.llm.enqueue([{"text": "first part, "}, {"finish": "length"}], [{"text": "second part."}])
+    r = ext_env.run(["-p", "--output-format", "json", "go"])
+    no_traceback(r)
+    assert r.json()["stop_reason"] == "end_turn"
+    assert r.json()["result"] == "first part, second part."
+
+
+def test_max_tokens_plain_text_reports_stop_reason_after_the_last_continuation(ext_env: AxonEnv) -> None:
+    """A reply still cut after every allowed continuation is surfaced with stop_reason=max_tokens in JSON output."""
+    ext_env.llm.enqueue(*[[{"text": "partial answer "}, {"finish": "length"}] for _ in range(4)])
     r = ext_env.run(["-p", "--output-format", "json", "go"])
     no_traceback(r)
     assert r.json()["stop_reason"] == "max_tokens"
