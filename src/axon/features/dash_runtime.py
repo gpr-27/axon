@@ -609,8 +609,8 @@ class Runtime:
                     res = agent.run_turn_threaded(text)
                 except KeyboardInterrupt:
                     pass                                   # the wrapper already announced it
-                except Exception:
-                    pass                                   # ... and this
+                except Exception as exc:                   # a turn that crashed must say so, or the page just stops
+                    self.hub.emit("error", {"message": f"The turn stopped because of an error: {type(exc).__name__}: {str(exc)[:500]}"})
                 else:
                     if res is None:
                         self.hub.emit("note", {"message": "The turn moved to the background."})
