@@ -185,8 +185,8 @@ async function wbMoreMenu(anchor) {
   if ((st.todos || []).length) panels.push({ label: 'Plan and todos', hint: String(st.todos.length), run: () => wbOpen('plan') });
   const mem = WB.ctx && WB.ctx.lists && WB.ctx.lists.memory_files || [];
   if (mem.length) panels.push({ label: 'Memory', hint: String(mem.length), run: () => wbOpen('memory') });
-  let nh = 0; try { nh = ((await api('/api/workbench/hooks?session=' + encodeURIComponent((C && C.sid) || ''))).hooks || []).length; } catch (e) { /* none */ }
-  if (nh) panels.push({ label: 'Hooks', hint: String(nh), run: () => wbOpen('hooks') });
+  let nh = 0, np = 0; try { const hd = await api('/api/workbench/hooks?session=' + encodeURIComponent((C && C.sid) || '')); nh = (hd.hooks || []).length; np = (hd.problems || []).length; } catch (e) { /* none */ }
+  if (nh || np) panels.push({ label: 'Hooks', hint: np ? (nh ? nh + ' · ' : '') + 'needs attention' : String(nh), run: () => wbOpen('hooks') });
   wbMenu(anchor, [...items, panels.length ? '-' : null, panels.length ? { head: 'Panels' } : null, ...panels], { alignRight: true });
 }
 function IS_MAC_WB() { return /Mac|iPhone|iPad/i.test(navigator.platform || ''); }
@@ -491,10 +491,11 @@ function wbMemory(P) {
   };
   P.onShow = draw; P.redraw = draw; draw();
 }
-function hooksView(list) {
-  if (!list.length) return [h('p', { class: 'muted' }, 'No hooks are configured.'), h('p', { class: 'muted' }, 'A hook is a command that runs on an event such as PreToolUse. Add one under "hooks" in .axon/settings.json, then reopen this panel.')];
+function hooksView(list, problems) {
+  const warn = (problems || []).map(t => h('div', { class: 'bad hk-warn' }, t));
+  if (!list.length) return [...warn, h('p', { class: 'muted' }, 'No hooks are running.'), h('p', { class: 'muted' }, 'A hook is a command that runs on an event such as PreToolUse. Add one under "hooks" in .axon/settings.json, then reopen this panel.')];
   const by = {}; list.forEach(k => { (by[k.event] = by[k.event] || []).push(k); });
-  const out = [h('p', { class: 'muted' }, list.length + (list.length === 1 ? ' hook' : ' hooks') + ' across ' + Object.keys(by).length + (Object.keys(by).length === 1 ? ' event' : ' events'))];
+  const out = [...warn, h('p', { class: 'muted' }, list.length + (list.length === 1 ? ' hook' : ' hooks') + ' across ' + Object.keys(by).length + (Object.keys(by).length === 1 ? ' event' : ' events'))];
   Object.keys(by).forEach(ev => {
     out.push(h('div', { class: 'hk-ev' }, ev));
     by[ev].forEach(k => {
@@ -507,7 +508,7 @@ function hooksView(list) {
 async function wbHooks(P) {
   P.onShow = () => wbHooks(P);
   try { const d = await api('/api/workbench/hooks?session=' + encodeURIComponent((UI.chat && UI.chat.sid) || ''));
-    P.body.replaceChildren(h('div', { class: 'wp-pad' }, ...hooksView(d.hooks || []))); }
+    P.body.replaceChildren(h('div', { class: 'wp-pad' }, ...hooksView(d.hooks || [], d.problems || []))); }
   catch (e) { P.body.replaceChildren(errorBox(e.message)); }
 }
 """

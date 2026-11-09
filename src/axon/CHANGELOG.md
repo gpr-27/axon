@@ -10,6 +10,7 @@
 - Web chat, errors: a turn that stops on an unexpected error now shows that error on the page. Before, the page was told nothing and the answer just stopped.
 - Web, Hooks panel: hooks are grouped by event and show each one's timeout, `if` condition, async flag and status message; an empty list now explains how to add a hook.
 - Web, Connectors panel: an opened MCP server now shows its transport, scope, timeout, whether your organization manages it, and the command or URL it runs (secrets redacted).
+- Web, Hooks panel: when hooks do not load (for example, a folder that is not trusted yet), the Hooks entry says "needs attention" and the panel shows the reason, such as "Run /trust to review and allow". Before, it only said "No hooks are configured."
 - Web chat, parity with the terminal: the "think harder" effort boost and the goal-verification re-prompt now appear as plain notices instead of a raw JSON block, and a test fails if any new agent event has no handler on the page.
 
 ## 0.31.0

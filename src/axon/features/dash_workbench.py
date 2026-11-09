@@ -293,7 +293,8 @@ def hooks_list(srv: "DashServer", session: str) -> dict[str, Any]:
     return {"hooks": [{"event": h["event"], "matcher": h["matcher"], "type": h["type"], "source": redact_text(str(h["source"])),
                        "command": redact_text(str(h["command"]))[:200], "timeout": h.get("timeout"), "if": redact_text(str(h.get("if") or "")),
                        "async": bool(h.get("async")), "statusMessage": redact_text(str(h.get("statusMessage") or ""))[:120]}
-                      for h in hm.describe()]}
+                      for h in hm.describe()],
+            "problems": [redact_text(str(e))[:300] for e in (getattr(hm, "load_errors", None) or [])][:10]}
 
 
 # ─── the chat title menu: rename and delete (delete moves to the project trash; /restore undoes it) ──
