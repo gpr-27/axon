@@ -151,6 +151,83 @@ async function viewAgent(subSid) {
     await tick(); const t = setInterval(() => { if (!C.closed) tick(); }, 2500); onLeave(() => clearInterval(t));
   }, { wide: false, persist: true, key: 'agent:' + subSid, hash: '#/agent/' + encodeURIComponent(subSid), title: 'Subagent' });
 }
+
+// ---- live view of a subagent inside its Task card, plus one "fan-out" board when several run together ----
+function saLive(C, n) {
+  C.subLive = C.subLive || {};
+  let L = C.subLive[n];
+  if (L && L.panel.isConnected) return L;
+  const cur = C.cur; if (!cur) return null;
+  const card = Object.values(cur.tools || {}).find(c => c.dataset.sub === String(n)); if (!card) return null;
+  const list = h('div', { class: 'sa-steps' }, h('div', { class: 'sa-empty' }, 'Waiting for the first step...'));
+  const stat = h('span', { class: 'sa-stat' }, 'running'), count = h('span', null, '0 steps'), cost = h('span', null, '');
+  const panel = h('div', { class: 'sa-live', 'data-state': 'run' }, h('div', { class: 'sa-lh' }, h('b', null, 'Subagent ' + n), count, cost, stat), list);
+  const tid = 'sub-' + n;
+  const inp = h('input', { type: 'text', class: 'sa-say', placeholder: 'Tell subagent ' + n + ' something (it reads this before its next step)', 'aria-label': 'Message to subagent ' + n, maxlength: 4000 });
+  const say = () => {
+    const t = inp.value.trim(); if (!t) return; inp.disabled = true;
+    api('/api/subagent/tell', { session: C.sid, task: tid, text: t }).then(() => {
+      inp.value = ''; if (L.first) { L.list.replaceChildren(); L.first = false; }
+      L.list.append(h('div', { class: 'sa-row you' }, h('span', { class: 'sk' }, '\u2192'), h('span', { class: 'sn' }, 'you'), h('span', { class: 'ss', title: t }, t), h('span', { class: 'sd' }, 'sent')));
+      L.list.scrollTop = L.list.scrollHeight;
+    }).catch(e => toast(e.message)).finally(() => { inp.disabled = false; inp.focus(); });
+  };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); say(); } });
+  const stop = h('button', { type: 'button', class: 'btn danger sa-stopbtn', onclick: () => {
+    if (!confirm('Stop subagent ' + n + '? Work it already did is kept.')) return;
+    api('/api/subagent/stop', { session: C.sid, task: tid }).then(() => toast('Stopping subagent ' + n)).catch(e => toast(e.message));
+  } }, 'Stop');
+  const ctl = h('div', { class: 'sa-ctl' }, inp, h('button', { type: 'button', class: 'btn', onclick: say }, 'Tell'), stop);
+  panel.append(ctl);
+  card.append(panel);
+  L = { panel, list, stat, count, cost, n, steps: 0, tools: 0, usd: 0, card, first: true, ctl };
+  C.subLive[n] = L; return L;
+}
+function subagentStep(C, ev) {
+  if (C.replaying) return;
+  const n = Number(String(ev.task_id || '').replace(/^sub-/, '')) || 0; if (!n) return;
+  const L = saLive(C, n); if (!L) return;
+  if (L.first) { L.list.replaceChildren(); L.first = false; }
+  const llm = ev.kind === 'llm';
+  L.steps++; if (!llm) L.tools++; L.usd += ev.cost || 0;
+  L.count.textContent = L.steps + (L.steps === 1 ? ' step' : ' steps') + ' · ' + L.tools + (L.tools === 1 ? ' tool' : ' tools');
+  L.cost.textContent = L.usd ? usd(L.usd) : '';
+  const name = llm ? 'model call' : (ev.name || 'tool');
+  const sum = (llm ? (ev.name ? ev.name + ' · ' : '') : '') + (ev.summary || '');
+  const row = h('div', { class: 'sa-row ' + (llm ? 'llm' : 'tool') + (ev.is_error ? ' err' : ''), title: sum },
+    h('span', { class: 'sk' }, llm ? '◆' : (ev.is_error ? '✕' : '▸')), h('span', { class: 'sn' }, name), h('span', { class: 'ss' }, sum),
+    h('span', { class: 'sd' }, ev.duration_s ? dur(ev.duration_s) : ''));
+  const stick = L.list.scrollTop + L.list.clientHeight >= L.list.scrollHeight - 24;
+  L.list.append(row);
+  while (L.list.children.length > 300) L.list.firstChild.remove();
+  if (stick) L.list.scrollTop = L.list.scrollHeight;
+  fanoutDraw(C);
+}
+function saLiveEnd(C, n, ev) {
+  const L = C.subLive && C.subLive[n]; if (!L) return;
+  const bad = ev.status === 'error' || ev.status === 'cancelled';
+  L.panel.dataset.state = bad ? 'bad' : 'ok'; if (L.ctl) L.ctl.hidden = true;
+  L.stat.textContent = bad ? ev.status : 'finished in ' + dur(ev.duration_s);
+  if (L.first) { L.list.replaceChildren(h('div', { class: 'sa-empty' }, 'No steps were reported.')); L.first = false; }
+  if (bad && ev.detail) L.list.append(h('div', { class: 'sa-row err' }, h('span', { class: 'sk' }, '✕'), h('span', { class: 'sn' }, 'error'), h('span', { class: 'ss', title: ev.detail }, ev.detail)));
+}
+function fanoutDraw(C) {
+  const cur = C.cur; if (!cur) return;
+  const all = Object.values(C.subBoard || {}).filter(x => x.turn === cur);
+  if (all.length < 2) return;
+  let b = cur.fanout;
+  if (!b || !b.el.isConnected) {
+    const el = h('div', { class: 'fanout', role: 'status', 'aria-live': 'polite' }, h('h5', null, ''));
+    const host = cur.body || C.feed; host.append(el); b = cur.fanout = { el };
+  }
+  const run = all.filter(x => x.state === 'run').length;
+  const rows = all.map(x => {
+    const L = C.subLive && C.subLive[x.n];
+    return h('div', { class: 'fo-row ' + x.state }, h('span', { class: 'fo-dot' }), h('a', { href: '#/agent/' + encodeURIComponent(saId(C.sid, x.n)) }, x.type + ' · ' + x.title),
+      h('span', { class: 'fo-m' }, L ? L.steps + ' steps' : ''), h('span', { class: 'fo-m' }, x.state === 'run' ? 'running' : x.state === 'bad' ? 'failed' : 'done'));
+  });
+  b.el.replaceChildren(h('h5', null, 'FANNED OUT · ' + all.length + ' SUBAGENTS · ' + (run ? run + ' RUNNING' : 'ALL FINISHED')), ...rows);
+}
 // The live "Subagent started/finished" line in the chat links to that subagent, and the running Task card links to it too.
 function subagentEvent(C, ev) {
   const n = Number(String(ev.task_id || '').replace(/^sub-/, '')) || 0;
@@ -163,6 +240,13 @@ function subagentEvent(C, ev) {
   if (ev.phase === 'start' && n && cur) {
     const card = Object.values(cur.tools || {}).find(c => c.dataset.task === '1' && !c.dataset.sub);
     if (card) { card.dataset.sub = String(n); const a = card.querySelector('.next a.plink'); if (a) { a.href = href; a.textContent = 'Open subagent ' + n; } }
+  }
+  if (!C.replaying && n) {
+    C.subBoard = C.subBoard || {};
+    const prev = C.subBoard[n] || {};
+    C.subBoard[n] = { n, turn: prev.turn || cur, type: ev.agent_type, title: ev.title, state: ev.phase === 'start' ? 'run' : (ev.status === 'error' || ev.status === 'cancelled' ? 'bad' : 'ok') };
+    if (ev.phase === 'end') saLiveEnd(C, n, ev); else saLive(C, n);
+    fanoutDraw(C);
   }
   if (!C.replaying) refreshSubs(C);
 }

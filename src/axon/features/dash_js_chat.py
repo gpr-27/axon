@@ -314,6 +314,18 @@ function drawHeadStatus(C) {
       h('button', { class: 'mini', onclick: () => location.reload() }, 'Reload page')));
     setTimeout(() => { if (C.offline) drawHeadStatus(C); }, 5000);
   }
+  if (st.busy && !C.offline) {
+    const quiet = C.lastEv ? Date.now() - C.lastEv : 0;
+    const ask = C.feed && C.feed.querySelector('.approve');
+    if (ask) {
+      el.append(h('button', { class: 'pill wait-pill need', type: 'button', title: 'The turn is paused until you answer', onclick: () => ask.scrollIntoView({ block: 'center', behavior: 'smooth' }) }, 'Waiting for your answer \u2193'));
+    } else if (quiet > 12000) {
+      const run = C.cur && Object.values(C.cur.tools || {}).filter(c => c.dataset.state === 'run' || c.dataset.state === 'wait');
+      const what = run && run.length ? 'Running ' + run.map(c => c.axName).slice(0, 3).join(', ') : 'Waiting for the model';
+      el.append(h('span', { class: 'pill wait-pill', role: 'status', title: 'No new activity from the turn. It is still running; press Stop to end it.' }, h('span', { class: 'spin' }), ' ' + what + ' \u00B7 quiet for ' + Math.round(quiet / 1000) + 's'));
+    }
+    if (!C.stallTimer) C.stallTimer = setInterval(() => { if (C.closed || !(C.st && C.st.busy)) { clearInterval(C.stallTimer); C.stallTimer = 0; drawHeadStatus(C); return; } drawHeadStatus(C); }, 3000);
+  }
   if (st.external) el.append(h('span', { class: 'term-note', title: 'Events from the terminal session this page is attached to' }, 'Terminal session'));
   const stop = C.head.querySelector('.stop-btn'); if (stop) stop.hidden = !st.busy;
   C.head.classList.add('slim'); C.head.classList.toggle('idle', !st.busy && !C.offline && !st.external);
@@ -588,6 +600,7 @@ function applyEvent(C, ev) {
       const sd = Object.assign({ n: ev.iteration, model: ev.model, tin: u.input_tokens || 0 }, { dur: ev.duration_s || 0, cost: ev.cost || 0, tout: u.output_tokens || 0, cread: u.cache_read_tokens || 0, stop: ev.stop_reason, miss: ev.cache_miss_cause || '', detail: ev.cache_miss_detail || '' });
       C.steps.push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
     case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } if (C.cur && C.cur.step && ev.miss) C.cur.step.detail.append(h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : ''))); break; }
+    case 'subagent_step': subagentStep(C, ev); break;
     case 'subagent': subagentEvent(C, ev); if (ev.phase !== 'start') liveFiles(C, { changes: [1] }); break;
     case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
     case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;

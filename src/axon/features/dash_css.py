@@ -437,4 +437,34 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 /* Jump to latest (a style element added by script is blocked by the page's content policy) */
 .jump-latest{position:absolute;left:50%;transform:translateX(-50%);z-index:5;border:1px solid var(--line);background:var(--raised);color:var(--ink);border-radius:999px;padding:5px 14px;font:inherit;font-size:12.5px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.25)}
 .jump-latest[hidden]{display:none}
+/* ---- live subagent panel inside a Task card, and the fan-out board ---- */
+.sa-live{margin:8px 12px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);overflow:hidden}
+.sa-live .sa-lh{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink2)}
+.sa-live .sa-lh b{color:var(--ink)}
+.sa-live .sa-stat{margin-left:auto;font-weight:600}
+.sa-live[data-state="run"] .sa-stat{color:var(--info)}.sa-live[data-state="ok"] .sa-stat{color:var(--ok)}.sa-live[data-state="bad"] .sa-stat{color:var(--bad)}
+.sa-live[data-state="run"] .sa-lh::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--info);animation:sapulse 1s ease-in-out infinite}
+@keyframes sapulse{50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.sa-live[data-state="run"] .sa-lh::before{animation:none}}
+.sa-steps{max-height:220px;overflow:auto;padding:4px 0;font:11.5px ui-monospace,Menlo,monospace}
+.sa-row{display:grid;grid-template-columns:16px minmax(70px,auto) minmax(0,1fr) auto;gap:8px;padding:2px 10px;align-items:baseline}
+.sa-row .sk{color:var(--ink2)}.sa-row.tool .sk{color:var(--primary)}.sa-row .sn{color:var(--ink);font-weight:600}
+.sa-row .ss{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sa-row .sd{color:var(--ink2)}
+.sa-row.err .sn,.sa-row.err .sk{color:var(--bad)}
+.sa-empty{padding:6px 10px;color:var(--ink2);font-size:12px}
+.fanout{border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:10px 0;padding:8px 10px;font-size:12.5px}
+.fanout h5{margin:0 0 6px;font-size:12px;color:var(--ink2);font-weight:600;letter-spacing:.02em}
+.fanout .fo-row{display:grid;grid-template-columns:14px minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:3px 0}
+.fanout .fo-row a{color:var(--ink);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fanout .fo-row a:hover{text-decoration:underline}
+.fanout .fo-dot{width:8px;height:8px;border-radius:50%;background:var(--info)}
+.fanout .fo-row.ok .fo-dot{background:var(--ok)}.fanout .fo-row.bad .fo-dot{background:var(--bad)}
+.fanout .fo-m{color:var(--ink2);font-variant-numeric:tabular-nums}
+.sa-ctl{display:flex;gap:6px;padding:6px 10px;border-top:1px solid var(--line)}
+.sa-ctl[hidden]{display:none}
+.sa-ctl .sa-say{flex:1;min-width:0;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);padding:4px 8px;font:inherit;font-size:12px}
+.sa-ctl .sa-say:focus{outline:2px solid var(--primary);outline-offset:1px}
+.sa-row.you .sk,.sa-row.you .sn{color:var(--primary)}
+.wait-pill{display:inline-flex;gap:6px;align-items:center;font-size:12px}
+.wait-pill.need{border:1px solid var(--primary);color:var(--primary);background:transparent;cursor:pointer;font:inherit;font-size:12px;border-radius:999px;padding:2px 10px}
 """
