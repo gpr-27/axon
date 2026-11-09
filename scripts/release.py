@@ -132,10 +132,10 @@ def build(ver: str) -> list[Path]:
 
 
 def twine_cmd() -> list[str]:
-    if shutil.which("twine"):
-        return ["twine"]
-    if shutil.which("uvx"):
-        return ["uvx", "twine"]
+    for tool in (["twine"], ["uvx", "twine"]):
+        found = shutil.which(tool[0])
+        if found:
+            return [found, *tool[1:]]
     die("twine is not installed (pip install twine, or install uv)")
     return []
 
