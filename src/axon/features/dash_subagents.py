@@ -105,7 +105,7 @@ def _link_parents(rows: list[dict[str, Any]], calls: list[dict[str, Any]], live:
         else:
             call = next((c for c in calls if c["index"] == r["index"]), None)
         if call is not None:
-            r["parent_step"] = {"entry": call["entry"], "tool": call["tool"], "label": call["label"], "inferred": False}
+            r["parent_step"] = {"entry": call["entry"], "tool": call["tool"], "label": call["label"], "inferred": False, "call_id": call["id"]}
             taken.add(id(call))
     waiting = [c for c in calls if not c["done"] and c["index"] is None and id(c) not in taken]
     pending = [r for r in rows if "parent_step" not in r and r.get("live")]

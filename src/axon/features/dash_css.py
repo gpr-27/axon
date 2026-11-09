@@ -467,4 +467,9 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 .sa-row.you .sk,.sa-row.you .sn{color:var(--primary)}
 .wait-pill{display:inline-flex;gap:6px;align-items:center;font-size:12px}
 .wait-pill.need{border:1px solid var(--primary);color:var(--primary);background:transparent;cursor:pointer;font:inherit;font-size:12px;border-radius:999px;padding:2px 10px}
+details.sa-hist{margin:8px 12px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+details.sa-hist>summary{cursor:pointer;padding:6px 10px;font-size:12px;color:var(--ink2)}
+details.sa-hist[open]>summary{border-bottom:1px solid var(--line);color:var(--ink)}
+.sa-sect{padding:8px 10px 2px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2)}
+.sa-pre{margin:4px 10px;max-height:200px;overflow:auto;font-size:12px;white-space:pre-wrap}
 """

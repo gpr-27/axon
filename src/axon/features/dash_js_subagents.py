@@ -228,6 +228,32 @@ function fanoutDraw(C) {
   });
   b.el.replaceChildren(h('h5', null, 'FANNED OUT · ' + all.length + ' SUBAGENTS · ' + (run ? run + ' RUNNING' : 'ALL FINISHED')), ...rows);
 }
+
+// A saved Task card: the subagent's recorded steps and final report, loaded when opened (the same rows as the live panel).
+function saHistory(sid, r) {
+  const body = h('div', { class: 'sa-hist-body' }, h('div', { class: 'sa-empty' }, 'Loading the recording...'));
+  const d = h('details', { class: 'sa-hist' }, h('summary', null, 'Subagent ' + r.index + ' recording · ' + (r.title || '') + ' · ' + saStatusLabel(r)), body);
+  let loaded = false;
+  d.addEventListener('toggle', async () => {
+    if (!d.open || loaded) return; loaded = true;
+    try {
+      const D = await api('/api/subagent/detail?session=' + encodeURIComponent(sid) + '&n=' + r.index);
+      const kids = [];
+      if (D.prompt) kids.push(h('div', { class: 'sa-sect' }, 'Task given'), h('pre', { class: 'out sa-pre' }, D.prompt));
+      kids.push(h('div', { class: 'sa-sect' }, 'Steps' + (D.steps && D.steps.length ? ' (' + D.steps.length + ')' : '')));
+      if (D.steps && D.steps.length) {
+        const list = h('div', { class: 'sa-steps' });
+        for (const s of D.steps) { const llm = s.kind === 'llm', sum = (llm && s.name ? s.name + ' · ' : '') + (s.summary || '');
+          list.append(h('div', { class: 'sa-row ' + (llm ? 'llm' : 'tool') + (s.is_error ? ' err' : ''), title: sum }, h('span', { class: 'sk' }, llm ? '◆' : (s.is_error ? '✕' : '▸')), h('span', { class: 'sn' }, llm ? 'model call' : (s.name || 'tool')), h('span', { class: 'ss' }, sum), h('span', { class: 'sd' }, s.duration_s ? dur(s.duration_s) : ''))); }
+        kids.push(list);
+      } else kids.push(h('div', { class: 'sa-empty' }, D.step_note || 'No steps were recorded.'));
+      if (D.result) kids.push(h('div', { class: 'sa-sect' }, 'Final report'), h('pre', { class: 'out sa-pre' }, D.result));
+      kids.push(h('div', { class: 'sa-empty' }, h('a', { class: 'plink', href: '#/agent/' + encodeURIComponent(r.session_id) }, 'Open the full transcript')));
+      body.replaceChildren(...kids);
+    } catch (e) { loaded = false; body.replaceChildren(h('div', { class: 'sa-empty bad' }, e.message)); }
+  });
+  return d;
+}
 // The live "Subagent started/finished" line in the chat links to that subagent, and the running Task card links to it too.
 function subagentEvent(C, ev) {
   const n = Number(String(ev.task_id || '').replace(/^sub-/, '')) || 0;
@@ -263,10 +289,11 @@ function subagentEvent(C, ev) {
     if (!sid || art.closest('.sa-nolink')) return;
     let d; try { d = await saRoster(sid, false); } catch (e) { return; }
     for (const [card, idx, i] of cards) {
-      const r = (d.subagents || []).find(x => x.parent_step && x.parent_step.entry === i && x.parent_step.tool === idx && !x.parent_step.inferred); if (!r || !r.session_id) continue;
+      const r = (d.subagents || []).find(x => x.parent_step && !x.parent_step.inferred && ((card.axId && x.parent_step.call_id === card.axId) || (x.parent_step.entry === i && x.parent_step.tool === idx))); if (!r || !r.session_id) continue;
       if (card.querySelector('.sa-open')) continue;
       const a = h('a', { class: 'plink sa-open', href: '#/agent/' + encodeURIComponent(r.session_id), title: (r.type ? r.type + ' · ' : '') + r.title + ' · ' + saStatusLabel(r), onclick: (e) => { e.stopPropagation(); } }, 'Open subagent ' + r.index);
       (card.querySelector('.p-why') || card.querySelector('summary')).append(' ', a);
+      if (!card.querySelector('.sa-hist')) card.append(saHistory(sid, r));
     }
   }
   const obs = new MutationObserver((muts) => {
