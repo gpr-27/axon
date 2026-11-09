@@ -161,7 +161,7 @@ def open_console(agent: Any, *, everything: bool = False, target: Any = None) ->
         if held:
             events, agent._held_events = agent._held_events or [], None
             for ev in events:         # for the trace; their lines were this screen's rows
-                agent._deliver(ev, show=type(ev).__name__ not in _QUIET_EVENTS)
+                agent._deliver(ev, show=type(ev).__name__ not in _QUIET_EVENTS, held=True)
     if keys.buf.strip():
         _keep_unsent(keys.buf)
     return True

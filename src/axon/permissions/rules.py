@@ -151,6 +151,17 @@ def _glob_pattern_base(pattern: Any) -> str | None:
 
 # ─── Shell parsing ──────────────────────────────────────────────────────────
 
+def _opens_ansi_c(cmd: str, quote_at: int) -> bool:
+    """True when the ``'`` at ``quote_at`` starts a ``$'...'`` string, inside which a backslash escapes the next
+    character (so ``\\'`` does not end it), unlike a plain single-quoted string."""
+    if quote_at < 1 or cmd[quote_at - 1] != "$":
+        return False
+    slashes, j = 0, quote_at - 2
+    while j >= 0 and cmd[j] == "\\":
+        slashes, j = slashes + 1, j - 1
+    return slashes % 2 == 0
+
+
 def split_shell_commands(cmd: str) -> list[str]:
     """Split a shell line into sub-commands on ; && || | & and newlines, honouring quotes."""
     parts: list[str] = []
@@ -162,16 +173,16 @@ def split_shell_commands(cmd: str) -> list[str]:
         ch = cmd[i]
         if quote:
             buf.append(ch)
-            if ch == "\\" and quote == '"' and i + 1 < n:
+            if ch == "\\" and quote in ('"', "$'") and i + 1 < n:
                 buf.append(cmd[i + 1])
                 i += 2
                 continue
-            if ch == quote:
+            if ch == quote or (quote == "$'" and ch == "'"):
                 quote = None
             i += 1
             continue
         if ch in ("'", '"'):
-            quote = ch
+            quote = "$'" if ch == "'" and _opens_ansi_c(cmd, i) else ch
             buf.append(ch)
             i += 1
             continue
@@ -210,12 +221,12 @@ def redirect_targets(cmd: str) -> list[str]:
             ch = sub[i]
             i += 1
             if quote:
-                if ch == "\\" and quote == '"':
+                if ch == "\\" and quote in ('"', "$'"):
                     i += 1
-                elif ch == quote:
+                elif ch == quote or (quote == "$'" and ch == "'"):
                     quote = None
             elif ch in "'\"":
-                quote = ch
+                quote = "$'" if ch == "'" and _opens_ansi_c(sub, i - 1) else ch
             elif ch == "\\":
                 i += 1
             elif ch == ">" and not (i < n and sub[i] == "("):
@@ -246,6 +257,12 @@ def has_substitution(cmd: str) -> bool:
     while i < n:
         ch = cmd[i]
         i += 1
+        if quote == "$'":
+            if ch == "\\":
+                i += 1                  # inside $'...' a backslash escapes the next character, even a quote
+            elif ch == "'":
+                quote = None
+            continue
         if quote == "'":
             if ch == "'":
                 quote = None
@@ -254,7 +271,7 @@ def has_substitution(cmd: str) -> bool:
             i += 1  # an escaped quote (\' or \") neither opens nor closes a quote
             continue
         if ch == "'" and quote is None:
-            quote = "'"
+            quote = "$'" if _opens_ansi_c(cmd, i - 1) else "'"
             continue
         if ch == '"':
             quote = None if quote == '"' else '"'
@@ -275,6 +292,13 @@ def substitution_bodies(cmd: str) -> list[str]:
     i, n = 0, len(cmd)
     while i < n:
         ch = cmd[i]
+        if quote == "$'":
+            if ch == "\\":
+                i += 1                  # inside $'...' a backslash escapes the next character, even a quote
+            elif ch == "'":
+                quote = None
+            i += 1
+            continue
         if quote == "'":
             if ch == "'":
                 quote = None
@@ -284,7 +308,7 @@ def substitution_bodies(cmd: str) -> list[str]:
             i += 2
             continue
         if ch == "'" and quote is None:
-            quote = "'"
+            quote = "$'" if _opens_ansi_c(cmd, i) else "'"
         elif ch == '"':
             quote = None if quote == '"' else '"'
         elif ch == "`":
@@ -317,7 +341,44 @@ def all_subcommands(cmd: str, _depth: int = 0) -> list[str]:
     if _depth < 8:
         for body in substitution_bodies(cmd):
             subs += all_subcommands(body, _depth + 1)
+        for sub in list(subs):
+            payload = nested_shell_payload(sub)
+            if payload:
+                subs += all_subcommands(payload, _depth + 1)
     return subs
+
+
+_NESTED_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+
+
+def plain_words(sub: str) -> list[str]:
+    """The words of one sub-command as the shell reads them: quotes and backslashes removed, and a program
+    given by path (``/bin/rm``) named by its last part. Empty when the text cannot be split."""
+    try:
+        words = shlex.split(strip_wrappers(bare_simple_command(sub)), posix=True)
+    except ValueError:
+        return []
+    if words:
+        words[0] = words[0].rsplit("/", 1)[-1]
+    return words
+
+
+def nested_shell_payload(sub: str) -> str | None:
+    """The text ``bash -c '...'``, ``sh -c ...`` or ``eval ...`` will run, else None. Deny and ask rules read it,
+    so ``bash -c 'rm x'`` is as visible as ``rm x``."""
+    words = plain_words(sub)
+    if not words:
+        return None
+    if words[0] == "eval":
+        return " ".join(words[1:]) or None
+    if words[0] not in _NESTED_SHELLS:
+        return None
+    for i, arg in enumerate(words[1:], start=1):
+        if not arg.startswith("-"):
+            return None                        # a script file: its contents are not visible here
+        if not arg.startswith("--") and "c" in arg:
+            return words[i + 1] if i + 1 < len(words) else None
+    return None
 
 
 _ENV_ASSIGN = re.compile(r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"(?:[^"\\]|\\.)*"|\S)*\s+""")
@@ -785,7 +846,12 @@ class Rule:
                     return True
                 for s in all_subcommands(cmd):
                     s = bare_simple_command(s)
-                    if s and (_command_matches(pat, s) or _command_matches(pat, strip_wrappers(s))):
+                    if not s:
+                        continue
+                    if _command_matches(pat, s) or _command_matches(pat, strip_wrappers(s)):
+                        return True
+                    words = plain_words(s)     # '/bin/rm x', '\rm x' and 'r"m" x' are all rm
+                    if words and _command_matches(pat, strip_wrappers(" ".join(words))):
                         return True
                 return False
             if is_unparseable_compound(cmd):

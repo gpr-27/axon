@@ -414,8 +414,18 @@ def handle_config(agent: Any, arg: str) -> CommandResult:
             except Exception:
                 window = 200_000
             new_val = parse_compact_threshold(value, window)
+        elif key == "small_model" and value.lower() in ("-", "none", "off", "clear", "unset"):
+            new_val = None       # same words as /settings; the text 'none' would be sent to the provider as a model name
+        elif key == "base_url" and not re.match(r"https?://\S+$", value):
+            raise ValueError("expected an address that starts with http:// or https://")
         else:
-            new_val = _coerce(getattr(agent.settings, key), value)
+            try:
+                new_val = _coerce(getattr(agent.settings, key), value)
+            except ValueError:
+                if isinstance(getattr(agent.settings, key), bool):
+                    raise
+                kind = "a whole number" if isinstance(getattr(agent.settings, key), int) else "a number"
+                raise ValueError(f"expected {kind}, got '{value}'") from None
         if isinstance(new_val, int) and not isinstance(new_val, bool) and new_val < 0:
             raise ValueError("must be >= 0")
     except ValueError as e:
@@ -428,6 +438,9 @@ def handle_config(agent: Any, arg: str) -> CommandResult:
             agent.provider = provider_for(agent.settings.model, agent.settings)
         except Exception:
             pass
+    if new_val is None:
+        ok(f"{key} cleared {SLATE}(the main model is used){RST}")
+        return CommandResult(handled=True)
     saved = ""
     if save:
         saved = " (saved to ~/.axon/config.toml)" if update_global_config({key: new_val}) else " (could not save)"

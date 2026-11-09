@@ -229,3 +229,15 @@ def test_openai_tool_schemas_compliance():
         assert params["type"] == "object"
         assert isinstance(params["properties"], dict)
         assert isinstance(params["required"], list), f"{fn['name']} parameters.required must be a list"
+
+
+def test_grep_count_summary_reports_true_totals_when_page_is_truncated(workspace: Path, settings):
+    ctx = ToolContext(workspace=workspace, file_state=FileState(), todos=TodoState(), settings=settings)
+    for i in range(12):
+        (workspace / f"f{i:02d}.txt").write_text("hit\nhit\nhit\n", encoding="utf-8")
+    args = {"pattern": "hit", "output_mode": "count", "head_limit": 5}
+    tool = GrepTool()
+    out = tool.run(args, ctx)
+    assert "Total: 36 matches across 12 files" in out
+    summary = tool.summarize(args, out)
+    assert "36 matches in 12 files" in summary

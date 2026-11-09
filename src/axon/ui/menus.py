@@ -45,6 +45,20 @@ def already_confirmed() -> bool:
     return _confirmed_in_menu
 
 
+class confirmed_by_the_user:
+    """`with confirmed_by_the_user():` runs a command whose confirmation was already answered Yes somewhere else
+    (the web page's confirm card), so the command's own y/N question, which has no keyboard to answer it, is not
+    asked and does not fall back to its default of No."""
+    def __enter__(self) -> None:
+        global _confirmed_in_menu
+        self._before = _confirmed_in_menu
+        _confirmed_in_menu = True
+
+    def __exit__(self, *exc: Any) -> None:
+        global _confirmed_in_menu
+        _confirmed_in_menu = self._before
+
+
 def menus_enabled() -> bool:
     """True when a raw-key menu can be shown (stdin and stdout are terminals)."""
     return plat.is_interactive()

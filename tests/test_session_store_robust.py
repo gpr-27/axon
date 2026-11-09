@@ -82,6 +82,34 @@ def test_branch_keeps_structured_messages(tmp_path: Path):
     assert store.read_conversation(store.active_session_id).messages == msgs
 
 
+def test_branch_keeps_tool_result_images(tmp_path: Path):
+    """A branch of a conversation whose tool result carried an image still has the image after a reload."""
+    from types import SimpleNamespace
+    from axon.agent.state import Conversation
+    from axon.session.interactive import handle_branch
+    store = SessionStore(tmp_path, session_dir=tmp_path / "s")
+    img = {"path": str(tmp_path / "shot.png"), "media_type": "image/png"}
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "a"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x", "images": [img]}]}]
+    agent = SimpleNamespace(session=store, conversation=Conversation(list(msgs)))
+    handle_branch(agent, "img")
+    assert store.read_conversation(store.active_session_id).messages == msgs
+
+
+def test_rewind_after_a_failed_turn_clears_retry(tmp_path: Path):
+    """/retry after a resume must not resend a failed prompt the user has already rewound past."""
+    store = SessionStore(tmp_path, session_dir=tmp_path / "s")
+    store.open("s1")
+    store.append_user("first")
+    store.append_turn(AssistantTurn(blocks=[TextBlock(text="ok")], stop_reason="end_turn", usage=Usage(input=1, output=1)), model="claude-opus-5")
+    store.append_user("second")
+    store.append("turn_failed", {"prompt": "second", "resume": False, "rolled_back": True})
+    assert store.last_failed_turn("s1") == {"prompt": "second", "resume": False}
+    store.append_rewind([{"role": "user", "content": "first"}], "conversation", 1)
+    assert store.last_failed_turn("s1") is None
+
+
 def test_checkpoints_are_binary_safe_and_persist(tmp_path: Path):
     ws = tmp_path / "w"
     ws.mkdir()

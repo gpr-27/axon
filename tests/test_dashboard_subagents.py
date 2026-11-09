@@ -185,3 +185,15 @@ def test_a_finished_subagent_shows_its_final_state_not_the_last_live_line(c, par
     mgr.complete("sub-3", "done", mgr.get_task("sub-3").conversation, status="completed")
     r = next(x for x in c.json(f"/api/subagents?session={parent.sid}")["subagents"] if x["index"] == 3)
     assert not r["live"] and "waiting for" not in r["activity"] and r["activity"].startswith("Finished"), r["activity"]
+
+
+def test_a_fan_out_is_drawn_as_lanes_and_survives_a_reload():
+    """Source-level check (the lanes themselves were exercised in a browser): lanes are filled while the log replays,
+    drawn once it is done, and a duplicate event is dropped."""
+    from axon.features import dash_css, dash_js_chat
+    js = _app_js()
+    step = js[js.index("function subagentStep("):js.index("function saLiveEnd(")]
+    assert step.index("saAddStep(") < step.index("if (C.replaying) return;")      # a replayed step is stored before the early return
+    assert "S.seen.has(ev.seq)" in js                                              # the same event twice draws one row
+    assert "saReplayDone(C)" in "".join(v for v in vars(dash_js_chat).values() if isinstance(v, str))
+    assert "function saReplayDone(" in js and ".fo-grid{" in dash_css.APP_LAYOUT_CSS

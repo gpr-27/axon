@@ -307,6 +307,8 @@ class Runtime:
             return
         self._orig = getattr(self.agent, "on_event", None)
         self.agent.on_event = self._tee
+        self.agent.on_held_event = self._publish      # a fan-out holds events back from the terminal, not from the page
+        self.agent.on_held_replay = self._terminal_only
         self.attached = True
         self.hook_turns()
         if self.external:
@@ -370,12 +372,22 @@ class Runtime:
     def detach(self) -> None:
         if self.attached and getattr(self.agent, "on_event", None) == self._tee:
             self.agent.on_event = self._orig
+        if self.attached:
+            self.agent.on_held_event = None
+            self.agent.on_held_replay = None
         self.unhook_turns()
         self.attached = False
 
     def _tee(self, ev: Any) -> None:
+        self._terminal_only(ev)             # the terminal renderer first; its KeyboardInterrupt (cancel) must propagate
+        self._publish(ev)
+
+    def _terminal_only(self, ev: Any) -> None:
         if self._orig is not None:
-            self._orig(ev)                  # the terminal renderer first; its KeyboardInterrupt (cancel) must propagate
+            self._orig(ev)
+
+    def _publish(self, ev: Any) -> None:
+        """Send one agent event to the page."""
         try:
             d = web_event(ev)
         except Exception:
@@ -817,6 +829,8 @@ class CommandRunner:
         card = dash_cmdcards.try_card(self.srv, rt, line) if cards and self.srv is not None else None
         if card is not None:
             return self._quick(job, {"ok": True, "card": card})
+        # Yes was already answered in the card: the command's own "are you sure? [y/N]" has no keyboard here and would say No
+        card_said_yes = bool(cards and self.srv is not None and dash_cmdcards.needs_confirm(line))
         if key in ("provider", "providers") or (key == "model" and not rest):
             return self._quick(job, {"ok": True, "open": "#/settings/providers",
                                      "message": f"{('/' + key)} opens Settings > Providers: that is where you choose a provider and model."})
@@ -885,7 +899,12 @@ class CommandRunner:
             try:
                 from axon.commands.registry import dispatch_command
                 try:
-                    res = dispatch_command(line, agent)
+                    if card_said_yes:
+                        from axon.ui.menus import confirmed_by_the_user
+                        with confirmed_by_the_user():
+                            res = dispatch_command(line, agent)
+                    else:
+                        res = dispatch_command(line, agent)
                 except KeyboardInterrupt:
                     res, message = None, "Stopped."
                     ok = False

@@ -187,8 +187,8 @@ def test_after_the_monitor_only_this_batch_is_summarized_and_steps_are_not_repla
     agent = make_agent(FakeProvider([]), workspace, events=events)
     for n in (1, 2, 3):
         agent.subagents.register(f"p{n}", title=f"Task {n}")
-    shown = []
-    monkeypatch.setattr(render, "render_subagent_dashboard", lambda tasks: shown.append([t.index for t in tasks]))
+    shown, steps_given = [], []
+    monkeypatch.setattr(render, "render_subagent_dashboard", lambda tasks, step_events=None, level=1: (shown.append([t.index for t in tasks]), steps_given.extend(step_events or [])))
     calls = [ToolUseBlock(id="a", name="Task", input={}), ToolUseBlock(id="b", name="Task", input={})]
     held = [SubagentStep(task_id="sub-3", agent_type="explore", kind="tool", name="Read"),
             ToolExecutionResult(id="b", name="Task", input={}, content="second", is_error=False),
@@ -198,6 +198,7 @@ def test_after_the_monitor_only_this_batch_is_summarized_and_steps_are_not_repla
     printed = [e for e in events if type(e).__name__ != "SubagentStep"]
     assert [e.content for e in printed] == ["first", "second"]    # cards in call order, not finish order
     assert not any(type(e).__name__ == "SubagentStep" for e in events)
+    assert [s.task_id for s in steps_given] == ["sub-3"]          # handed to the summary, grouped there
 
 
 def test_a_note_typed_in_the_monitor_says_it_goes_to_the_main_agent():

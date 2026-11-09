@@ -343,8 +343,9 @@ class Settings(BaseSettings):
             proj_perms = proj_data.get("permissions")
             if isinstance(proj_perms, dict):
                 base_perms = merged.get("permissions") if isinstance(merged.get("permissions"), dict) else {}
+                as_rules = lambda v: [v] if isinstance(v, str) else list(v or [])  # noqa: E731  # one rule may be a plain string
                 merged["permissions"] = {
-                    key: _dedupe(list(base_perms.get(key, [])) + list(proj_perms.get(key, [])))
+                    key: _dedupe(as_rules(base_perms.get(key)) + as_rules(proj_perms.get(key)))
                     for key in ("allow", "deny", "ask")
                 }
             proj_hooks = proj_data.get("hooks")

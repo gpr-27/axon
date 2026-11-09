@@ -127,6 +127,7 @@ def detect_thinking_keyword(text: str) -> tuple[str, str] | None:
 
 
 MAX_OVERFLOW_RETRIES = 2
+MAX_OUTPUT_CONTINUATIONS = 3     # times one turn resumes a reply cut off by the output limit
 TITLE_RECENT_PROMPTS = 5
 TITLE_SNIPPET_CHARS = 300
 TITLE_REFRESH_INSTRUCTION = ("Write a 3-6 word title for this coding session, saying what it is about now. Weigh recent "
@@ -445,6 +446,8 @@ class Agent:
         self._last_call_window: tuple[float, float] = (0.0, 0.0)
         self._batch_parallel = False
         self._held_events: list[Any] | None = None  # subagent events queued while the live monitor is drawn
+        self.on_held_event: Callable[[Any], None] | None = None   # told at once about each held event (the web page)
+        self.on_held_replay: Callable[[Any], None] | None = None  # replaces on_event when held events are delivered
         self._cache = CacheTracker()
         self._memory: Any = None
         self._memory_text: str | None = None
@@ -488,18 +491,30 @@ class Agent:
         if self._held_events is not None:
             # The live subagent monitor owns the screen while it is drawn; worker threads must not print into it.
             self._held_events.append(event)
+            # An attached web page draws nothing into the terminal, so the hold must not delay it.
+            mirror = getattr(self, "on_held_event", None)
+            if mirror is not None:
+                try:
+                    mirror(event)
+                except Exception:
+                    pass
             return
         self._deliver(event)
 
-    def _deliver(self, event: Any, show: bool = True) -> None:
+    def _deliver(self, event: Any, show: bool = True, held: bool = False) -> None:
+        """Record *event* and show it. *held*: it was held for the monitor, so whoever ``on_held_event`` already
+        told must not be told again; ``on_held_replay`` then stands in for ``on_event``."""
         trace = self._trace
         if trace is not None:
             try:
                 trace.record(event)
             except Exception:
                 pass
-        if self.on_event and show:
-            self.on_event(event)
+        if not show:
+            return
+        target = (getattr(self, "on_held_replay", None) if held else None) or self.on_event
+        if target:
+            target(event)
 
     @property
     def last_trace(self) -> TurnTrace | None:
@@ -1991,6 +2006,8 @@ class Agent:
         limit = max(1, int(self.settings.max_iterations))
         step_warned = False
         overflow_retries = 0
+        output_continuations = 0
+        cut_text = ""                 # the part of the reply written before an output-limit cut
 
         while iterations < limit:
             if iterations > 0:
@@ -2108,12 +2125,14 @@ class Agent:
                                          call=self._call_meta, thinking_s=list(self._think_blocks))
             except TypeError:
                 self.session.append_turn(turn)
-            final_text = turn.text
+            final_text = cut_text + turn.text        # a reply continued after the output limit is one answer
 
             if outcome == "interrupted":
                 return self._stop_result(final_text or INTERRUPTED_NOTE, "interrupted", iterations, total_tool_calls, total_usage)
 
             tool_uses = turn.tool_uses
+            if tool_uses:
+                cut_text = ""
             if (not tool_uses and turn.stop_reason == "model_context_window_exceeded"
                     and overflow_retries < MAX_OVERFLOW_RETRIES):
                 overflow_retries += 1
@@ -2122,6 +2141,14 @@ class Agent:
                 self.conversation.append_user(follow)
                 self.session.append_user(follow)
                 system_blocks = self.system_blocks()
+                continue
+            if not tool_uses and turn.stop_reason == "max_tokens" and output_continuations < MAX_OUTPUT_CONTINUATIONS:
+                # The reply was cut by the output limit, not finished: pick up where it stopped.
+                output_continuations += 1
+                cut_text = final_text
+                follow = "[Your last reply was cut off by the output limit. Continue exactly where you stopped, without repeating or apologising.]"
+                self.conversation.append_user(follow)
+                self.session.append_user(follow)
                 continue
             if not tool_uses:
                 event = "SubagentStop" if self.is_subagent else "Stop"
@@ -2638,19 +2665,20 @@ class Agent:
     def _deliver_after_monitor(self, held: list[Any], tool_uses: list[ToolUseBlock], batch_nums: set[int]) -> None:
         """Print a fan-out once the live monitor closes: the summary of this batch's subagents, then each Task
         call with its result card, in the order the model asked for them. The subagents' own step-by-step events
-        were already on screen in the monitor; they go to the trace (and /subagents <n>) but are not replayed."""
+        were on screen in the monitor; the summary lists them again grouped by subagent (normal trace level and up)."""
         tasks = [t for t in self.subagents.all_tasks() if t.index in batch_nums]
         if tasks:
             try:
                 from axon.ui.render import render_subagent_dashboard
-                render_subagent_dashboard(tasks)
+                render_subagent_dashboard(tasks, step_events=[ev for ev in held if type(ev).__name__ == "SubagentStep"],
+                                          level=int(getattr(self.renderer, "level", 1)))
             except Exception:
                 pass
         order = {tu.id: i for i, tu in enumerate(tool_uses)}
         quiet = ("SubagentEvent", "SubagentStep", "RetryEvent", "ProviderRetry")
         rank = lambda ev: order.get(getattr(ev, "id", None) or getattr(ev, "tool_use_id", None), -1)  # noqa: E731
         for ev in sorted(held, key=rank):
-            self._deliver(ev, show=type(ev).__name__ not in quiet)
+            self._deliver(ev, show=type(ev).__name__ not in quiet, held=True)
 
     def _interactive_monitor(self) -> bool:
         if self.is_subagent or self.on_event is None:

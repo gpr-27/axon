@@ -95,9 +95,10 @@ def context_breakdown(agent: Any, real_used: int | None = None) -> dict[str, Any
         t = _tok(json.dumps(s))
         if n.startswith("mcp__"):
             cats["mcp_tools"] += t
-            g = by_server.setdefault(_server_of(n), {"name": _server_of(n), "tokens": 0, "count": 0, "tools": []})
+            g = by_server.setdefault(_server_of(n), {"name": _server_of(n), "tokens": 0, "count": 0, "loaded": 0, "tools": []})
             g["tokens"] += t
             g["count"] += 1
+            g["loaded"] += 1
             g["tools"].append({"name": n.split("__", 2)[-1], "tokens": t})
         else:
             cats["system_tools"] += t
@@ -110,7 +111,7 @@ def context_breakdown(agent: Any, real_used: int | None = None) -> dict[str, Any
             deferred = {"mcp_tools": schema_tokens(dtools), "mcp_count": len(dtools)}
             for t in dtools:
                 nm = str(t.name)
-                g = by_server.setdefault(_server_of(nm), {"name": _server_of(nm), "tokens": 0, "count": 0, "tools": [], "deferred": 0})
+                g = by_server.setdefault(_server_of(nm), {"name": _server_of(nm), "tokens": 0, "count": 0, "loaded": 0, "tools": [], "deferred": 0})
                 g["deferred"] = g.get("deferred", 0) + 1
                 g["count"] += 1
                 g["tools"].append({"name": nm.split("__", 2)[-1], "tokens": 0, "deferred": True})

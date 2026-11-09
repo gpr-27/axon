@@ -296,7 +296,8 @@ def handle_branch(agent: Agent, name: str = "") -> None:
             # retry, titles) are only the prompts the user typed.
             store.append("tool_results", [
                 {"tool_use_id": b.get("tool_use_id"), "content": b.get("content", ""),
-                 "is_error": bool(b.get("is_error"))} for b in content])
+                 "is_error": bool(b.get("is_error")),
+                 **({"images": b["images"]} if b.get("images") else {})} for b in content])
         elif role == "user":
             store.append("user_message", {"role": "user", "content": m.get("content", "")})
         elif role == "assistant":

@@ -771,7 +771,7 @@ _ALSO_ASK = {"rewind", "restore"}
 # The terminal asks "are you sure?" for these on a keyboard; the page has no keyboard prompt (a command run here would
 # take its default, which is Yes for most of them), so the card asks first.
 _OWNS_DATA = {"memory", "plugin", "agents", "keys", "endpoint", "worktree", "permissions", "hooks", "mcp", "skills", "sessions",
-              "library", "todos", "plans", "tag", "pin"}
+              "library", "todos", "plans", "tag", "pin", "prompt"}
 _VERBS = {"remove", "rm", "delete", "del", "drop", "kill", "reset", "purge", "clear", "forget", "uninstall", "unset", "empty", "--all"}
 _INSTALL_VERBS = {"install", "add", "marketplace"}
 
@@ -780,6 +780,8 @@ def _extra_confirm(name: str, words: str) -> str:
     low = words.lower().split()
     if name == "delete" and words:
         return "This deletes saved session data: " + (words or "a session") + ". /restore can bring it back from the trash."
+    if name == "init" and "--force" in low:
+        return "This replaces AXON.md with a regenerated one. Anything you wrote in it is lost."
     if name not in _OWNS_DATA or not low:
         return ""
     if name == "plugin" and low[0] in _INSTALL_VERBS and not (low[0] == "marketplace" and low[1:2] in (["list"], ["browse"])):

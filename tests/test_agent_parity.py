@@ -339,6 +339,7 @@ def test_task_tool_passes_background_name_and_isolation(workspace: Path) -> None
 
 def test_concurrent_subagent_limit(workspace: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("AXON_MAX_CONCURRENT_SUBAGENTS", "1")
+    monkeypatch.setenv("AXON_SUBAGENT_QUEUE_WAIT", "0")
     parent = make_agent(FakeProvider(scripted("x")), workspace)
     parent.session.open("sess_p")
     parent.subagents.register("busy", title="busy")                  # status running
@@ -346,6 +347,29 @@ def test_concurrent_subagent_limit(workspace: Path, monkeypatch: Any) -> None:
         run_subagent("another", parent, subagent_type="explore")
     with pytest.raises(ToolError, match="Concurrent subagent limit"):
         delegate("another", parent, background=True, subagent_type="explore")
+
+
+def test_subagent_over_the_limit_waits_for_a_slot_instead_of_failing(workspace: Path, monkeypatch: Any) -> None:
+    import threading
+    monkeypatch.setenv("AXON_MAX_CONCURRENT_SUBAGENTS", "1")
+    monkeypatch.setenv("AXON_SUBAGENT_QUEUE_WAIT", "10")
+    parent = make_agent(FakeProvider(scripted("done")), workspace)
+    parent.session.open("sess_p")
+    busy = parent.subagents.register("busy", title="busy")
+    threading.Timer(0.5, lambda: parent.subagents.complete(busy.id, "ok", parent.conversation)).start()
+    assert "done" in run_subagent("another", parent, subagent_type="explore")
+
+
+def test_subtask_is_not_refused_by_the_concurrent_limit(workspace: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("AXON_MAX_CONCURRENT_SUBAGENTS", "1")
+    monkeypatch.setenv("AXON_SUBAGENT_QUEUE_WAIT", "0")
+    from axon.commands.parity_cmds import handle_subtask
+    parent = make_agent(FakeProvider(scripted("sub report")), workspace)
+    parent.session.open("sess_p")
+    parent.subagents.register("busy", title="busy")
+    handle_subtask(parent, "do a thing")
+    _wait(lambda: any(t.title.startswith("do a thing") and t.status != "running" for t in parent.subagents.all_tasks()))
+    assert "Subtask failed" not in "".join(i.text for i in parent.message_queue.items)
 
 
 def test_send_message_steers_a_running_subagent_and_reports_to_main(workspace: Path) -> None:

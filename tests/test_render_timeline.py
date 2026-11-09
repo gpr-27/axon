@@ -318,3 +318,22 @@ def test_spinner_live_timer_counts_the_current_activity(monkeypatch):
     assert "4.0s" in strip_ansi(s.render_line())
     s.set_label("Step 2 · thinking")                 # new activity: its own clock
     assert "thinking… 0.0s" in strip_ansi(s.render_line())
+
+def test_dashboard_lists_each_subagents_steps_grouped_at_normal(capsys):
+    from axon.agent.subagent import SubagentTask
+    from axon.agent.trace import SubagentStep
+    from axon.ui.render import render_subagent_dashboard
+    a = SubagentTask(id="sub-1", index=1, title="Map repo", prompt="p", status="completed", steps=2, max_steps=8)
+    b = SubagentTask(id="sub-2", index=2, title="Find tests", prompt="p", status="completed", steps=2, max_steps=8)
+    steps = [SubagentStep(task_id="sub-2", agent_type="explore", kind="tool", name="Grep", summary="needle_two"),
+             SubagentStep(task_id="sub-1", agent_type="explore", kind="tool", name="Read", summary="needle_one"),
+             SubagentStep(task_id="sub-2", agent_type="explore", kind="tool", name="Glob", summary="needle_three"),
+             SubagentStep(task_id="sub-1", agent_type="explore", kind="tool", name="Grep", summary="needle_four")]
+    render_subagent_dashboard([a, b], step_events=steps, level=1)
+    out = strip_ansi(capsys.readouterr().out)
+    # subagent 1's two steps come together, then subagent 2's, each under its own heading
+    order = [out.index(n) for n in ("needle_one", "needle_four", "needle_two", "needle_three")]
+    assert order == sorted(order)
+    assert out.rindex("Map repo") < out.index("needle_one") < out.rindex("Find tests") < out.index("needle_two")
+    render_subagent_dashboard([a, b], step_events=steps, level=0)                   # compact stays short
+    assert "needle_one" not in strip_ansi(capsys.readouterr().out)

@@ -105,6 +105,34 @@ def test_max_tokens_with_tool_use_gets_error_results(workspace: Path) -> None:
     assert not (workspace / "a.txt").exists()
 
 
+def test_text_cut_by_max_tokens_is_continued(workspace: Path) -> None:
+    cut = AssistantTurn(blocks=[TextBlock(text="First half of a long answer, ")], stop_reason="max_tokens")
+    prov = FakeProvider([cut] + scripted("and the second half."))
+    agent = make_agent(prov, workspace)
+    res = agent.run_turn("write a long answer")
+    assert len(prov.requests) == 2                       # the cut reply did not end the turn
+    assert res.final_text == "First half of a long answer, and the second half."   # axon -p and subagent reports use this
+    assert res.stop_reason == "end_turn"
+    assert "cut off" in json.dumps(prov.requests[1]["messages"][-1])
+
+
+def test_text_before_a_cut_is_not_kept_once_the_model_moves_on_to_a_tool(workspace: Path) -> None:
+    cut = AssistantTurn(blocks=[TextBlock(text="Partial plan. ")], stop_reason="max_tokens")
+    tool = AssistantTurn(blocks=[TextBlock(text="Rest of plan."), ToolUseBlock(id="t1", name="Glob", input={"pattern": "*.nothing"})], stop_reason="tool_use")
+    prov = FakeProvider([cut, tool] + scripted("Done."))
+    res = make_agent(prov, workspace).run_turn("go")
+    assert res.final_text == "Done."
+
+
+def test_max_tokens_continuation_is_capped(workspace: Path) -> None:
+    cut = lambda: AssistantTurn(blocks=[TextBlock(text="more ")], stop_reason="max_tokens")
+    prov = FakeProvider([cut() for _ in range(10)])
+    agent = make_agent(prov, workspace)
+    res = agent.run_turn("go")
+    assert res.stop_reason == "max_tokens"
+    assert len(prov.requests) == 4                        # the first call plus three continuations
+
+
 def test_max_iterations_enforced(workspace: Path) -> None:
     turns = [AssistantTurn(blocks=[ToolUseBlock(id=f"c{i}", name="Ls", input={"path": "."})], stop_reason="tool_use") for i in range(10)]
     agent = make_agent(FakeProvider(turns), workspace, max_iterations=3)

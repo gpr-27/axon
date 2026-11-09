@@ -179,6 +179,7 @@ function replayLog(C, events) {
       try { applyEvent(C, d); } catch (e) { console.warn('replay', rec.type, e); }
     }
   } finally {
+    try { if (typeof saReplayDone === 'function') saReplayDone(C); } catch (e) { console.warn('subagent lanes', e); }
     C.replaying = false; if (C.cur && C.cur.running) { for (const ap of Object.values(C.aps || {})) { if (ap.row && ap.row.dataset.state === 'wait') { try { buildApproval(C, ap.ev, ap.row); } catch (e) { /* the page shows it after the next state read */ } } } } else C.cur = null; C.steps = [];
   }
 }

@@ -288,6 +288,12 @@ class GrepTool(Tool):
         if mode == "files_with_matches":
             return plural(len(lines), "file") + more
         if mode == "count":
+            # The Total line covers every file; the listed page may be cut at head_limit.
+            tm = re.search(r"^Total: ([\d,]+) matches? across ([\d,]+) files?$", output, re.M)
+            if tm:
+                n_matches = int(tm.group(1).replace(",", ""))
+                n_files = int(tm.group(2).replace(",", ""))
+                return f"{plural(n_matches, 'match', 'matches')} in {plural(n_files, 'file')}"
             total = 0
             for ln in lines:
                 try:

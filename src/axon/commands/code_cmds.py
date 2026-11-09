@@ -142,6 +142,10 @@ def handle_diff(agent: Any, arg: str) -> CommandResult:
             return CommandResult(handled=True)
         wb.run_changes_screen(agent, *target)
         return CommandResult(handled=True)
+    in_repo, _why = git(ws, "rev-parse", "--git-dir")
+    if in_repo != 0:       # outside a repo `git diff --cached` fails with a confusing "unknown option" message
+        err("Not a git repository.")
+        return CommandResult(handled=True)
     args = ["diff", "--cached"] if a.lower() in ("staged", "cached", "--cached") else ["diff"]
     code, stat = git(ws, *args, "--stat")
     if code != 0:

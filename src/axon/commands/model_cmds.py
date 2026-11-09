@@ -229,6 +229,10 @@ _MODE_DESC = {
 
 
 def set_mode(agent: Any, mode: str) -> None:
+    if mode == "bypass" and getattr(getattr(agent, "permissions", None), "bypass_disabled", False) is True:
+        err("Bypass mode is turned off by permissions.disableBypassPermissionsMode in a settings file, "
+            f"so it would run as default. Staying in {agent.settings.mode}.")
+        return
     update_settings(agent, mode=mode)
     color = {"default": SLATE, "acceptEdits": MINT, "plan": GOLD, "bypass": ROSE}.get(mode, WHITE)
     print(f"\n  {TEAL}✓ Permission mode:{RST} {color}{BOLD}{mode}{RST} {SLATE}— {_MODE_DESC[mode]}{RST}\n")

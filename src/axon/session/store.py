@@ -749,6 +749,8 @@ class SessionStore:
                 failed = {"prompt": str(data.get("prompt") or ""), "resume": bool(data.get("resume"))}
             elif t == "assistant_turn" and _is_legacy_error_turn(data):
                 failed = {"prompt": last_prompt if prev == "user_message" else "", "resume": prev != "user_message"}
+            elif t == "rewind":
+                failed = None     # the user went back past the failed prompt: nothing left to retry
             elif t in _CONTENT_TYPES:
                 failed = None
                 if t == "user_message" and isinstance(data, dict):

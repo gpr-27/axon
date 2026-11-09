@@ -199,7 +199,7 @@ def context_lines(data: dict[str, Any], width: int, expanded: set[str] | frozens
         out.append(("", None))
     for k, lbl in shown:
         items = lists[k]
-        count = sum(g["count"] for g in items) if k == "mcp_tools" else len(items)
+        count = sum(g.get("loaded", g["count"]) for g in items) if k == "mcp_tools" else len(items)
         is_open = k in expanded
         arrow = ("⌄" if is_open else "›") if _uni() else ("v" if is_open else ">")
         line = _lr(f"{WHITE if focus == k else SLATE}{arrow} {lbl}{RST}", f"{SLATE}{count:,}{RST}", width)

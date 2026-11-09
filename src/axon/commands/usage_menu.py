@@ -146,6 +146,8 @@ OVERRIDES: dict[str, list[Choice]] = {
     "learn": [ch("Remember a rule or fact…", ask="Rule or fact"),
               ch("Remember it for every project…", "--global", "Rule or fact")],
     "map": [ch("Run it"), ch("Map one path…", ask="Path"), ch("Limit the size…", "--tokens", "Token limit")],
+    "model": [ch("/model", hint="interactive picker"), ch("Switch to a model…", ask="Model name"),
+              ch("/model random", "random", hint="surprise me"), ch("/model random:small", "random:small", hint="surprise me, small models only")],
     "next": [ch("Run it"), ch("Show suggestion number…", ask="Number")],
     "optimize": [ch("Improve a request…", ask="Rough request")],
     "plan": [ch("Enter plan mode"), ch("Plan a task…", ask="Task"), ch("Leave plan mode", "off")],
@@ -262,6 +264,10 @@ def _choice_from(name: str, body: str, hint: str) -> list[Choice]:
     if body.startswith("["):
         end = _matching_bracket(body)
         inner, after = body[1:end], body[end + 1:].strip()
+        if inner.startswith("--") and " " in inner and "|" in inner:
+            # '[--scope a|b|c]': the bars choose the flag's value, they do not make 'b' a command of its own
+            flag, _, values = inner.partition(" ")
+            return [_one(name, f"{flag} {alt} {after}".strip(), hint) for alt in split_alternatives(values)]
         if "|" in inner:
             return [_one(name, f"{alt} {after}".strip(), hint) for alt in split_alternatives(inner)]
     tokens = body.split()

@@ -466,3 +466,28 @@ def test_shell_output_is_added_in_batches_and_trimmed_in_both_places():
 def test_resume_and_delete_without_an_id_open_sessions_instead_of_guessing(c, env, llm, line):
     r = run(c, line)
     assert r["open"] == "#/sessions" and "Sessions" in r["message"] and "card" not in r
+
+
+def test_init_force_asks_in_the_card_and_then_really_regenerates(c, env, llm):
+    """/init --force asks 'overwrite?' with a default of No. The page has no keyboard, so after the card's Yes it still
+    printed 'Kept the existing file.' and changed nothing."""
+    (env.ws / "AXON.md").write_text("old notes\n", encoding="utf-8")
+    r = run(c, "/init --force")
+    assert r["card"]["confirm"]["line"] == "/init --force" and "AXON.md" in r["card"]["confirm"]["text"]
+    assert (env.ws / "AXON.md").read_text(encoding="utf-8") == "old notes\n"
+    c.post("/api/cmdcard/confirm", {"line": "/init --force"})
+    r2 = run(c, "/init --force")
+    assert "card" not in r2
+    assert "Kept the existing file" not in r2.get("html", "")
+    assert (env.ws / "AXON.md").read_text(encoding="utf-8") != "old notes\n"
+
+
+def test_prompt_delete_asks_in_the_card_and_then_really_deletes(c, env, llm):
+    run(c, "/prompt save mything hello {{name}}")
+    assert "mything" in run(c, "/prompt list")["html"]
+    r = run(c, "/prompt delete mything")
+    assert r["card"]["confirm"]["line"] == "/prompt delete mything"
+    c.post("/api/cmdcard/confirm", {"line": "/prompt delete mything"})
+    r2 = run(c, "/prompt delete mything")
+    assert "Kept it" not in r2.get("html", "")
+    assert "mything" not in run(c, "/prompt list")["html"]

@@ -270,10 +270,19 @@ def _get_mode_info(mode: str) -> tuple[str, str]:
     return f"{label} (shift+tab to cycle)", color
 
 
-def cycle_mode(mode: str, delta: int = 1) -> str:
-    if mode not in MODES_CYCLE:
-        return MODES_CYCLE[0]
-    return MODES_CYCLE[(MODES_CYCLE.index(mode) + delta) % len(MODES_CYCLE)]
+def cycle_mode(mode: str, delta: int = 1, locked: tuple[str, ...] = ()) -> str:
+    """The next permission mode. ``locked`` modes are skipped (bypass, when a settings file turns it off)."""
+    cycle = [m for m in MODES_CYCLE if m not in locked] or MODES_CYCLE[:1]
+    if mode not in cycle:
+        return cycle[0]
+    return cycle[(cycle.index(mode) + delta) % len(cycle)]
+
+
+def locked_modes() -> tuple[str, ...]:
+    """Modes Shift+Tab must not land on: bypass while ``permissions.disableBypassPermissionsMode`` is on,
+    since the engine would run it as default while the status line said bypass."""
+    perms = getattr(_prompt_agent(), "permissions", None)
+    return ("bypass",) if getattr(perms, "bypass_disabled", False) is True else ()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1724,7 +1733,7 @@ class PromptEditor:
             else:
                 st.notice = "shift+tab cycles the permission mode"   # Tab only completes (CC parity)
         elif action == "chat:cycleMode":
-            st.mode = cycle_mode(st.mode, 1)
+            st.mode = cycle_mode(st.mode, 1, locked_modes())
         elif action in ("cursor:up", "cursor:down"):
             delta = -1 if action == "cursor:up" else 1
             if pop is not None:

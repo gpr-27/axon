@@ -4427,8 +4427,48 @@ def _sub_behind_scenes(t: Any) -> str:
     return f" {glyph('dot')} ".join(facts)
 
 
-def render_subagent_dashboard(tasks: list[Any]) -> None:
+def _subagent_step_rows(tasks: list[Any], steps: list[Any], width: int) -> list[str]:
+    """Each subagent's own steps (LLM and tool calls) under a heading with its number and title, one
+    subagent after the other, so parallel runs do not interleave."""
+    dot = f" {glyph('dot')} "
+    by_task: dict[str, list[Any]] = {}
+    for ev in steps:
+        by_task.setdefault(str(_get(ev, "task_id", default="")), []).append(ev)
+    out: list[str] = []
+    for t in tasks:
+        mine = by_task.get(str(getattr(t, "id", "") or f"sub-{t.index}"), [])
+        if not mine:
+            continue
+        out.append(f"  {CYAN}{BOLD}#{t.index}{RST} {TEXT}{BOLD}{_one_line(t.title, max(10, width - 20))}{RST} "
+                   f"{MUTED}{dot}{len(mine)} step{'s' if len(mine) != 1 else ''}{RST}")
+        for ev in mine:
+            is_llm = str(_get(ev, "kind", default="")) == "llm"
+            err = bool(_get(ev, "is_error", default=False))
+            mark = (f"{ERROR}{glyph('fail')}{RST}" if err else
+                    (f"{ACCENT}{glyph('diamond')}{RST}" if is_llm else f"{PRIMARY}{glyph('tool')}{RST}"))
+            name = _one_line(_get(ev, "name", default="") or ("LLM call" if is_llm else "tool"), 40)
+            label = f"{TEXT}LLM{RST} {MUTED}{name}{RST}" if is_llm else f"{BOLD}{name}{RST}"
+            facts = []
+            summary = _one_line(_get(ev, "summary", default=""), 90).replace(" · ", dot)
+            if summary:
+                facts.append(summary)
+            if is_llm and (_get(ev, "input_tokens", default=0) or _get(ev, "output_tokens", default=0)):
+                facts.append(f"{_fmt_tokens(int(_get(ev, 'input_tokens', default=0) or 0))} in{dot}"
+                             f"{_fmt_tokens(int(_get(ev, 'output_tokens', default=0) or 0))} out")
+            if _get(ev, "duration_s", default=None):
+                facts.append(f"{float(_get(ev, 'duration_s')):.1f}s")
+            row = f"    {SUBTLE}{glyph('thinking_bar')}{RST} {mark} {label}"
+            if facts:
+                row += f" {MUTED}{dot}{dot.join(facts)}{RST}"
+            out.append(truncate(row, width))
+        out.append("")
+    return out
+
+
+def render_subagent_dashboard(tasks: list[Any], step_events: list[Any] | None = None, level: int = 1) -> None:
     """Summary table printed after a batch of parallel Task calls: one row per subagent, in call order.
+    *step_events* (the SubagentStep events held while the live monitor was open) are listed under the table, grouped
+    by subagent, at the normal trace level and above.
 
     Each failure is printed in full under its row (never cut), with the retries / resumes that came
     before it; status is a glyph + word so it never relies on color alone."""
@@ -4511,6 +4551,9 @@ def render_subagent_dashboard(tasks: list[Any]) -> None:
         if extra and (t.status in ("error", "exhausted") or getattr(t, "retries", 0) or getattr(t, "resumes", 0)):
             out += _hang(f"{MUTED}{extra}{RST}", width, f"{detail}{SUBTLE}{glyph('info')}{RST} ", detail + "  ")
     out.append(rule)
+    if step_events and level >= 1:
+        out.append("")
+        out += _subagent_step_rows(tasks, step_events, width)
     foot = (f"{SUBTLE}/subagents{_NBSP}<#> opens a subagent's full transcript (prompt, every tool call, its report)"
             f"{dot}Tab{_NBSP}/{_NBSP}0-9 switch views during a run{RST}")
     out += [r.replace(_NBSP, " ") for r in _hang(foot, width, "  ", "  ")]

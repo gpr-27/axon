@@ -1030,7 +1030,16 @@ def max_concurrent_subagents() -> int:
 
 
 def _check_concurrency(parent: Any) -> None:
+    """Wait (up to AXON_SUBAGENT_QUEUE_WAIT seconds, default 120) for a running subagent to finish, so a large
+    fan-out queues instead of failing; Ctrl+C ends the wait. Past the wait, raise."""
     limit = max_concurrent_subagents()
+    try:
+        wait = float(os.environ.get("AXON_SUBAGENT_QUEUE_WAIT", "") or 120)
+    except ValueError:
+        wait = 120.0
+    deadline = time.monotonic() + max(0.0, wait)
+    while parent.subagents.running_count() >= limit and time.monotonic() < deadline:
+        interruptible.sleep(0.25)
     if parent.subagents.running_count() >= limit:
         raise ToolError(f"Concurrent subagent limit reached ({limit} running). Do not retry now: wait for a running "
                         "subagent to finish (its report arrives as a message), or stop one with /stop.")

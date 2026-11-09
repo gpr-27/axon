@@ -1230,7 +1230,15 @@ class DashServer(ThreadingHTTPServer):
         because the page never starts a chat in bypass, whatever settings.json says. One answer for every label."""
         for rt in self.all_runtimes():
             return str(getattr(rt.agent.settings, "mode", "") or "default")
-        return "default"
+        return self.startup_mode()
+
+    def startup_mode(self) -> str:
+        """The mode a new chat starts in: the saved Permission mode (Settings), except bypass, which the page never offers."""
+        try:
+            saved = str(getattr(self.settings_obj(), "mode", "") or "default")
+        except DashError:
+            return "default"
+        return saved if saved in REPLY_MODES else "default"
 
     def _safe_settings(self) -> Any:
         try:
@@ -1274,7 +1282,7 @@ class DashServer(ThreadingHTTPServer):
             pass
         pc = self.provider_choice or {}
         try:
-            agent = build_agent(AxonOptions(workspace=ws, mode="default", resume=resume, **{"connect_mcp": True, **pc}),
+            agent = build_agent(AxonOptions(workspace=ws, mode=self.startup_mode(), resume=resume, **{"connect_mcp": True, **pc}),
                                   on_event=rt._tee)
         except SDKError as e:
             raise DashError(str(e), 409) from None

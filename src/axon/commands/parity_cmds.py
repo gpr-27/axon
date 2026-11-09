@@ -91,7 +91,7 @@ def handle_subtask(agent: Any, arg: str) -> CommandResult:
 
     def work() -> None:
         try:
-            report = run_subagent(prompt, agent, description=clip(task, 60))
+            report = run_subagent(prompt, agent, description=clip(task, 60), unlimited=True)
             note = f"[Subtask finished: {clip(task, 80)}]\n{report}"
         except Exception as e:
             note = f"[Subtask failed: {clip(task, 80)}] {type(e).__name__}: {e}"
