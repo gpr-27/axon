@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.33.0
+
+- Web chat, subagents: a fan-out started from the terminal now reaches the page while it runs. Before, the page showed nothing until the whole batch finished.
+- Web chat, subagents: two or more subagents in a turn are drawn as side-by-side lanes in the chat, with each one's model, running time, tokens, cost and every step as it happens. The lanes stay after the turn and come back after a reload.
+- Terminal, subagents: a finished fan-out now lists each subagent's steps at `normal` trace, grouped under that subagent.
+- Subagents: a fan-out over the concurrency limit now waits for a free slot (up to `AXON_SUBAGENT_QUEUE_WAIT` seconds, default 120) instead of failing. `/subtask` is no longer refused by the limit.
+- Replies cut off by the output limit now continue, up to 3 times in a turn, and the parts are joined into one answer. Before, the turn stopped with half an answer.
+- Permissions: Bash deny rules now catch `bash -c '...'`, `eval`, `/bin/rm`, `\\rm`, `'rm'`, `/usr/bin/env rm` and commands hidden by `$'...'` quoting. A `Read` deny also catches `bash -c 'cat .env'`.
+- Permissions: a project config that writes one rule as a string (`deny = "Bash(rm *)"`) now gets that rule. Before, it was split into single letters and never applied.
+- Permissions: bypass mode is no longer offered by Shift+Tab or `/mode` when it is disabled.
+- Grep: the count summary now shows the true totals when the listed page is cut short.
+- Sessions: `/branch` keeps images in tool results, and `/retry` no longer offers a failed prompt you rewound past.
+- Commands: `/init --force` and `/prompt delete` now work from the web page; `/memory project`, `/memory repo` and `/model random` options work; `/config small_model none` clears the setting; `/config` rejects a bad `base_url` and explains a bad number; `/diff staged` outside a repo says so.
+- Web, Context panel: the MCP row counts only loaded tools, and deferred tools read "if loaded". Web, Settings: the saved Permission mode now applies to new chats.
+
 ## 0.32.0
 
 - Web chat, subagents: every Task card now shows its subagent live (each model call and tool call with time and cost, a running count, and the final state), and a "Fanned out" board lists all subagents running together with status and step count. Each running subagent has a message box (Tell) and Stop right in the chat. Before, the page dropped these step events and showed only "Waiting for the result...".
