@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.34.0
+
+- Terminal, every step at `normal`: a subagent's steps are listed under that subagent even without the live monitor; retries during a fan-out are printed; the tool header names the rule that allowed a call ("allowed: rule Bash(git *)"); a cache miss says why; the goal check is shown. The `choose` line no longer repeats the narration above a batch, and the batch header says "one after another" when `parallel_tools` is 1.
+- Web chat, every step at `normal`: each model call shows a Step line with what was sent (model, tokens by conversation, system and tools, messages, tools offered, effort) and what came back (tokens, cached, stop reason, cache hit or the cause of a miss). Every tool row shows what allowed it, MCP tools show their server, and hook and memory rows are visible.
+- Web chat, subagents: a single subagent gets a lane too, lanes sit in the order the model asked for them, a queued subagent is marked, parallel tool rows keep the model's order, and reloading during a fan-out restores Tell and Stop.
+- Subagents: the concurrency limit can no longer be exceeded by a burst of starts. A background subagent over the limit is queued and starts when a slot frees; "queued" shows in the monitor, `/subagents`, the terminal and the web lanes, and a queued subagent can be stopped. Step limits, retries and resumes inside a subagent show as they happen. A forked session keeps its subagent transcripts.
+- Permissions and hooks: a hook manager failure on PreToolUse now asks (and denies when nobody can answer) instead of letting the tool run, and the error is shown. Input rewritten by a PermissionRequest hook is checked against the rules again. A prefix or glob Bash allow rule no longer covers a file reached through a symlink that leaves the workspace.
+- Windows: critical-removal detection reads backslash paths and covers `Remove-Item`, `rd` and `del`; drive-letter paths work in permission rules; a cron time the platform cannot convert no longer raises.
+- Read: on files over the in-memory limit the page now ends on a whole line and gives the exact offset to continue from. Before, the header could claim lines the page did not hold. Summaries for Read, Glob, WebFetch, WebSearch, Patch, Git and LSP say when output was cut short and by how much.
+- MCP: startup prints one line per server (tool count, transport, or why it failed or needs sign-in). A server that exits gives its last error line as the reason, and a call made while a crashed server restarts waits up to 10 seconds. Tool events carry the server name and its time.
+- Skills and plugins: a skill with broken frontmatter, a skill hidden by another of the same name, and a plugin with a broken manifest are listed with the reason instead of vanishing. A wrong ToolSearch name suggests the closest ones.
+- Commands: `/model` refuses an unknown name and suggests close ones (`--force` overrides); `/resume` finds a session by title; `/compact` reports messages and tokens in and out, and says so when the summary was not smaller; `/cost calls N` shows that call; `/export` rejects an unknown format; a rewind that cannot be saved changes nothing and says so.
+- Replies cut by a full context window that carry tool calls now get a true message and overflow recovery.
+- Status bar: `ctx %` follows the current model's window and moves after `/compact` and `/clear`. The welcome box keeps its logo together at 60 columns.
+- Web pages: Insights "Last 7 days" and the Usage "Tokens per day" chart no longer count cached tokens twice; costs use one format everywhere; the right-hand rail comes back after the window is narrowed and widened; Reconnect reports how it ended; `dontAsk` mode reads "Never asks".
+
 ## 0.33.0
 
 - Web chat, subagents: a fan-out started from the terminal now reaches the page while it runs. Before, the page showed nothing until the whole batch finished.
