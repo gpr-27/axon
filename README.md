@@ -53,9 +53,9 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 │   → 2 results (857 B, ~204 tokens) go to step 2
 │ 
 │ ◆ Step 2 · claude-sonnet-4-5 · 4 messages · ~12.5k tokens
-│ ▣ TOOLS · 1 call · allowed: rule
+│ ▣ TOOLS · 1 call · allowed: rule Bash(pytest *)
 │   Bash  input   pytest -q tests/test_cart.py
-│         run     ✓ 1.80s · allowed (rule)
+│         run     ✓ 1.80s
 │         output  F....
 │                 FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') =…
 │                 1 failed, 4 passed in 0.21s
@@ -75,9 +75,9 @@ approved it, which hooks fired, and what it all cost, to four decimal places.
 │   → 1 result (39 B, ~10 tokens) goes to step 4
 │ 
 │ ◆ Step 4 · claude-sonnet-4-5 · 8 messages · ~12.9k tokens
-│ ▣ TOOLS · 1 call · allowed: rule
+│ ▣ TOOLS · 1 call · allowed: rule Bash(pytest *)
 │   Bash  input   pytest -q tests/test_cart.py
-│         run     ✓ 1.70s · allowed (rule)
+│         run     ✓ 1.70s
 │         output  .....
 │                 5 passed in 0.19s
 │   → 1 result (23 B, ~6 tokens) goes to step 5

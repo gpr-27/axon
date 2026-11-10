@@ -192,7 +192,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 <details><summary><code>/resume</code> usage</summary>
 
 ```text
-/resume [session-id or prefix]
+/resume [session id, part of an id, or title]
 ```
 
 </details>
@@ -314,7 +314,7 @@ Contents: [Session](#session) · [Context & Cost](#context--cost) · [Model & Mo
 
 ```text
 /cost            session breakdown
-/cost calls      every API call
+/cost calls [n]  every API call, or call n in full
 /cost --project  all sessions of this project (from ~/.axon/usage.jsonl)
 /cost --all      every project
 ```

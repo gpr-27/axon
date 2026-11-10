@@ -22,9 +22,9 @@
 <text y="328" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="51.6" fill="#646a78">→ 2 results (857 B, ~204 tokens) go to step 2</tspan></text>
 <text y="347" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan></text>
 <text y="366" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#ced1d8">◆</tspan><tspan x="51.6" fill="#e4e6ec" class="b">Step 2</tspan><tspan x="110.4" fill="#8c92a0">·</tspan><tspan x="127.2" fill="#e4e6ec">claude-sonnet-4-5</tspan><tspan x="278.4" fill="#8c92a0">· 4 messages · ~12.5k tokens</tspan></text>
-<text y="385" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#5ed2c8" class="b">▣ TOOLS</tspan><tspan x="93.6" fill="#8c92a0"> · 1 call · allowed: rule</tspan></text>
+<text y="385" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#5ed2c8" class="b">▣ TOOLS</tspan><tspan x="93.6" fill="#8c92a0"> · 1 call · allowed: rule Bash(pytest *)</tspan></text>
 <text y="404" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="51.6" fill="#e4e6ec" class="b">Bash</tspan><tspan x="102.0" fill="#646a78">input </tspan><tspan x="169.2" fill="#e4e6ec">pytest -q tests/test_cart.py</tspan></text>
-<text y="423" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">run   </tspan><tspan x="169.2" fill="#86de8c">✓</tspan><tspan x="186.0" fill="#e4e6ec">1.80s</tspan><tspan x="236.4" fill="#8c92a0">· allowed (rule)</tspan></text>
+<text y="423" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">run   </tspan><tspan x="169.2" fill="#86de8c">✓</tspan><tspan x="186.0" fill="#e4e6ec">1.80s</tspan></text>
 <text y="442" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">output</tspan><tspan x="169.2" fill="#e4e6ec">F....</tspan></text>
 <text y="461" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="169.2" fill="#e4e6ec">FAILED tests/test_cart.py::test_discount_rounding - assert Decimal('9.99') =…</tspan></text>
 <text y="480" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="169.2" fill="#e4e6ec">1 failed, 4 passed in 0.21s</tspan></text>
@@ -75,9 +75,9 @@
 <text y="746" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="51.6" fill="#646a78">→ 1 result (39 B, ~10 tokens) goes to step 4</tspan></text>
 <text y="765" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan></text>
 <text y="784" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#ced1d8">◆</tspan><tspan x="51.6" fill="#e4e6ec" class="b">Step 4</tspan><tspan x="110.4" fill="#8c92a0">·</tspan><tspan x="127.2" fill="#e4e6ec">claude-sonnet-4-5</tspan><tspan x="278.4" fill="#8c92a0">· 8 messages · ~12.9k tokens</tspan></text>
-<text y="803" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#5ed2c8" class="b">▣ TOOLS</tspan><tspan x="93.6" fill="#8c92a0"> · 1 call · allowed: rule</tspan></text>
+<text y="803" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="34.8" fill="#5ed2c8" class="b">▣ TOOLS</tspan><tspan x="93.6" fill="#8c92a0"> · 1 call · allowed: rule Bash(pytest *)</tspan></text>
 <text y="822" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="51.6" fill="#e4e6ec" class="b">Bash</tspan><tspan x="102.0" fill="#646a78">input </tspan><tspan x="169.2" fill="#e4e6ec">pytest -q tests/test_cart.py</tspan></text>
-<text y="841" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">run   </tspan><tspan x="169.2" fill="#86de8c">✓</tspan><tspan x="186.0" fill="#e4e6ec">1.70s</tspan><tspan x="236.4" fill="#8c92a0">· allowed (rule)</tspan></text>
+<text y="841" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">run   </tspan><tspan x="169.2" fill="#86de8c">✓</tspan><tspan x="186.0" fill="#e4e6ec">1.70s</tspan></text>
 <text y="860" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="102.0" fill="#646a78">output</tspan><tspan x="169.2" fill="#e4e6ec">.....</tspan></text>
 <text y="879" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="169.2" fill="#e4e6ec">5 passed in 0.19s</tspan></text>
 <text y="898" xml:space="preserve"><tspan x="18.0" fill="#484e5c">│</tspan><tspan x="51.6" fill="#646a78">→ 1 result (23 B, ~6 tokens) goes to step 5</tspan></text>
