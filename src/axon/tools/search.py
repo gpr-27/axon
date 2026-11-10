@@ -144,18 +144,27 @@ class GlobTool(Tool):
             return f"No files matched pattern '{pattern}' in {display_path(root, ctx.workspace)}."
         matches.sort(key=lambda x: (-x[0], x[1]))
         paths = [m[1] for m in matches]
-        out = "\n".join(paths[:limit])
-        if len(paths) > limit:
-            out += f"\n\n[... {len(paths) - limit} more files matched. Narrow the pattern or raise head_limit ...]"
-        return cap_text(out, output_cap(ctx, 30_000))
+        # Whole paths only, up to head_limit and the output cap, so the count of what is left out is exact.
+        room, shown = output_cap(ctx, 30_000) - 200, 0
+        for path in paths[:limit]:
+            room -= len(path) + 1
+            if room < 0 and shown:
+                break
+            shown += 1
+        out = "\n".join(paths[:shown])
+        if len(paths) > shown:
+            how = "Narrow the pattern or raise head_limit" if shown == limit else "Narrow the pattern: this result is full"
+            out += f"\n\n[... {len(paths) - shown} more files matched. {how} ...]"
+        return out
 
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
         if is_error or output.startswith("No files matched"):
             return default_summary(output, is_error) if is_error else "no files matched"
-        paths = [ln for ln in output.split("\n") if ln and not ln.startswith("[")]
-        m = re.search(r"\[\.\.\. (\d+) more files", output)
+        m = re.search(r"\n\n\[\.\.\. (\d+) more files matched\. [^\n]* \.\.\.\]$", output)
+        listing = output[:m.start()] if m else output      # a path may itself start with "[", as in "[id].tsx"
+        shown = len([ln for ln in listing.split("\n") if ln])
         extra = int(m.group(1)) if m else 0
-        return plural(len(paths) + extra, "file") + (f" (showing {len(paths)})" if extra else "")
+        return plural(shown + extra, "file") + (f" (showing {shown})" if extra else "")
 
     @staticmethod
     def _candidates(root: Path, no_ignore: bool = True, hidden: bool = True) -> Iterable[str]:

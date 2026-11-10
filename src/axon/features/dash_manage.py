@@ -514,7 +514,7 @@ def usage_report(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
     out["project_name"] = srv.workspace.name
     out["period_key"] = per.key
     out["by_day"] = [{"name": d.isoformat(), "calls": a.calls, "input": a.input, "output": a.output, "cache_read": a.cache_read,
-                      "cache_write": a.cache_write, "cost": a.cost} for d, a in stats.days]
+                      "cache_write": a.cache_write, "uncached_input": a.uncached_input, "cost": a.cost} for d, a in stats.days]
     out["by_session"] = [{"id": s.id, "title": redact_text(s.title) or s.id, "project": an._project_name(s.project, s.workspace),
                           "calls": s.calls, "turns": s.turns, "tokens": s.tokens, "cost": s.cost, "last": s.last_ts,
                           "models": sorted(s.models)} for s in stats.sessions]

@@ -138,7 +138,7 @@ class CompactionEvent:
 
 @dataclass(frozen=True)
 class SubagentEvent:
-    phase: str                     # start | end
+    phase: str                     # queued (over the concurrent limit, waiting for a slot) | start | end
     task_id: str
     agent_type: str
     title: str
@@ -158,7 +158,7 @@ class SubagentStep:
     ``subagent`` step in the parent's TurnTrace."""
     task_id: str
     agent_type: str
-    kind: str                      # llm | tool
+    kind: str                      # llm | tool | note (step limit, retry, resume: shown as they happen)
     name: str = ""                 # tool name, or model for llm steps
     summary: str = ""              # tool args / result preview, or token summary
     is_error: bool = False
@@ -485,6 +485,8 @@ class TurnTrace:
                 self._open_llm = None
             elif isinstance(event, ToolExecutionStart):
                 step = self._add("tool", {"id": event.id, "name": event.name, "input": _jsonable(event.input)})
+                if getattr(event, "server", ""):
+                    step.data["server"] = event.server
                 if event.id in self._pending_why:
                     step.data["why"] = self._pending_why.pop(event.id)
                 self._open_tools[event.id] = step
@@ -504,6 +506,8 @@ class TurnTrace:
                 step = self._open_tools.get(event.id) or self._add("tool", {"id": event.id, "name": event.name, "input": _jsonable(event.input)})
                 step.ended_at = now
                 step.data.update({"is_error": event.is_error, "result_preview": _preview(event.content)})
+                if getattr(event, "server", ""):
+                    step.data.update({"server": event.server, "server_ms": int(getattr(event, "duration_ms", 0) or 0)})
                 self.tool_calls += 1
             elif isinstance(event, ToolTiming):
                 step = self._open_tools.pop(event.id, None)
@@ -523,6 +527,11 @@ class TurnTrace:
                         start.ended_at = now
                         start.data.update({k: v for k, v in _jsonable(event).items() if k not in ("task_id", "title")})
                         return
+                waiting = self._subagent_step(event.task_id) if event.phase == "start" else None
+                if waiting is not None and waiting.data.get("phase") == "queued":     # the same run, now started
+                    waiting.data.update({"phase": "start", "status": event.status, "model": event.model,
+                                         "queued_s": round(now - waiting.started_at, 2)})
+                    return
                 step = self._add("subagent", _jsonable(event))
                 step.data.setdefault("steps", [])
             elif isinstance(event, SubagentStep):

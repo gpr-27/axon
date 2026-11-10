@@ -124,14 +124,14 @@ def run_plugin_command(agent: Any, arg: str, refresh: Callable[[Any], None], rel
         elif sub == "reload":
             reload_cmd(agent, "")
         else:
-            _list(installed)
+            _list(installed, ws)
     except (mk.MarketplaceError, ValueError, FileExistsError, RuntimeError, OSError) as e:
         err(str(e))
 
 
 # ─── list / info ────────────────────────────────────────────────────────────
 
-def _list(installed: list[pl.Plugin]) -> None:
+def _list(installed: list[pl.Plugin], ws: Path | None = None) -> None:
     header("Plugins", f"{len(installed)} installed")
     if not installed:
         print(f"    {SLATE}None. /plugin marketplace add <source> then /plugin install <name>@<marketplace>, "
@@ -140,6 +140,14 @@ def _list(installed: list[pl.Plugin]) -> None:
         comps = ", ".join(f"{n} {k}" for k, n in p.components().items()) or "empty"
         state = f"{MINT}●{RST}" if p.enabled else f"{DARK_SLATE}○{RST}"
         print(f"    {state} {WHITE}{p.id:<28}{RST} {SLATE}{p.version:<8} {p.scope:<8} {comps}{RST}")
+    try:
+        broken = pl.plugin_problems(ws) if ws is not None else []
+    except OSError:
+        broken = []
+    for d, why in broken:
+        print(f"    {SLATE}✗ {WHITE}{d.name:<28}{RST} {SLATE}not loaded: {why}{RST}")
+    if broken:
+        print(f"      {SLATE}Fix the file, or delete the folder to remove the plugin.{RST}")
     markets = mk.list_marketplaces()
     if markets:
         print(f"\n    {SLATE}Marketplaces: {', '.join(n for n, _ in markets)}  (/plugin discover){RST}")

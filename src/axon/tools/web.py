@@ -76,6 +76,8 @@ class WebFetchTool(Tool):
         total = len(body)
         window = body[start : start + max_chars]
         header = [f"URL: {res.url}", f"HTTP {res.status} · {res.content_type or 'unknown type'} · {total:,} chars"]
+        if window and (start or start + max_chars < total):
+            header.append(f"Showing chars {start + 1:,}-{start + len(window):,} of {total:,}")
         if title:
             header.insert(1, f"Title: {title}")
         if prompt:
@@ -100,5 +102,12 @@ class WebFetchTool(Tool):
         if not m:
             return default_summary(output, False)
         ctype = m.group(2).split(";")[0]
-        more = " (truncated)" if "more chars" in output else ""
-        return f"HTTP {m.group(1)} · {ctype} · {m.group(3)} chars{more}"
+        head = output.split("\n\n", 1)[0]             # the header block: the page text below may say anything
+        part = re.search(r"^Showing chars ([\d,]+-[\d,]+ of [\d,]+)$", head, re.M)
+        size = f"chars {part.group(1)}" if part else f"{m.group(3)} chars"
+        notes = []
+        if "\n[Download stopped at the 5 MB size cap.]" in output[-400:]:
+            notes.append("download stopped at 5 MB")
+        if re.search(r"\[\.\.\. output truncated: [\d,]+ more characters \.\.\.\]\s*\Z", output):
+            notes.append("truncated")
+        return f"HTTP {m.group(1)} · {ctype} · {size}" + (f" ({', '.join(notes)})" if notes else "")

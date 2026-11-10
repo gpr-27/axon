@@ -2451,6 +2451,9 @@ class Renderer:
         self._batch_blocks: dict[str, dict[str, Any]] = {}
         self._batch_next = 0
         self._batch_parallel = False
+        self._batch_tasks = 0                            # Task calls in the current batch
+        self._sub_steps: dict[str, list[Any]] = {}       # normal: a subagent's steps held until it ends (parallel runs)
+        self._step_said = ""                             # the text the model wrote in this step, as printed
         self._text_in_step = False
         self._turn_cost = 0.0
         self._turn_cost_known = False
@@ -2669,33 +2672,41 @@ class Renderer:
         ]
         mode_s = f"{WARNING}{mode}{RST} {MUTED}mode{RST}" if mode else ""
         trace_s = f"{MUTED}trace {self.trace_level} (alt+l){RST}"
-        tips = f"{MUTED}/help commands {dot} ! shell {dot} @ files {dot} ? shortcuts{RST}"
-        rows: list[str] = []
-        for lg, text in lines:                     # logo column + text; long text wraps under itself
-            if isinstance(text, list):             # "a · b · c": break between the pieces, not inside one
-                sep, parts, cur = f" {MUTED}{dot}{RST} ", [], ""
-                for piece in text:
-                    trial = piece if not cur else cur + sep + piece
-                    if cur and display_width(trial) > text_w:
-                        parts.append(cur + f" {MUTED}{dot}{RST}")
-                        cur = piece
-                    else:
-                        cur = trial
-                parts.append(cur)
+
+        def between(pieces: list[str], room: int, trail: str = "") -> list[str]:
+            """'a · b · c' in rows of *room* columns, broken between the pieces and never inside one."""
+            sep, out, cur = f" {MUTED}{dot}{RST} ", [], ""
+            for piece in pieces:
+                trial = piece if not cur else cur + sep + piece
+                if cur and display_width(trial) > room:
+                    out.append(cur + trail)
+                    cur = piece
+                else:
+                    cur = trial
+            out.append(cur)
+            return out
+
+        beside: list[str] = []                     # the text beside the logo; long text wraps under itself
+        for _lg, text in lines:
+            if isinstance(text, list):
+                parts = between(text, text_w, f" {MUTED}{dot}{RST}")
                 parts = [x if display_width(x) <= text_w else truncate(x, text_w) for x in parts]
             else:
                 parts = wrap_ansi(text, text_w) or [""]
-            rows.append(f"{lg}  {parts[0]}")
-            rows += [" " * (lw + 2) + r for r in parts[1:]]
+            beside += parts
+        # the logo's three rows stay together whatever wraps beside them
+        rows: list[str] = [f"{logo[i] if i < len(logo) else ' ' * lw}  {r}" for i, r in enumerate(beside)]
         if data_row:
             rows.append(data_row)
         rows.append("")
         rows.append(f"{mode_s}{f' {MUTED}{dot}{RST} ' if mode_s else ''}{trace_s}")
-        rows.append(tips)
-        rows.append(f"{MUTED}type while Axon works to queue a message {dot} esc interrupts {dot} /btw side question{RST}")
+        hints = [["/help commands", "! shell", "@ files", "? shortcuts"],
+                 ["type while Axon works to queue a message", "esc interrupts", "/btw side question"]]
         if _click_expand_on(getattr(getattr(self, "_agent", None), "settings", None)):
             sel = "⌥/shift+drag" if glyph("dot") == "·" else "alt/shift+drag"
-            rows.append(f"{MUTED}click a block to expand {dot} {sel} selects text{RST}")
+            hints.append(["click a block to expand", f"{sel} selects text"])
+        for hint in hints:
+            rows += between([f"{MUTED}{h}{RST}" for h in hint], inner)
         tip = ""
         if not os.environ.get("AXON_NO_TIPS"):
             try:
@@ -2786,6 +2797,8 @@ class Renderer:
     def _on_llm_call(self, e: LLMCallStart) -> None:
         self._flush_cards(force=True)
         self._flush_blocks(force=True)
+        if self._sub_steps:
+            self._flush_sub_steps()
         self._finish_stream()
         self._flush_step_line()
         self._set_phase("idle")
@@ -2812,6 +2825,7 @@ class Renderer:
         self._step_model = e.model
         self._step_stats_done = False
         self._text_in_step = False
+        self._step_said = ""
         self._t_step = _record(TranscriptEntry("step", self._turn_no, e.iteration, title=f"Step {e.iteration} · {e.model}",
                                                summary=f"reads {_plural(e.message_count, 'message')}", started_at=time.time(),
                                                status="running"))
@@ -2901,6 +2915,9 @@ class Renderer:
         if context:
             self._turn_context = context
         if self.level < 2:
+            if miss_cause and self.level == 1:     # the table has the cached share; why it missed is said here
+                mark = "info" if "first request" in miss_cause else "warn"     # a cold start is expected, not a problem
+                self._line(f"{MUTED}{glyph(mark)} cache miss: {miss_cause}{RST}", "  ")
             return       # compact / normal: no cost line mid-turn; the end-of-turn table has it
         show_stop = stop if (self.level >= 2 or stop not in ("end_turn", "tool_use", "")) else ""
         sep = f" {MUTED}{glyph('dot')}{RST} "
@@ -3051,6 +3068,7 @@ class Renderer:
             # On the timeline the text is a child of its step (same column as tool calls); no header row.
             self.spinner.set_label(self._step_label("responding"))
         self._resp_raw.append(e.text)
+        self._step_said += e.text
         self._turn_text = True
         self._md_out(self._md.feed(e.text))
         self.spinner.nudge()            # show the unfinished line now, not at the next 100 ms tick
@@ -3119,7 +3137,9 @@ class Renderer:
         readonly = all(self._is_readonly(getattr(t, "name", "") or "") for t in tools)
         # Same rule as Agent._execute_batch: only an all-read-only batch runs concurrently, and only
         # then can results arrive out of order (so only then are tool blocks buffered).
-        self._batch_parallel = readonly and len(self._batch_order) > 1
+        said = getattr(e, "parallel", None)          # the loop's own word (parallel_tools = 1 runs them one by one)
+        self._batch_parallel = (readonly if said is None else bool(said)) and len(self._batch_order) > 1
+        self._batch_tasks = sum(1 for t in tools if (getattr(t, "name", "") or "") == "Task")
         self._tool_batch_count += 1
         self._finish_stream()
         self._close_step_stats()
@@ -3457,7 +3477,7 @@ class Renderer:
         return _tool_cards.CardCall(
             number=int(saved.get("number") or self._step_call_no or 1), name=name, inp=inp,
             why=str(saved.get("why") or why or ""), why_source=str(saved.get("why_source") or ""),
-            total=self._batch_total if batched else 1, common_allowed=common,
+            said=self._step_said, total=self._batch_total if batched else 1, common_allowed=common,
             allowed=self._allowed_info.pop(call_id, ""),
             content=content, is_error=is_error, duration=duration, state=state,
             hint=hint, notes=self._call_notes.pop(call_id, []),
@@ -3682,7 +3702,10 @@ class Renderer:
             num = _subagent_number(_get(e, "task_id", default=""))
             label = f"#{num} {title}" if num else title
             label += f" ({agent_type})" if agent_type else ""
-            if phase == "start":
+            if phase == "queued":
+                self._line(f"{AMBER}{glyph('warn')} subagent queued{RST} {TEXT}{label}{RST} {MUTED}{dot} "
+                           f"{_one_line(_get(e, 'detail', default='') or 'waiting for a free slot', 120)}{RST}", "  ")
+            elif phase == "start":
                 self._line(f"{CYAN}{glyph('play')} subagent started{RST} {TEXT}{label}{RST}" + (f" {MUTED}{dot} {_one_line(_get(e, 'model'), 60)}{RST}" if _get(e, "model") else ""), "  ")
             else:
                 status = str(_get(e, "status", default="done"))
@@ -3695,13 +3718,23 @@ class Renderer:
                                f"{float(_get(e, 'duration_s', default=0) or 0):.1f}s{RST}", "  ")
                 else:
                     self._line(f"{color}{glyph('ok') if color == SUCCESS else glyph('warn')} subagent {status}{RST} {TEXT}{label}{RST} {MUTED}{dot} "
-                               f"{_get(e, 'iterations', default=0)} steps {dot} {_fmt_tokens(int(_get(e, 'input_tokens', default=0) or 0))} in {dot} "
+                               f"{_plural(int(_get(e, 'iterations', default=0) or 0), 'step')} {dot} {_fmt_tokens(int(_get(e, 'input_tokens', default=0) or 0))} in {dot} "
                                f"{_fmt_tokens(int(_get(e, 'output_tokens', default=0) or 0))} out {dot} {float(_get(e, 'duration_s', default=0) or 0):.1f}s {dot} "
                                f"${float(_get(e, 'cost', default=0) or 0):.4f}{RST}", "  ")
+                self._sub_step_out(self._sub_steps.pop(str(_get(e, "task_id", default="")), []))
         elif kind == "SubagentStep":
-            # Each subagent's own LLM and tool calls: the live monitor and /subagents <n> show them; the main
-            # timeline lists them only at the detailed and debug levels, so parallel runs don't interleave.
-            if self.level < 2:
+            # Each subagent's own LLM and tool calls. Normal: a lone subagent's steps are listed as they happen;
+            # with several running at once each one's steps wait for its 'subagent completed' line, so parallel
+            # runs don't interleave. Detailed and debug print every step at once, tagged with its subagent.
+            if self.level < 1:
+                return
+            if self.level == 1:
+                task_id = str(_get(e, "task_id", default=""))
+                if self._batch_tasks > 1 or task_id in self._sub_steps:
+                    self._sub_steps.setdefault(task_id, []).append(e)
+                else:
+                    self._finish_stream()
+                    self._sub_step_out([e])
                 return
             self._finish_stream()
             is_llm = str(_get(e, "kind", default="")) == "llm"
@@ -3733,6 +3766,11 @@ class Renderer:
             self._line(f"{CYAN}{glyph('arrow')} {_plural(n, 'message')} you typed during the turn sent to the model{RST}", "  ")
             for t in texts[:3]:
                 self._line(f"{MUTED}{glyph('chevron')} {_one_line(t, 120)}{RST}", "    ")
+        elif kind == "GoalCheckEvent":
+            if self.level >= 1:
+                self._finish_stream()
+                self._line(f"{CYAN}{glyph('arrow')} goal check{RST} {MUTED}{dot} asking the model whether the goal is met: "
+                           f"{_one_line(_get(e, 'goal', default=''), 100)}{RST}", "  ")
         elif kind == "ThinkingBoost":
             self._line(f"{ACCENT}{glyph('star')} \"{_get(e, 'keyword', default='think')}\" {dot} effort "
                        f"{_get(e, 'previous_effort', default='?')} {glyph('arrow')} {_get(e, 'effort', default='?')}"
@@ -3772,6 +3810,20 @@ class Renderer:
                 self._render_debug_fields(e, skip=set(), title="timing")
         elif self.level >= 3 and _event_fields(e):
             self._render_debug_fields(e, skip=set())
+
+    def _sub_step_out(self, steps: list[Any]) -> None:
+        """A subagent's own steps, one row each, under its 'subagent started / completed' line."""
+        width = max(20, term_width() - 1 - display_width(self._rail("    ")))
+        for ev in steps:
+            self._line(truncate(_subagent_step_row(ev), width), "    ")
+
+    def _flush_sub_steps(self) -> None:
+        """Held steps of subagents that have not ended (stopped, or still running in the background)."""
+        held, self._sub_steps = self._sub_steps, {}
+        for task_id, steps in held.items():
+            num = _subagent_number(task_id)
+            self._line(f"{CYAN}subagent {'#' + num if num else task_id}{RST} {MUTED}{glyph('dot')} {_plural(len(steps), 'step')} so far{RST}", "  ")
+            self._sub_step_out(steps)
 
     def _annotate_tool(self, call_id: str, tool: str, text: str) -> None:
         """Print a note on a tool row (re-labelled when another tool's output came in between)."""
@@ -4427,6 +4479,30 @@ def _sub_behind_scenes(t: Any) -> str:
     return f" {glyph('dot')} ".join(facts)
 
 
+def _subagent_step_row(ev: Any) -> str:
+    """One step of a subagent: '▏ ⚒ Read · src/a.py · 0.2s' or '▏ ◆ LLM model · 1.2k in · 80 out · 1.1s'."""
+    dot = f" {glyph('dot')} "
+    is_llm = str(_get(ev, "kind", default="")) == "llm"
+    err = bool(_get(ev, "is_error", default=False))
+    mark = (f"{ERROR}{glyph('fail')}{RST}" if err else
+            (f"{ACCENT}{glyph('diamond')}{RST}" if is_llm else f"{PRIMARY}{glyph('tool')}{RST}"))
+    name = _one_line(_get(ev, "name", default="") or ("LLM call" if is_llm else "tool"), 40)
+    label = f"{TEXT}LLM{RST} {MUTED}{name}{RST}" if is_llm else f"{BOLD}{name}{RST}"
+    facts = []
+    summary = _one_line(_get(ev, "summary", default=""), 90).replace(" · ", dot)
+    if summary:
+        facts.append(summary)
+    if is_llm and (_get(ev, "input_tokens", default=0) or _get(ev, "output_tokens", default=0)):
+        facts.append(f"{_fmt_tokens(int(_get(ev, 'input_tokens', default=0) or 0))} in{dot}"
+                     f"{_fmt_tokens(int(_get(ev, 'output_tokens', default=0) or 0))} out")
+    if _get(ev, "duration_s", default=None):
+        facts.append(f"{float(_get(ev, 'duration_s')):.1f}s")
+    row = f"{SUBTLE}{glyph('thinking_bar')}{RST} {mark} {label}"
+    if facts:
+        row += f"{MUTED}{dot}{dot.join(facts)}{RST}"
+    return row
+
+
 def _subagent_step_rows(tasks: list[Any], steps: list[Any], width: int) -> list[str]:
     """Each subagent's own steps (LLM and tool calls) under a heading with its number and title, one
     subagent after the other, so parallel runs do not interleave."""
@@ -4441,26 +4517,7 @@ def _subagent_step_rows(tasks: list[Any], steps: list[Any], width: int) -> list[
             continue
         out.append(f"  {CYAN}{BOLD}#{t.index}{RST} {TEXT}{BOLD}{_one_line(t.title, max(10, width - 20))}{RST} "
                    f"{MUTED}{dot}{len(mine)} step{'s' if len(mine) != 1 else ''}{RST}")
-        for ev in mine:
-            is_llm = str(_get(ev, "kind", default="")) == "llm"
-            err = bool(_get(ev, "is_error", default=False))
-            mark = (f"{ERROR}{glyph('fail')}{RST}" if err else
-                    (f"{ACCENT}{glyph('diamond')}{RST}" if is_llm else f"{PRIMARY}{glyph('tool')}{RST}"))
-            name = _one_line(_get(ev, "name", default="") or ("LLM call" if is_llm else "tool"), 40)
-            label = f"{TEXT}LLM{RST} {MUTED}{name}{RST}" if is_llm else f"{BOLD}{name}{RST}"
-            facts = []
-            summary = _one_line(_get(ev, "summary", default=""), 90).replace(" · ", dot)
-            if summary:
-                facts.append(summary)
-            if is_llm and (_get(ev, "input_tokens", default=0) or _get(ev, "output_tokens", default=0)):
-                facts.append(f"{_fmt_tokens(int(_get(ev, 'input_tokens', default=0) or 0))} in{dot}"
-                             f"{_fmt_tokens(int(_get(ev, 'output_tokens', default=0) or 0))} out")
-            if _get(ev, "duration_s", default=None):
-                facts.append(f"{float(_get(ev, 'duration_s')):.1f}s")
-            row = f"    {SUBTLE}{glyph('thinking_bar')}{RST} {mark} {label}"
-            if facts:
-                row += f" {MUTED}{dot}{dot.join(facts)}{RST}"
-            out.append(truncate(row, width))
+        out += [truncate("    " + _subagent_step_row(ev), width) for ev in mine]
         out.append("")
     return out
 

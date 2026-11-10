@@ -208,7 +208,8 @@ def _usage_from(d: dict[str, Any]) -> Usage:
         except (TypeError, ValueError):
             return 0
     return Usage(input=_i("input"), output=_i("output"), cache_read=_i("cache_read"),
-                 cache_write=_i("cache_write"), reasoning=_i("reasoning"))
+                 cache_write=_i("cache_write"), reasoning=_i("reasoning"),
+                 cache_write_1h=min(_i("cache_write_1h"), _i("cache_write")))
 
 
 def estimate_cost(model: str | None, usage: Usage) -> float:
@@ -526,6 +527,8 @@ class SessionStore:
             "usage": {
                 "input": u.input, "output": u.output, "cache_read": u.cache_read,
                 "cache_write": u.cache_write, "reasoning": u.reasoning,
+                # the 1-hour share of cache_write is billed at a higher rate; without it a rebuilt ledger underprices
+                **({"cache_write_1h": u.cache_write_1h} if getattr(u, "cache_write_1h", 0) else {}),
             } if u else None,
         }
         # What the timeline showed for this call (context size, provider, results fed back) and how long each

@@ -354,6 +354,22 @@ def test_enable_says_so_when_the_shared_mcp_file_keeps_a_server_off(c, env):
     assert st == 409 and b"Remove that line" in body
 
 
+def test_reconnect_reports_how_it_ended(c, env):
+    """The panel's Reconnect said "Reconnecting x" and nothing else, even when the server failed again at once."""
+    from axon import storage
+    from axon.mcp.bridge import get_bridge
+    storage.user_file("mcp.json").write_text(json.dumps({"mcpServers": {"dead": {"command": "/usr/bin/false"}}}))
+    try:
+        st, _, body = c.post("/api/workbench/connector", {"name": "dead", "action": "reconnect"})
+        d = json.loads(body)
+        assert st == 200 and d["ok"] is True and d["status"] != "connected" and d["tools"] in (0, None)
+        if d["status"] == "failed":
+            assert d["error"]
+    finally:
+        get_bridge(env.ws).disconnect_server("dead")
+    assert "function wbReconnectWord" in APP_JS and "toast('Reconnecting ' + s.name)" not in APP_JS
+
+
 def test_menu_hints_do_not_use_the_chat_marker_class():
     """`.mk` is the chat's 18px tool marker; a menu hint with that class was squeezed to 18px and cut off."""
     from axon.features.dashboard_web import APP_CSS, WORKBENCH_CSS

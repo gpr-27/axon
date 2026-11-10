@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,9 @@ def plural(n: int, word: str, plural_word: str | None = None) -> str:
     return f"{n:,} {word if n == 1 else (plural_word or word + 's')}"
 
 
+_TRUNCATED_TAIL = re.compile(r"\n*\[\.\.\. output truncated: [\d,]+ more characters[^\n]*\.\.\.\]\s*\Z")
+
+
 def default_summary(output: str, is_error: bool = False) -> str:
     text = (output or "").strip()
     if not text:
@@ -90,8 +94,11 @@ def default_summary(output: str, is_error: bool = False) -> str:
         first = first[:87] + "..."
     if is_error:
         return f"error: {first}"
+    cut = _TRUNCATED_TAIL.search(text)             # cap_text's marker: the card must not pass a cut result off as whole
+    if cut:
+        text = text[:cut.start()].rstrip()
     n = text.count("\n") + 1
-    return first if n == 1 else f"{first} · {plural(n, 'line')}"
+    return (first if n == 1 else f"{first} · {plural(n, 'line')}") + (" (truncated)" if cut else "")
 
 
 def _call_resolver(fn: Any, root: Path, raw: str | Path, allow_git_read: bool) -> Path:

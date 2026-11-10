@@ -312,13 +312,20 @@ def allowed_because(outcome: str, source: str = "", reason: str = "", approval: 
     return f"allowed: {_reason_words(reason)}" if reason else "allowed"
 
 
+RULE_MAX_CHARS = 40
+
+
 def short_allowed(text: str) -> str:
     """The permission outcome in two to four words, from ``allowed_because`` text:
     'allowed: bypass mode is on' -> 'allowed (bypass mode)', 'allowed by rule Bash(git *)' ->
-    'allowed (rule)', 'declined by you' -> 'declined by you'. '' when there is no text."""
-    low = " ".join(str(text or "").split()).lower()
+    'allowed (rule Bash(git *))', 'declined by you' -> 'declined by you'. '' when there is no text.
+    The short form of a rule comes back as it is, so the rule's name survives a second pass."""
+    flat = " ".join(str(text or "").split())
+    low = flat.lower()
     if not low:
         return ""
+    if low.startswith("allowed (rule ") and flat.endswith(")"):
+        return flat
     if low.startswith("approved by you"):
         return "approved by you"
     if low.startswith("declined by you"):
@@ -329,7 +336,10 @@ def short_allowed(text: str) -> str:
     if low.startswith("needs approval"):
         return "needs approval"
     if low.startswith("allowed by rule"):
-        return "allowed (rule)"
+        rule = " ".join(str(text).split())[len("allowed by rule"):].strip()
+        if len(rule) > RULE_MAX_CHARS:
+            rule = rule[: RULE_MAX_CHARS - 1] + "…"
+        return f"allowed (rule {rule})" if rule else "allowed (rule)"
     if low.startswith("allowed by hook"):
         return "allowed (hook)"
     if "bypass" in low:

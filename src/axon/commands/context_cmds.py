@@ -7,7 +7,7 @@ from typing import Any
 
 from axon.commands.common import (
     err, estimate_tokens, fmt_tokens, fmt_usd, header, info, kv, ok, record_usage, section,
-    table, update_settings, usage, width,
+    table, update_settings, usage, warn, width,
     typed_hint,
 )
 from axon.commands.registry import CommandResult, command
@@ -415,6 +415,8 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
     before_tok = sum(estimate_tokens(m.get("content", "")) for m in conv.messages)
     print(f"\n  {TEAL}⚡ Compacting {before_n} messages (~{fmt_tokens(before_tok)} tokens){'  · focus: ' + arg if arg else ''}…{RST}")
     ctx = getattr(agent, "context", None)
+    original = list(conv.messages)
+    prev_receipt = getattr(ctx, "last_receipt", None)
     used_llm = False
     u = None
     if ctx is not None and hasattr(ctx, "summarize_with_provider"):
@@ -434,22 +436,47 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
             conv.messages = [{"role": "user", "content": note}, {"role": "assistant", "content": "Understood."}] + conv.messages[cut:]
     after_n = len(conv.messages)
     after_tok = sum(estimate_tokens(m.get("content", "")) for m in conv.messages)
-    if isinstance(getattr(ctx, "last_receipt", None), dict) and after_n != before_n:
-        ctx.last_receipt["trigger"] = "manual"
-    if after_n >= before_n and after_tok >= before_tok:
+    call = ""
+    if u is not None and hasattr(u, "input"):
+        call = f"{int(u.input or 0):,} in · {int(u.output or 0):,} out"
+        try:
+            from axon.providers.pricing import cost_for
+            call += f" · {fmt_usd(cost_for(agent.settings.model, u), 4)}"
+        except Exception:
+            pass
+    if conv.messages == original:
         info("Nothing to compact yet: there are no older turns to summarize (the latest turn is always kept).")
         return CommandResult(handled=True)
+    kept = next((k for k in range(min(after_n, before_n), -1, -1) if k == 0 or conv.messages[-k:] == original[-k:]), 0)
+    if after_n >= before_n and after_tok >= before_tok:
+        # The summary took more room than what it replaced: put the conversation back rather than grow it.
+        conv.messages = original
+        if ctx is not None and hasattr(ctx, "last_receipt"):
+            ctx.last_receipt = prev_receipt
+        info(f"Conversation unchanged: the summary is not smaller than the {before_n - kept} older messages it would replace "
+             f"(~{fmt_tokens(before_tok)} → ~{fmt_tokens(after_tok)} tokens)." + (f" Summary call: {call}." if call else ""))
+        return CommandResult(handled=True)
+    if isinstance(getattr(ctx, "last_receipt", None), dict):
+        ctx.last_receipt["trigger"] = "manual"
     record: dict[str, Any] = {"messages": conv.messages, "instructions": arg}
     if u is not None and hasattr(u, "input"):
         # the summary call's usage, so a resumed session's ledger (/cost) still counts it
         record["model"] = agent.settings.model
-        record["usage"] = {k: int(getattr(u, k, 0) or 0) for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
+        record["usage"] = {k: int(getattr(u, k, 0) or 0)
+                           for k in ("input", "output", "cache_read", "cache_write", "reasoning", "cache_write_1h")}
+    saved = True
     try:
         agent.session.append("compaction", record)
-    except Exception:
-        pass
+    except Exception as e:
+        saved = False
+        warn(f"The compaction could not be saved ({e}): resuming this session will bring back the full conversation.")
     how = "LLM summary" if used_llm else "heuristic summary"
-    ok(f"Compacted {before_n} → {after_n} messages · ~{fmt_tokens(before_tok)} → ~{fmt_tokens(after_tok)} tokens ({how})")
+    print(f"\n  {MINT}✓{RST} Compacted {before_n} → {after_n} messages · ~{fmt_tokens(before_tok)} → ~{fmt_tokens(after_tok)} tokens ({how})")
+    print(f"      {SLATE}Summarised {before_n - kept} older messages into {after_n - kept}, kept the latest {kept} as they were"
+          f"{' · saved to the transcript' if saved else ''}{RST}")
+    if call:
+        print(f"      {SLATE}Summary call: {call} · /compact --last shows the summary{RST}")
+    print()
     return CommandResult(handled=True)
 
 
@@ -541,8 +568,35 @@ def handle_usage(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
+def _cost_one_call(ledger: Any, which: str) -> CommandResult:
+    """/cost calls <n>: one API call in full."""
+    entries = list(getattr(ledger, "entries", []) or [])
+    try:
+        n = int(which.lstrip("#"))
+    except ValueError:
+        usage("/cost calls [n]   every API call, or call number n in full")
+        return CommandResult(handled=True, success=False)
+    e = next((x for x in entries if x.id == n), None)
+    if e is None:
+        err(f"No call #{n} (this session has {len(entries)}).")
+        return CommandResult(handled=True, success=False)
+    import time
+    u = e.usage
+    read, write = int(u.cache_read or 0), int(u.cache_write or 0)
+    header(f"Call #{n}", time.strftime("%H:%M:%S", time.localtime(e.timestamp)))
+    kv("Source", e.source)
+    kv("Model", e.model + (f" via {e.provider}" if e.provider else ""))
+    kv("Input", f"{int(u.input or 0):,} tokens ({max(0, int(u.input or 0) - read - write):,} uncached · {read:,} read from cache · {write:,} written to cache)")
+    if getattr(u, "cache_write_1h", 0):
+        kv("1-hour cache", f"{int(u.cache_write_1h):,} of the written tokens (billed at the 1-hour rate)")
+    kv("Output", f"{int(u.output or 0):,} tokens" + (f" ({int(u.reasoning):,} reasoning)" if getattr(u, "reasoning", 0) else ""))
+    kv("Cost", fmt_usd(e.cost, 5) + ("" if e.priced else " (no price known for this model)"))
+    print()
+    return CommandResult(handled=True)
+
+
 @command("cost", category=CAT, description="Cost by source and model, cache savings, $/turn",
-         aliases=("ledger", "stats"), usage="/cost            session breakdown\n/cost calls      every API call\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
+         aliases=("ledger", "stats"), usage="/cost            session breakdown\n/cost calls [n]  every API call, or call n in full\n/cost --project  all sessions of this project (from ~/.axon/usage.jsonl)\n/cost --all      every project")
 def handle_cost(agent: Any, arg: str) -> CommandResult:
     a = arg.strip().lower()
     if a in ("--all", "all", "lifetime", "global"):   # the usage log does not need this session's ledger
@@ -566,6 +620,9 @@ def handle_cost(agent: Any, arg: str) -> CommandResult:
         info("No usage recorded yet.")
         return CommandResult(handled=True)
 
+    first, _, rest = a.partition(" ")
+    if first in ("calls", "call") and rest.strip():
+        return _cost_one_call(ledger, rest.strip())
     if a in ("calls", "call", "detail", "details", "history", "-v", "--verbose"):
         print(f"\n  {GOLD}{BOLD}Detailed Call-by-Call API History{RST}")
         if hasattr(ledger, "render_call_history"):

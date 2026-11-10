@@ -54,7 +54,7 @@ from axon.agent.trace import (
 )
 from axon.tools.base import ToolContext
 from axon.tools.registry import ToolRegistry
-from axon.permissions.engine import PermissionEngine
+from axon.permissions.engine import Decision as _Decision, PermissionEngine
 from axon.session.store import SessionStore
 from axon.session.ledger import Ledger
 from axon.providers.base import (
@@ -677,6 +677,19 @@ class Agent:
         except Exception:
             pass
 
+    @staticmethod
+    def _hook_failure(event: str, error: BaseException) -> Any:
+        """The hooks for *event* could not be evaluated at all. That is never a silent "allow": a PreToolUse
+        failure makes the call ask the user (and with nobody to ask, the call does not run); a PermissionRequest
+        failure leaves the prompt to the user. Every other event carries on. The failure is shown as a hook step."""
+        from axon.hooks.manager import HookResult
+        note = f"{event} hooks could not be evaluated: {type(error).__name__}: {error}"
+        res = HookResult(ran=1, warnings=[note])
+        if event == "PreToolUse":
+            res.permission_decision = "ask"
+            res.permission_reason = f"{note}. Its hooks did not check this call, so it needs your approval."
+        return res
+
     # ── session lifecycle ───────────────────────────────────────────
     def _hook(self, event: str, payload: dict[str, Any], tool_use_id: str = "") -> Any:
         if self.hooks is None:
@@ -700,8 +713,8 @@ class Agent:
             except Exception:
                 pass
             res = self.hooks.run(event, payload)
-        except Exception:
-            return None
+        except Exception as e:  # noqa: BLE001 - a broken hook manager must not take the turn down
+            res = self._hook_failure(event, e)
         warnings = list(getattr(res, "warnings", None) or [])
         sysmsg = str(getattr(res, "system_message", "") or "").strip()
         if sysmsg:
@@ -2188,16 +2201,14 @@ class Agent:
             except Exception:
                 self._rationales = {}
             self._prev_round_tools = list(tool_uses)
-            if turn.stop_reason in ("max_tokens", "model_context_window_exceeded"):
-                results = [
-                    ToolResultBlock(
-                        tool_use_id=tu.id,
-                        content="Not executed: the response hit the max_tokens limit while writing this tool call, so its "
-                                "arguments may be truncated. Retry with smaller steps (e.g. write large files in parts).",
-                        is_error=True,
-                    )
-                    for tu in tool_uses
-                ]
+            cut_by = turn.stop_reason if turn.stop_reason in ("max_tokens", "model_context_window_exceeded") else ""
+            if cut_by:
+                why = ("Not executed: the response hit the max_tokens limit while writing this tool call, so its "
+                       "arguments may be truncated. Retry with smaller steps (e.g. write large files in parts)."
+                       if cut_by == "max_tokens" else
+                       "Not executed: the context window filled while this tool call was being written, so its arguments "
+                       "may be truncated. Older content has been shortened to make room; make the call again.")
+                results = [ToolResultBlock(tool_use_id=tu.id, content=why, is_error=True) for tu in tool_uses]
             else:
                 try:
                     results = self._execute_batch(tool_uses)
@@ -2217,7 +2228,7 @@ class Agent:
                     ]
 
             batch_stop = self._hook_stop
-            if turn.stop_reason != "max_tokens":
+            if not cut_by:          # nothing ran, so there is no batch to report
                 calls = []
                 for tu, r in zip(tool_uses, results):
                     calls.append({"tool_name": tu.name, "tool_input": tu.input if isinstance(tu.input, dict) else {},
@@ -2242,6 +2253,11 @@ class Agent:
             self._append_results(results)
             last_round = self._observations(tool_uses, results, iterations)
             stop_continuations = 0
+            if cut_by == "model_context_window_exceeded" and overflow_retries < MAX_OVERFLOW_RETRIES:
+                # Same recovery as a text reply cut by a full context: without it the next call overflows again.
+                overflow_retries += 1
+                self._recover_from_overflow(overflow_retries)
+                system_blocks = self.system_blocks()
             if batch_stop:
                 self._hook_stop = ""
                 return self._stop_result((final_text + "\n\n" if final_text else "") + f"[Stopped by hook: {batch_stop}]",
@@ -2587,6 +2603,11 @@ class Agent:
     def _execute_batch(self, tool_uses: list[ToolUseBlock]) -> list[ToolResultBlock]:
         """Execute tool uses. Every slot is pre-allocated so each tool_use gets a result (Law 1).
         Read-only tools (and Task) run concurrently, bounded by settings.parallel_tools."""
+        has_tasks = any(tu.name == "Task" for tu in tool_uses)
+        workers = max(1, min(int(self.settings.parallel_tools or 1), len(tool_uses)))
+        parallel = all(self._parallel_safe(tu) for tu in tool_uses) and (
+            (len(tool_uses) > 1 and workers > 1) or has_tasks
+        )
         if tool_uses:
             self._emit(
                 ToolBatchStart(
@@ -2594,16 +2615,12 @@ class Agent:
                     tools=tool_uses,
                     user_prompt=self._current_turn_prompt,
                     mode=self.settings.mode,
+                    parallel=parallel,
                 )
             )
 
         results: list[ToolResultBlock | None] = [None] * len(tool_uses)
         self._partial_results = results
-        has_tasks = any(tu.name == "Task" for tu in tool_uses)
-        workers = max(1, min(int(self.settings.parallel_tools or 1), len(tool_uses)))
-        parallel = all(self._parallel_safe(tu) for tu in tool_uses) and (
-            (len(tool_uses) > 1 and workers > 1) or has_tasks
-        )
         self._batch_parallel = parallel
 
         if parallel:
@@ -2675,7 +2692,7 @@ class Agent:
             except Exception:
                 pass
         order = {tu.id: i for i, tu in enumerate(tool_uses)}
-        quiet = ("SubagentEvent", "SubagentStep", "RetryEvent", "ProviderRetry")
+        quiet = ("SubagentEvent", "SubagentStep")     # the summary above covers these; a held retry is still shown
         rank = lambda ev: order.get(getattr(ev, "id", None) or getattr(ev, "tool_use_id", None), -1)  # noqa: E731
         for ev in sorted(held, key=rank):
             self._deliver(ev, show=type(ev).__name__ not in quiet, held=True)
@@ -2864,7 +2881,19 @@ class Agent:
         parse_error = getattr(block, "parse_error", None)
         if parse_error:
             kwargs.update(parse_error=str(parse_error))
+        server = self._mcp_server_of(block.name)
+        if server:
+            kwargs.update(server=server)
         return ToolExecutionStart(**kwargs)
+
+    def _mcp_server_of(self, tool_name: str) -> str:
+        """The MCP server a tool belongs to, or "" (also for a tool loaded through ToolSearch)."""
+        try:
+            tool = self.registry.get(tool_name)
+        except Exception:
+            return ""
+        tool = getattr(tool, "target", tool)
+        return str(getattr(tool, "server_name", "") or "")
 
     def _run_one_inner(self, block: ToolUseBlock) -> ToolResultBlock:
         self._emit(self._tool_start_event(block))
@@ -2916,15 +2945,31 @@ class Agent:
         if hook_perm == "allow" and outcome == "ask" and not hard_ask:
             outcome, source, reason = "allow", "hook", "Allowed by PreToolUse hook."
         elif hook_perm == "ask" and outcome == "allow":
-            outcome, source, reason = "ask", "hook", "PreToolUse hook requested confirmation."
+            outcome, source = "ask", "hook"
+            reason = str(getattr(pre, "permission_reason", "") or "") or "PreToolUse hook requested confirmation."
+            decision = _Decision("ask", reason)     # the prompt states why it is asking, not the rule that allowed
 
         if outcome != "allow":
             req = self._hook("PermissionRequest", {"tool_name": tool.name, "tool_input": tool_input, "reason": reason},
                              tool_use_id=block.id)
             req_dec = getattr(req, "permission_decision", None) if req is not None else None
-            if req is not None and getattr(req, "updated_input", None) is not None:
+            if req is not None and getattr(req, "updated_input", None) is not None \
+                    and dict(req.updated_input) != tool_input:
+                # The hook rewrote the call: the rules are checked again on what will actually run.
                 tool_input = dict(req.updated_input)
-            if req_dec == "allow":
+                decision = self.permissions.check(tool, tool_input, self.settings.mode)
+                if decision.outcome == "deny":
+                    self._perm_event(block, "deny", f"{decision.reason} (input rewritten by a PermissionRequest hook)",
+                                     "rule" if getattr(decision, "rule", None) else "mode",
+                                     rule=getattr(decision, "rule", None) or "")
+                    return self._error_result(block, f"Permission Denied: {decision.reason}")
+                if decision.outcome == "ask" and getattr(decision, "hard", False):
+                    hard_ask = True
+                    reason = str(decision.reason)
+                    source = "rule" if getattr(decision, "rule", None) else source
+            if req_dec == "allow" and hard_ask:
+                pass        # an ask rule, critical path or network read: no hook answers for the user
+            elif req_dec == "allow":
                 outcome, source, reason = "allow", "hook", "Allowed by PermissionRequest hook."
                 self._apply_permission_updates(getattr(req, "updated_permissions", None) or [])
             elif req_dec == "deny":
@@ -3027,7 +3072,8 @@ class Agent:
         res = ToolResultBlock(tool_use_id=block.id, content=content, is_error=is_error,
                               images=() if is_error else tuple(ctx.images))
         self._emit(ToolExecutionResult(id=block.id, name=block.name, input=tool_input, content=res.content,
-                                       is_error=res.is_error, changes=tuple(changes)))
+                                       is_error=res.is_error, changes=tuple(changes),
+                                       server=self._mcp_server_of(block.name), duration_ms=duration_ms))
         return res
 
     def _snapshot_files(self, tool_name: str, tool_input: dict[str, Any]) -> filechanges.Snapshot | None:

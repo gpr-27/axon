@@ -124,6 +124,8 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
         gate("post", prev_model, chosen, requested=chosen)
     via = f" {SLATE}via {preset.name} ({base_url}){RST}" if preset is not None else f" {SLATE}({base_url}){RST}"
     print(f"\n  {TEAL}✓ Model:{RST} {BOLD}{WHITE}{chosen}{RST}{via}")
+    scope = "saved as your default" if persist else "this session only"
+    print(f"    {SLATE}{f'was {prev_model} · ' if prev_model and prev_model != chosen else ''}used from the next message · {scope}{RST}")
     if preset is not None:
         from axon.ui.provider_picker import print_endpoint_notice
         print_endpoint_notice(preset)
@@ -137,6 +139,30 @@ def _curated(agent: Any) -> list[tuple[str, str, str]]:
         return list(get_curated_model_choices(agent.settings.base_url))
     except Exception:
         return []
+
+
+def unknown_model_names(agent: Any, name: str) -> list[str] | None:
+    """None when *name* can be switched to; otherwise the listed models closest to it (possibly none).
+
+    A name is refused only when the active provider publishes its model list and neither that list, a saved
+    custom model, a model family (claude-, gpt-, org/model, name:tag ...) nor an alias accounts for it. Local
+    servers, custom endpoints and URLs Axon has no list for choose their own names, so anything goes there."""
+    try:
+        from axon.providers.catalog import is_model_alias
+        from axon.providers.registry import active_preset, known_models, preset_for_model_switch
+        active = active_preset(agent.settings)
+        if active is None or active.category != "Popular Cloud" or not active.requires_key:
+            return None
+        if is_model_alias(name) or preset_for_model_switch(name, agent.settings) is not None:
+            return None
+        import difflib
+        listed = list(dict.fromkeys([m for m, _, _ in _curated(agent)] + known_models()))
+        by_low = {m.lower(): m for m in listed}
+        if name.lower() in by_low:
+            return None
+        return [by_low[m] for m in difflib.get_close_matches(name.lower(), list(by_low), n=3, cutoff=0.6)]
+    except Exception:
+        return None
 
 
 @command("model", category=CAT, description="Switch model (picker, name, 'random' or 'random:small')",
@@ -162,9 +188,23 @@ def handle_model(agent: Any, arg: str) -> CommandResult:
             return CommandResult(handled=True)
         a = random.choice(pool)
         print(f"\n  {GOLD}🎲 Picked {BOLD}{a}{RST}")
+    words = a.split()
+    force = "--force" in words
+    if force:
+        a = " ".join(w for w in words if w != "--force")
+        if not a:
+            usage("/model <name> --force")
+            return CommandResult(handled=True, success=False)
     if a == agent.settings.model:
         info(f"Already using {a}.")
         return CommandResult(handled=True)
+    close = None if force else unknown_model_names(agent, a)
+    if close is not None:
+        print(f"\n  {ROSE}✗{RST} Unknown model '{a}': no connected provider lists it. Nothing changed, still using {agent.settings.model}.")
+        if close:
+            print(f"    {SLATE}Did you mean {RST}{WHITE}{', '.join(close)}{RST}{SLATE}?{RST}")
+        print(f"    {SLATE}/model lists the models you can use · /model {a} --force switches anyway{RST}\n")
+        return CommandResult(handled=True, success=False)
     switch_model(agent, a)
     return CommandResult(handled=True)
 

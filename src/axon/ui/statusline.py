@@ -127,22 +127,44 @@ def session_cost(agent: Any) -> float:
 
 
 def context_usage(agent: Any) -> tuple[int, int]:
-    """(tokens in context, context window) - last LLM call when known, else an estimate."""
+    """(tokens in context, context window) as they are now.
+
+    The last LLM call reports both, but the conversation moves on without a call: tool results arrive,
+    /compact and /clear shrink it, /model changes the window. So the call's figure is adjusted by how much
+    the messages have grown or shrunk since, and the window is always the current model's."""
     renderer = getattr(agent, "renderer", None)
-    used, window = getattr(renderer, "last_context", (0, 0)) or (0, 0)
+    last = getattr(renderer, "last_context", None) or (0, 0)
+    used, window = last
     settings = getattr(agent, "settings", None)
-    if not window:
+    model = str(getattr(settings, "model", "") or "")
+    try:                                       # the same window the agent loop measures against
+        live = int(agent.context.context_window(model) or 0)
+    except Exception:
+        live = 0
+    if live:
+        window = live
+    elif not window:
         try:
             from axon.providers.registry import effective_context_window
-            window = int(effective_context_window(str(getattr(settings, "model", "") or ""), settings) or 0)
+            window = int(effective_context_window(model, settings) or 0)
         except Exception:
             window = 0
+    conv = getattr(agent, "conversation", None)
+    try:
+        estimate = int(conv.token_estimate()) if conv is not None else 0
+    except Exception:
+        estimate = 0
+    if used:
+        anchor = getattr(renderer, "_context_anchor", None)
+        if not anchor or anchor[0] is not last:            # a new call: remember the messages it covered
+            anchor = (last, estimate)
+            try:
+                renderer._context_anchor = anchor
+            except Exception:
+                pass
+        used = max(0, int(used) + estimate - anchor[1])
     if not used:
-        conv = getattr(agent, "conversation", None)
-        try:
-            used = int(conv.token_estimate()) if conv is not None else 0
-        except Exception:
-            used = 0
+        used = estimate
     return int(used or 0), int(window or 200_000)
 
 

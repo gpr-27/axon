@@ -90,6 +90,16 @@ def _match_session(ids: list[str], arg: str) -> tuple[str | None, list[str]]:
     return None, matches
 
 
+def _match_title(recent: list[Any], arg: str) -> tuple[str | None, list[str]]:
+    """Session whose title is *arg* (any case), else the one whose title contains it; several -> the candidates."""
+    want = " ".join(arg.lower().split())
+    titled = [(m.session_id, " ".join(str(getattr(m, "first_prompt", "") or "").lower().split())) for m in recent]
+    matches = [sid for sid, t in titled if t == want] or [sid for sid, t in titled if want and want in t]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
 def handle_session_delete(store: SessionStore, session_id: str = "") -> None:
     """Delete one session (id, unique prefix, or picker) or all with --all."""
     recent = store.list_recent(limit=None)
@@ -210,8 +220,16 @@ def handle_resume(agent: Agent, session_id: str = "") -> None:
     chosen: str | None
     if arg:
         chosen, candidates = _match_session(ids, arg)
+        if not chosen and not candidates:
+            chosen, candidates = _match_title(recent, arg)      # a renamed session is known by its title, not its id
         if not chosen and candidates:
-            print(f"\n  {GOLD}'{arg}' matches {len(candidates)} sessions - be more specific.{RST}\n")
+            titles = {m.session_id: m.first_prompt for m in recent}
+            print(f"\n  {GOLD}'{arg}' matches {len(candidates)} sessions - be more specific, or use the id:{RST}")
+            for c in candidates[:8]:
+                print(f"    {SLATE}{c}{RST}  {WHITE}{str(titles.get(c) or '')[:48]}{RST}")
+            if len(candidates) > 8:
+                print(f"    {SLATE}… {len(candidates) - 8} more{RST}")
+            print()
             return
         if not chosen:
             print(f"\n  {ROSE}✗ Session not found: {arg}{RST}\n")

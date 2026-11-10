@@ -208,8 +208,19 @@ def connector_action(ws: Path, name: str, action: str) -> dict[str, Any]:
         return {"ok": True}
     if action == "reconnect":
         _reconnect(ws, cfg, name)
-        return {"ok": True}
+        return {"ok": True, **_connector_outcome(ws, name)}
     raise DashError("unknown action", 400)
+
+
+def _connector_outcome(ws: Path, name: str) -> dict[str, Any]:
+    """How the server stands right after a reconnect, so the page can say whether it worked."""
+    from axon.features import workbench_data
+    try:
+        row = next((r for r in workbench_data.connectors(ws)["servers"] if r["name"] == name), None)
+    except Exception:
+        row = None
+    row = row or {}
+    return {"status": row.get("status", ""), "error": row.get("error", ""), "tools": row.get("tools")}
 
 
 def _reconnect(ws: Path, cfg: Any, name: str) -> None:

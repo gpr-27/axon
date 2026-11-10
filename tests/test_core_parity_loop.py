@@ -402,7 +402,7 @@ def test_skill_tool_loads_body(workspace: Path) -> None:
                                 encoding="utf-8")
     agent = make_agent(FakeProvider([]), workspace)
     out = SkillTool().run({"skill": "deploy", "args": "staging"}, _ctx(agent))
-    assert "make deploy with staging" in out and '<skill name="deploy">' in out
+    assert "make deploy with staging" in out and '<skill name="deploy" source="project"' in out
     with pytest.raises(ToolError):
         SkillTool().run({"skill": "nope"}, _ctx(agent))
     text = "\n".join(b["text"] for b in agent.system_blocks())

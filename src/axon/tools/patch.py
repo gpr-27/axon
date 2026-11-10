@@ -302,5 +302,5 @@ class PatchTool(Tool):
         m = re.search(r"\((\d+) hunks?\): (.*)\.$", output.strip())
         if not m:
             return default_summary(output, False)
-        n_files = m.group(2).count(",") + 1
+        n_files = len(re.findall(r"(?:^|, )(?:patched|created|deleted) ", m.group(2)))   # a file name may hold a comma
         return f"{plural(int(m.group(1)), 'hunk')} · {plural(n_files, 'file')}"

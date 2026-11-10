@@ -202,6 +202,8 @@ class WebSearchTool(Tool):
                     lines.append(f"   {r.url}")
                     if r.snippet:
                         lines.append(f"   {_strip_tags(r.snippet)[:300]}")
+                if errors:      # an earlier backend failed and this one answered: say so rather than hide the fallback
+                    lines += ["", f"[Fell back to {name} after: {'; '.join(errors)}]"]
                 return "\n".join(lines)
             errors.append(f"{name}: no results")
 
@@ -218,5 +220,10 @@ class WebSearchTool(Tool):
             return default_summary(output, True)
         import re
         n = len(re.findall(r"^\d+\. ", output, re.M))
-        m = re.search(r"\(via (.*?)\)", output)
-        return plural(n, "result") + (f" via {m.group(1)}" if m else "")
+        m = re.search(r"\(via ([^()]*)\):?$", output.split("\n", 1)[0])
+        fell = re.search(r"^\[Fell back to .*? after: (.*)\]$", output, re.M)
+        failed = ""
+        if fell:
+            names = [e.split(":", 1)[0] for e in fell.group(1).split("; ") if ": " in e]
+            failed = f" ({', '.join(dict.fromkeys(names))} failed)"
+        return plural(n, "result") + (f" via {m.group(1)}" if m else "") + failed

@@ -211,6 +211,18 @@ class StdioTransport(Transport):
         self._reader: threading.Thread | None = None
         self._closing = False
 
+    def last_stderr(self, limit: int = 200) -> str:
+        """The last line this run of the server wrote to stderr: usually the reason it exited."""
+        try:
+            with open(self.log_path, "rb") as f:
+                f.seek(getattr(self, "_log_offset", 0))
+                text = f.read()[-8192:].decode("utf-8", "replace")
+        except OSError:
+            return ""
+        lines = [ln.strip() for ln in text.splitlines()]
+        lines = [ln for ln in lines if ln and not ln.startswith(("===", "[non-JSON stdout]", "[dispatch error]"))]
+        return lines[-1][:limit] if lines else ""
+
     def _log(self, text: str) -> None:
         try:
             if self._log_file:
@@ -238,6 +250,10 @@ class StdioTransport(Transport):
         full_env.setdefault("PYTHONIOENCODING", "utf-8")
         argv = build_argv(self.command, self.args, full_env)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._log_offset = self.log_path.stat().st_size   # where this run's output starts
+        except OSError:
+            self._log_offset = 0
         self._log_file = open(self.log_path, "ab")
         self._log(f"\n=== starting: {subprocess.list2cmdline(argv)} (cwd={self.cwd}) ===\n")
         kwargs: dict[str, Any] = {}
@@ -288,7 +304,9 @@ class StdioTransport(Transport):
                     code = None
             if not self._closing:
                 self._log(f"=== process exited (code {code}) ===\n")
-            on_close(f"server process exited (code {code}); see {self.log_path}")
+            said = self.last_stderr()
+            on_close(f"server process exited (code {code})" + (f": {said}" if said else "")
+                     + f"; see {self.log_path}")
 
         self._reader = threading.Thread(target=_read, name=f"mcp-{self.name}-reader", daemon=True)
         self._reader.start()

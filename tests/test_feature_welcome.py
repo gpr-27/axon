@@ -332,3 +332,13 @@ def test_overview_command(home, tmp_path, capsys):
     cmd.handler(SimpleNamespace(settings=SimpleNamespace(workspace=ws)), "")
     out = capsys.readouterr().out
     assert "Files" in out and "Tests" in out and "pytest" in out and "Last 7 days" in out
+
+
+def test_spend_week_does_not_count_cached_tokens_twice(home, tmp_path):
+    # `input` already includes the tokens read from and written to the cache, as on the Usage page.
+    ws = make_project(tmp_path)
+    storage.append_jsonl(storage.user_file("usage.jsonl"), {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600)), "project": storage.project_key(ws),
+        "workspace": str(ws), "session": "s1", "model": "m", "source": "main",
+        "usage": {"input": 1000, "output": 50, "cache_read": 700, "cache_write": 200}, "cost": 0.1})
+    assert po.spend_week(ws)["tokens"] == 1050

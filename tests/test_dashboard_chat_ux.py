@@ -114,7 +114,7 @@ def test_stop_says_stopped_and_holds_queued_messages():
 def test_effort_and_cache_words_are_plain_unless_detailed():
     assert "quantum: 'Highest'" in APP_JS and "synapse: 'High'" in APP_JS
     assert "item('effort', effortWord(s.effort || info.effort)" in APP_JS
-    assert "'sdetail dtl'" in APP_JS and "tok(u.cache_read_tokens) + ' cached'" in APP_JS     # tokens and cache live in the Detailed line of a step
+    assert "'sline s-got'" in APP_JS and "tok(u.cache_read_tokens) + ' cached'" in APP_JS     # tokens and cache live in the "Got" line of a step, shown from the normal level up
     assert "orange: cache missed" not in APP_JS
     if NODE:
         out = _node("""

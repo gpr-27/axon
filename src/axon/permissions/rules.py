@@ -592,7 +592,7 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
             if j == -1:
                 out.append(re.escape(c))
             else:
-                body = pat[i + 1:j].replace("\\", "\\\\")
+                body = pat[i + 1:j].replace("\\", "\\\\").replace("[", "\\[")
                 if body[:1] == "!":  # glob negation ([!abc]) is [^abc] in a regex
                     body = "^" + body[1:]
                 elif body[:1] == "^":  # a literal caret, not a negation, in glob syntax
@@ -605,11 +605,14 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$", re.IGNORECASE if IS_WINDOWS else 0)
 
 
-def _posix_form(p: str) -> str:
-    """Windows paths compare as /c/Users/x, so //c/** and //**/.env mean what they say."""
+def _posix_form(p: str, windows: bool | None = None) -> str:
+    """Windows paths compare as /c/Users/x, so //c/** and //**/.env mean what they say. A slash before the drive
+    letter (``/C:\\Users\\x``, what ``"/" + str(path)`` gives) names the same path."""
     p = p.replace("\\", "/")
-    if IS_WINDOWS and re.match(r"^[A-Za-z]:(/|$)", p):
-        return "/" + p[0].lower() + p[2:]
+    if IS_WINDOWS if windows is None else windows:
+        m = re.match(r"^/?([A-Za-z]):(/|$)", p)
+        if m:
+            return "/" + m.group(1).lower() + p[m.end(1) + 1:]
     return p
 
 

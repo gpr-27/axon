@@ -522,7 +522,7 @@ def test_tool_summaries(reg, ctx, workspace, backend):
         return tool.summarize(args, tool.run(args, ctx))
 
     assert run("Read", {"path": "f.txt"}).startswith("200 lines · ")
-    assert run("Read", {"path": "f.txt", "offset": 11, "limit": 5}) .endswith("(lines 11-15)")
+    assert run("Read", {"path": "f.txt", "offset": 11, "limit": 5}) .endswith("(lines 11-15 of 200)")
     assert run("Grep", {"pattern": "Target", "output_mode": "content"}) == "3 matches in 3 files"
     assert run("Grep", {"pattern": "Target", "output_mode": "files_with_matches"}) == "3 files"
     assert run("Grep", {"pattern": "nomatchzzz"}) == "no matches"

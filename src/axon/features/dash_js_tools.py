@@ -236,7 +236,7 @@ async function viewMemory() {
   shell('memory', async (main) => {
     main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Memory'), h('div', { class: 'sub' }, 'What Axon reads at the start of every session, and the notes it keeps.'))));
     let d; try { d = await api('/api/memory'); } catch (e) { main.append(errorBox(e.message)); return; }
-    main.append(h('h2', null, 'Instruction files'), d.files.length ? table([{ label: 'File', key: 'name' }, { label: 'Scope', key: 'scope' }, { label: 'Size', cls: 'r', fmt: r => (r.size / 1024).toFixed(1) + ' KB' }, { label: '', fmt: r => r.editable ? h('a', { class: 'btn', href: '#/files/' + encodeURIComponent(r.rel) }, 'Open and edit') : h('span', { class: 'muted' }, r.path) }], d.files) : h('p', { class: 'muted' }, 'No AXON.md, CLAUDE.md or AGENTS.md here. Run /init from the Commands page to create one.'));
+    main.append(h('h2', null, 'Instruction files'), d.files.length ? table([{ label: 'File', key: 'name' }, { label: 'Scope', key: 'scope' }, { label: 'Size', cls: 'r', fmt: r => fmtBytes(r.size || 0) }, { label: '', fmt: r => r.editable ? h('a', { class: 'btn', href: '#/files/' + encodeURIComponent(r.rel) }, 'Open and edit') : h('span', { class: 'muted' }, r.path) }], d.files) : h('p', { class: 'muted' }, 'No AXON.md, CLAUDE.md or AGENTS.md here. Run /init from the Commands page to create one.'));
     mgMemoryPanel(main);
   });
 }

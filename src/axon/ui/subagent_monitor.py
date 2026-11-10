@@ -33,6 +33,7 @@ _STATUS: dict[str, tuple[str, str, str, str]] = {
     "cancelled": ("⊘", SLATE, "cancelled", "─"),
     "running": ("▶", CYAN, "running", "┅"),
     "pending": ("○", SLATE, "queued", "┄"),
+    "queued": ("○", AMBER, "queued", "┄"),      # over the concurrent limit: waiting for a free slot
 }
 _FINISHED = ("completed", "exhausted", "error", "cancelled")
 _PROMPT_LINES = 3         # the task as shown above a transcript (Ctrl+O shows all of it)
@@ -78,7 +79,7 @@ def _wall(tasks: list[Any], now: float) -> float:
     starts = [s for s in starts if s]
     if not starts:
         return max((_elapsed(t, now) for t in tasks), default=0.0)
-    if any(getattr(t, "status", "") in ("running", "pending") for t in tasks):
+    if any(getattr(t, "status", "") in ("running", "pending", "queued") for t in tasks):
         return now - min(starts)
     ends = [float(getattr(t, "start_time", 0.0) or 0.0) + float(getattr(t, "elapsed_s", 0.0) or 0.0) for t in tasks]
     return max(ends) - min(starts)
@@ -124,7 +125,7 @@ def _stats(t: Any, now: float) -> str:
     steps, max_steps = int(getattr(t, "steps", 0) or 0), int(getattr(t, "max_steps", 0) or 0)
     # A step is one model call. While running, show it against the step limit; once finished, the limit is
     # irrelevant: "2 steps", not "step 2 · limit 25".
-    running = getattr(t, "status", "") in ("running", "pending")
+    running = getattr(t, "status", "") in ("running", "pending", "queued")
     if running and max_steps:
         step_txt = f"{SLATE}step{RST} {WHITE}{steps}{RST} {SLATE}· limit {max_steps}{RST}"
     else:
@@ -158,7 +159,7 @@ def _activity(t: Any) -> str:
     if not act:
         logs = getattr(t, "live_logs", None) or []
         act = _one_line(logs[-1]) if logs else ""
-    return act or ("waiting to start" if getattr(t, "status", "") == "pending" else "starting…")
+    return act or ("waiting to start" if getattr(t, "status", "") in ("pending", "queued") else "starting…")
 
 
 def _doing(t: Any) -> tuple[str, str]:
@@ -284,7 +285,7 @@ def agent_table(tasks: list[Any], width: int, selected: int | None = None, now: 
 
 def _header(tasks: list[Any], width: int, now: float, title: str = "Subagents") -> str:
     counts = {k: sum(1 for t in tasks if getattr(t, "status", "pending") == k) for k in _STATUS}
-    shown = [k for k in ("running", "completed", "error", "exhausted", "cancelled", "pending") if counts[k]]
+    shown = [k for k in ("running", "completed", "error", "exhausted", "cancelled", "queued", "pending") if counts[k]]
     total_tok = sum(int(getattr(t, "tokens_consumed", 0) or 0) for t in tasks)
     right = f"{SLATE}{_tok(total_tok) + ' tok · ' if total_tok else ''}{_clock(_wall(tasks, now))}{RST}"
     left = ""
@@ -311,7 +312,7 @@ def _footer(items: list[tuple[str, str]], width: int) -> list[str]:
 
 
 def _x_hint(t: Any) -> tuple[str, str]:
-    return ("x", "stop") if getattr(t, "status", "") in ("running", "pending") else ("x", "clear")
+    return ("x", "stop") if getattr(t, "status", "") in ("running", "pending", "queued") else ("x", "clear")
 
 
 def _list_footer(tasks: list[Any], selected: int, width: int, console: bool) -> list[str]:
@@ -490,7 +491,7 @@ def _detail_head(t: Any, width: int, now: float, room: int, expanded: bool) -> l
     lines += _kv("asked", asked, width)
     if t.status == "error" or getattr(t, "error_msg", None):
         lines += _kv("reason", _wrap(_one_line(getattr(t, "error_msg", None) or "failed (no reason reported)"), room), width, ROSE)
-    elif t.status == "running":
+    elif t.status in ("running", "queued"):
         act = _activity(t)
         lines += _kv("now", [plat.truncate_ansi(act, room)], width, AMBER if act.lower().startswith(("retrying", "resuming")) else CYAN)
     return lines
@@ -500,7 +501,7 @@ def can_message(t: Any) -> str:
     """"queue" when a message reaches it at its next step, "resume" when a message starts it again, "" when not."""
     if getattr(t, "kind", "agent") != "agent":
         return ""
-    if getattr(t, "status", "") in ("running", "pending"):
+    if getattr(t, "status", "") in ("running", "pending", "queued"):
         return "queue"
     return "resume" if getattr(getattr(t, "conversation", None), "messages", None) else ""
 
@@ -510,7 +511,7 @@ def _detail_footer(t: Any, width: int, expanded: bool) -> list[str]:
     if can_message(t):
         items.append(("⏎", "send"))
     items += [("esc", "back"), ("↑↓", "scroll"), ("←→", "next agent"), ("ctrl+o", "collapse" if expanded else "expand")]
-    if getattr(t, "status", "") in ("running", "pending"):
+    if getattr(t, "status", "") in ("running", "pending", "queued"):
         items.append(("ctrl+x", "stop"))
     return _footer(items, width)
 
@@ -917,7 +918,7 @@ class MonitorKeys:
 
     def _stop_or_clear(self, task: Any, clear: bool = True) -> None:
         who = _label(task)
-        if getattr(task, "status", "") in ("running", "pending"):
+        if getattr(task, "status", "") in ("running", "pending", "queued"):
             stop = getattr(task, "stop", None)
             if callable(stop):
                 done = bool(stop())

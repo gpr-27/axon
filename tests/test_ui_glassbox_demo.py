@@ -122,10 +122,11 @@ def test_live_timeline_structure(out):
     # timeline rows keep the rail; only response bodies (markdown) and the footer leave it
     body_rows = [r for r in rows[1:] if r.strip() and not r.startswith("  ") and not r.startswith("└")]
     assert all(r.startswith("│") for r in body_rows), body_rows
-    # a subagent's own steps stay out of the normal timeline (the monitor and /subagents show them) ...
+    # a lone subagent's own steps are listed under its start line as they happen (no label needed: nothing runs beside it) ...
     start = next(i for i, r in enumerate(rows) if "subagent started" in r)
     end = next(i for i, r in enumerate(rows) if "subagent completed" in r)
-    assert not [r for r in rows[start + 1:end] if "┊" in r]
+    nested = [r for r in rows[start + 1:end] if "┊" in r]
+    assert len(nested) == 2 and "LLM claude-haiku-4" in nested[0] and "Bash" in nested[1] and "subagent #" not in "".join(nested)
     # ... and appear, labelled with the subagent, between its start and end lines at the detailed level
     detailed = strip_ansi(out("detailed")[0])
     assert "replied in" in detailed and "75%" in detailed      # detailed keeps the per-step line

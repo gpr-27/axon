@@ -130,3 +130,18 @@ def test_usage_command_prints_plain_text_without_a_terminal(workspace, axon_home
     assert resolve_builtin("usage").name == "usage" and resolve_builtin("cost").name == "cost"
     dispatch_command("/usage context", agent)
     assert "== Status ==" not in capsys.readouterr().out
+
+
+def test_welcome_box_keeps_the_logo_together_and_breaks_hints_between_items(monkeypatch, workspace) -> None:
+    """At 60 columns the model line wraps: the logo got a gap in the middle and a hint was cut after 'esc'."""
+    from axon.ui import render
+    monkeypatch.setattr(render, "term_width", lambda: 60)
+    monkeypatch.setenv("AXON_NO_TIPS", "1")
+    text = strip_ansi(render.Renderer().banner_text("0.33.0", "gpt-4o", "quantum", str(workspace), "bypass",
+                                                    "http://127.0.0.1:1"))
+    rows = [l.strip().strip("│").rstrip() for l in text.split("\n") if l.strip()][1:-1]
+    assert any("local inference" in r and "gpt-4o" not in r for r in rows)          # the model line did wrap
+    logo = [i for i, r in enumerate(rows) if "╲│╱" in r or "●" in r or "╱│╲" in r]
+    assert logo == [0, 1, 2], rows
+    assert any("esc interrupts" in r for r in rows), rows
+    assert not any(r.rstrip().endswith(" ·") for r in rows[3:]), rows

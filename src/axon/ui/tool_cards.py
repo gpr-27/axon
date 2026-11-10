@@ -125,6 +125,7 @@ class CardCall:
     total: int = 1                # calls in this step: the number is shown only when there are several
     common_allowed: str = ""      # the permission outcome said in the TOOLS header: this card repeats it only if it differs
     workspace: str = ""           # paths under it are shown relative (default: the current folder)
+    said: str = ""                # what the model wrote before the calls of this step (printed right above the cards)
 
 
 # ─── small helpers ─────────────────────────────────────────────────────────
@@ -238,6 +239,13 @@ def _text_lines(content: str) -> list[str]:
 
 # ─── choose / input / run ──────────────────────────────────────────────────
 
+def _same_words(a: str, b: str) -> bool:
+    """Whether two texts say the same thing once markdown marks, case and spacing are set aside."""
+    def words(s: str) -> str:
+        return " ".join(re.sub(r"[*_`#>]", "", str(s or "")).split()).rstrip(".:!").lower()
+    return bool(words(a)) and words(a) == words(b)
+
+
 def real_reason(c: CardCall) -> str:
     """The model's own reason for the call; '' for Axon's filler or a sentence that only repeats the
     shell call's description."""
@@ -247,6 +255,8 @@ def real_reason(c: CardCall) -> str:
     description = c.inp.get("description") if isinstance(c.inp, dict) else None
     if isinstance(description, str) and " ".join(description.split()).rstrip(".").lower() == why.rstrip(".").lower():
         return ""
+    if c.total > 1 and c.why_source != "model-thinking" and c.said and _same_words(c.said, why):
+        return ""           # one sentence for the whole batch, printed right above: not this one call's reason
     return why
 
 

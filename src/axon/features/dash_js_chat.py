@@ -494,13 +494,15 @@ function newStep(C, cur, ev, ts) {
   const n = ev.iteration || cur.nSteps + 1;
   const mk = mkEl('run'), time = h('span', { class: 'stime' }), cost = h('span', { class: 'scost' }), sub = h('span', { class: 'ssub' });
   const hd = h('div', { class: 'shead' }, mk, h('span', { class: 'stitle' }, 'Step ' + n), sub, time, cost);
-  const detail = h('div', { class: 'sdetail dtl' }), body = h('div', { class: 'sbody' });
+  const sent = h('div', { class: 'sline s-sent' }), got = h('div', { class: 'sline s-got' });
+  const detail = h('div', { class: 'sdetail' }, sent, got), body = h('div', { class: 'sbody' });
   const el = h('section', { class: 'step', 'data-n': n }, hd, detail, body);
   if (ev.entry != null) el.dataset.i = ev.entry;
   cur.body.append(el);
   if (ts != null) time.dataset.t0 = ts;
-  const st = { n, el, hd, mk, time, cost, sub, detail, body, t0: ts, ended: false, expect: false, open: 0, tools: 0, modelDur: null, standalone: [], groups: [], bad: false, waiting: 0 };
-  detail.append(h('span', null, ev.model || ''), h('span', null, tok(ev.tokens_in || 0) + ' tokens in'));
+  const st = { n, el, hd, mk, time, cost, sub, detail, sent, got, model: ev.model || '', body, t0: ts, ended: false, expect: false, open: 0, tools: 0, modelDur: null, standalone: [], groups: [], bad: false, waiting: 0 };
+  if (ev.model || ev.tokens_in) sent.append(h('b', null, 'Sent'), ev.model ? h('span', null, ev.model) : null, ev.synthetic || !ev.tokens_in ? null : h('span', { title: 'Estimated size of the whole request: conversation, system prompt and tool descriptions' }, '~' + tok(ev.tokens_in) + ' tokens'));
+  const fb = ev.fed_back || []; if (fb.length) sent.append(h('span', { title: fb.map(f => f.name + (f.tokens ? ' (' + tok(f.tokens) + ' tokens)' : '')).join(', ') }, axPlural(fb.length, 'tool result') + ' fed back'));
   cur.step = st; cur.nSteps++; cur.n = cur.nSteps; cur.stepText = 'Step ' + n + ': thinking'; cur.group = null; headMeta(cur, false);
   return st;
 }
@@ -595,12 +597,13 @@ function applyEvent(C, ev) {
       st.ended = true; st.expect = ev.stop_reason === 'tool_use'; st.modelDur = ev.duration_s != null ? ev.duration_s : null;
       cur.cost += ev.cost || 0;
       if (ev.cost) st.cost.textContent = usd(ev.cost);
-      st.detail.append(h('span', null, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out'), u.cache_read_tokens ? h('span', null, tok(u.cache_read_tokens) + ' cached') : null, ev.stop_reason ? h('span', null, 'stop: ' + ev.stop_reason) : null);
-      st.hd.title = [ev.model || st.detail.firstChild.textContent, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out tokens', u.cache_read_tokens ? tok(u.cache_read_tokens) + ' cached' : ''].filter(Boolean).join(' · ');
-      if (ev.outcome && ev.outcome !== 'ok') { st.bad = true; st.detail.append(h('span', { class: 'bad' }, ev.outcome)); st.sub.textContent = ev.outcome; st.sub.classList.add('bad'); }
+      st.got.append(h('b', null, 'Got'), h('span', null, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out'), u.cache_read_tokens ? h('span', null, tok(u.cache_read_tokens) + ' cached') : null, u.cache_write_tokens ? h('span', null, tok(u.cache_write_tokens) + ' written to cache') : null, u.reasoning_tokens ? h('span', null, tok(u.reasoning_tokens) + ' reasoning') : null, ev.stop_reason ? h('span', null, 'stop: ' + ev.stop_reason) : null);
+      if (!st.sent.firstChild && ev.model) st.sent.append(h('b', null, 'Sent'), h('span', null, ev.model));
+      st.hd.title = [ev.model || st.model, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out tokens', u.cache_read_tokens ? tok(u.cache_read_tokens) + ' cached' : ''].filter(Boolean).join(' · ');
+      if (ev.outcome && ev.outcome !== 'ok') { st.bad = true; st.got.append(h('span', { class: 'bad', title: ev.error || '' }, ev.outcome + (ev.error ? ': ' + String(ev.error).slice(0, 160) : ''))); st.sub.textContent = ev.outcome; st.sub.classList.add('bad'); }
       const sd = Object.assign({ n: ev.iteration, model: ev.model, tin: u.input_tokens || 0 }, { dur: ev.duration_s || 0, cost: ev.cost || 0, tout: u.output_tokens || 0, cread: u.cache_read_tokens || 0, stop: ev.stop_reason, miss: ev.cache_miss_cause || '', detail: ev.cache_miss_detail || '' });
       C.steps.push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
-    case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } if (C.cur && C.cur.step && ev.miss) C.cur.step.detail.append(h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : ''))); break; }
+    case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } const cst = C.cur && C.cur.step; if (cst && !cst.cacheEl && (ev.miss || ev.cached_tokens)) { cst.cacheEl = ev.miss ? h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : '')) : h('span', { class: 'chit', title: tok(ev.cached_tokens) + ' of ' + tok(ev.input_tokens || 0) + ' input tokens were read from the prompt cache' }, 'cache hit ' + Math.round(ev.hit_pct || 0) + '%'); cst.got.append(cst.cacheEl); } break; }
     case 'subagent_step': subagentStep(C, ev); break;
     case 'subagent': subagentEvent(C, ev); if (ev.phase !== 'start') liveFiles(C, { changes: [1] }); break;
     case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
@@ -611,11 +614,14 @@ function applyEvent(C, ev) {
     case 'goal_check': hostOf(C).append(notice('You set a goal, so the model was asked once to verify it before finishing: ' + String(ev.goal || '').slice(0, 200), 'ok')); break;
     case 'steer': hostOf(C).append(notice('Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
     case 'queued': if (C.replaying) break; C.feed.append(notice((ev.steer ? 'Sent into the running turn: ' : 'Queued for after the turn: ') + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
-    case 'memory_loaded': hostOf(C).append(h('div', { class: 'steprow dtl' }, h('span', null, 'memory loaded'), h('span', null, ev.path), h('span', null, ev.reason))); break;
-    case 'hook': hostOf(C).append(h('div', { class: 'steprow dtl' }, h('span', null, 'hook ' + ev.event), h('span', null, ev.ran + ' ran'), ev.blocked ? h('span', { class: 'bad' }, 'blocked') : null, ev.message ? h('span', null, ev.message) : null)); break;
+    case 'memory_loaded': (C.cur ? hostOf(C) : C.feed).append(h('div', { class: 'steprow' }, h('b', null, 'Memory loaded'), h('span', null, relPath(ev.path)), h('span', null, ev.reason + (ev.trigger ? ' (' + ev.trigger + ')' : '')), ev.tokens ? h('span', null, tok(ev.tokens) + ' tokens') : null)); break;
+    case 'hook': hookRow(C, ev); break;
     case 'tool_rationale': break;
     case 'tool_batch': if (ev.count > 1) { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts); toolGroup(C, cur, ev, ts); } break;
-    case 'llm_request': if (C.cur && C.cur.step) C.cur.step.detail.append(h('span', null, 'context ' + tok(ev.conversation_tokens || 0) + ' + system ' + tok(ev.system_tokens || 0) + ' + tools ' + tok(ev.tool_schema_tokens || 0) + ' · effort ' + ev.effort + ' · ' + ev.tool_count + ' tools')); break;
+    case 'llm_request': if (C.cur && C.cur.step) { const sl = C.cur.step.sent; if (!sl.firstChild) sl.append(h('b', null, 'Sent'), h('span', null, ev.model || ''));
+      sl.append(h('span', { title: 'Tokens in the request, by part' }, 'conversation ' + tok(ev.conversation_tokens || 0) + ' + system ' + tok(ev.system_tokens || 0) + ' + tools ' + tok(ev.tool_schema_tokens || 0)),
+        h('span', null, axPlural(ev.message_count || 0, 'message')), h('span', null, axPlural(ev.tool_count || 0, 'tool') + ' offered' + (ev.prompt_tools ? ' (described in the prompt)' : '')),
+        ev.effort ? h('span', null, 'effort ' + (typeof effortWord === 'function' ? effortWord(ev.effort) : ev.effort)) : null, h('span', null, ev.thinking ? 'thinking on' : 'thinking off')); } break;
     case 'turn_end': finishTurn(C, ev, ts); break;
     case 'interrupted': if (C.cur) hostOf(C).append(notice('Stopped', '')); finishTurn(C, null, ts); break;
     case 'error': (C.cur ? C.cur.answer : C.feed).append(turnError(ev.message)); finishTurn(C, null, ts, 'error'); break;
@@ -681,7 +687,7 @@ async function copyTab(card, btn) {
 }
 function mkTool(name, input) {
   const mk = mkEl('run');
-  const sum = h('summary', { class: 'xrow' }, mk, kindLabel('tool', 'Tool call'), h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
+  const sum = h('summary', { class: 'xrow' }, mk, kindLabel('tool', 'Tool call'), h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'route' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
   const panes = { in: h('div', { class: 'tpane p-in', hidden: true }), out: h('div', { class: 'tpane p-out', hidden: true }, h('span', { class: 'muted' }, 'Waiting for the result...')), why: h('div', { class: 'tpane p-why', hidden: true }) };
   const card = h('details', { class: 'tool live-tool kd-tool both', open: true, 'data-state': 'run' }, sum);
   const bar = h('div', { class: 'tabs2', role: 'tablist' });
@@ -690,6 +696,8 @@ function mkTool(name, input) {
   card.append(h('div', { class: 'tdet' }, bar, panes.in, panes.out, panes.why));
   card.addEventListener('toggle', () => { if (card.open && !card.axTab) selectTab(card, card.dataset.state === 'run' || card.dataset.state === 'wait' ? 'in' : 'out'); });
   card.axMk = mk; card.axPanes = panes; card.axName = name; card.axIn = input || {}; card.axInText = '';
+  const mcp = mcpOf(name);
+  if (mcp) { const tn = sum.querySelector('.tn'); tn.textContent = mcp.tool; toolChip(card, 'mcp', 'MCP ' + mcp.server, 'Sent to the MCP server "' + mcp.server + '" as ' + mcp.tool + ' (full name ' + name + ')'); }
   return card;
 }
 function inputText(name, inp) { return name === 'Bash' && typeof inp.command === 'string' ? inp.command : JSON.stringify(inp || {}, null, 2); }
@@ -699,7 +707,7 @@ function toolGroup(C, cur, ev, ts) {
   const rows = h('div', { class: 'prows' });
   const el = h('div', { class: 'pgroup' }, h('div', { class: 'phead' }, h('span', { class: 'mk' }), title, time), rows);
   cur.step.body.append(el);
-  const g = { el, rows, title, time, n: ev.count, added: 0, done: 0, cards: [], finished: false };
+  const g = { el, rows, title, time, n: ev.count, added: 0, done: 0, cards: [], finished: false, order: (ev.tools || []).map(t => t.id) };
   cur.step.groups.push(g); cur.group = g; return g;
 }
 const RUNNING_WORD = (name, inp) => { let s = ''; try { s = axRunning(name, inp); } catch (e) { s = ''; } return s; };
@@ -716,7 +724,10 @@ function toolStart(C, ev, ts) {
   if (ev.parse_error) why.append(h('div', { class: 'bad' }, ev.parse_error));
   card.axWhyText = ev.rationale || '';
   const g = cur.group && cur.group.added < cur.group.n ? cur.group : null;
-  (g ? g.rows : st.body).append(card);
+  // tools of one batch start on separate threads, so their events can arrive in any order: the rows keep the order the model asked in
+  const ord = g ? g.order.indexOf(ev.id) : -1; card.axOrd = ord < 0 ? 1e9 : ord;
+  const later = g ? g.cards.find(c => c.axOrd > card.axOrd && c.parentNode === g.rows) : null;
+  if (later) g.rows.insertBefore(card, later); else (g ? g.rows : st.body).append(card);
   if (g) { g.added++; g.cards.push(card); card.axGroup = g; } else st.standalone.push(card);
   cur.tools[ev.id] = card; card.axStep = st; card.axT0 = ts; card.axId = ev.id;
   if (ts != null) card.querySelector('.td').dataset.t0 = ts;
@@ -726,6 +737,27 @@ function toolStart(C, ev, ts) {
   decorate(card);
   if (ev.name === 'Task') { card.dataset.task = '1'; card.axPanes.why.append(h('div', { class: 'next' }, h('a', { href: '#/agents/' + encodeURIComponent(C.sid), class: 'plink' }, 'View subagents'))); }
 }
+// A hook run is a step like any other: one row saying which event, for which tool, how many ran and what they decided.
+function hookRow(C, ev) {
+  const card = C.cur && ev.tool_use_id ? C.cur.tools[ev.tool_use_id] : null;
+  const bits = [h('b', null, 'Hook'), h('span', null, ev.event + (ev.tool_name ? ' · ' + ev.tool_name : '')), h('span', null, ev.ran + ' ran')];
+  if (ev.blocked) bits.push(h('span', { class: 'bad' }, 'blocked'));
+  if (ev.permission_decision) bits.push(h('span', null, 'decided: ' + ev.permission_decision));
+  if (ev.additional_context) bits.push(h('span', { title: ev.additional_context }, 'added context for the model'));
+  if (ev.message) bits.push(h('span', { title: ev.message }, String(ev.message).slice(0, 200)));
+  for (const w of ev.warnings || []) bits.push(h('span', { class: 'bad', title: w }, String(w).slice(0, 200)));
+  const row = h('div', { class: 'steprow hookrow' }, ...bits);
+  if (card && card.isConnected) { const tail = card.axHookTail || card; tail.after(row); card.axHookTail = row; toolChip(card, 'hook', 'hook ' + ev.event, ev.blocked ? 'A hook blocked this call' : 'A hook ran for this call'); }
+  else (C.cur ? hostOf(C) : C.feed).append(row);
+}
+// Chips that say where a call went and who let it through. They sit beside the result chips and survive the result being drawn.
+function toolChip(card, key, text, title, bad) {
+  const box = card.querySelector('.route'); if (!box) return;
+  let c = box.querySelector('[data-k="' + key + '"]');
+  if (!c) { c = h('span', { class: 'chip2 rt', 'data-k': key }); box.append(c); }
+  c.textContent = text; c.title = title || ''; c.classList.toggle('bad', !!bad);
+}
+function mcpOf(name) { const m = /^mcp__(.+?)__(.+)$/.exec(String(name || '')); return m ? { server: m[1], tool: m[2] } : null; }
 function permNote(card, text, bad) { const n = card.querySelector('.pnote'); n.hidden = !text; n.textContent = text || ''; n.classList.toggle('bad', !!bad); }
 const CHOICE_NOTE = { once: 'You allowed this once', always: 'You allowed this for the session', rule: 'You allowed this and saved a rule', deny: 'You denied this' };
 const PERM_SRC = { rule: 'a saved rule', mode: 'the current mode', hook: 'a hook', user: 'you', invariant: 'a built-in safety rule', 'no-approver': 'no approver available', delegation: 'delegation' };
@@ -734,6 +766,9 @@ function permInfo(card, ev) {
   const line = (ev.outcome === 'deny' ? 'Denied' : 'Allowed') + (src ? ' because ' + src : '') + (ev.reason ? ': ' + ev.reason : '') + (ev.approval ? ' (you chose: ' + ev.approval + ')' : '');
   const p = card.axPanes.why.querySelector('.perm'); if (p) p.textContent = line;
   card.axWhyText = (card.axWhyText ? card.axWhyText + '\n' : '') + line;
+  // who decided, on the row itself: the rule that matched, the mode in force, a hook, or you
+  const by = ev.source === 'rule' ? 'rule' + (ev.rule ? ' ' + ev.rule : '') : ev.source === 'mode' ? (ev.mode ? ev.mode + ' mode' : 'mode') : ev.source === 'user' ? 'you' : (PERM_SRC[ev.source] || ev.source || '');
+  if (ev.outcome && by) toolChip(card, 'perm', (ev.outcome === 'deny' ? 'denied by ' : ev.outcome === 'ask' ? 'asked: ' : 'allowed by ') + by, line, ev.outcome === 'deny');
   if (ev.outcome === 'deny') { card.classList.add('denied'); setToolState(card, 'bad'); permNote(card, ev.source === 'user' ? CHOICE_NOTE.deny : 'Blocked' + (src ? ' by ' + src : '') + (ev.reason ? ': ' + ev.reason : ''), true); }
   else if (ev.source === 'user') permNote(card, CHOICE_NOTE[ev.approval] || 'You allowed this');
 }

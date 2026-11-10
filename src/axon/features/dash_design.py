@@ -724,11 +724,25 @@ input[type=text]:focus,input[type=search]:focus,input[type=password]:focus,input
 .mk.stop::after{background:var(--ink2)}
 .thead .mk.run .spin{animation:none}
 .thead:has(.fib:empty) .mk.run .spin{animation:ax-node 1.1s ease-in-out infinite}
-/* steps: rows only; "Step n" belongs to the detailed trace levels */
+/* steps: each model call has a head (number, tools, time, cost) and two lines saying what it was sent and what came back.
+   Only the compact trace level, which is opt-in, leaves them out. */
 .t-normal .entry.a.live .tmeta{display:none}
 .tsteps{margin:2px 0 0;padding:0}
 .tsteps::before{content:none}
-.feed:not(.t-detailed):not(.t-debug) .shead,.feed:not(.t-detailed):not(.t-debug) .pgroup>.phead{display:none}
+.t-compact .shead,.t-compact .pgroup>.phead,.t-compact .sdetail,.t-compact .xrow .route{display:none}
+.sdetail{font:400 12px/1.5 var(--font-ui);color:var(--ink2)}
+.sline{position:relative;display:flex;flex-wrap:wrap;column-gap:12px;padding-left:40px}
+.sline:empty{display:none}
+.sline>b{position:absolute;left:0;top:0;font-weight:500;color:var(--ink2)}
+.steprow>b{flex:0 0 auto;font-weight:500;color:var(--ink2)}
+.sline>span{font:inherit;margin:0;padding:0}
+.sline .bad,.steprow .bad{color:var(--bad)}
+.tsteps .steprow{font:400 12px/1.5 var(--font-ui);column-gap:12px;row-gap:0;padding:0}
+.xrow .route{flex:none;display:flex;gap:4px}
+.xrow .route:empty{display:none}
+.chip2.rt{background:none;box-shadow:inset 0 0 0 1px var(--line);color:var(--ink2);white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+.chip2.rt.bad{color:var(--bad)}
+@media (max-width:560px){.xrow .route{order:8;flex:1 0 100%;flex-wrap:wrap;padding:0 0 2px 26px}}
 .shead{grid-template-columns:16px auto minmax(0,1fr) auto 56px;min-height:26px;margin:6px 0 0;padding:0 8px 0 0;font:500 13px/1.4 var(--font-ui);color:var(--ink2)}
 .stime{font-weight:400;color:var(--ink2)}
 .sdetail{margin:0 8px 2px 24px}

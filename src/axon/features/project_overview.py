@@ -243,7 +243,7 @@ def spend_week(ws: Path) -> dict[str, Any]:
     from axon.features import analytics
     since = time.time() - 7 * 86400
     recs = analytics.load_usage(since=since, project=storage.project_key(Path(ws)))
-    tokens = sum(r.input + r.output + r.cache_read + r.cache_write for r in recs)
+    tokens = sum(r.input + r.output for r in recs)   # input already includes cache reads and writes, as on the Usage page
     return {"cost": round(sum(r.cost for r in recs), 4), "calls": len(recs), "tokens": tokens, "sessions": len({r.session for r in recs if r.session})}
 
 

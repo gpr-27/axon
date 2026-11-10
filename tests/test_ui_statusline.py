@@ -191,3 +191,26 @@ def test_idle_timer_without_interval_waits_for_an_event(tmp_path, monkeypatch):
     agent.renderer.last_context = (50_000, 200_000)            # and changing back is a change too
     sl.render_custom_status(agent.settings, agent, idle=True)
     assert runs() == 4
+
+
+def test_context_figure_follows_compaction_clear_and_model_switch(tmp_path):
+    """The last call's (used, window) went stale: `ctx N%` kept its value after /compact, /clear and /model."""
+    agent = make_agent(tmp_path)
+    size = [40_000]
+    agent.conversation = SimpleNamespace(token_estimate=lambda: size[0])
+    agent.renderer.last_context = (50_000, 200_000)            # 10k of system prompt and tools + 40k of messages
+    assert sl.context_usage(agent) == (50_000, 200_000)
+    size[0] = 46_000                                           # tool results arrive before the next call
+    assert sl.context_usage(agent)[0] == 56_000
+    size[0] = 3_000                                            # /compact: the messages became a short summary
+    assert sl.context_usage(agent)[0] == 13_000
+    assert "ctx 6%" in strip_ansi(sl.default_status_line(agent, 120))
+    size[0] = 0                                                # /clear: only the fixed part is left
+    assert sl.context_usage(agent)[0] == 10_000
+    agent.renderer.last_context = (60_000, 200_000)            # the next call reports afresh
+    size[0] = 50_000
+    assert sl.context_usage(agent)[0] == 60_000
+    agent.context = SimpleNamespace(context_window=lambda model=None: 1_000_000 if model == "big" else 200_000)
+    agent.settings.model = "big"                               # /model: the window is the new model's, at once
+    assert sl.context_usage(agent) == (60_000, 1_000_000)
+    assert "ctx 6%" in strip_ansi(sl.default_status_line(agent, 120))

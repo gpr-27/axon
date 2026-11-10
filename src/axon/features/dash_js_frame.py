@@ -13,7 +13,7 @@ function prefKey() { return 'axon-ui:v2:' + ((state.ws || {}).workspace || ''); 
 function loadPrefs() { try { return JSON.parse(lsGet(prefKey()) || '{}'); } catch (e) { return {}; } }
 function savePrefs() {
   // At phone width the panels are sheets that always start closed; keep the desktop choice for when the window is wide again.
-  const keep = innerWidth <= 900 ? loadPrefs() : {}; const open = (k) => (typeof keep[k] === 'boolean' ? keep[k] : UI[k]);
+  const keep = innerWidth <= 900 ? loadPrefs() : {}; if (innerWidth <= 900 && typeof keep.rightOpen !== 'boolean' && typeof UI.rightWide === 'boolean') keep.rightOpen = UI.rightWide; const open = (k) => (typeof keep[k] === 'boolean' ? keep[k] : UI[k]);
   lsSet(prefKey(), JSON.stringify({ left: UI.left, right: UI.right, bottom: UI.bottom, rightOpen: open('rightOpen'),
     tabs: UI.tabs.filter(t => t.hash && !/^#\/(files|shell|terminal)?$/.test(t.hash)).map(t => t.hash).slice(0, 12), active: UI.active && !/^#\/(files|shell|terminal)?$/.test(UI.active.hash || '') ? UI.active.hash : '' }));
 }
@@ -58,7 +58,7 @@ function ensureFrame() {
   const p = loadPrefs(); if (typeof p.right === 'number') UI.right = Math.max(160, Math.min(900, p.right));
   if (typeof p.rightOpen === 'boolean') UI.rightOpen = p.rightOpen;   // older saved layouts also carry left and bottom entries: ignored
   UI.restore = p;
-  if (innerWidth <= 900) UI.rightOpen = false;
+  if (innerWidth <= 900) { UI.rightWide = UI.rightOpen; UI.rightOpen = false; }
   const ws = state.ws || {};
   const logo = h('span', { html: state.logo || '' });
   const nav = h('nav', { 'aria-label': 'Sections', class: 'side-nav' }, ...NAV.map(([id, label, keys]) => h('a', { href: '#/' + id, 'data-nav': id, title: label + (NAV_HELP[id] ? ': ' + NAV_HELP[id] : '') + '  (' + keys + ')' }, svgIcon(ICONS[id]), h('span', { class: 'lbl' }, label))));
@@ -87,7 +87,8 @@ function ensureFrame() {
   applySizes(); syncToggles(); drawStatus(); renderRight(); drawChip(); wbRender(); wbTitleSync();
   let keepT = 0; const keepRoom = () => { clearTimeout(keepT); keepT = setTimeout(() => wbKeepChatRoom(null), 250); }; keepRoom();   // a saved layout or a smaller window must not squeeze the chat out
   window.addEventListener('resize', () => { keepRoom(); tabArrows(); const small = innerWidth <= 900; const was = document.body.classList.contains('small'); document.body.classList.toggle('small', small);
-    if (small && !was) { UI.rightOpen = false; document.body.classList.remove('drawer-right', 'drawer-wb'); applySizes(); syncToggles(); } });
+    if (small && !was) { UI.rightWide = UI.rightOpen; UI.rightOpen = false; document.body.classList.remove('drawer-right', 'drawer-wb'); applySizes(); syncToggles(); }
+    else if (!small && was) { if (UI.rightWide === true && !UI.rightOpen) { UI.rightOpen = true; applySizes(); syncToggles(); renderRight(); } } });   // wide again: the panel comes back if it was open before the window got narrow
   document.body.classList.toggle('small', innerWidth <= 900);
 }
 function drawChip() {

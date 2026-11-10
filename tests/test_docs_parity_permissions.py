@@ -290,7 +290,9 @@ def test_bare_deny_removes_the_tool_and_scoped_does_not(workspace):
 
 def test_generated_path_rule_is_literal_and_absolute_uses_two_slashes(workspace, tmp_path_factory):
     outside = tmp_path_factory.mktemp("o")
-    assert str(PermissionEngine.narrow_rule_for("Edit", {"file_path": "a[1].py"}, workspace)) == "Edit(./a\\[1\\].py)"
+    # A backslash is a path separator in a rule on Windows, so the bracket is written as a class there.
+    literal = "Edit(./a[[]1].py)" if os.name == "nt" else "Edit(./a\\[1\\].py)"
+    assert str(PermissionEngine.narrow_rule_for("Edit", {"file_path": "a[1].py"}, workspace)) == literal
     assert str(PermissionEngine.narrow_rule_for("Edit", {"file_path": str(outside / "x")}, workspace)).startswith("Edit(//")
     r = PermissionEngine.narrow_rule_for("Edit", {"file_path": "a[1].py"}, workspace)
     assert r.matches("Edit", {"file_path": "a[1].py"}, workspace)

@@ -306,6 +306,15 @@ def test_usage_defaults_and_tables(c, env):
     assert allp["scope"] == "all" and allp["by_project"] and sum(r["cost"] for r in allp["by_project"]) == pytest.approx(allp["kpis"]["cost"])
 
 
+def test_usage_by_day_splits_input_so_the_stacked_chart_adds_up(c, env):
+    # `input` includes cached tokens; the chart stacks uncached input, output, cache read and cache written.
+    d = c.json("/api/manage/usage")
+    for r in d["by_day"]:
+        assert r["uncached_input"] == max(0, r["input"] - r["cache_read"] - r["cache_write"])
+    from axon.features.dash_js_manage import JS_MANAGE
+    assert "key: 'uncached_input'" in JS_MANAGE and "{ key: 'input', label: 'Input', color" not in JS_MANAGE
+
+
 def test_usage_custom_dates_only_count_that_range(c, env):
     from datetime import date, timedelta
     a, b = date.today() - timedelta(days=5), date.today() - timedelta(days=3)

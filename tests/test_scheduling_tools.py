@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -499,7 +500,8 @@ def test_only_a_terminal_session_restores_and_a_damaged_file_is_ignored(tmp_path
     assert wc.restore_cron_jobs(_session_agent(tmp_path), clock=lambda: start, start_thread=False) == 0
     monkeypatch.delenv("AXON_DISABLE_CRON")
     path = wc._cron_file(a)
-    assert path.stat().st_mode & 0o077 == 0
+    if os.name != "nt":                 # Windows has no group/other bits: the file is covered by the profile folder's ACL
+        assert path.stat().st_mode & 0o077 == 0
     path.write_text('[{"id": "x"}, 5, {"id": "y", "prompt": "p", "recurring": true, "cron": "not cron"}]')
     assert wc.restore_cron_jobs(_session_agent(tmp_path), clock=lambda: start, start_thread=False) == 0
     path.write_text("{broken")
@@ -558,3 +560,23 @@ def test_a_file_without_the_plain_field_stays_plain_text(tmp_path: Path) -> None
     path.write_text('[{"id": "abcd1234", "cron": "7 * * * *", "prompt": "!touch x", "recurring": true}]')
     assert wc.restore_cron_jobs(a, clock=lambda: _at(2026, 11, 9, 10, 1), start_thread=False) == 1
     assert wc.active_jobs(a)[0].plain is True
+
+
+# ─── Windows: a naive datetime within a day of the epoch has no .timestamp() ──
+
+def test_next_after_survives_a_datetime_the_platform_cannot_convert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows ``datetime.timestamp()`` raises OSError 22 for local times near 1 Jan 1970 (it probes a negative
+    time), which is where a test clock of 1000.0 lands. The next run is then worked out by plain arithmetic."""
+    import axon.tools.cron as cron_mod
+
+    class WindowsDatetime(datetime):
+        def timestamp(self) -> float:
+            if self.year == 1970:
+                raise OSError(22, "Invalid argument")
+            return super().timestamp()
+
+    spec = CronSpec("*/5 * * * *")
+    want = spec.next_after(1000.0)
+    monkeypatch.setattr(cron_mod, "datetime", WindowsDatetime)
+    assert spec.next_after(1000.0) == want
+    assert want is not None and 0 < want - 1000.0 <= 300

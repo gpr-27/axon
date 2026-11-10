@@ -1730,8 +1730,9 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 ref = srv.index.lookup(unquote(m.group(1)))
             except DashError as e:
-                if e.status == 404 and not m.group(2) and unquote(m.group(1)) in srv.rts:
-                    # a chat that was just opened has no file yet: an empty page, not a 404 the browser logs as an error
+                if e.status == 404 and not m.group(2) and srv.runtime(unquote(m.group(1)), create=False) is not None:
+                    # a chat that was just opened has no file yet: an empty page, not a 404 the browser logs as an error.
+                    # That holds for the terminal's own chat too, which is not one of the runtimes this server built.
                     self._json(200, {"entries": [], "total": 0, "first": 0, "has_before": False})
                     return
                 raise

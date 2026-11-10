@@ -721,6 +721,10 @@ class SkillManager:
             if s:
                 if prefix and s.name in self._skills:
                     s.name = f"{prefix}:{s.name}"
+                old = self._skills.get(s.name)
+                if old is not None and old.scope != "bundled" and old.path != s.path:
+                    self.problems.append(f"{old.path}: skill '{s.name}' ({old.scope}) is hidden by the {scope} "
+                                         f"skill of the same name at {s.path}")
                 self._skills[s.name] = s
 
     def _scan_extra_dir(self, directory: Path) -> None:
@@ -941,6 +945,12 @@ class SkillManager:
         except OSError:
             return None
         fm, body = parse_frontmatter(content)
+        if not fm and content.removeprefix("\ufeff").startswith("---") and scope != "bundled":
+            # Opened with '---' but never closed: nothing in it was read. Say so; do not show '---' as the description.
+            self.problems.append(f"{path}: frontmatter is not closed with a '---' line, so its name and "
+                                 "description were not read")
+            body = "\n".join(ln for ln in content.removeprefix("\ufeff").splitlines()[1:]
+                             if not re.match(r"^[A-Za-z_-]+:\s", ln)).strip()
         raw_name = fm.get("name") if isinstance(fm.get("name"), str) else ""
         dir_name = path.parent.name
         if plugin is not None and path.parent.resolve() == Path(plugin.path).resolve():

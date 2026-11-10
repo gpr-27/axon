@@ -138,6 +138,7 @@ class ToolBatchStart:
     tools: list[ToolUseBlock]
     user_prompt: str = ""
     mode: str = ""
+    parallel: bool | None = None   # how the loop runs the batch (None: not said, the reader infers it)
 
 @dataclass(frozen=True)
 class ToolExecutionStart:
@@ -149,6 +150,7 @@ class ToolExecutionStart:
     rationale: str = ""          # the model's own words just before this call (never invented)
     rationale_source: str = ""   # where the rationale came from: "text" | "thinking" | ""
     parse_error: str = ""        # set when the arguments were not valid JSON (input is then {"raw": text})
+    server: str = ""             # the MCP server this call goes to ("" for a built-in tool)
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
@@ -158,6 +160,8 @@ class ToolExecutionResult:
     content: str
     is_error: bool = False
     changes: tuple[Any, ...] = ()   # axon.agent.filechanges.FileChange: files a shell command changed
+    server: str = ""                # the MCP server that answered ("" for a built-in tool)
+    duration_ms: int = 0            # time inside the tool itself (for MCP: the server's answer), without approval waits
 
 @dataclass(frozen=True)
 class TurnComplete:

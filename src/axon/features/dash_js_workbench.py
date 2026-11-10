@@ -630,6 +630,13 @@ function wbUsageSection(C, sec) {
   const b = lim.budget; if (b && b.session_usd) { const p = Math.min(100, Math.round(100 * (st.cost || 0) / b.session_usd)); out.push(h('div', { class: 'lim' }, h('div', { class: 'kvr' }, h('span', { class: 'muted' }, 'Session budget'), h('span', { class: 'num' }, usd(st.cost || 0) + ' of ' + usd(b.session_usd))), h('div', { class: 'bar thin ' + (p > 90 ? 'bad' : p > 75 ? 'warn' : '') }, h('i', { style: 'width:' + p + '%' })))); }
   return sec('Usage', out, h('a', { class: 'plink', href: '#/usage' }, 'details'));
 }
+// What a Reconnect click ended in, in words: the button alone looked the same after a failure as before the click.
+function wbReconnectWord(name, r) {
+  if (r.status === 'connected') return name + ' connected' + (r.tools != null ? ', ' + r.tools + ' tools' : '');
+  if (r.status === 'failed') return name + ' did not connect: ' + (r.error || 'no reason given').slice(0, 160);
+  if (r.status === 'needs-auth') return name + ' needs you to sign in. Use Authenticate.';
+  return 'Reconnecting ' + name;
+}
 function wbConnectorsSection(C, sec) {
   const d = WB.conn; if (!d || !d.servers.length) return d ? sec('Connectors', h('div', { class: 'rnote' }, 'No MCP servers are set up. ', h('a', { href: '#/extensions' }, 'Add one'))) : null;
   const all = d.servers.slice().sort((a, b) => (b.needs_reconnect - a.needs_reconnect) || a.name.localeCompare(b.name));
@@ -639,7 +646,7 @@ function wbConnectorsSection(C, sec) {
     const open = WB_EXP.has('conn:' + s.name); const needsAuth = s.status === 'needs-auth';
     const act = s.needs_approval ? h('a', { class: 'cn-act warn', href: '#/extensions', title: 'This project server waits for your approval before it starts. Approve it on the Extensions page.', onclick: (e) => e.stopPropagation() }, 'Needs approval')
       : needsAuth ? h('button', { class: 'cn-act warn', type: 'button', onclick: (e) => { e.stopPropagation(); openInTerminal('/mcp'); } }, 'Authenticate')
-      : s.status === 'disabled' ? h('span', { class: 'rr muted' }, 'Off') : s.needs_reconnect ? h('button', { class: 'cn-act warn', type: 'button', onclick: async (e) => { e.stopPropagation(); try { await api('/api/workbench/connector', { name: s.name, action: 'reconnect' }); toast('Reconnecting ' + s.name); WB_BUSY.conn.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, 'Reconnect')
+      : s.status === 'disabled' ? h('span', { class: 'rr muted' }, 'Off') : s.needs_reconnect ? h('button', { class: 'cn-act warn', type: 'button', onclick: async (e) => { e.stopPropagation(); try { toast(wbReconnectWord(s.name, await api('/api/workbench/connector', { name: s.name, action: 'reconnect' }))); WB_BUSY.conn.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, 'Reconnect')
         : h('span', { class: 'rr muted' }, s.status === 'connecting' || s.status === 'reconnecting' ? 'connecting' : (s.tools != null ? s.tools + ' tools' : 'on'));
     const r = h('div', { class: 'cn' + (open ? ' open' : '') }, h('div', { class: 'cn-row', role: 'button', tabindex: '0', 'aria-expanded': String(open), title: s.error || s.status, onclick: () => { open ? WB_EXP.delete('conn:' + s.name) : WB_EXP.add('conn:' + s.name); wbRail(C); }, onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
       h('span', { class: 'badge-i' }, (s.name[0] || '?').toUpperCase()), h('span', { class: 'rl' }, s.name), act));
@@ -650,7 +657,7 @@ function wbConnectorsSection(C, sec) {
       const meta = [s.transport, s.scope + ' scope', s.managed ? 'managed by your organization' : '', s.timeout ? s.timeout + 's timeout' : ''].filter(Boolean).join(' · ');
       r.append(h('div', { class: 'cn-body' }, h('div', { class: 'muted cn-meta' }, meta), s.target ? h('code', { class: 'cn-target' }, s.target) : null, s.error ? h('div', { class: 'bad cn-err' }, s.error) : null, ts.length > 8 ? q : null, tl, h('div', { class: 'formrow' },
         h('button', { class: 'mini', type: 'button', onclick: async () => { try { await api('/api/workbench/connector', { name: s.name, action: s.status === 'disabled' ? 'enable' : 'disable' }); WB_BUSY.conn.t = 0; WB_BUSY.ctx.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, s.status === 'disabled' ? 'Enable' : 'Disable'),
-        s.status !== 'disabled' ? h('button', { class: 'mini', type: 'button', onclick: async () => { try { await api('/api/workbench/connector', { name: s.name, action: 'reconnect' }); toast('Reconnecting ' + s.name); WB_BUSY.conn.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, 'Reconnect') : null)));
+        s.status !== 'disabled' ? h('button', { class: 'mini', type: 'button', onclick: async () => { try { toast(wbReconnectWord(s.name, await api('/api/workbench/connector', { name: s.name, action: 'reconnect' }))); WB_BUSY.conn.t = 0; renderRightSoon(); } catch (er) { toast(er.message); } } }, 'Reconnect') : null)));
     }
     return r;
   });
@@ -724,7 +731,7 @@ function confirmBypass(C, mode) {
 const WB_MODES = [['default', 'Asks first', 'Ask before edits and commands'], ['acceptEdits', 'Edits allowed', 'Allow file edits, ask for commands'], ['plan', 'Plan only', 'Read-only, writes a plan'], ['bypass', 'Runs without asking', 'No approval prompts']];
 function wbFooterDraw(C) {
   const f = C.foot; if (!f) return; const st = C.st || {};
-  const info = state.info || {}; const us = UI.status || {}; f.model.textContent = st.model || us.model || info.model || 'model'; f.effort.textContent = effortWord(st.effort || us.effort || info.effort); const m = WB_MODES.find(x => x[0] === (st.mode || 'default')) || WB_MODES[0];
+  const info = state.info || {}; const us = UI.status || {}; f.model.textContent = st.model || us.model || info.model || 'model'; f.effort.textContent = effortWord(st.effort || us.effort || info.effort); const m = WB_MODES.find(x => x[0] === (st.mode || 'default')) || (st.mode === 'dontAsk' ? ['dontAsk', 'Never asks', 'Denies anything that would ask. Set in settings.json or with --permission-mode.'] : [st.mode, st.mode, '']);   // a mode the menu does not offer is still named truthfully
   f.mode.textContent = m[1]; f.mode.className = 'fw fw-mode mode-' + m[0]; f.mode.title = m[2];
   const c = st.context || {}; const p = Math.min(100, Math.round(c.pct || 0));
   f.ring.title = c.window ? 'Context: ' + p + '% used, ' + (c.used || 0).toLocaleString() + ' of ' + c.window.toLocaleString() + ' tokens' : 'Context window';

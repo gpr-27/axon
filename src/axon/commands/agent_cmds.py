@@ -521,6 +521,9 @@ def _subagent_stop(agent: Any, query: str) -> CommandResult:
     if task is None:
         err(f"No subagent '{query}'.")
         return CommandResult(handled=True, success=False)
+    if task.status == "queued" and mgr.cancel(task.id):
+        ok(f"Removed {task.id} ({clip(task.title, 50)}) from the queue: it had not started")
+        return CommandResult(handled=True)
     if task.status != "running":
         info(f"{task.id} is not running ({task.status}).")
         return CommandResult(handled=True)
@@ -695,7 +698,7 @@ def handle_subagents(agent: Any, arg: str) -> CommandResult:
         return CommandResult(handled=True)
     if not a:
         from axon.ui.picker import pick
-        icons = {"completed": "✓", "exhausted": "!", "error": "✗"}
+        icons = {"completed": "✓", "exhausted": "!", "error": "✗", "queued": "○", "cancelled": "⊘"}
         options = [f"[Main] {parent_id}"] + [
             f"[{t.index}] {icons.get(t.status, '▶')} {t.title} ({t.steps} steps)" + (" · viewing" if f"{parent_id}_sub_{t.index}" == curr_id else "")
             for t in tasks
@@ -838,7 +841,7 @@ def handle_tasks(agent: Any, arg: str) -> CommandResult:
         if open_console(agent, everything=True):
             return CommandResult(handled=True)
     header("Tasks", f"{len(shells)} shell(s) · {len(turns)} background turn(s) · {len(tasks)} subagent task(s)")
-    colors = {"running": GOLD, "completed": MINT, "error": ROSE, "exhausted": ROSE, "pending": SLATE, "interrupted": ROSE}
+    colors = {"running": GOLD, "completed": MINT, "error": ROSE, "exhausted": ROSE, "pending": SLATE, "queued": SLATE, "interrupted": ROSE}
     if shells:
         section("Background shells", TEAL)
         rows = []

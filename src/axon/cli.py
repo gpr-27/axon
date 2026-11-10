@@ -468,13 +468,10 @@ def build_agent(
                     tools.register(mcp_tool)
             if announce:
                 try:
-                    rows = get_bridge().status_rows() if hasattr(get_bridge(), "status_rows") else []
-                    failed = any(r.get("status") in ("failed", "needs-config", "disconnected") for r in rows)
-                    summary = get_bridge().startup_summary()
-                    if summary and (failed or settings.verbose):
-                        announce(summary)
-                    elif mcp_tools:
-                        announce(f"MCP: {len(mcp_tools)} tool(s) loaded from configured servers")
+                    # One line per server: which loaded, how many tools each, which did not and why.
+                    report = get_bridge().startup_report()
+                    if report:
+                        announce(report)
                 except Exception:
                     pass
         except Exception as e:
@@ -510,8 +507,9 @@ def build_agent(
         except Exception:
             pass
         search = None if no_search else defer_mcp_tools(tools, window)
-        if search is not None and announce and settings.verbose:
-            announce(f"MCP: {len(search.deferred)} tool schema(s) deferred behind ToolSearch")
+        if search is not None and announce and search.deferred:
+            announce(f"MCP: {len(search.deferred)} tool schema(s) deferred behind ToolSearch "
+                     "(the model loads one when it needs it)")
     except Exception:
         pass
 
@@ -586,6 +584,10 @@ def fork_session(agent: Any, say: Callable[[str], None]) -> str:
             dest = agent.session.path_for(new_id)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(old_file, dest)
+            # Its subagents' transcripts, traces and meta files too, or /subagents in the fork has nothing to open.
+            old_subs = old_file.parent / "subagents"
+            if old_file.name == "session.jsonl" and old_subs.is_dir():
+                shutil.copytree(old_subs, dest.parent / "subagents", dirs_exist_ok=True)
         from axon.agent.trace import trace_file
         old_traces = trace_file(agent.settings.workspace, old_id)
         if old_traces.is_file():

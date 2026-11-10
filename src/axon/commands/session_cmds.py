@@ -60,7 +60,7 @@ def handle_clear(agent: Any, arg: str) -> CommandResult:
 
 
 @command("resume", category=CAT, description="Resume a previous session of this workspace",
-         aliases=("continue",), usage="/resume [session-id or prefix]")
+         aliases=("continue",), usage="/resume [session id, part of an id, or title]")
 def handle_resume_cmd(agent: Any, arg: str) -> CommandResult:
     from axon.session.interactive import handle_resume
     before = getattr(agent.session, "active_session_id", None)
@@ -427,6 +427,10 @@ def _summarize_tail(agent: Any, tail: list[dict[str, Any]]) -> str:
                     transcript, max_tokens=700, source="rewind_summary")
 
 
+class RewindNotSaved(ValueError):
+    """The rewind record could not be written; nothing was changed."""
+
+
 class RewindConflict(ValueError):
     """Files changed outside Axon since it last wrote them: a code rewind would overwrite the changes."""
 
@@ -459,20 +463,17 @@ def apply_rewind(agent: Any, index: int, mode: str, force: bool = False) -> dict
         raise ValueError(f"no prompt #{index} (have {len(points)})")
     out: dict[str, Any] = {"reverted": [], "removed": 0, "prompt": pt.prompt, "summary": None}
     msgs = list(agent.conversation.messages)
-    if mode in ("code", "code_and_conversation"):
-        cp = getattr(agent, "checkpoints", None)
-        if cp is not None and pt.ts and hasattr(cp, "rewind_to"):
-            clash = [] if force else _code_conflicts(cp, pt.ts)
-            if clash:
-                raise RewindConflict(f"{len(clash)} file(s) changed outside Axon since it last wrote them: {', '.join(clash[:6])}"
-                                     + (" ..." if len(clash) > 6 else "") + ". Nothing was changed.", clash)
-            out["reverted"] = cp.rewind_to(pt.ts)
-        elif cp is not None and not pt.ts:
-            out["reverted"] = ["Skipped code restore: the prompt's time is unknown (resumed without a transcript)"]
+    cp = getattr(agent, "checkpoints", None) if mode in ("code", "code_and_conversation") else None
+    restore_code = cp is not None and bool(pt.ts) and hasattr(cp, "rewind_to")
+    if restore_code:
+        clash = [] if force else _code_conflicts(cp, pt.ts)
+        if clash:
+            raise RewindConflict(f"{len(clash)} file(s) changed outside Axon since it last wrote them: {', '.join(clash[:6])}"
+                                 + (" ..." if len(clash) > 6 else "") + ". Nothing was changed.", clash)
+    kept: list[dict[str, Any]] | None = None
     if mode in ("conversation", "code_and_conversation"):
         kept = msgs[:pt.message_index]
         out["removed"] = len(msgs) - len(kept)
-        agent.conversation.messages[:] = kept
     elif mode == "summarize_from_here":
         tail = msgs[pt.message_index:]
         if tail:
@@ -483,14 +484,27 @@ def apply_rewind(agent: Any, index: int, mode: str, force: bool = False) -> dict
                 {"role": "assistant", "content": "Understood. I will continue from this summary."},
             ]
             out["removed"] = len(tail)
-            agent.conversation.messages[:] = kept
     if mode != "code":
+        # Save the rewind before anything changes: a rewind the transcript does not hold is undone by the next resume.
         sess = getattr(agent, "session", None)
         if sess is not None and hasattr(sess, "append_rewind"):
             try:
-                sess.append_rewind(list(agent.conversation.messages), mode, index)
-            except Exception:
-                pass
+                sess.append_rewind(list(kept if kept is not None else msgs), mode, index)
+            except Exception as e:
+                raise RewindNotSaved(f"The rewind could not be saved to the session file ({e}). Nothing was changed.") from e
+    if restore_code:
+        try:
+            out["reverted"] = cp.rewind_to(pt.ts)
+        except Exception as e:
+            if mode == "code":
+                raise
+            out["reverted"] = [f"Failed to restore files: {e}"]    # the conversation rewind is already saved; finish it
+    elif cp is not None and not pt.ts:
+        out["reverted"] = ["Skipped code restore: the prompt's time is unknown (resumed without a transcript)"]
+    if kept is not None:
+        agent.conversation.messages[:] = kept
+    out["left"] = len(agent.conversation.messages)
+    if mode != "code":
         traces = getattr(agent, "traces", None)
         if isinstance(traces, list) and mode != "summarize_from_here" and pt.ts:
             # a turn's trace starts just before its prompt is recorded, so cut after the previous prompt
@@ -510,7 +524,12 @@ def _print_rewind_result(res: dict[str, Any], mode: str, index: int) -> None:
     for r in res["reverted"]:
         print(f"    {ROSE if r.startswith(('Failed', 'Skipped')) else SLATE}• {r}{RST}")
     if res["removed"]:
-        print(f"    {SLATE}• {res['removed']} message(s) removed from the conversation{RST}")
+        left = f", {res['left']} left" if isinstance(res.get("left"), int) else ""
+        print(f"    {SLATE}• {res['removed']} message(s) removed from the conversation{left} · saved, so a resume keeps it{RST}")
+    elif mode != "code":
+        print(f"    {SLATE}• the conversation had nothing after that prompt to remove{RST}")
+    if mode in ("code", "code_and_conversation") and not res["reverted"]:
+        print(f"    {SLATE}• no file edits to undo since that prompt{RST}")
     if res.get("summary"):
         print(f"    {SLATE}• summarised as:{RST} {WHITE}{res['summary'][:300]}{RST}")
     if mode in ("conversation", "code_and_conversation") and res.get("prompt"):
@@ -547,6 +566,9 @@ def _rewind_menu(agent: Any, points: list[RewindPoint]) -> CommandResult:
             info("Nothing was changed.")
             return CommandResult(handled=True)
         res = apply_rewind(agent, pt.index, mode, force=True)
+    except ValueError as e:
+        err(str(e))
+        return CommandResult(handled=True, success=False)
     _print_rewind_result(res, mode, pt.index)
     return CommandResult(handled=True)
 
@@ -833,6 +855,11 @@ def handle_export(agent: Any, arg: str) -> CommandResult:
             fname = parts[1] if len(parts) > 1 else ""
         else:
             fname = arg.strip()
+            if len(parts) == 1 and not any(ch in fname for ch in "./\\~") and fname.lower() not in ("clipboard", "clip", "copy", "--clipboard"):
+                # one bare word that is not a format: a typo, not a file name (it used to be written as a Markdown file)
+                err(f"Unknown export format '{fname}'. Formats: md, html, pdf, json, txt. "
+                    f"To save under that name, add an extension or a folder: /export {fname}.md")
+                return CommandResult(handled=True, success=False)
             low = fname.lower()
             fmt = "json" if low.endswith(".json") else "txt" if low.endswith(".txt") else "html" if low.endswith((".html", ".htm")) else "md"
     to_clipboard = fname.lower() in ("clipboard", "clip", "copy", "--clipboard")

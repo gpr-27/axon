@@ -79,15 +79,27 @@ class CronSpec:
 
     def next_after(self, ts: float) -> float | None:
         """The first matching minute strictly after *ts* (epoch seconds), or None when there is none."""
-        start = datetime.fromtimestamp(ts).replace(second=0, microsecond=0) + timedelta(minutes=1)
+        base = datetime.fromtimestamp(ts)
+        start = base.replace(second=0, microsecond=0) + timedelta(minutes=1)
         day = start.replace(hour=0, minute=0)
+
+        def epoch(at: datetime) -> float:
+            try:
+                return at.timestamp()
+            except (OSError, OverflowError, ValueError):
+                # Windows cannot convert a local time within a day of 1 Jan 1970 (it probes a negative time and
+                # fails with "Invalid argument"), so count forward from the time we were given instead.
+                return ts + (at - base).total_seconds()
+
         for _ in range(MAX_SEARCH_DAYS):
             if self._day_matches(day):
                 for hour in sorted(self.hours):
                     for minute in sorted(self.minutes):
                         at = day.replace(hour=hour, minute=minute)
-                        if at >= start and at.timestamp() > ts:
-                            return at.timestamp()
+                        if at >= start:
+                            when = epoch(at)
+                            if when > ts:
+                                return when
             day += timedelta(days=1)
         return None
 

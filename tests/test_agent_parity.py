@@ -345,8 +345,9 @@ def test_concurrent_subagent_limit(workspace: Path, monkeypatch: Any) -> None:
     parent.subagents.register("busy", title="busy")                  # status running
     with pytest.raises(ToolError, match="Concurrent subagent limit"):
         run_subagent("another", parent, subagent_type="explore")
-    with pytest.raises(ToolError, match="Concurrent subagent limit"):
-        delegate("another", parent, background=True, subagent_type="explore")
+    # A background spawn over the limit no longer blocks or fails its Task call: it is queued (tests/test_subagent_queue.py).
+    assert delegate("another", parent, background=True, subagent_type="explore").startswith("Queued subagent")
+    parent.subagents.cancel_all()
 
 
 def test_subagent_over_the_limit_waits_for_a_slot_instead_of_failing(workspace: Path, monkeypatch: Any) -> None:

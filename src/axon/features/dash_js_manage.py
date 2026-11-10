@@ -451,12 +451,12 @@ async function viewOverview() {
     } else {
       const cell = (l, v, hint, extra) => h('div', { class: 'kpi' }, h('div', { class: 'l' }, l), h('div', { class: 'v' }, v), extra || null, h('div', { class: 'h', title: hint }, hint));
       const costDays = d.by_day.map(r => ({ name: r.name, cost: r.cost || 0, calls: r.calls }));
-      body.append(h('div', { class: 'u-hero' }, h('div', { class: 'u-fig' }, h('div', { class: 'u-num' }, k.cost_text), h('div', { class: 'u-cap' }, 'Spent, ', d.period_label.toLowerCase()), h('div', { class: 'u-cap dim' }, usd(k.per_day) + ' a day')),
+      body.append(h('div', { class: 'u-hero' }, h('div', { class: 'u-fig' }, h('div', { class: 'u-num' }, usd(k.cost)), h('div', { class: 'u-cap' }, 'Spent, ', d.period_label.toLowerCase()), h('div', { class: 'u-cap dim' }, usd(k.per_day) + ' a day')),
         h('div', { class: 'u-spark' }, UCH.cost ? null : vzColumns(costDays, [{ key: 'cost', label: 'Cost', color: 'var(--primary)' }], { label: 'Cost per day', fmtY: vzMoney, fmtV: usd, note: r => axPlural(r.calls || 0, 'call') }))));
       body.append(h('div', { class: 'strip' },
         cell('Tokens', tok(k.tokens_in + k.tokens_out), tok(k.tokens_in) + ' in, ' + tok(k.tokens_out) + ' out'),
         cell('Cache hit rate', pct(k.hit_pct), tok(k.cache_read) + ' read, ' + tok(k.cache_write) + ' written', vzMeter((k.hit_pct || 0) / 100, '', 'Cache hit rate')),
-        cell('Cache savings', k.savings_text, 'against the same calls uncached'),
+        cell('Cache savings', (k.savings < 0 ? '-' : '') + usd(Math.abs(k.savings || 0)), 'against the same calls uncached'),
         cell('Calls', k.calls.toLocaleString(), axPlural(k.sessions, 'session')),
         cell('Model time / total', k.has_latency ? dur(k.api_s) + ' / ' + dur(k.wall_s) : 'no data', k.has_latency ? 'avg ' + dur(k.avg_latency) + ', p95 ' + dur(k.p95_latency) : 'older logs lack timings')));
     }
@@ -495,7 +495,7 @@ async function viewOverview() {
     const allBtn = h('button', { class: 'btn', type: 'button', onclick: () => { const hide = !anyHidden(); ['cost', 'donut', 'tokens'].forEach(x => { UCH[x] = hide; }); lsSet('axon-usage-charts', JSON.stringify(UCH)); redo(); } }, anyHidden() ? 'Show charts' : 'Hide charts');
     const syncAll = () => { allBtn.textContent = anyHidden() ? 'Show charts' : 'Hide charts'; };
     const modelBars = () => vzRanked(d.charts.donut_parts.map(p => ({ name: p.name, value: p.cost, text: usd(p.cost) + '  ' + p.pct.toFixed(0) + '%' })));
-    const TOKEN_SERIES = [{ key: 'input', label: 'Input', color: 'var(--s1)' }, { key: 'output', label: 'Output', color: 'var(--s2)' }, { key: 'cache_read', label: 'Cache read', color: 'var(--s3)' }, { key: 'cache_write', label: 'Cache written', color: 'var(--s4)' }];
+    const TOKEN_SERIES = [{ key: 'uncached_input', label: 'Uncached input', color: 'var(--s1)' }, { key: 'output', label: 'Output', color: 'var(--s2)' }, { key: 'cache_read', label: 'Cache read', color: 'var(--s3)' }, { key: 'cache_write', label: 'Cache written', color: 'var(--s4)' }];
     const tokenChart = () => h('div', null, h('ul', { class: 'vz-legend' }, TOKEN_SERIES.map(s => h('li', null, h('i', { style: 'background:' + s.color }), h('span', null, s.label)))), vzColumns(d.by_day, TOKEN_SERIES, { label: 'Tokens per day', fmtY: tok, fmtV: tok }));
     body.append(h('div', { class: 'mg-chartbar' }, h('span', { class: 'muted' }, 'Charts are drawn from the numbers below, so hiding them removes nothing.'), allBtn, h('button', { class: 'mini mg-chartbtn', type: 'button', 'aria-expanded': String(!UCH.cost), onclick: () => { UCH.cost = !UCH.cost; lsSet('axon-usage-charts', JSON.stringify(UCH)); redo(); } }, UCH.cost ? 'Show cost chart' : 'Hide cost chart')));
     body.append(h('div', { class: 'cols' },

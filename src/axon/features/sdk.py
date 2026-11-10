@@ -167,10 +167,16 @@ def event_to_dict(ev: Any) -> dict[str, Any] | None:
     if cls in ("TextDelta", "ThinkingDelta"):
         return {"type": kind, "text": ev.text}
     if cls == "ToolExecutionStart":
-        return {"type": kind, "id": ev.id, "name": ev.name, "input": _jsonable(ev.input)}
+        d = {"type": kind, "id": ev.id, "name": ev.name, "input": _jsonable(ev.input)}
+        if getattr(ev, "server", ""):
+            d["server"] = ev.server           # the MCP server the call goes to
+        return d
     if cls == "ToolExecutionResult":
-        return {"type": kind, "tool_use_id": ev.id, "name": ev.name, "content": ev.content,
-                "is_error": bool(ev.is_error)}
+        d = {"type": kind, "tool_use_id": ev.id, "name": ev.name, "content": ev.content,
+             "is_error": bool(ev.is_error)}
+        if getattr(ev, "server", ""):
+            d.update(server=ev.server, duration_ms=int(getattr(ev, "duration_ms", 0) or 0))
+        return d
     if cls == "ToolBatchStart":
         return {"type": kind, "count": ev.total_count,
                 "tools": [{"id": t.id, "name": t.name} for t in ev.tools]}

@@ -73,10 +73,22 @@ def test_latex_command_as_bare_superscript_argument() -> None:
 
 
 def test_inline_regexes_do_not_go_quadratic_on_unclosed_markers() -> None:
-    _under(0.5, lambda: markdown._style_inline("`" * 5000 + "a"))
-    _under(0.5, lambda: markdown._style_inline("[" * 20000))
-    _under(0.5, lambda: markdown._style_inline("**a " * 5000))
-    _under(0.5, lambda: markdown._style_inline("__a " * 5000))
+    # Measured: each input costs about 0.12 s of CPU at this size and doubles when the input doubles
+    # (the bounded quantifiers cap the work per position). A wall-clock limit failed on a busy
+    # machine (0.7 to 1.5 s), so this checks CPU time and, above all, how the cost grows.
+    def cpu(text: str) -> float:
+        best = float("inf")
+        for _ in range(3):
+            start = time.process_time()
+            markdown._style_inline(text)
+            best = min(best, time.process_time() - start)
+        return best
+
+    for unit, count in (("`", 5000), ("[", 20000), ("**a ", 5000), ("__a ", 5000)):
+        small, large = cpu(unit * count), cpu(unit * count * 4)
+        assert small < 1.0, (unit, small)
+        # 4x the input: linear is about 4x the time, quadratic 16x
+        assert large < max(small * 9, 0.05), (unit, small, large)
 
 
 def test_inline_code_spans_still_pair_by_run_length() -> None:

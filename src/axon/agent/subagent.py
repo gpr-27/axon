@@ -569,7 +569,7 @@ class SubagentTask:
     index: int
     title: str
     prompt: str
-    status: str = "pending"  # pending, running, completed, exhausted, error
+    status: str = "pending"  # pending, queued (waiting for a free slot), running, completed, exhausted, error, cancelled
     steps: int = 0
     max_steps: int = 15
     start_time: float = 0.0
@@ -643,8 +643,11 @@ class SubagentManager:
             return self._counter
 
     def register(self, prompt: str, max_steps: int = 15, title: str | None = None, agent_type: str = "general-purpose",
-                 call_id: str = "", name: str = "") -> SubagentTask:
+                 call_id: str = "", name: str = "", limit: int | None = None) -> SubagentTask:
+        """Add a task. With *limit* the slot check and the registration are one step under the lock: the task is
+        ``running`` when fewer than *limit* are, otherwise ``queued`` until ``admit`` gives it a slot."""
         with self._lock:
+            queued = limit is not None and self.running_count() >= limit
             if call_id and call_id in self._reserved:
                 idx = self._reserved.pop(call_id)
             else:
@@ -661,7 +664,7 @@ class SubagentManager:
                 index=idx,
                 title=clean_title,
                 prompt=prompt,
-                status="running",
+                status="queued" if queued else "running",
                 max_steps=max_steps,
                 start_time=time.time(),
                 agent_type=agent_type,
@@ -671,6 +674,21 @@ class SubagentManager:
             self._tasks.append(task)
             self._notify()
             return task
+
+    def admit(self, task_id: str, limit: int) -> bool:
+        """Give the queued task *task_id* a slot when one is free and nothing was queued before it. True once it
+        is running (also when it already was)."""
+        with self._lock:
+            task = next((t for t in self._tasks if t.id == task_id), None)
+            if task is None or task.status != "queued":
+                return task is not None and task.status == "running"
+            first = next((t for t in self._tasks if t.status == "queued"), None)
+            if first is not task or self.running_count() >= limit:
+                return False
+            task.status = "running"
+            task.start_time = time.time()
+            self._notify()
+            return True
 
     def reopen(self, task: SubagentTask, max_steps: int) -> None:
         """Start a finished subagent's next run under the same id (SendMessage to a finished subagent)."""
@@ -815,6 +833,13 @@ class SubagentManager:
         # Signal under the lock: once bind_thread(task_id, None) has run, the thread can no longer be interrupted
         # (an interrupt landing after the run would escape into the tool pool and the parent's turn).
         with self._lock:
+            waiting = next((t for t in self._tasks if t.id == task_id and t.status == "queued"), None)
+            if waiting is not None:        # it has no slot and no model call yet: just take it out of the queue
+                waiting.status = "cancelled"
+                waiting.stopped = True
+                waiting.error_msg = "Stopped by the user while it was queued"
+                self._notify()
+                return True
             ident = self._threads.get(task_id)
             if not ident:
                 return False
@@ -835,9 +860,10 @@ class SubagentManager:
         return signalled
 
     def cancel_all(self) -> int:
-        """Interrupt every running subagent; returns how many were signalled."""
+        """Interrupt every running subagent and drop every queued one; returns how many were stopped."""
         with self._lock:
-            running = [tid for tid in self._threads if any(t.id == tid and t.status == "running" for t in self._tasks)]
+            running = [t.id for t in self._tasks if t.status == "queued"]
+            running += [tid for tid in self._threads if any(t.id == tid and t.status == "running" for t in self._tasks)]
         return sum(1 for tid in running if self.cancel(tid))
 
 
@@ -1029,20 +1055,32 @@ def max_concurrent_subagents() -> int:
         return DEFAULT_MAX_CONCURRENT
 
 
-def _check_concurrency(parent: Any) -> None:
-    """Wait (up to AXON_SUBAGENT_QUEUE_WAIT seconds, default 120) for a running subagent to finish, so a large
-    fan-out queues instead of failing; Ctrl+C ends the wait. Past the wait, raise."""
-    limit = max_concurrent_subagents()
+def _queue_wait_s() -> float:
     try:
-        wait = float(os.environ.get("AXON_SUBAGENT_QUEUE_WAIT", "") or 120)
+        return max(0.0, float(os.environ.get("AXON_SUBAGENT_QUEUE_WAIT", "") or 120))
     except ValueError:
-        wait = 120.0
-    deadline = time.monotonic() + max(0.0, wait)
-    while parent.subagents.running_count() >= limit and time.monotonic() < deadline:
-        interruptible.sleep(0.25)
-    if parent.subagents.running_count() >= limit:
-        raise ToolError(f"Concurrent subagent limit reached ({limit} running). Do not retry now: wait for a running "
-                        "subagent to finish (its report arrives as a message), or stop one with /stop.")
+        return 120.0
+
+
+def _queue_note(parent: Any, limit: int) -> str:
+    return f"{parent.subagents.running_count()} running, limit {limit}"
+
+
+def _wait_for_slot(parent: Any, task: Any, limit: int) -> float:
+    """Hold the queued *task* until a slot frees; returns the seconds it waited. A background task waits as long
+    as it takes (its Task call returned already); a foreground one waits up to AXON_SUBAGENT_QUEUE_WAIT seconds
+    (default 120) and is then left ``queued`` for the caller to fail. Stopping it (or Ctrl+C) ends the wait."""
+    began = time.monotonic()
+    deadline = None if task.background else began + _queue_wait_s()
+    try:
+        while not parent.subagents.admit(task.id, limit):
+            if task.status != "queued" or (deadline is not None and time.monotonic() >= deadline):
+                break
+            task.activity = f"Queued · waiting for a free slot ({_queue_note(parent, limit)})"
+            interruptible.sleep(0.1)
+    except KeyboardInterrupt:
+        parent.subagents.cancel(task.id)
+    return time.monotonic() - began
 
 
 def _effective_mode(parent_mode: str, wanted: str | None) -> tuple[str, bool]:
@@ -1481,10 +1519,8 @@ def run_subagent(
         if task.status != "running":
             parent.subagents.reopen(task, max_iter)
     elif task is None:
-        if not unlimited:
-            _check_concurrency(parent)
         task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name,
-                                         call_id=call_id, name=name)
+                                         call_id=call_id, name=name, limit=None if unlimited else max_concurrent_subagents())
     task.model = model
     task.model_param, task.effort_param = model_param, effort_param
     task.one_shot = agent_def.source == "builtin" and agent_def.name.lower() in ("explore", "plan")
@@ -1509,11 +1545,35 @@ def run_subagent(
                 cost=cost, input_tokens=int(getattr(usage, "input", 0) or 0),
                 output_tokens=int(getattr(usage, "output", 0) or 0), status=status,
                 duration_s=time.time() - started if phase == "end" else 0.0, iterations=iterations,
-                detail=result_text if status in ("error", "cancelled") else "",
+                detail=result_text if status in ("error", "cancelled", "queued") else "",
             ))
         except Exception:
             pass
 
+    waited: float | None = None
+    if task.status == "queued":
+        # Over the limit: say so now (monitor, /subagents, the web page), then wait for a slot.
+        limit = max_concurrent_subagents()
+        note = _queue_note(parent, limit)
+        task.activity = f"Queued · waiting for a free slot ({note})"
+        task.add_log(f"Queued: {note}")
+        task.add_entry("step", f"Queued · waiting for a free slot ({note})")
+        emit_parent("queued", "queued", result_text=f"waiting for a free slot ({note})")
+        waited = _wait_for_slot(parent, task, limit)
+        if task.status == "queued":
+            reason = (f"Concurrent subagent limit reached ({limit} running) and no slot freed in {waited:.0f}s. Do not retry "
+                      "now: wait for a running subagent to finish (its report arrives as a message), or stop one with /stop.")
+            parent.subagents.fail(task.id, reason)
+            emit_parent("end", "error", result_text=reason)
+            raise ToolError(reason)
+    if task.status == "cancelled" and resume is None:      # stopped while queued (possibly before this thread got here)
+        emit_parent("end", "cancelled", result_text="Stopped by the user while it was queued")
+        return f"[Subagent #{task.index} ({task.title}) failed: stopped by the user while it was queued; it did no work.]"
+    if waited is not None:
+        task.activity = ""
+        task.add_log(f"Started after {waited:.1f}s in the queue")
+        task.add_entry("step", f"Slot free after {waited:.1f}s in the queue · starting")
+        started = time.time()
     emit_parent("start", "running")
     hook = getattr(parent, "_hook", None)
     if callable(hook):
@@ -1575,6 +1635,7 @@ def run_subagent(
             task.add_log("Step limit reached: writing the final report")
             task.add_entry("step", f"Step limit ({max_iter}) reached · writing the final report")
             task.activity = "Step limit reached · writing the final report"
+            nested("note", name="step limit", summary=f"reached {max_iter} steps · writing the final report, no more tools")
             thinking_buf.clear()
         elif isinstance(event, LLMCallStart):
             parent.subagents.update_progress(task.id, event.iteration)
@@ -1636,6 +1697,7 @@ def run_subagent(
             task.add_log(line)
             task.add_entry("retry", line, is_error=True)
             task.activity = f"Retrying ({att}/{mx}) · {why}"
+            nested("note", name="retry", summary=line, is_error=True)
 
     from axon.agent.loop import Agent
     from axon.session.store import SessionStore
@@ -1746,6 +1808,7 @@ def run_subagent(
                 task.add_log(line)
                 task.add_entry("resume", line, is_error=True)
                 task.activity = f"Resuming ({task.resumes}/{SUBAGENT_RESUMES}) · {why}"
+                nested("note", name="resume", summary=line, is_error=True)
                 interruptible.sleep(SUBAGENT_RESUME_DELAY_S * task.resumes)
                 res = sub_agent.run_turn(again)
                 spent.append(res.usage)
@@ -1959,11 +2022,13 @@ def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None 
             raise ToolError(f"Unknown subagent_type '{subagent_type}'. Available: {available}")
         _check_spawn_allowed(parent, agent_def)
         _check_spawn_depth(parent, agent_def)
-        _check_concurrency(parent)
-        task = parent.subagents.register(prompt, max_steps=_step_limit(parent, agent_def, max_iterations),
+        limit = max_concurrent_subagents()
+        task = parent.subagents.register(prompt, max_steps=_step_limit(parent, agent_def, max_iterations), limit=limit,
                                          title=description or None, agent_type=agent_def.name, call_id=call_id, name=name)
-        verb = "Started"
+        verb = "Queued" if task.status == "queued" else "Started"
     task.background = True
+    if verb == "Queued":
+        task.activity = f"Queued · waiting for a free slot ({_queue_note(parent, limit)})"
 
     def work() -> None:
         try:
@@ -1979,6 +2044,10 @@ def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None 
 
     threading.Thread(target=work, daemon=True, name=f"subagent-{task.id}").start()
     who = f"{task.id}" + (f", name '{task.name}'" if task.name else "")
+    if verb == "Queued":
+        return (f"Queued subagent #{task.index} ({task.title}) in the background ({who}): {_queue_note(parent, limit)}. It "
+                "starts by itself when a running subagent finishes, and its report will arrive as a message; carry on "
+                "with other work, do not poll and do not start it again.")
     return (f"{verb} subagent #{task.index} ({task.title}) in the background ({who}). Its report will arrive as a "
             "message when it finishes; carry on with other work and do not poll. Message it meanwhile (or resume it "
             f"later) with SendMessage(to=\"{task.name or task.id}\").")

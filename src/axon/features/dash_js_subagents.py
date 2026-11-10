@@ -203,7 +203,7 @@ function saAddStep(S, ev) {
   if (typeof ev.seq === 'number') { if (S.seen.has(ev.seq)) return false; S.seen.add(ev.seq); }
   const st = { kind: ev.kind, name: ev.name || '', summary: ev.summary || '', is_error: !!ev.is_error, duration_s: ev.duration_s || 0 };
   S.steps.push(st); if (S.steps.length > 400) S.steps.shift();
-  if (ev.kind !== 'llm') S.tools++;
+  if (ev.kind !== 'llm' && ev.kind !== 'note') S.tools++;
   S.usd += ev.cost || 0; S.tokens += (ev.input_tokens || 0) + (ev.output_tokens || 0);
   S.step = st; return true;
 }
@@ -217,7 +217,7 @@ function saSecs(C, S) { return S.dur != null ? S.dur : Math.max(0, (S.state === 
 function saLaneHead(C, S) {
   const L = S.lane; if (!L) return;
   L.el.dataset.state = S.state;
-  L.stat.textContent = S.state === 'run' ? 'running' : S.state === 'ok' ? 'done' : S.state === 'stop' ? 'no end recorded' : 'failed';
+  L.stat.textContent = S.state === 'run' ? 'running' : S.state === 'wait' ? 'queued' : S.state === 'ok' ? 'done' : S.state === 'stop' ? 'no end recorded' : 'failed';
   L.meta.replaceChildren(...[S.type, S.model, dur(saSecs(C, S)), S.tokens ? tok(S.tokens) + ' tokens' : '', S.usd ? usd(S.usd) : ''].filter(Boolean).map(x => h('span', null, x)));
 }
 function saLane(C, S) {
@@ -250,7 +250,7 @@ function subagentStep(C, ev) {
   if (L) {
     if (L.first) { L.list.replaceChildren(); L.first = false; }
     const llm = ev.kind === 'llm';
-    L.steps++; if (!llm) L.tools++; L.usd += ev.cost || 0;
+    if (ev.kind !== 'note') L.steps++; if (!llm && ev.kind !== 'note') L.tools++; L.usd += ev.cost || 0;
     L.count.textContent = L.steps + (L.steps === 1 ? ' step' : ' steps') + ' · ' + L.tools + (L.tools === 1 ? ' tool' : ' tools');
     L.cost.textContent = L.usd ? usd(L.usd) : '';
     const stick = L.list.scrollTop + L.list.clientHeight >= L.list.scrollHeight - 24;
@@ -268,11 +268,12 @@ function saLiveEnd(C, n, ev) {
   if (L.first) { L.list.replaceChildren(h('div', { class: 'sa-empty' }, 'No steps were reported.')); L.first = false; }
   if (bad && ev.detail) L.list.append(h('div', { class: 'sa-row err' }, h('span', { class: 'sk' }, '✕'), h('span', { class: 'sn' }, 'error'), h('span', { class: 'ss', title: ev.detail }, ev.detail)));
 }
-// Side by side lanes under the turn, one per subagent, once two or more ran in the same turn. Lanes wrap to a new row past three, or in a narrow column.
+// Lanes under the turn, one per subagent that ran in it, side by side when there are several. A single subagent gets a lane too:
+// its steps are steps of the turn, and the lane is what a reload draws again. Lanes wrap to a new row past three, or in a narrow column.
 function fanoutDraw(C, turn) {
   turn = turn || C.cur; if (!turn) return;
   const all = Object.values(C.subBoard || {}).filter(x => x.turn === turn);
-  if (all.length < 2) return;
+  if (!all.length) return;
   let b = turn.fanout;
   if (!b || !b.el.isConnected) {
     const head = h('h5', null, ''), grid = h('div', { class: 'fo-grid' });
@@ -284,9 +285,13 @@ function fanoutDraw(C, turn) {
   for (const S of all) { (S.notes || []).forEach(x => x.remove()); S.notes = []; }   // the lanes say all of this now
   const run = all.filter(x => x.state === 'run').length;
   const tokens = all.reduce((a, x) => a + x.tokens, 0), cost = all.reduce((a, x) => a + x.usd, 0);
-  b.head.textContent = 'Fanned out · ' + all.length + ' subagents · ' + (run ? run + ' running' : 'all finished') + (tokens ? ' · ' + tok(tokens) + ' tokens' : '') + (cost ? ' · ' + usd(cost) : '');
+  b.el.setAttribute('aria-label', all.length > 1 ? 'Subagents running side by side' : 'Subagent');
+  const wait = all.filter(x => x.state === 'wait').length;
+  const now = [run ? run + ' running' : '', wait ? wait + ' queued' : ''].filter(Boolean).join(' · ');
+  b.head.textContent = (all.length > 1 ? 'Fanned out · ' + all.length + ' subagents · ' + (now || 'all finished') : 'Subagent · ' + (now ? (run ? 'running' : 'queued') : 'finished')) + (tokens ? ' · ' + tok(tokens) + ' tokens' : '') + (cost ? ' · ' + usd(cost) : '');
   for (const S of all) {
     const lane = saLane(C, S);
+    lane.el.style.order = String(S.n);           // lanes sit in the order the model asked for them, whichever started first
     if (lane.el.parentNode !== b.grid) b.grid.append(lane.el);
     const L = C.subLive && C.subLive[S.n];       // the lane shows the steps now: the Task card's own panel hides, its Tell/Stop move into the lane
     if (L) { if (L.ctl && S.state === 'run' && L.ctl.parentNode !== lane.el) lane.el.append(L.ctl); L.panel.hidden = true; }
@@ -305,6 +310,8 @@ function saReplayDone(C) {
   for (const S of Object.values(C.subBoard || {})) {
     if (S.state === 'run' && !running) S.state = 'stop';
     if (S.turn) turns.add(S.turn);
+    // the turn is still running: a subagent that is still working gets its Tell and Stop back (fanoutDraw moves them into its lane)
+    if (S.state === 'run' && running && S.turn === C.cur) { const L = saLive(C, S.n); if (L) { L.steps = S.steps.length; L.tools = S.tools; L.usd = S.usd; } }
   }
   for (const t of turns) fanoutDraw(C, t);
 }
@@ -339,7 +346,7 @@ function subagentEvent(C, ev) {
   const n = Number(String(ev.task_id || '').replace(/^sub-/, '')) || 0;
   const href = n ? '#/agent/' + encodeURIComponent(saId(C.sid, n)) : '#/agents/' + encodeURIComponent(C.sid);
   const cur = C.cur;
-  const line = (ev.phase === 'start' ? 'Subagent started: ' : 'Subagent ' + ev.status + ': ') + ev.agent_type + ' · ' + ev.title + (ev.phase === 'end' && !C.replaying ? ' · ' + usd(ev.cost) + ' · ' + tok((ev.input_tokens || 0) + (ev.output_tokens || 0)) + ' tokens · ' + dur(ev.duration_s) : '');
+  const line = (ev.phase === 'start' ? 'Subagent started: ' : 'Subagent ' + ev.status + ': ') + ev.agent_type + ' · ' + ev.title + (ev.phase === 'queued' && ev.detail ? ' · ' + ev.detail : '') + (ev.phase === 'end' && !C.replaying ? ' · ' + usd(ev.cost) + ' · ' + tok((ev.input_tokens || 0) + (ev.output_tokens || 0)) + ' tokens · ' + dur(ev.duration_s) : '');
   const note = notice('', ev.status === 'error' ? 'bad' : '');
   note.append(h('a', { class: 'plink', href }, line));
   (cur ? cur.body : C.feed).append(note);
@@ -353,6 +360,7 @@ function subagentEvent(C, ev) {
     (S.notes = S.notes || []).push(note);
     S.type = ev.agent_type || S.type; S.title = ev.title || S.title; S.model = ev.model || S.model;
     if (ev.phase === 'start') { S.state = 'run'; S.dur = null; if (typeof ev.ts === 'number') S.t0 = ev.ts; }
+    else if (ev.phase === 'queued') { S.state = 'wait'; S.dur = null; }
     else {
       S.state = ev.status === 'error' || ev.status === 'cancelled' ? 'bad' : 'ok'; S.dur = ev.duration_s || 0; S.detail = ev.detail || '';
       if (ev.cost) S.usd = ev.cost; if ((ev.input_tokens || 0) + (ev.output_tokens || 0)) S.tokens = (ev.input_tokens || 0) + (ev.output_tokens || 0);

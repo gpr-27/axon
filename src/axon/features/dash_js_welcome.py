@@ -251,7 +251,7 @@ function overviewFill(body, d) {
       ' ', link('Ask Axon to run it', () => fillChatBox('Run ' + cmd + ' and tell me what fails, if anything.'), 'Puts a request in the chat box')) ]);
   }
   const s = d.spend;
-  rows.push(['Last 7 days', s.calls ? link('$' + s.cost.toFixed(2) + ' · ' + s.calls + ' model call' + (s.calls > 1 ? 's' : '') + ' · ' + tok(s.tokens) + ' tokens', () => { location.hash = '#/usage'; }, 'Open Usage') : h('span', { class: 'muted' }, 'No model calls in this project in the last 7 days.')]);
+  rows.push(['Last 7 days', s.calls ? link(usd(s.cost) + ' · ' + s.calls + ' model call' + (s.calls > 1 ? 's' : '') + ' · ' + tok(s.tokens) + ' tokens', () => { location.hash = '#/usage'; }, 'Open Usage') : h('span', { class: 'muted' }, 'No model calls in this project in the last 7 days.')]);
   rows.push(['Last chats', d.chats.length ? h('ul', null, ...d.chats.map(c => h('li', null, h('a', { href: '#/chat/' + encodeURIComponent(c.id) }, c.title), h('span', { class: 'muted' }, ago(Date.now() / 1000 - c.when))))) : h('span', { class: 'muted' }, 'No chats in this project yet.')]);
   const m = d.memory;
   rows.push(['Memory', m.total ? h('span', null, link(m.total + ' note' + (m.total > 1 ? 's' : ''), () => { location.hash = '#/memory'; }, 'Open Memory'), ': ' + m.items.map(i => i.name).join(', ')) : h('span', { class: 'muted' }, 'No notes saved yet.')]);

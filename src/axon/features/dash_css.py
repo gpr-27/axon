@@ -454,14 +454,14 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 .sa-empty{padding:6px 10px;color:var(--ink2);font-size:12px}
 .fanout{border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:10px 0;padding:8px 10px;font-size:12.5px}
 .fanout h5{margin:0 0 6px;font-size:12px;color:var(--ink2);font-weight:600;letter-spacing:.02em}
-.fanout .fo-grid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden;grid-template-columns:repeat(auto-fit,minmax(max(240px,calc((100% - 2px) / 3)),1fr))}
-.fanout .fo-lane{background:var(--surface);min-width:0;display:flex;flex-direction:column}
+.fanout .fo-grid{display:grid;gap:1px;border:1px solid var(--line);border-radius:6px;overflow:hidden;grid-template-columns:repeat(auto-fit,minmax(max(240px,calc((100% - 2px) / 3)),1fr))}
+.fanout .fo-lane{background:var(--surface);min-width:0;display:flex;flex-direction:column;outline:1px solid var(--line)}
 .fanout .fo-lh{padding:7px 10px 5px;border-bottom:1px solid var(--line)}
 .fanout .fo-t{display:flex;gap:8px;align-items:baseline;justify-content:space-between}
 .fanout .fo-t a{color:var(--ink);font-weight:600;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fanout .fo-t a:hover{text-decoration:underline}
 .fanout .fo-stat{font-size:11.5px;font-weight:600;color:var(--ink2);white-space:nowrap}
-.fanout .fo-lane[data-state="run"] .fo-stat{color:var(--primary)}.fanout .fo-lane[data-state="ok"] .fo-stat{color:var(--ok)}.fanout .fo-lane[data-state="bad"] .fo-stat{color:var(--bad)}
+.fanout .fo-lane[data-state="run"] .fo-stat{color:var(--primary)}.fanout .fo-lane[data-state="ok"] .fo-stat{color:var(--ok)}.fanout .fo-lane[data-state="bad"] .fo-stat{color:var(--bad)}.fanout .fo-lane[data-state="wait"] .fo-stat{color:var(--warn)}
 .fanout .fo-meta{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:11.5px;color:var(--ink2);font-variant-numeric:tabular-nums}
 .fanout .fo-meta span+span::before{content:"\00B7";margin-right:8px}
 .fanout .fo-steps{max-height:260px;flex:1}

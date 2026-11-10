@@ -80,7 +80,21 @@ class SkillTool(Tool):
                        agent=agent, workspace=ctx.workspace)
         except Exception:
             pass
-        return f"<skill name=\"{name}\">\n{text.strip()}\n</skill>\n\nFollow these skill instructions for the current task."
+        if skill is None:
+            try:
+                from axon.skills.manager import _manager_for
+                skill = _manager_for(ctx.workspace).get(name)
+            except Exception:
+                skill = None
+        # Which skill this is and where it was loaded from, in the result the user sees.
+        scope = str(getattr(skill, "scope", "") or "")
+        plugin = str(getattr(skill, "plugin", "") or "")
+        source = f"plugin:{plugin}" if plugin else scope
+        where = f' source="{source}"' if source else ""
+        if skill is not None and scope != "bundled" and getattr(skill, "path", None):
+            where += f' path="{skill.path}"'
+        return (f"<skill name=\"{name}\"{where}>\n{text.strip()}\n</skill>\n\n"
+                "Follow these skill instructions for the current task.")
 
     def render_call(self, args: dict[str, Any]) -> str:
         extra = f" {args.get('args')}" if args.get("args") else ""
@@ -360,8 +374,15 @@ class ToolSearchTool(Tool):
             _wait_for_mcp(pending)
             pending, failed = _mcp_server_state()
         found = self.search(query, limit)
+        missing = self._missing(query)
         if not found:
-            msg = f"No deferred tool matches '{query}'. Deferred tools: {', '.join(sorted(self.deferred)) or 'none'}"
+            names = sorted(self.deferred)
+            listing = ", ".join(names) if len(names) <= 40 else deferred_tool_summary(self.deferred)
+            msg = f"No deferred tool matches '{query}'."
+            close = [c for m in missing for c in self._close(m)]
+            if close:
+                msg += f" Did you mean: {', '.join(dict.fromkeys(close))}?"
+            msg += f" Deferred tools: {listing or 'none'}"
             if pending:
                 msg += f"\nStill connecting: {', '.join(pending)}."
             if failed:
@@ -378,7 +399,22 @@ class ToolSearchTool(Tool):
             lines.append(json.dumps({"name": t.name, "description": str(desc or ""),
                                      "parameters": t.schema}, default=str, ensure_ascii=False))
         lines.append("</functions>")
+        for m in missing:   # a select: name that matched nothing must not vanish silently
+            close = self._close(m)
+            lines.append(f"Not found: {m}" + (f" (did you mean: {', '.join(close)}?)" if close else ""))
         return "\n".join(lines)
+
+    def _missing(self, query: str) -> list[str]:
+        """Names asked for with 'select:' that are not deferred tools."""
+        q = (query or "").strip()
+        if not q.lower().startswith("select:"):
+            return []
+        low = {n.lower() for n in self.deferred}
+        return [n.strip() for n in q.split(":", 1)[1].split(",") if n.strip() and n.strip().lower() not in low]
+
+    def _close(self, name: str) -> list[str]:
+        import difflib
+        return difflib.get_close_matches(name, list(self.deferred), n=3, cutoff=0.6)
 
 
 class _Revealed(Tool):

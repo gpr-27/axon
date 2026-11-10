@@ -279,7 +279,8 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
                 allowed=allowed_texts[number - 1], content=content,
                 is_error=bool(res.get("is_error")) if res is not None else False,
                 duration=float(dur) if dur else None, state="done" if res is not None else "stopped",
-                hint="/transcript", registry=registry, name_w=name_w, total=len(uses), common_allowed=common)
+                hint="/transcript", registry=registry, name_w=name_w, total=len(uses), common_allowed=common,
+                said=str(reply.get("said") or ""))
             if clean:
                 add_many((f"{rail}{r}" for r in tool_cards.compact_rows(call, width - 2)), (tool_tags or {}).get(call_id))
             else:
@@ -388,7 +389,7 @@ def format_session_history(path: Path, registry: Any = None, width: int | None =
             except Exception:
                 why = {}
             reply.clear()
-            reply.update(model=model, provider=prov, uses=len(uses), call_no=0, why=why,
+            reply.update(model=model, provider=prov, uses=len(uses), call_no=0, why=why, said=text,
                          tool_count=int(call.get("tool_count") or 0), prompt_tools=bool(call.get("prompt_tools")))
             if phased and uses:
                 card_block(uses)

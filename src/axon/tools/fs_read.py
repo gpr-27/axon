@@ -374,15 +374,24 @@ class ReadTool(Tool):
         import itertools
         out: list[str] = []
         n = 0
-        cut = 0
+        room = max(cap - 400, 1000)     # stop at a whole line before the output cap, so the header and the offset to continue from stay true
+        full = False
         with open(p, "rb") as f:
             for text, dropped in itertools.islice(ff.iter_lines_bounded(f, MAX_LINE_CHARS), offset - 1, offset - 1 + limit):
+                row = f"{offset + n:6d}→{text}" + (f" ...[line truncated, {dropped} more chars]" if dropped else "")
+                room -= len(row) + 1
+                if room < 0 and out:
+                    full = True
+                    break
                 n += 1
-                out.append(f"{offset - 1 + n:6d}→{text}" + (f" ...[line truncated, {dropped} more chars]" if dropped else ""))
-                cut += 1 if dropped else 0
+                out.append(row)
         if not out:
             return f"[{rel} ({size:,} bytes) has no line {offset}: offset is beyond the end of the file.]"
-        more = f"\n\n[... more lines may follow. Continue with offset={offset + n} ...]" if n == limit else ""
+        more = ""
+        if full:
+            more = f"\n\n[... more lines follow: this result is full. Continue with offset={offset + n} ...]"
+        elif n == limit:
+            more = f"\n\n[... more lines may follow. Continue with offset={offset + n} ...]"
         head = (f"[{rel}: {size // 1_048_576} MB, too large to load whole, so lines {offset}-{offset + n - 1} are read from disk; "
                 f"use Grep to find a region]")
         return cap_text(head + "\n" + "\n".join(out) + more, cap, "Use a smaller limit")
@@ -437,8 +446,17 @@ class ReadTool(Tool):
             return default_summary(first, False)
         first, last = int(nums[0][0]), int(nums[-1][0])
         size = sum(len(t) + 1 for _, t in nums)
-        rng = f" (lines {first}-{last})" if first > 1 or "more lines" in output else ""
-        return f"{plural(len(nums), 'line')} · {human_size(size)}{rng}"
+        tail = output[-300:]
+        rest = re.search(r"\.\.\. (\d+) more lines\. Continue with offset=", tail)
+        if rest:
+            rng = f" (lines {first}-{last} of {last + int(rest.group(1)):,})"
+        elif re.search(r"more lines (may )?follow", tail):     # a file paged from disk: its length is not known
+            rng = f" (lines {first}-{last}, more follow)"
+        else:
+            rng = f" (lines {first}-{last})" if first > 1 else ""
+        cut = len(re.findall(r" \.\.\.\[line truncated, \d+ more chars\]$", output, re.M))
+        long_lines = f" · {plural(cut, 'long line')} cut" if cut else ""
+        return f"{plural(len(nums), 'line')} · {human_size(size)}{rng}{long_lines}"
 
     @staticmethod
     def _suggest(p: Path, ctx: ToolContext) -> str:

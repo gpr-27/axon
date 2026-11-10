@@ -75,7 +75,7 @@ async function preferencesTab(body) {
       if (s.key === 'trace_level' && ['compact', 'normal', 'detailed', 'debug'].includes(v)) { state.trace = v; lsSet('axon-trace2', v); document.querySelectorAll('.feed').forEach(f => { f.className = 'feed t-' + v; }); if (typeof drawStatus === 'function') drawStatus(); } } catch (e) { res.replaceChildren(notice(e.message, 'bad')); } };
     let ctl;
     if (s.type === 'bool') ctl = h('input', { type: 'checkbox', checked: !!s.value, onchange: (e) => save(e.target.checked), 'aria-label': s.label });
-    else if (s.type === 'choice') ctl = h('select', { onchange: (e) => save(e.target.value), 'aria-label': s.label }, ...s.choices.map(c => h('option', { value: c, selected: String(s.value) === c }, prefWord(s.key, c))));
+    else if (s.type === 'choice') ctl = h('select', { onchange: (e) => save(e.target.value), 'aria-label': s.label }, ...(s.value == null || s.choices.includes(String(s.value)) ? s.choices : [String(s.value)].concat(s.choices)).map(c => h('option', { value: c, selected: String(s.value) === c }, prefWord(s.key, c))));   // a value set elsewhere (dontAsk in settings.json) is shown, never replaced by the first choice
     else { ctl = h('input', { type: 'text', value: s.value == null ? '' : String(s.value), onchange: (e) => save(e.target.value), 'aria-label': s.label }); }
     const label = s.key === 'theme' ? 'Terminal colour theme' : s.label;
     if (s.key === 'theme') ctl.setAttribute('aria-label', label);
@@ -85,7 +85,7 @@ async function preferencesTab(body) {
 }
 // The words the composer and status bar use for a stored setting value.
 function prefWord(key, v) {
-  if (key === 'mode' && typeof WB_MODES !== 'undefined') { const m = WB_MODES.find(x => x[0] === v); if (m) return m[1]; }
+  if (key === 'mode' && typeof WB_MODES !== 'undefined') { const m = WB_MODES.find(x => x[0] === v); if (m) return m[1]; if (v === 'dontAsk') return 'Never asks (denies instead)'; }
   if (key === 'effort' && typeof effortWord === 'function') return effortWord(v);
   return v;
 }
@@ -108,7 +108,7 @@ async function detailsTab(body) {
       h('button', { class: 'mini', type: 'button', 'aria-label': 'Remove ' + r.kind + ' rule ' + r.rule, onclick: () => run('/permissions remove ' + r.kind + ' ' + r.rule) }, 'Remove')));
     permsCard.replaceChildren(h('h3', null, 'Permissions'),
       h('dl', { class: 'kv' }, h('dt', null, 'mode'), h('dd', null, perms.mode), h('dt', null, 'extra folders'), h('dd', null, perms.additional_dirs.join('\n') || '(none)'), h('dt', null, 'shell sandbox'), h('dd', null, perms.sandbox ? 'on' : 'off')),
-      h('h3', { style: 'margin-top:14px' }, 'Rules'), rows.length ? h('div', null, ...rows) : h('p', { class: 'muted' }, 'No rules yet. Axon asks before edits and commands, as the mode says.'),
+      h('h3', { style: 'margin-top:14px' }, 'Rules'), rows.length ? h('div', null, ...rows) : h('p', { class: 'muted' }, 'No rules yet. The permission mode above decides what Axon asks about.'),
       h('div', { class: 'formrow', style: 'margin-top:10px' }, kind, rule, h('button', { class: 'btn primary', type: 'button', onclick: add }, 'Add rule')), out,
       h('p', { class: 'muted' }, 'Rules are saved in this folder\'s .axon/settings.local.json. Deny beats Always ask, and Always ask beats Allow.'));
   };

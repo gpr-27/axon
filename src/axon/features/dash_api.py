@@ -496,7 +496,7 @@ def subagents_view(srv: "DashServer", sid: str) -> dict[str, Any]:
                 tasks[t.index] = {"index": t.index, "task": t.id, "title": t.title, "type": t.agent_type, "model": t.model,
                                   "status": t.status, "steps": t.steps, "max_steps": t.max_steps, "elapsed": round(t.elapsed_s, 1),
                                   "tokens": t.tokens_consumed, "tool_calls": t.tool_calls, "activity": t.activity,
-                                  "name": t.name, "background": t.background, "stopped": t.stopped, "live": t.status == "running",
+                                  "name": t.name, "background": t.background, "stopped": t.stopped, "live": t.status == "running", "queued": t.status == "queued",
                                   "error": t.error_msg or "", "prompt": (t.prompt or "")[:600], "source": "live"}
         except Exception:
             notes.append("The live subagent roster could not be read.")

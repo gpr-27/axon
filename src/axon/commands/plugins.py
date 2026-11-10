@@ -252,6 +252,35 @@ def merge_marketplace_entry(manifest: dict[str, Any], entry: dict[str, Any], has
     return out
 
 
+def manifest_problem(mp: Path) -> str:
+    """Why a plugin manifest cannot be used, or "" when it can."""
+    try:
+        data = json.loads(mp.read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        return f"{mp} could not be read: {e}"
+    except ValueError as e:
+        return f"{mp} is not valid JSON: {e}"
+    if not isinstance(data, dict):
+        return f"{mp} must hold a JSON object, not a {type(data).__name__}"
+    return ""
+
+
+def plugin_problems(workspace: Path) -> list[tuple[Path, str]]:
+    """Installed plugin folders that do not load, each with the reason (load_plugins leaves them out)."""
+    out: list[tuple[Path, str]] = []
+    for root, _scope in plugin_roots(workspace):
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name.startswith(".") or d.name in ("cache", "data", "marketplaces"):
+                continue
+            mp = _manifest_path(d)
+            why = manifest_problem(mp) if mp is not None else ""
+            if why:
+                out.append((d, why))
+    return out
+
+
 def load_plugins(workspace: Path) -> list[Plugin]:
     """All installed plugins; a project plugin overrides a user plugin of the same name.
     A plugin is enabled unless /plugin disable'd or ``enabledPlugins: {name: false}`` in settings;
@@ -875,6 +904,9 @@ def install_plugin(source: str, root: Path) -> Plugin:
         mp = _manifest_path(src)
         if mp is None and not _has_standard_layout(src):
             raise ValueError(f"{src} has no plugin.json")
+        why = manifest_problem(mp) if mp else ""
+        if why:
+            raise ValueError(f"Not installed: {why}")
         manifest = json.loads(mp.read_text(encoding="utf-8-sig")) if mp else {}
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", str(manifest.get("name") or src.name)).strip("-")
         dest = root / name

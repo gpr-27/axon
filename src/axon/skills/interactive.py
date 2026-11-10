@@ -139,6 +139,11 @@ def _print_list(mgr: SkillManager) -> None:
             tools = f" {DARK_SLATE}[{', '.join(s.allowed_tools)}]{RST}" if s.allowed_tools else ""
             from axon.commands.common import clip
             print(f"    {WHITE}/{s.name:<20}{RST} {SLATE}{clip(s.description or '', 64)}{RST}{tools}{shadow}")
+    problems = list(getattr(mgr, "problems", []) or [])
+    if problems:
+        print(f"\n  {GOLD}{BOLD}Problems{RST}")
+        for p in problems:
+            print(f"    {SLATE}{p}{RST}")
     off = sorted(mgr.disabled)
     if off:
         print(f"\n  {SLATE}{BOLD}Disabled{RST}  {SLATE}{', '.join(off)}  (turn on: /skills enable <name>){RST}")

@@ -294,26 +294,47 @@ def critical_removal(cmd: str, workspace: Path, extra_dirs: list[Path] | None = 
     """The target when a shell line removes the filesystem root, a top-level directory, the home folder, the workspace
     or a parent of it, or a glob below an additional directory. Other commands aren't checked."""
     exact, under_glob = critical_removal_targets(workspace, extra_dirs)
-    variables: dict[str, str] = {}
-    for argv in _simple_commands(cmd):
-        prog = os.path.basename(argv[0]).lower()
-        if prog not in ("rm", "rmdir"):
-            continue
-        for raw in argv[1:]:
-            if raw.startswith("-"):
+
+    def resolve(target: str) -> str:
+        try:
+            return str(Path(target).resolve())
+        except (OSError, RuntimeError):
+            return os.path.normpath(target)
+    return _critical_removal(cmd, str(workspace), exact, under_glob, os.path, resolve)
+
+
+_REMOVERS = frozenset({"rm", "rmdir"})
+_WINDOWS_REMOVERS = frozenset({"remove-item", "ri", "del", "erase", "rd"})      # PowerShell and cmd.exe names
+
+
+def _critical_removal(cmd: str, workspace: str, exact: list[str], under_glob: list[str], pm: Any, resolve: Any) -> str | None:
+    """``critical_removal`` over a path module (``posixpath`` or ``ntpath``) and a resolver, so Windows paths can
+    be checked on any machine. PowerShell and cmd.exe keep a backslash as a separator where a POSIX reading of
+    the line drops it, so on Windows the line is also read with its backslashes as slashes."""
+    windows = pm.sep == "\\"
+    exact_n = {pm.normcase(x) for x in exact}
+    glob_n = {pm.normcase(x) for x in under_glob}
+    lines = [cmd] + ([cmd.replace("\\", "/")] if windows and "\\" in cmd else [])
+    for line in lines:
+        for argv in _simple_commands(line):
+            prog = os.path.basename(argv[0]).lower()
+            prog = prog[:-4] if prog.endswith(".exe") else prog
+            if prog not in _REMOVERS and not (windows and prog in _WINDOWS_REMOVERS):
                 continue
-            expanded = os.path.expanduser(os.path.expandvars(raw))
-            glob_tail = expanded.endswith(("/*", "/**"))
-            base = expanded.rstrip("*").rstrip("/") or "/"
-            target = base if os.path.isabs(base) else os.path.join(str(workspace), base)
-            try:
-                real = str(Path(target).resolve())
-            except (OSError, RuntimeError):
-                real = os.path.normpath(target)
-            parent = os.path.dirname(real)
-            if real == os.path.dirname(real) or parent == os.path.dirname(parent) or real in exact or (glob_tail and real in under_glob):
-                return raw
-    del variables
+            for raw in argv[1:]:
+                if raw.startswith("-") or (windows and re.fullmatch(r"/[A-Za-z?]", raw)):      # -rf, /s /q
+                    continue
+                expanded = pm.expanduser(pm.expandvars(raw))
+                glob_tail = expanded.endswith(("/*", "/**"))
+                base = expanded.rstrip("*").rstrip("/") or "/"
+                if windows and re.fullmatch(r"[A-Za-z]:", base):
+                    base += "\\"
+                target = base if pm.isabs(base) else pm.join(workspace, base)
+                real = resolve(target)
+                parent = pm.dirname(real)
+                key = pm.normcase(real)
+                if real == parent or parent == pm.dirname(parent) or key in exact_n or (glob_tail and key in glob_n):
+                    return raw
     return None
 
 
@@ -362,9 +383,19 @@ def _tee_targets(sub: str) -> list[str]:
     return [w for w in words[1:] if not w.startswith("-")]
 
 
-def _escape_path(path: str) -> str:
-    """A generated rule matches only the literal path that was approved."""
+def _escape_path(path: str, windows: bool | None = None) -> str:
+    """A generated rule matches only the literal path that was approved. On Windows a backslash in a rule is a
+    path separator, so the one glob character a file name can hold there is written as a class: ``[[]``."""
+    if os.name == "nt" if windows is None else windows:
+        return path.replace("\\", "/").replace("[", "[[]")
     return re.sub(r"([\\\[\]*?!])", r"\\\1", path)
+
+
+def _absolute_rule_pattern(path: str, windows: bool | None = None) -> str:
+    """``//abs`` for a generated rule (one slash alone anchors at the settings file): //tmp/x, //c/Users/x."""
+    from axon.permissions.rules import _posix_form
+    win = os.name == "nt" if windows is None else windows
+    return "/" + _escape_path(_posix_form(path, windows=win), windows=win)
 
 
 def _exclude_local_settings_from_git(path: Path) -> None:
@@ -679,10 +710,16 @@ class PermissionEngine:
                     return Decision("ask", f"'{name}' writes to the protected path {why}: {p}")
 
         # 4. Allow rules
+        escaped = ""
         for r in self.allow_rules:
             if r.matches(name, args, ws, kind="allow", server=server):
-                if name == "Bash" and r.pattern and r.pattern.strip() != "*" and self._redirects_outside(r, args):
-                    continue        # `Bash(git diff *)` must not let `git diff > ~/.bashrc` through: ask
+                if name == "Bash" and r.pattern and r.pattern.strip() != "*":
+                    if self._redirects_outside(r, args):
+                        continue        # `Bash(git diff *)` must not let `git diff > ~/.bashrc` through: ask
+                    link = self._link_leaves_workspace(r, args)
+                    if link:
+                        escaped = escaped or f"{link} (allow rule {r} does not cover it)"
+                        continue        # `Bash(cat *)` must not read through a link that leaves the workspace: ask
                 return Decision("allow", f"Allowed by rule: {r}", str(r))
 
         # 5. Tools that are denied by default
@@ -692,6 +729,8 @@ class PermissionEngine:
         # 6. Bypass
         if mode == "bypass":
             return Decision("allow", "Bypass mode active.")
+        if escaped and mode != "plan":
+            return Decision("ask", f"'{name}' names a file that is a link to a path outside the workspace: {escaped}")
 
         # 7. Outside-workspace paths always need a human (plan mode included: read-only exploration
         #    is free inside the workspace, not across the whole disk)
@@ -741,6 +780,31 @@ class PermissionEngine:
             if any(c in target for c in "*?[$") or not self._inside_or_allowlisted(target, "Bash"):
                 return True
         return False
+
+    def _link_leaves_workspace(self, rule: Rule, args: dict[str, Any]) -> str:
+        """A file the command names (the operands of cat, head, grep, cp, tee ... as ``bash_file_targets`` reads
+        them) whose path is written inside the workspace but, through a symbolic link, is really outside it and
+        outside every added directory. The Read tool asks for such a path; a prefix or glob Bash rule did not
+        approve it either. Returns "name -> real path", or "" when there is none. Paths with globs or variables
+        are left to the shell, and relative paths are read from the workspace root."""
+        cmd = str(args.get("command", ""))
+        if " ".join((rule.pattern or "").split()) == " ".join(cmd.split()):
+            return ""               # the rule is this exact command line: approved as it stands
+        reads, writes = bash_file_targets(cmd)
+        roots = {os.path.normcase(os.path.normpath(str(self.workspace))),
+                 os.path.normcase(os.path.realpath(str(self.workspace)))}
+        for target in dict.fromkeys(reads + writes):
+            if not target or target.startswith("~") or any(c in target for c in "*?[$`"):
+                continue
+            p = Path(target)
+            if not p.is_absolute():
+                p = self.workspace / p
+            written = os.path.normcase(os.path.normpath(str(p)))
+            if not any(written == r or written.startswith(r.rstrip("\\/") + os.sep) for r in roots):
+                continue            # written as an outside path: the rule's own wording decides, as before
+            if not self._inside_or_allowlisted(target, "Bash"):
+                return f"{target} -> {os.path.realpath(str(p))}"
+        return ""
 
     def _readonly_git(self, name: str, args: dict[str, Any]) -> bool:
         if name != "Git":
@@ -884,7 +948,7 @@ class PermissionEngine:
                     return Rule(sel, rel if "/" in rel else "./" + rel)
             except ValueError:
                 pass
-            return Rule(sel, "/" + _escape_path(str(p).replace("\\", "/")))  # //abs: / alone anchors at the settings file
+            return Rule(sel, _absolute_rule_pattern(str(p)))  # //abs: / alone anchors at the settings file
         return Rule(tool_name)
 
     def grant_for(self, tool: Any, args: dict[str, Any], workspace: Path | None = None) -> Rule:

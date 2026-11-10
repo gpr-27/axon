@@ -589,9 +589,11 @@ class MCPServerConnection:
             self.on_tools_changed(self)
 
     def _require_client(self) -> MCPClient:
-        if self.status == "connecting":  # first connection still in progress (e.g. just after a resume)
+        # First connection still in progress (e.g. just after a resume), or the server crashed a moment ago
+        # and is being restarted: wait for it, for a bounded time, instead of failing the call at once.
+        if self.status in ("connecting", "reconnecting"):
             deadline = time.monotonic() + CONNECTING_GRACE_S
-            while self.status == "connecting" and time.monotonic() < deadline:
+            while self.status in ("connecting", "reconnecting") and time.monotonic() < deadline:
                 time.sleep(0.05)
         if not self.connected and self.status in ("connected", "disconnected"):
             # The server process died or the session dropped: reconnect once.
@@ -659,7 +661,8 @@ class MCPServerConnection:
                 self.status, self.error = "needs-auth", "the credential from headersHelper was rejected"
                 return self.error
         if client.closed and not isinstance(exc, MCPTimeout):
-            return "connection closed before the tool call was answered"
+            why = self.error if self.status in ("disconnected", "reconnecting", "failed") and self.error else ""
+            return "connection closed before the tool call was answered" + (f" ({why})" if why else "")
         return str(exc)
 
     def resources(self) -> list[dict[str, Any]]:
@@ -1343,6 +1346,35 @@ class MCPToolBridge:
         if waiting:
             parts.append("awaiting approval: " + ", ".join(waiting) + " (/mcp approve)")
         return " · ".join(parts)
+
+    def startup_report(self) -> str:
+        """What loaded at startup, one line per server: transport, tool count, and why one did not load."""
+        rows = self.status_rows()
+        if not rows:
+            return ""
+        ok = [r for r in rows if r["status"] == "connected"]
+        total = sum(r["tools"] for r in ok)
+        head = (f"MCP: {len(ok)} of {len(rows)} server{'s' if len(rows) != 1 else ''} connected, "
+                f"{total} tool{'s' if total != 1 else ''}")
+        width = max(len(r["name"]) for r in rows)
+        notes = {"needs-auth": "needs sign-in: run /mcp", "pending-approval": "awaiting approval: /mcp approve",
+                 "connecting": "still connecting; its tools appear when it is ready",
+                 "reconnecting": "reconnecting", "disabled": "disabled"}
+        lines = [head]
+        for r in rows:
+            if r["status"] == "connected":
+                detail = f"{r['tools']} tool{'s' if r['tools'] != 1 else ''} · {r['transport']}"
+                if r["excluded"]:
+                    detail += f" · {len(r['excluded'])} left out (invalid schema)"
+            else:
+                why = " ".join(str(r["error"] or "").split())
+                note = notes.get(r["status"], "")
+                if note:
+                    detail = note if not why or r["status"] == "needs-auth" else f"{note} ({why[:200]})"
+                else:
+                    detail = f"{r['status']}: {why[:300]}" if why else r["status"]
+            lines.append(f"    {r['name']:<{width}}  {detail}")
+        return "\n".join(lines)
 
     def get_status_report(self) -> str:
         if not self._connections:

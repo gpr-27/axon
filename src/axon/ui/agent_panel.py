@@ -15,7 +15,7 @@ from axon.ui.subagent_monitor import MonitorKeys, _keep_unsent, _visible, drive
 
 _active = False
 _cleared: set[str] = set()     # shells and turns cleared from the list with x (the session keeps them)
-_QUIET_EVENTS = ("SubagentEvent", "SubagentStep", "RetryEvent", "ProviderRetry")
+_QUIET_EVENTS = ("SubagentEvent", "SubagentStep")     # a held retry is the main agent's own: it is printed on close
 
 
 class ShellRow:

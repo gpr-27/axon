@@ -605,8 +605,8 @@ hooks to the main session (an explicit `--mode` wins over `permissionMode`).
   data folder, and applies its edits back to your workspace when it finishes. If they cannot be applied
   (conflict), the worktree and branch are kept and the report says where. Without a git repository it runs in
   the workspace. Axon creates the worktree from `HEAD`.
-- At most 20 subagents run at once (`AXON_MAX_CONCURRENT_SUBAGENTS`); another start fails and the model is told
-  not to retry. Subagents cannot start subagents of their own.
+- At most 20 subagents run at once (`AXON_MAX_CONCURRENT_SUBAGENTS`); a foreground start over the limit waits for a free
+  slot (`AXON_SUBAGENT_QUEUE_WAIT` seconds, default 120) and a background start is queued. Subagents cannot start subagents of their own.
 - `@agent-<name>` or `@"name (agent)"` in a prompt makes the model delegate to that subagent.
 - `Agent(Explore)` in `permissions.deny` (or `--disallowedTools "Agent(Explore)"`) blocks one type; `Agent`
   is the Task tool under its Claude Code name everywhere a tool name is accepted.
