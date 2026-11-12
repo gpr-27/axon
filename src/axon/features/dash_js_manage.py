@@ -324,15 +324,64 @@ async function viewSessions() {
   });
 }
 
+// ---------- Memory scopes: global, project, local files + auto memory switch (the terminal's /memory, same module) ----------
+const MGFS = 'font-size:16px;width:100%;box-sizing:border-box;max-width:100%';
+function mgScopesPanel(host, onAuto) {
+  const box = h('div', { class: 'mg-scopes' });
+  const sizeOf = (r) => r.kind === 'file' ? (r.exists && !r.empty ? fmtBytes(r.size) : (r.exists ? 'empty' : 'not created')) : (r.count + (r.count === 1 ? ' note' : ' notes'));
+  async function load() {
+    let d; try { d = await api('/api/manage/memory/scopes'); } catch (e) { box.replaceChildren(errorBox(e.message)); return; }
+    box.replaceChildren(h('p', { class: 'muted' }, d.summary ? 'At the start of every chat Axon is given ' + d.summary.replace(/^memory: /, '') + '.' : 'Nothing is loaded yet. Add a line below.'),
+      ...d.scopes.filter(r => r.kind === 'file').map(r => scopeCard(r, d)),
+      h('div', { class: 'mg-auto' }, h('label', { style: 'display:flex;gap:10px;align-items:center;min-height:44px' },
+        h('input', { type: 'checkbox', checked: d.auto, 'aria-label': 'Auto memory', onchange: async (ev) => {
+          try { await api('/api/manage/memory/auto', { enabled: ev.target.checked }); mgNotice('Auto memory ' + (ev.target.checked ? 'on' : 'off') + '.'); if (onAuto) onAuto(); load(); }
+          catch (e) { ev.target.checked = !ev.target.checked; mgNotice(e.message, { error: true }); } } }),
+        h('span', null, 'Auto memory: Axon saves durable facts you state (commands, rules, decisions) as notes for this project.'))));
+  }
+  function scopeCard(r, d) {
+    const det = h('details', { class: 'tool mg-scope', 'data-scope': r.key },
+      h('summary', null, h('span', { class: 'tn' }, r.label), h('span', { class: 'ta' }, sizeOf(r) + (r.modified ? ' · ' + r.modified : '')), h('span', { class: 'ts' }, r.loaded ? 'loaded' : 'not loaded')),
+      h('div', { class: 'muted', style: 'overflow-wrap:anywhere' }, r.blurb), h('div', { class: 'muted', style: 'overflow-wrap:anywhere' }, r.display));
+    const out = h('pre', { class: 'out', style: 'white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%' }, r.text || '(empty)');
+    const acts = h('div', { class: 'acts' });
+    const note = h('div', { class: 'muted', 'aria-live': 'polite' });
+    const addIn = h('input', { type: 'text', placeholder: 'Add a line to ' + r.label, 'aria-label': 'Add a line to ' + r.label + ' memory', style: MGFS });
+    const addBtn = h('button', { class: 'btn', type: 'button', onclick: async () => {
+      if (!addIn.value.trim()) return;
+      try { const x = await api('/api/manage/memory/scope/add', { key: r.key, text: addIn.value }); mgNotice(x.action === 'unchanged' ? 'Already there.' : 'Added.' + (x.gitignored ? ' AXON.local.md was added to .gitignore.' : '')); load(); }
+      catch (e) { mgNotice(e.message, { error: true }); } } }, 'Add');
+    const edit = h('button', { class: 'btn', type: 'button', disabled: !!r.locked, title: r.why_locked || '', onclick: () => {
+      const ta = h('textarea', { rows: 10, 'aria-label': 'Edit ' + r.label + ' memory', style: MGFS }); ta.value = r.text || '';
+      const save = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+        try { const x = await api('/api/manage/memory/scope', { key: r.key, text: ta.value, expected_sha: r.sha }); mgNotice(x.action === 'unchanged' ? 'Nothing changed.' : 'Saved. The old version is kept.' + (x.gitignored ? ' AXON.local.md was added to .gitignore.' : '')); load(); }
+        catch (e) { mgNotice(e.message, { error: true }); load(); } } }, 'Save');
+      const cancel = h('button', { class: 'btn', type: 'button', onclick: () => { ta.replaceWith(out); acts.replaceChildren(edit, del, hist); } }, 'Cancel');
+      out.replaceWith(ta); acts.replaceChildren(save, cancel); ta.focus();
+    } }, 'Edit');
+    const del = h('button', { class: 'btn danger', type: 'button', disabled: !r.exists, onclick: async () => {
+      if (!await mgConfirm('Delete ' + r.label + ' memory?', r.display + ' will be removed. A copy is kept, and /memory restore brings it back.', 'Delete', true)) return;
+      try { await api('/api/manage/memory/scope/delete', { key: r.key }); mgNotice('Deleted.'); load(); } catch (e) { mgNotice(e.message, { error: true }); } } }, 'Delete');
+    const hist = h('button', { class: 'btn', type: 'button', onclick: () => mgMemHistory(det, r.key, r.label, load) }, 'History');
+    acts.append(edit, del, hist);
+    det.append(out, acts, h('div', { class: 'formrow', style: 'margin-top:8px' }, addIn, addBtn), r.locked ? h('p', { class: 'muted' }, r.why_locked) : null, note);
+    if (r.exists && !r.empty) det.open = false;
+    return det;
+  }
+  host.append(h('h2', null, 'Instructions'),
+    h('p', { class: 'muted' }, 'Global is yours for every project. Project (AXON.md) is shared through git. Local (AXON.local.md) is private to you and git-ignored. Secrets are removed before saving.'), box);
+  load();
+}
+
 // ---------- Memory notes: every scope, add, edit, delete, search (dash_manage.py) ----------
-const MEMSC = [['', 'All'], ['global', 'Global'], ['project', 'This project (private)'], ['repo', 'This repo (shared)']];
+const MEMSC = [['', 'All'], ['global', 'Global notes'], ['project', 'Auto memory (private)'], ['repo', 'Repo notes (shared)']];
 const MEM = { q: '', scope: '' };
 function mgMemoryPanel(host) {
   const list = h('div', { class: 'mg-memlist' });
-  const search = h('input', { class: 'search', type: 'search', placeholder: 'Search memories', 'aria-label': 'Search memories', value: MEM.q });
+  const search = h('input', { class: 'search', type: 'search', placeholder: 'Search memories', 'aria-label': 'Search memories', value: MEM.q, style: 'font-size:16px' });
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Memory scope' });
-  const addText = h('textarea', { rows: 3, placeholder: 'Write what Axon should remember, in your own words', 'aria-label': 'New memory', style: 'width:100%' });
-  const addScope = h('select', { 'aria-label': 'Where to keep it' }, [['project', 'This project (private)'], ['repo', 'This repo (shared if you commit .axon)'], ['global', 'Global (every project)']].map(([v, l]) => h('option', { value: v }, l)));
+  const addText = h('textarea', { rows: 3, placeholder: 'Write what Axon should remember, in your own words', 'aria-label': 'New memory', style: 'width:100%;font-size:16px;box-sizing:border-box' });
+  const addScope = h('select', { 'aria-label': 'Where to keep it' }, [['project', 'Auto memory (private to this project)'], ['repo', 'Repo notes (shared if you commit .axon)'], ['global', 'Global notes (every project)']].map(([v, l]) => h('option', { value: v }, l)));
   const note = h('div', { class: 'muted', 'aria-live': 'polite' });
   let gen = 0, counts = {};
   const drawSeg = () => seg.replaceChildren(...MEMSC.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': String(MEM.scope === v), onclick: () => { MEM.scope = v; drawSeg(); load(); } },
@@ -356,18 +405,19 @@ function mgMemoryPanel(host) {
     const acts = h('div', { class: 'acts' });
     const edit = h('button', { class: 'btn', type: 'button', onclick: () => {
       if (m.cut) { mgNotice('That memory is too long to edit here. Open the file instead.', { error: true }); return; }
-      const ta = h('textarea', { rows: 8, style: 'width:100%', 'aria-label': 'Edit ' + m.name }); ta.value = m.body;
+      const ta = h('textarea', { rows: 8, style: 'width:100%;font-size:16px;box-sizing:border-box', 'aria-label': 'Edit ' + m.name }); ta.value = m.body;
       const save = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
-        try { const r = await api('/api/manage/memory/update', { scope: m.scope, id: m.id, body: ta.value }); mgNotice(r.action === 'unchanged' ? 'Nothing changed.' : 'Saved. The old version is kept.'); load(); }
-        catch (e) { mgNotice(e.message, { error: true }); } } }, 'Save');
-      const cancel = h('button', { class: 'btn', type: 'button', onclick: () => { ta.replaceWith(out); acts.replaceChildren(edit, del); } }, 'Cancel');
+        try { const r = await api('/api/manage/memory/update', { scope: m.scope, id: m.id, body: ta.value, expected_sha: m.sha }); mgNotice(r.action === 'unchanged' ? 'Nothing changed.' : 'Saved. The old version is kept.'); load(); }
+        catch (e) { mgNotice(e.message, { error: true }); load(); } } }, 'Save');
+      const cancel = h('button', { class: 'btn', type: 'button', onclick: () => { ta.replaceWith(out); acts.replaceChildren(edit, del, hist); } }, 'Cancel');
       out.replaceWith(ta); acts.replaceChildren(save, cancel); ta.focus();
     } }, 'Edit');
     const del = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
       if (!await mgConfirm('Delete this memory?', '"' + m.name.slice(0, 80) + '" will no longer be given to Axon. A copy is kept, and /memory restore brings it back.', 'Delete', true)) return;
       try { await api('/api/manage/memory/delete', { scope: m.scope, id: m.id }); mgNotice('Deleted "' + m.name.slice(0, 50) + '".'); load(); }
       catch (e) { mgNotice(e.message, { error: true }); } } }, 'Delete');
-    acts.append(edit, del); box.append(acts);
+    const hist = h('button', { class: 'btn', type: 'button', onclick: () => mgMemHistory(box, m.scope + ':' + m.id, m.name, load) }, 'History');
+    acts.append(edit, del, hist); box.append(acts);
     return box;
   }
   let timer = null;
@@ -381,7 +431,7 @@ function mgMemoryPanel(host) {
       counts = {}; load();
     } catch (e) { note.textContent = e.message; }
   };
-  host.append(h('h2', { style: 'margin-top:22px' }, 'Memories'),
+  host.append(h('h2', { style: 'margin-top:22px' }, 'Notes'),
     h('p', { class: 'muted' }, 'Notes Axon keeps and is given at the start of every chat. Global applies to every project; project is private to this one; repo is kept in the project folder so a team can share it. Secrets are removed before saving.'),
     h('div', { class: 'mg-memadd' }, addText, h('div', { class: 'formrow' }, addScope, h('button', { class: 'btn primary', type: 'button', onclick: add }, 'Remember'))), note,
     h('div', { class: 'filters' }, search, seg), list);

@@ -32,6 +32,7 @@ from axon.ui.markdown import (
     highlight_spans,
     lang_for_path,
 )
+from axon.ui import diff_view as _dv
 from axon.ui import theme as _theme
 from axon.ui.theme import (
     ACCENT,
@@ -170,7 +171,7 @@ def code_card_header(path: str, content: str, verb: str = "Created", added: int 
                      removed: int | None = None) -> str:
     """'✚ Created src/shop/cart.py · +42 · ■ Python · 42 lines · 1.2 KB' (counts when known)."""
     dot = f" {SUBTLE}{glyph('dot')}{RST} "
-    mark = {"Created": (SUCCESS, glyph("created")), "Overwrote": (WARNING, glyph("overwrote"))}.get(verb, (INFO, glyph("edited")))
+    mark = {"Created": (SUCCESS, glyph("created")), "Create": (SUCCESS, glyph("created")), "Overwrote": (WARNING, glyph("overwrote"))}.get(verb, (INFO, glyph("edited")))
     head = f"{mark[0]}{mark[1]} {verb}{RST} {BOLD}{_path_link(path)}{RST}"
     counts = count_badge(added, removed)
     if counts:
@@ -312,9 +313,12 @@ def _hunk_sep(num_w: int, width: int, label: str = "") -> str:
 
 
 def diff_rows(old_text: str, new_text: str, start_line: int = 1, width: int = 80, lang: str = "",
-              context: int = 2, max_rows: int = 60, hint: str = "", old_start: int | None = None) -> list[str]:
+              context: int = 2, max_rows: int = 60, hint: str = "", old_start: int | None = None,
+              eof_notes: bool = False) -> list[str]:
     """Unified diff of two texts: real line numbers, hunk separators, tinted +/- rows with intra-line
     word highlights; long lines wrap with the gutter kept."""
+    if _dv.is_binary(old_text) or _dv.is_binary(new_text):
+        return [_dv.binary_row(3, len((new_text or old_text).encode("utf-8", errors="replace")))]
     old_lines = old_text.splitlines()
     new_lines = new_text.splitlines()
     numbered = start_line > 0          # 0: where the change sits is unknown - leave the number gutter blank
@@ -322,16 +326,18 @@ def diff_rows(old_text: str, new_text: str, start_line: int = 1, width: int = 80
     old_start = start_line if old_start is None else old_start
     if len(old_lines) + len(new_lines) > 20_000:
         a, r = len(new_lines), len(old_lines)
-        return [f"{MUTED}(diff too large to show: {a} lines replace {r}){RST}"]
+        return [_dv.note_row(3, f"diff not shown: {a} lines added, {r} removed")]
     sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
     last = max(start_line + len(new_lines), old_start + len(old_lines))
     num_w = max(3, len(str(last)))
     text_w = max(10, width - num_w - 3)
     rows: list[str] = []
+    if old_lines != new_lines and _dv.whitespace_only(old_text, new_text):
+        rows.append(_dv.note_row(num_w, "whitespace-only change"))
     groups = list(sm.get_grouped_opcodes(context))
     for gi, group in enumerate(groups):
         if gi:
-            rows.append(_hunk_sep(num_w, width, f"line {start_line + group[0][3]}" if numbered else ""))
+            rows.append(_dv.gap_row(num_w, group[0][1] - groups[gi - 1][-1][2]))
         for tag, i1, i2, j1, j2 in group:
             if len(rows) > max_rows * 2:
                 break
@@ -355,6 +361,14 @@ def diff_rows(old_text: str, new_text: str, start_line: int = 1, width: int = 80
     if len(rows) > max_rows:
         hidden = len(rows) - max_rows
         rows = rows[:max_rows] + [more_row(hidden, hint, " " * num_w + "  ", "row")]
+    elif eof_notes:
+        side = _dv.eof_difference(old_text, new_text)
+        if side and not rows:
+            rows.append(_dv.note_row(num_w, f"{'added' if side == 'old' else 'removed'} newline at end of file"))
+        elif side and groups:
+            op = groups[-1][-1]
+            if (op[4] if side == "new" else op[2]) == len(new_lines if side == "new" else old_lines):
+                rows.append(_dv.note_row(num_w, _dv.EOF_NOTE))
     return rows
 
 
@@ -392,43 +406,64 @@ _CHANGE_KINDS = {   # kind -> (verb, glyph, colour)
 
 
 def file_change_rows(changes: list[Any], width: int = 80, max_rows: int = 60, hint: str = "") -> list[str]:
-    """Files a shell command changed: a totals row, one aligned row per file, then each file's diff
-    (created files as additions, deleted files as removals) within *max_rows*.
+    """Files a shell command changed: ONE totals row, one aligned row per file (a run of deletions in the
+    same folder is one row), then each file's diff (created files as additions, deleted files as removals)
+    within *max_rows*.
 
-    '✎ 3 files changed · +5 −4'
+    '✎ 4 files changed · +5 −4'
     '  ✚ Created  docs/new.md  +3'
     '  ⟳ Modified keep.py      +2 −1'
-    '  ✖ Deleted  gone.txt     −3'
-    '  ➜ Renamed  hi.txt       from hi.tht · same content'"""
+    '  ✖ Deleted  gone.txt     −3 · 41 B'
+    '  ➜ Renamed  hi.tht → hi.txt · same content'"""
     if not changes:
         return []
     added = sum(c.added or 0 for c in changes)
     removed = sum(c.removed or 0 for c in changes)
     dot = f" {SUBTLE}{glyph('dot')}{RST} "
-    rows = [f"{INFO}{glyph('edited')} {BOLD}{_plural(len(changes), 'file')} changed{RST}{dot}{change_badge(added, removed)}"]
+    rows = [f"{INFO}{glyph('edited')} {BOLD}{_plural(len(changes), 'file')} changed{RST}"
+            + (f"{dot}{count_badge(added or None, removed or None)}" if len(changes) > 1 and (added or removed) else "")]     # one file: its row has the counts
     verb_w = max(len(v) for v, _, _ in _CHANGE_KINDS.values())
     path_w = min(max(display_width(c.path) for c in changes), max(12, width - verb_w - 20))
-    for c in changes:
+    own, groups = _dv.group_deletions(changes)
+    cols = {"SUCCESS": SUCCESS, "INFO": INFO, "ERROR": ERROR, "ACCENT": ACCENT}
+    for c in own:
         verb, mark, color = _CHANGE_KINDS.get(c.kind, _CHANGE_KINDS["modified"])
-        col = {"SUCCESS": SUCCESS, "INFO": INFO, "ERROR": ERROR, "ACCENT": ACCENT}[color]
+        col = cols[color]
         shown = truncate(c.path, path_w)
         if c.kind == "renamed":
             same = c.old is not None and c.old == c.new
-            note = f"{MUTED}from {RST}{_path_link(c.old_path or '')}" + (f"{dot}{MUTED}same content{RST}" if same else "")
+            side = max(8, (width - verb_w - 12 - (14 if same else 0)) // 2)
+            rows.append(truncate(f"  {col}{glyph(mark)} {verb.ljust(verb_w)}{RST} {BOLD}{_dv.rename_note(c, side)}{RST}"
+                                 + (f"{dot}{MUTED}same content{RST}" if same else ""), width))
+            continue
+        if c.kind == "deleted":
+            note = _dv.deleted_facts(c)
+            name = f"{ERROR}{pad(shown, path_w)}{RST}"
         else:
-            note = count_badge(c.added, c.removed) or (f"{MUTED}contents not shown{RST}" if c.kind != "deleted" else "")
-        rows.append(f"  {col}{glyph(mark)} {verb.ljust(verb_w)}{RST} {BOLD}{_path_link(c.path, pad(shown, path_w))}{RST}  {note}")
+            note = count_badge(c.added, c.removed) or f"{MUTED}contents not shown{RST}"
+            name = f"{BOLD}{_path_link(c.path, pad(shown, path_w))}{RST}"
+        rows.append(f"  {col}{glyph(mark)} {verb.ljust(verb_w)}{RST} {name}  {note}")
+    for folder, files in groups:
+        mark = glyph("deleted")
+        lines = sum(f.removed or 0 for f in files)
+        label = truncate((folder + "/") if folder else "./", path_w)
+        rows.append(f"  {ERROR}{mark} {'Deleted'.ljust(verb_w)}{RST} {ERROR}{pad(label, path_w)}{RST}  "
+                    f"{MUTED}{_plural(len(files), 'file')}{RST}" + (f"{dot}{count_badge(None, lines)}" if lines else ""))
     budget = max_rows - len(rows)
+    grouped = {id(f) for _, fs in groups for f in fs}
     for c in changes:
         if budget <= 0:
             break
         old, new = (c.old or "") if c.kind != "created" else "", (c.new or "") if c.kind != "deleted" else ""
-        if (c.kind in ("modified", "renamed") and (c.old is None or c.new is None)) or old == new:
+        if id(c) in grouped or (c.kind in ("modified", "renamed") and (c.old is None or c.new is None)) or old == new:
             continue
-        body = diff_rows(old, new, 1, width, lang_for_path(c.path), max_rows=max(4, budget - 1), hint=hint)
-        rows.append(_hunk_sep(3, width, c.path))
+        body = diff_rows(old, new, 1, width, lang_for_path(c.path), max_rows=max(4, budget - 1), hint=hint,
+                         eof_notes=c.kind == "modified")
+        if len(changes) > 1:                  # which file the diff below belongs to
+            rows.append(f"{SUBTLE}{glyph('hunk') * 3}{RST} {MUTED}{c.path}{RST}")
+            budget -= 1
         rows += body
-        budget -= len(body) + 1
+        budget -= len(body)
     return rows
 
 
@@ -522,9 +557,11 @@ def patch_rows(patch: str, width: int, max_rows: int = 60, hint: str = "") -> tu
         num_w = max(3, len(str(last)))
         if len(files) > 1:
             rows.append(f"{BOLD}{_path_link(f['path'])}{RST} {change_badge(f['added'], f['removed'])}")
+        prev_end = 0
         for k, (os_, ns, lines) in enumerate(f["hunks"]):
-            if k or len(files) > 1:
-                rows.append(_hunk_sep(num_w, width, f"line {ns}"))
+            if k:
+                rows.append(_dv.gap_row(num_w, ns - prev_end if ns > prev_end else None))
+            prev_end = ns + sum(1 for ln in lines if not ln.startswith("-"))
             rows += hunk_rows(os_, ns, lines, width, lang, num_w)
     if len(rows) > max_rows:
         rows = rows[:max_rows] + [more_row(len(rows) - max_rows, hint, "  ", "row")]

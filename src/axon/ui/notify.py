@@ -261,6 +261,12 @@ def notify_event(kind: str, message: str, *, settings: Any = None, elapsed: floa
     """Send a desktop notification for *kind* if the policy allows it and you are in another app."""
     if settings is not None:
         configure(settings)
+    if kind == "question":          # the other sinks (webhooks, open pages) hear about a waiting question too
+        try:
+            from axon.features import notify as sinks
+            sinks.emit("requires_action", message, settings=settings)
+        except Exception:
+            pass
     if not should_notify(kind, elapsed):
         return False
     now = time.monotonic()

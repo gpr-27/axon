@@ -192,7 +192,7 @@ def context_lines(data: dict[str, Any], width: int, expanded: set[str] | frozens
         label = _fit("MCP tools (deferred)", label_w)
         out.append((f"{DARK_SLATE}{'■' if _uni() and _color() else ' '}{RST} {SLATE}{pad(label, label_w)}{RST} "
                     f"{SLATE}{pad('~' + tok(d['mcp_tools']), num_w, 'right')}{RST} {DARK_SLATE}{pad('—' if _uni() else '-', pct_w, 'right')}{RST}", None))
-        out.append((_fit(f"  {DARK_SLATE}{d['mcp_count']} tools load on demand (ToolSearch), not counted above.{RST}", width), None))
+        out.append((_fit(f"  {DARK_SLATE}{d['mcp_count']} tools load on demand ({d.get('how') or 'ToolSearch'}), not counted above.{RST}", width), None))
     lists = data["lists"]
     shown = [(k, lbl) for k, lbl in EXPANDABLE.items() if lists.get(k)]
     if shown:
@@ -241,6 +241,11 @@ def print_context(agent: Any, expand: set[str], width: int) -> None:
     from axon.commands.common import header, kv
     from axon.commands.context_cmds import _budget
     data = context_data(agent)
+    try:
+        from axon.providers.toolsearch import mode_note
+        data["deferred"]["how"] = mode_note(agent)
+    except Exception:
+        pass
     window, threshold, reserve = _budget(agent)
     header("Context usage", f"{agent.settings.model} · window {tok(window)}")
     print()

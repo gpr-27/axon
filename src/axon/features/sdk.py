@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "bypass")
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "auto", "bypass")
 INTERRUPTED_TEXT = "[Response interrupted]"
 _FAILED_STOPS = {"error", "blocked", "interrupted", "budget_exceeded", "token_budget", "max_iterations"}
 # Options a remote caller (e.g. `axon serve`) may set; code-only hooks are excluded.
@@ -185,7 +185,7 @@ def event_to_dict(ev: Any) -> dict[str, Any] | None:
                 "model": ev.model, "message_count": ev.message_count, "tokens_in": ev.tokens_in,
                 "fed_back": _jsonable(ev.tools_ingested)}
     data = _jsonable(ev)
-    if cls in ("LLMCallEnd", "CompactionEvent") and getattr(ev, "usage", None) is not None:
+    if cls in ("LLMCallEnd", "CompactionEvent", "GoalCheckEvent") and getattr(ev, "usage", None) is not None:
         data["usage"] = usage_to_dict(ev.usage)
     return {"type": kind, **data}
 

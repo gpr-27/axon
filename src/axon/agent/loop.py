@@ -24,10 +24,11 @@ from decimal import Decimal
 from typing import Any, Callable, Iterator
 from axon import interruptible
 from axon.config import Settings
-from axon.errors import ToolError
+from axon.errors import ProviderError, ToolError
 from axon.agent import filechanges
 from axon.agent.state import Conversation, FileState, TodoState, record_usage
 from axon.agent import large_input, suggest
+from axon.agent import budget_pause
 from axon.tools import diagnostics
 from axon.agent.prompt import build_system
 from axon.agent.context import ContextManager
@@ -37,6 +38,7 @@ from axon.agent.trace import (
     CacheStatus,
     CacheTracker,
     CompactionEvent,
+    ContextEditEvent,
     MemoryLoadedEvent,
     ToolRationale,
     cost_breakdown,
@@ -82,6 +84,11 @@ PARALLEL_SAFE_TOOLS = frozenset({"Task"})
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529})
 _RETRYABLE_NAMES = ("timeout", "connect", "ratelimit", "overloaded", "internalserver", "remoteprotocol", "readerror")
 INTERRUPTED_NOTE = "[Response interrupted by user]"
+
+
+class _SteerAbort(BaseException):
+    """Raised inside a model call that a typed message cuts short (before it started any tool call)."""
+
 FILE_PATH_KEYS = ("path", "file_path", "notebook_path")
 FILE_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "Patch", "NotebookEdit"})
 WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "Patch", "NotebookEdit"})
@@ -89,6 +96,12 @@ SHELL_TOOLS = frozenset({"Bash"})   # their file changes are detected by a works
 MAX_THRASH_COMPACTIONS = 3
 _BASH_READ_RE = None
 STEER_PREFIX = "[User added while you were working]:"
+# The one state line the user sees under a message typed while the agent works (terminal, web and subagent views).
+STEER_STATE_TEXT = {
+    "interrupt": "interrupting the current answer to include it",
+    "tool": "queued \u2014 read when the current tool finishes",
+    "next_step": "included in the model's next step",
+}
 SHELL_CONTEXT_CAP = 30_000
 POST_COMPACT_FILES = 5
 POST_COMPACT_FILE_CHARS = 8_000
@@ -269,6 +282,19 @@ def _pause_input() -> Any:
         except Exception:
             pass
         yield
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    """A dropped / reset / broken / timed-out connection, however the provider wrapped it."""
+    from axon.providers.transport import _is_connection_error
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _is_connection_error(cur):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return isinstance(exc, ProviderError) and str(exc).lstrip().lower().startswith(("network error", "cannot connect", "request timed out", "timed out"))
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -471,6 +497,13 @@ class Agent:
         self._title_auto: bool | None = None        # True: Axon wrote the name, so later turns may rewrite it
         self._title_turns = 0
         self.goal: str | None = getattr(settings, "goal", None)   # /goal (P-CMD sets it)
+        try:
+            from axon.tools.advisor_tool import sync as _advisor_sync
+            _advisor_sync(self)         # consult_advisor is advertised only while advisor_model is set
+            from axon.features.semindex_tool import sync as _sem_sync
+            _sem_sync(self)             # semantic_search is advertised only while enabled and an index exists
+        except Exception:
+            pass
         self.pending_input: str | None = None       # prefilled into the next prompt (rewind, /diff "a")
         self.title_provider: Any = None             # optional provider for LLM titles (small_model)
         self.suggestions = suggest.SuggestionBox()  # the guessed next prompt, shown as ghost text
@@ -480,6 +513,7 @@ class Agent:
         self._turn_thread: threading.Thread | None = None
         self._last_cancel_at = 0.0                  # when Esc last interrupted the turn (repeat presses are ignored)
         self._side_provider: Any = None             # a second provider streaming for this turn (compaction)
+        self._bg_compact: Any = None                # agent.compaction.BackgroundCompaction (created on first use)
         self._bg_request = threading.Event()
         self._bg_counter = 0
         self._active_bg: BackgroundTurn | None = None
@@ -875,6 +909,12 @@ class Agent:
         """Run the Notification hook and, for events that need you, send a desktop notification
         (policy in axon.ui.notify: permission prompts, questions, failures, long turns)."""
         res = self._hook("Notification", {"message": message, "notification_type": notification_type})
+        if not self.is_subagent:
+            try:
+                from axon.features import notify as _notify
+                _notify.from_agent_notification(self, notification_type, message)
+            except Exception:
+                pass
         if desktop and not self.is_subagent:
             try:
                 from axon.ui.notify import notify_event
@@ -898,12 +938,18 @@ class Agent:
             if obj is not None and hasattr(obj, "clear"):
                 obj.clear()
         self._session_context = ""
+        self.goal_last = None             # a done-when goal belongs to the session that set it
         self.last_failed_turn = None
         self._git_snapshot = None
         self._pending_context = []
         from axon.commands.workspace_cmds import stop_loops
         stop_loops(self)                 # scheduled prompts belong to the session that asked for them
         self._post_compact_context = ""
+        try:
+            from axon.agent.compaction import cancel_background
+            cancel_background(self)          # a summary of the old conversation is of no use in the new one
+        except Exception:
+            pass
         self._repo_map = None
         self._titled = None
         self._title = None
@@ -1431,6 +1477,22 @@ class Agent:
     def tool_schemas(self) -> list[dict[str, Any]]:
         return self.registry.schemas(provider_style="anthropic" if self.provider.name == "anthropic" else "openai")
 
+    def _tool_search_hints(self) -> dict[str, Any]:
+        """Deferred tool definitions for the Anthropic server-side tool search (the provider applies them only on the
+        official host and a supported model; every other provider keeps the client-side ToolSearch)."""
+        try:
+            if self.provider.name != "anthropic":
+                return {}
+            from axon.providers import toolsearch
+            if toolsearch.mode(self.settings) == "off" or not toolsearch.supported(self.settings.model):
+                return {}
+            defs = toolsearch.deferred_defs(self.registry)
+            if defs:
+                toolsearch.reveal_all(self.registry)   # a call the server-side search unlocked must be runnable
+            return {"deferred_defs": defs}
+        except Exception:
+            return {}
+
     def _max_output_tokens(self) -> int:
         try:
             from axon.providers.registry import get_max_output
@@ -1493,9 +1555,17 @@ class Agent:
         self._pending_summary = summary
         return summary
 
-    def compact(self, trigger: str = "manual", instructions: str = "", summary: str | None = None) -> bool:
+    def compact(self, trigger: str = "manual", instructions: str = "", summary: str | None = None,
+                usage_in: Any = None, model_in: str = "", cut: int | None = None) -> bool:
         """Summarize older turns (PreCompact hook first) on the cheap model. Pass ``summary`` (e.g. from
-        :meth:`compact_preview`) to apply an already generated summary. Returns True if compacted."""
+        :meth:`compact_preview`) to apply an already generated summary; *usage_in* / *model_in* are what writing it
+        cost and *cut* the number of messages it covers (a background summary). Returns True if compacted."""
+        if trigger != "background":
+            try:
+                from axon.agent.compaction import cancel_background
+                cancel_background(self)      # its cut no longer matches once this compaction rewrites the history
+            except Exception:
+                pass
         res = self._hook("PreCompact", {"trigger": trigger, "custom_instructions": instructions or None})
         if res is not None and getattr(res, "blocked", False):
             n = len(self.conversation.messages)
@@ -1507,12 +1577,16 @@ class Agent:
         usage, cost, model = None, 0.0, ""
         if summary is None and trigger != "manual" and self.context.split_point(self.conversation) <= 0:
             return False    # no older turns to summarize: a paid summary call would change nothing
+        if summary is not None and usage_in is not None:
+            usage, model = usage_in, model_in or self.settings.model
+            cost = _as_float(record_usage(self.ledger, model, usage, source="compact"))
+            self._log_usage(model, usage, cost, "compact")
         if summary is None:
             summary, usage, model = self._generate_summary(instructions)
             if usage is not None:
                 cost = _as_float(record_usage(self.ledger, model, usage, source="compact"))
                 self._log_usage(model, usage, cost, "compact")
-        self.context._summarize_older_turns(self.conversation, summary_text=summary)
+        self.context._summarize_older_turns(self.conversation, summary_text=summary, cut=cut)
         changed = len(self.conversation.messages) != before
         if changed and isinstance(getattr(self.context, "last_receipt", None), dict):
             self.context.last_receipt["trigger"] = trigger
@@ -1551,6 +1625,19 @@ class Agent:
         self._hook("PostCompact", {"trigger": trigger, "compacted": changed,
                                    "compact_summary": (summary or "")[:20_000], "summary": (summary or "")[:4000]})
         return changed
+
+    def _server_compaction_covers(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]]) -> bool:
+        """True while the API compacts by itself (so the client waits), unless the prompt is well past the point
+        (the safety net: a tenth of the window over it)."""
+        try:
+            from axon.agent.compaction import server_active
+            if not server_active(self):
+                return False
+            window = self.context.context_window(self.settings.model)
+            return self.context.projected_tokens(self.conversation, system_blocks, tool_schemas) < \
+                self.context.threshold(self.settings.model) + window // 10
+        except Exception:
+            return False
 
     def _recent_edited_files(self, limit: int = POST_COMPACT_FILES) -> list[str]:
         """Most recently written/edited file paths, newest first, from the turn traces."""
@@ -1604,6 +1691,8 @@ class Agent:
         try:
             return self._traced_turn(user_input)
         finally:
+            from axon.agent import refusal as _refusal
+            _refusal.restore(self)          # a one-off refusal fallback lasts for this turn only
             if on_main:
                 self._turn_on_main = False
 
@@ -1702,6 +1791,11 @@ class Agent:
         return prev_effort, prev_thinking
 
     def _after_turn(self, user_input: str, result: TurnResult) -> None:
+        try:
+            from axon.features import notify as _notify
+            _notify.turn_finished(self, result)
+        except Exception:
+            pass
         if result.stop_reason == "error":
             detail = str(result.error or result.final_text)[:2000]
             self._hook("StopFailure", {"error": classify_stop_failure(detail), "error_details": detail,
@@ -1714,6 +1808,53 @@ class Agent:
         self._maybe_suggest(user_input, result)
         self._after_turn_title(user_input, result)
 
+    # what the agent is doing right now, for steer messages: "streaming" (a model call that has not started a
+    # tool call), "tool_call" (the model is writing tool calls), "tools" (tools run) or "idle"
+    _phase: str = "idle"
+    budget_pause: dict[str, Any] | None = None       # set when a spend cap paused the work (see agent.budget_pause)
+    _task_tracker: Any = None                        # estimate of what the task budget's countdown has used this turn
+    _steer_abort: bool = False
+    _steer_shown: bool = True
+    # Guards that keep a steer interrupt from ever hurting a request: never abort a call that has only just
+    # started (connection / headers phase), and at most one abort per STEER_MIN_GAP_S (extra messages merge into
+    # the pending steer and are read at the next boundary).
+    STEER_MIN_AGE_S = 1.0
+    STEER_MIN_GAP_S = 2.0
+    _call_gen: int = 0                  # id of the model call that is streaming (a watcher only acts on its own)
+    _call_started: float = 0.0          # monotonic start of that call
+    _stream_events: int = 0             # events that call has yielded so far
+    _last_steer_abort: float = -1e9     # monotonic time of the last interrupt
+    _after_steer: bool = False          # the previous call of this turn was cut by a steer
+    _steer_paused: bool = False         # kill switch: set after a steer-interrupted request failed (this session)
+
+    def steer_interrupts_on(self) -> bool:
+        return bool(getattr(self.settings, "steer_interrupts", True)) and not self._steer_paused
+
+    def _steer_ready(self, gen: int) -> bool:
+        """True when a typed message may cut call *gen* right now."""
+        if gen != self._call_gen or self._phase != "streaming" or not self._steer_pending():
+            return False
+        now = time.monotonic()
+        if now - self._last_steer_abort < self.STEER_MIN_GAP_S:
+            return False
+        return self._stream_events > 0 or now - self._call_started >= self.STEER_MIN_AGE_S
+
+    def steer_state(self) -> str:
+        """How a message typed now reaches the model: "interrupt" (the running answer is cut and the message read
+        at once), "tool" (it waits for the current tool call to finish) or "next_step" (read at the next step)."""
+        if self._phase == "streaming" and self.steer_interrupts_on():
+            return "interrupt"
+        if self._phase in ("tool_call", "tools"):
+            return "tool"
+        return "next_step"
+
+    def _steer_pending(self) -> bool:
+        has = getattr(getattr(self, "message_queue", None), "has_steer", None)
+        try:
+            return bool(has()) if callable(has) else False
+        except Exception:
+            return False
+
     def drain_steer_messages(self) -> list[str]:
         """Messages typed mid-turn (queue items flagged steer=True), removed from the queue."""
         q = getattr(self, "message_queue", None)
@@ -1721,9 +1862,44 @@ class Agent:
         if not callable(drain):
             return []
         try:
-            return [it.text for it in drain() if str(getattr(it, "text", "")).strip()]
+            items = list(drain())
+            self._steer_shown = bool(items) and all(getattr(it, "shown", False) for it in items)
+            return [it.text for it in items if str(getattr(it, "text", "")).strip()]
         except Exception:
             return []
+
+    def _steer_interrupt(self, turn: AssistantTurn, call_model: str, cost: float, t0: float, t1: float, iteration: int) -> bool:
+        """The model call was cut because the user typed while it streamed (no tool call had started). Keep the
+        streamed text as a normal assistant message (or drop it when empty) and add the typed messages as one user
+        turn, so the next call, in this same turn, answers them. False when nothing was waiting after all."""
+        texts = self.drain_steer_messages()
+        if not texts:
+            return False
+        kept = bool(turn.blocks) and bool((turn.text or "").strip())
+        if kept:
+            self.conversation.append_assistant(turn)
+            try:
+                self.session.append_turn(turn, model=call_model, cost=cost, duration_s=max(0.0, t1 - t0),
+                                         call=self._call_meta, thinking_s=list(self._think_blocks))
+            except TypeError:
+                self.session.append_turn(turn)
+        note = ("Your previous reply was cut off here so you can read this; do not repeat what you already wrote."
+                if kept else "Your unfinished reply was discarded so you can read this.")
+        msg = "\n".join(f"{STEER_PREFIX} {t}" for t in texts) + f"\n\n({note})"
+        if kept:
+            self.conversation.append_user(msg, attach_images=False)
+        else:
+            self._merge_user_note(msg)
+        self.session.append_user(msg)
+        self._emit(SteerEvent(count=len(texts), texts=tuple(t[:500] for t in texts), iteration=iteration,
+                              mode="interrupt", shown=self._steer_shown))
+        self.journal("steer", {"action": "interrupted", "texts": texts, "iteration": iteration, "kept_text": kept})
+        try:
+            for t in texts:
+                self.session.append("steer_message", {"text": t, "iteration": iteration, "mode": "interrupt"})
+        except Exception:
+            pass
+        return True
 
     def _deliver_steer(self, results: list[ToolResultBlock], iteration: int) -> list[ToolResultBlock]:
         """Append mid-turn user messages to the last tool result of this round (same user message,
@@ -1735,7 +1911,8 @@ class Agent:
                     self.message_queue.push(t)
             return results
         results = self._with_note(results, "\n".join(f"{STEER_PREFIX} {t}" for t in texts))
-        self._emit(SteerEvent(count=len(texts), texts=tuple(t[:500] for t in texts), iteration=iteration))
+        self._emit(SteerEvent(count=len(texts), texts=tuple(t[:500] for t in texts), iteration=iteration,
+                              mode="next_step", shown=self._steer_shown))
         self.journal("steer", {"action": "delivered", "texts": texts, "iteration": iteration})
         try:
             for t in texts:
@@ -1870,7 +2047,11 @@ class Agent:
                 fingerprint = self._cache.fingerprint(self.settings.model, str(self.settings.effort), system_blocks, tool_schemas, self.conversation.messages)
             except Exception:
                 fingerprint = None
-            turn, outcome, err = self._call_model(system_blocks, tool_schemas, iteration)
+            self._no_steer_interrupt = True        # the report at the step limit is not cut short
+            try:
+                turn, outcome, err = self._call_model(system_blocks, tool_schemas, iteration)
+            finally:
+                self._no_steer_interrupt = False
             cost, call_model = self._record_call(turn, outcome, err, iteration, fingerprint, tokens_in)
         except Exception:
             restore()
@@ -1948,19 +2129,27 @@ class Agent:
             del messages[index:]
 
     def _stop_result(self, text: str, reason: str, iterations: int, tool_calls: int, usage: Usage, error: str | None = None) -> TurnResult:
+        self._phase = "idle"
         return TurnResult(final_text=text, stop_reason=reason, iterations=iterations, tool_calls_count=tool_calls, usage=usage, error=error)
 
     def _run_turn(self, user_input: str) -> TurnResult:
         total_usage = Usage()
         raw_prompt = user_input
         self.last_failed_turn = None
+        self.budget_pause = None
+        from axon.providers.task_budget import Tracker
+        self._task_tracker = Tracker()
         ceiling = Decimal(str(self.settings.session_cost_ceiling or 0))
-        if ceiling > 0 and self.ledger.total() >= ceiling:
-            return self._stop_result(
-                f"Session cost ceiling reached (${self.ledger.total():.4f} >= ${ceiling}). "
-                "Raise session_cost_ceiling in ~/.axon/config.toml or start a new session.",
-                "budget_exceeded", 0, 0, total_usage,
-            )
+        if ceiling > 0 and budget_pause.session_spent(self) >= float(ceiling):
+            spent_now = budget_pause.session_spent(self)
+            if self.is_subagent:
+                return self._stop_result(f"[Stopped: session budget reached (${spent_now:.2f} of ${float(ceiling):.2f}).]",
+                                         "budget_exceeded", 0, 0, total_usage)
+            msg = budget_pause.pause(self, setting="session_cost_ceiling", scope="session", spent=spent_now,
+                                     limit=float(ceiling), prompt=raw_prompt, resume=False)
+            self._emit(BudgetEvent(scope="session", action="paused", spent_usd=spent_now, projected_usd=0.0,
+                                   limit_usd=float(ceiling), model=self.settings.model, message=msg))
+            return self._stop_result("", "budget_exceeded", 0, 0, total_usage, error=msg)
 
         if not self.is_subagent:           # the project's daily and monthly budgets stop new turns like the session ceiling does
             try:
@@ -1991,6 +2180,9 @@ class Agent:
                 if res.additional_context:
                     user_input = f"{user_input}\n\n<user-prompt-submit-hook>\n{res.additional_context}\n</user-prompt-submit-hook>"
 
+        if not self.is_subagent and not self._model_written_prompt_flag():
+            self._auto_memory_capture(raw_prompt)
+
         pending = self.take_pending_context()
         late = self._absorb_async_hooks()
         if late:
@@ -2002,7 +2194,8 @@ class Agent:
         # A subagent's prompt is written by the model: paths in it are files to read, not images to attach.
         # The same goes for a scheduled prompt.
         model_written = self.is_subagent or self.__dict__.pop("_model_written_prompt", False)
-        self.conversation.append_user(user_input, attach_images=not model_written)
+        from axon.tools.pdf_render import agent_vision
+        self.conversation.append_user(user_input, attach_images=not model_written, vision=agent_vision(self))
         prompt_message = self.conversation.messages[-1]
         self.session.append_user(user_input)
         self._current_turn_prompt = user_input
@@ -2012,7 +2205,7 @@ class Agent:
         iterations = 0
         stop_hook_forced = False
         stop_continuations = 0
-        goal_checked = False
+        goal_round = 0                # grader calls so far this turn (the round limit is in agent.goal_rounds)
         last_round: list[dict[str, Any]] = []
         system_blocks = self.system_blocks()
         tool_schemas = self.tool_schemas()
@@ -2020,26 +2213,50 @@ class Agent:
         step_warned = False
         overflow_retries = 0
         output_continuations = 0
+        refusal_retried = False
         cut_text = ""                 # the part of the reply written before an output-limit cut
 
         while iterations < limit:
             if iterations > 0:
-                if ceiling > 0 and self.ledger.total() >= ceiling:
-                    return self._stop_result(
-                        (final_text + "\n\n" if final_text else "") + f"[Stopped: session cost ceiling ${ceiling} reached.]",
-                        "budget_exceeded", iterations, total_tool_calls, total_usage,
-                    )
+                if ceiling > 0 and budget_pause.session_spent(self) >= float(ceiling):
+                    spent_now = budget_pause.session_spent(self)
+                    if self.is_subagent:
+                        return self._stop_result(
+                            (final_text + "\n\n" if final_text else "") + f"[Stopped: session budget reached (${spent_now:.2f} of ${float(ceiling):.2f}).]",
+                            "budget_exceeded", iterations, total_tool_calls, total_usage,
+                        )
+                    msg = budget_pause.pause(self, setting="session_cost_ceiling", scope="session", spent=spent_now,
+                                             limit=float(ceiling), prompt=raw_prompt, resume=False)
+                    budget_pause.finalize(self, prompt_message, raw_prompt)
+                    self._emit(BudgetEvent(scope="session", action="paused", spent_usd=spent_now, projected_usd=0.0,
+                                           limit_usd=float(ceiling), model=self.settings.model, message=msg))
+                    return self._stop_result(final_text, "budget_exceeded", iterations, total_tool_calls, total_usage, error=msg)
                 budget = int(self.settings.turn_token_budget or 0)
                 if budget > 0 and (total_usage.input + total_usage.output) >= budget:
                     return self._stop_result(
                         (final_text + "\n\n" if final_text else "") + f"[Stopped: turn token budget of {budget:,} tokens reached.]",
                         "token_budget", iterations, total_tool_calls, total_usage,
                     )
+                from axon.agent import client_budget as _cb      # task budget on providers without a native one
+                _cb_line = _cb.exhausted(self)
+                if _cb_line:
+                    return self._stop_result((final_text + "\n\n" if final_text else "") + _cb_line,
+                                             "token_budget", iterations, total_tool_calls, total_usage)
             iterations += 1
 
+            try:   # exact prompt size (count-tokens endpoint) when the estimate is near the compact threshold; else a no-op
+                self.context.exact.refine(self, system_blocks, tool_schemas, first_iteration=iterations == 1)
+            except Exception:
+                pass
+            try:    # a background summary: swap it in, or start one near the threshold (between tool exchanges only)
+                from axon.agent.compaction import background as _bg_compaction
+                if _bg_compaction(self).step(system_blocks, tool_schemas):
+                    system_blocks = self.system_blocks()
+            except Exception as e:
+                self.journal("error", {"error": f"background compaction failed: {type(e).__name__}: {e}"[:2000], "iteration": iterations})
             if len(self.conversation.messages) > 4 and self.context.needs_compaction(
                 self.conversation, system_blocks, tool_schemas, model=self.settings.model
-            ):
+            ) and not self._server_compaction_covers(system_blocks, tool_schemas):
                 self._consecutive_compactions += 1
                 if self._consecutive_compactions > MAX_THRASH_COMPACTIONS:
                     self._consecutive_compactions = 0
@@ -2059,6 +2276,7 @@ class Agent:
                 self._consecutive_compactions = 0
             stop = self._budget_guard(system_blocks, tool_schemas, iterations, total_tool_calls, total_usage, final_text)
             if stop is not None:
+                budget_pause.finalize(self, prompt_message, raw_prompt)     # nothing answered yet: the prompt itself is what resumes
                 return stop
             self.context.prepare(self.conversation, system_blocks, tool_schemas, model=self.settings.model)
 
@@ -2096,15 +2314,36 @@ class Agent:
             turn, outcome, err = self._call_model(system_blocks, tool_schemas, iterations)
             if turn is not None:
                 total_usage = total_usage + turn.usage
+                try:
+                    self._task_tracker.add(turn.usage, inclusive=getattr(self.provider, "name", "") == "openai_compat")
+                except Exception:
+                    pass
             cost, call_model = self._record_call(turn, outcome, err, iterations, fingerprint, context_tokens)
             total_usage = total_usage + self._last_cut_usage
             t0, t1 = self._last_call_window
+
+            if outcome == "steered":
+                if self._steer_interrupt(turn, call_model, cost, t0, t1, iterations):
+                    continue
+                outcome = "ok"      # the message was taken meanwhile: go on with what streamed
 
             if outcome == "error" and overflow_retries < MAX_OVERFLOW_RETRIES and large_input.is_context_overflow(err):
                 overflow_retries += 1
                 if self._recover_from_overflow(overflow_retries):
                     system_blocks = self.system_blocks()
                     continue
+
+            if outcome == "error" and not refusal_retried and not self.is_subagent:
+                from axon.agent import refusal as _refusal
+                if _refusal.is_filter_error(err):
+                    refusal_retried = True        # a content-filter error is a refusal: one retry on the fallback model
+                    notice = _refusal.retry(self, None, reason="content filter")
+                    if notice:
+                        from axon.providers.base import retry_event as _retry_event
+                        self._emit(_retry_event(1, 1, 0.0, notice))
+                        system_blocks = self.system_blocks()
+                        tool_schemas = self.tool_schemas()
+                        continue
 
             if outcome == "error":
                 msg = f"Provider error: {err}"
@@ -2132,6 +2371,13 @@ class Agent:
                                          error=f"{err}\n  {hint}")
 
             assert turn is not None
+            if turn.stop_reason == "compaction":
+                # Server-side compaction paused the reply: the summary block goes first, the newest turns follow it
+                # word for word, and the same request is made again (nothing of this reply is an answer).
+                from axon.agent.compaction import apply_server_compaction
+                apply_server_compaction(self, turn, call_model, cost)
+                system_blocks = self.system_blocks()
+                continue
             self.conversation.append_assistant(turn)
             try:
                 self.session.append_turn(turn, model=call_model, cost=cost, duration_s=max(0.0, t1 - t0),
@@ -2146,6 +2392,16 @@ class Agent:
             tool_uses = turn.tool_uses
             if tool_uses:
                 cut_text = ""
+            if not tool_uses and turn.stop_reason == "refusal" and not refusal_retried and not self.is_subagent:
+                from axon.agent import refusal as _refusal
+                refusal_retried = True            # one retry per turn, never a loop
+                notice = _refusal.retry(self, turn)
+                if notice:
+                    from axon.providers.base import retry_event as _retry_event
+                    self._emit(_retry_event(1, 1, 0.0, notice))
+                    system_blocks = self.system_blocks()
+                    tool_schemas = self.tool_schemas()
+                    continue
             if (not tool_uses and turn.stop_reason == "model_context_window_exceeded"
                     and overflow_retries < MAX_OVERFLOW_RETRIES):
                 overflow_retries += 1
@@ -2180,16 +2436,18 @@ class Agent:
                     self.session.append_user(follow)
                     continue
                 goal = "" if self.is_subagent else self.active_goal
-                if goal and not goal_checked and turn.stop_reason not in ("max_tokens", "refusal") \
-                        and iterations < max(1, int(self.settings.max_iterations)):
-                    goal_checked = True  # at most one extra round per turn
-                    self._emit(GoalCheckEvent(goal=goal, iteration=iterations))
-                    follow = (f"[Goal check] The session goal is: {goal}\n"
-                              "Does your work now satisfy it? If yes, reply with one short confirmation line. "
-                              "If not, say what is missing and continue working toward it.")
-                    self.conversation.append_user(follow)
-                    self.session.append_user(follow)
-                    continue
+                if goal and turn.stop_reason not in ("max_tokens", "refusal") and str(final_text).strip():
+                    # Done-when goal: an independent grader checks the answer against objective evidence (agent/goal.py).
+                    from axon.agent import goal as goal_mod
+                    decision = goal_mod.check_after_answer(self, goal, raw_prompt, final_text, goal_round, iterations, limit)
+                    if decision.graded:
+                        goal_round += 1
+                    if decision.stop:
+                        return self._stop_result(final_text, "interrupted", iterations, total_tool_calls, total_usage)
+                    if decision.follow_up:
+                        self.conversation.append_user(decision.follow_up)
+                        self.session.append_user(decision.follow_up)
+                        continue
                 return self._stop_result(final_text, turn.stop_reason, iterations, total_tool_calls, total_usage)
 
             total_tool_calls += len(tool_uses)
@@ -2394,7 +2652,7 @@ class Agent:
             return None
         projected = self._projected_request_cost(system_blocks, tool_schemas)
         spent_turn = float(self._trace.cost) if self._trace is not None else 0.0
-        spent_sess = float(self.ledger.total())
+        spent_sess = budget_pause.session_spent(self)      # a subagent's run counts toward the session cap
         checks = [("turn", spent_turn, turn_limit), ("session", spent_sess, sess_limit), *period]
         for scope, spent, limit in checks:
             if not limit or spent + projected <= float(limit):
@@ -2422,6 +2680,12 @@ class Agent:
                                            limit_usd=float(limit), model=self.settings.model,
                                            message=f"The next request would exceed the {scope} budget."))
                 return None
+            if scope in ("turn", "session") and not self.is_subagent:
+                msg = budget_pause.pause(self, setting="budget_turn_usd" if scope == "turn" else "budget_session_usd",
+                                         scope=scope, spent=spent, limit=float(limit), prompt="", resume=False)
+                self._emit(BudgetEvent(scope=scope, action="paused", spent_usd=spent, projected_usd=projected,
+                                       limit_usd=float(limit), model=self.settings.model, message=msg))
+                return self._stop_result(final_text, "budget_exceeded", iterations, tool_calls, usage, error=msg)
             msg = (f"[Stopped by budget guard: {scope} spend ${spent:.4f} + next request ~${projected:.4f} "
                    f"would exceed the ${float(limit):.2f} {scope} budget.]")
             self._emit(BudgetEvent(scope=scope, action="stop", spent_usd=spent, projected_usd=projected,
@@ -2471,25 +2735,103 @@ class Agent:
         except Exception:
             pass
         started = time.time()
+        try:    # the Messages API task budget (the provider adds it only where the model and endpoint take it)
+            self.provider.task_budget_tokens = getattr(self.settings, "task_budget_tokens", None)
+        except Exception:
+            pass
+        steer_on = self.steer_interrupts_on() and not getattr(self, "_no_steer_interrupt", False)
+        self._steer_abort = False
+        self._call_after_steer, self._after_steer = self._after_steer, False
+        self._call_gen += 1
+        gen = self._call_gen
+        self._call_started = time.monotonic()
+        self._stream_events = 0
+        self._phase = "streaming"
+        watch = self._start_steer_watch(gen) if steer_on else None
+        try:
+            return self._call_model_inner(system_blocks, tool_schemas, iteration, started, steer_on, gen)
+        finally:
+            if self._phase == "streaming":
+                self._phase = "tools"
+            if watch is not None:
+                watch[0].set()
+                with self._steer_lock():     # a cancel already under way finishes; none can start after this call
+                    pass
+                watch[1].join(1.0)
+
+    def _refresh_provider_clients(self) -> None:
+        for provider in (self.provider, getattr(self, "_side_provider", None)):
+            refresh = getattr(provider, "refresh_client", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:
+                    pass
+
+    def _steer_lock(self) -> threading.Lock:
+        lock = self.__dict__.get("_steer_cancel_lock")
+        if lock is None:
+            lock = self.__dict__.setdefault("_steer_cancel_lock", threading.Lock())
+        return lock
+
+    def _start_steer_watch(self, gen: int) -> tuple[threading.Event, threading.Thread]:
+        """While a call streams, watch for a typed message: a stream blocked on a silent server never yields an
+        event to notice it on, so the watcher aborts that read from outside (the provider's own cancel).
+
+        Single-shot and bound to its own call (*gen*): it never cancels a later call's connection, never fires
+        in the first moments of a request, and at most once per STEER_MIN_GAP_S."""
+        stop = threading.Event()
+        ident = threading.get_ident()
+        lock = self._steer_lock()
+
+        def run() -> None:
+            while not stop.wait(0.05):
+                with lock:
+                    if stop.is_set() or not self._steer_ready(gen):
+                        continue
+                    self._steer_abort = True
+                    self._last_steer_abort = time.monotonic()
+                    self._cancel_provider_stream(ident)
+                return
+        thread = threading.Thread(target=run, name="axon-steer-watch", daemon=True)
+        thread.start()
+        return stop, thread
+
+    def _call_model_inner(self, system_blocks: list[dict[str, Any]], tool_schemas: list[dict[str, Any]], iteration: int,
+                          started: float, steer_on: bool, gen: int | None = None) -> tuple[AssistantTurn | None, str, BaseException | None]:
+        attempt = 0
+        healed = False
+        gen = self._call_gen if gen is None else gen
         while True:
             partial_text: list[str] = []
             emitted = False
             lock = _provider_lock(self.provider)
             try:
                 with lock:
+                    from axon.providers import toolflow
+                    toolflow.set_hints(serial_tools=int(getattr(self.settings, "parallel_tools", 1) or 0) <= 1,
+                                       **self._tool_search_hints())
+                    from axon.agent import context_edit as _ctx_edit, speed as _speed
+                    _ctx_edit.arm(self)       # server-side clearing of old tool results, where the provider and model allow it
+                    from axon.agent import client_budget as _cb, client_context as _cc
+                    _sent_messages, _client_edit = _cc.view(self, system_blocks, tool_schemas)   # old results stubbed in the request copy only
+                    if _client_edit is not None:
+                        self._emit(_client_edit)  # one line: 'cleared 12 old tool results · saved ~38k tokens'
                     stream: Iterator[StreamEvent] = self.provider.stream(
                         model=self.settings.model,
-                        system=system_blocks,
-                        messages=self.conversation.messages,
+                        system=_cb.with_note(self, system_blocks),     # client-side task budget note (no-op with a native one)
+                        messages=_sent_messages,
                         tools=tool_schemas,
                         max_tokens=self._max_output_tokens(),
-                        effort=self.settings.effort,
+                        effort=_speed.prepare(self, iteration),   # fast-mode flag, auto per-message effort (agent/speed.py)
                         thinking=self.settings.thinking,
                     )
                     think_started: float | None = None
                     for event in stream:
                         if isinstance(event, (TextDelta, ToolUseStart)):
                             emitted = True
+                        if isinstance(event, (ToolUseStart, ToolBatchStart)):
+                            self._phase = "tool_call"       # past this point a typed message waits for the tool boundary
                         if isinstance(event, TextDelta):
                             partial_text.append(event.text)
                         # Thinking blocks are timed the way the live view times them: from the first thinking
@@ -2501,12 +2843,33 @@ class Agent:
                             self._think_blocks.append(round(max(0.1, time.time() - think_started), 3))
                             think_started = None
                         self._emit(event)
+                        self._stream_events += 1
+                        if steer_on and self._steer_ready(gen):
+                            self._last_steer_abort = time.monotonic()
+                            close = getattr(stream, "close", None)
+                            if callable(close):
+                                try:
+                                    close()
+                                except Exception:
+                                    pass
+                            raise _SteerAbort()
                     if think_started is not None:
                         self._think_blocks.append(round(max(0.1, time.time() - think_started), 3))
                     turn = self.provider.finalize()
+                    from axon.agent.exact_count import note_call as _note_call
+                    _note_call(self, turn, system_blocks, tool_schemas)   # calibrate the estimate against the reported prompt size
+                    _edit_event = _ctx_edit.collect(self)
+                    if _edit_event is not None:
+                        self._emit(_edit_event)   # one line: 'cleared 12 old tool results · saved ~38k tokens'
                 self._last_call_window = (started, time.time())
                 return self._normalize_turn(turn), "ok", None
-            except KeyboardInterrupt:
+            except (_SteerAbort, KeyboardInterrupt) as stop:
+                if isinstance(stop, _SteerAbort) or (self._steer_abort and self._phase == "streaming" and self._steer_pending()):
+                    self._last_call_window = (started, time.time())
+                    text = "".join(partial_text).rstrip()
+                    self._after_steer = True
+                    return AssistantTurn(blocks=[TextBlock(text=text)] if text else [], stop_reason="end_turn",
+                                         usage=Usage()), "steered", None
                 text = ""
                 usage = Usage()
                 try:
@@ -2522,6 +2885,17 @@ class Agent:
                 # Never replay partial tool calls: their arguments are incomplete and unpaired.
                 return AssistantTurn(blocks=[TextBlock(text=full)], stop_reason="end_turn", usage=usage), "interrupted", None
             except Exception as e:
+                if not emitted and not healed and self._call_after_steer and _is_transport_failure(e):
+                    # The call right after a steer interrupt hit a transport error: heal quietly. Evict the whole
+                    # connection pool, retry this step at once, and stop interrupting for the rest of the session
+                    # (messages are then read at the next step). The user's message is already in the history.
+                    healed = True
+                    self._steer_paused = True
+                    self._refresh_provider_clients()
+                    self.journal("steer", {"action": "healed", "error": f"{type(e).__name__}: {e}"[:500], "iteration": iteration})
+                    self._emit(ContextEditEvent(cleared_tool_uses=0, cleared_input_tokens=0, message="steering: interrupts paused for this session "
+                                     "after a connection error; messages will be read at the next step"))
+                    continue
                 if not emitted and attempt < self.max_retries and self._should_retry(e):
                     attempt += 1
                     delay = self.retry_backoff_s * (2 ** (attempt - 1))
@@ -2595,8 +2969,11 @@ class Agent:
     def _parallel_safe(self, tu: ToolUseBlock) -> bool:
         if tu.name in PARALLEL_SAFE_TOOLS:
             return True
+        if getattr(tu, "parse_error", None):
+            return False   # answered with an error, never run: keep it out of the parallel pool
         try:
-            return bool(self.registry.get(tu.name).readonly)
+            from axon.tools.base import is_serial
+            return not is_serial(self.registry.get(tu.name))   # a tool marked serial never runs beside another call
         except Exception:
             return True  # unknown tools resolve instantly to an error result
 
@@ -2791,6 +3168,22 @@ class Agent:
         except Exception:
             pass
 
+    def _model_written_prompt_flag(self) -> bool:
+        return bool(self.__dict__.get("_model_written_prompt", False))
+
+    def _auto_memory_capture(self, text: str) -> None:
+        """Save durable facts the user just stated to this project's auto memory (regex only: no model call, no wait)."""
+        try:
+            from axon.agent import auto_memory as am
+            from axon.features import memory_history as _mh
+            with _mh.writing_as("auto-capture", str(getattr(self.session, "active_session_id", "") or "")):
+                facts = am.capture(self.settings.workspace, text, self.settings)
+            if facts:
+                self._emit(MemoryLoadedEvent(path=str(am.mf.scope_dir(self.settings.workspace, "project")), reason="saved",
+                                             message=am.saved_notice(facts)))
+        except Exception:
+            pass
+
     def _after_file_access(self, tool_name: str, args: dict[str, Any], content: str) -> str:
         """On-demand memory (nested AXON.md, path-scoped rules) and MEMORY.md size checks."""
         target: str | None = None
@@ -2825,6 +3218,13 @@ class Agent:
                 notes.append(f"<system-reminder>\nAdditional instructions now apply (loaded because this file was accessed):\n\n{rendered}\n</system-reminder>")
         except Exception:
             pass
+        if tool_name in WRITE_TOOLS and p.suffix == ".md" and p.name != "MEMORY.md" and not content.startswith("Error"):
+            try:
+                from axon.agent.memory import auto_memory_dir
+                if p.resolve().parent == auto_memory_dir(self.settings.workspace).resolve():
+                    self._emit(MemoryLoadedEvent(path=str(p), reason="saved", message=p.stem.replace("-", " ")))
+            except Exception:
+                pass
         if tool_name in WRITE_TOOLS and p.name == "MEMORY.md":
             try:
                 from axon.agent.memory import auto_memory_dir, check_memory_index
@@ -2900,7 +3300,11 @@ class Agent:
 
         parse_error = getattr(block, "parse_error", None)
         if parse_error:
-            return self._error_result(block, f"{parse_error}. Re-issue the call with a valid JSON object of arguments.")
+            from axon.providers.toolflow import invalid_json_content
+            raw = str((block.input or {}).get("raw") or "") if isinstance(block.input, dict) else ""
+            hint = ("Re-issue the call with a valid JSON object of arguments"
+                    + ("; for a large file, write it in smaller parts." if "max_tokens" in str(parse_error) else "."))
+            return self._error_result(block, invalid_json_content(raw, f"{parse_error}. {hint}"))
 
         try:
             tool = self.registry.get(block.name)
@@ -2948,6 +3352,21 @@ class Agent:
             outcome, source = "ask", "hook"
             reason = str(getattr(pre, "permission_reason", "") or "") or "PreToolUse hook requested confirmation."
             decision = _Decision("ask", reason)     # the prompt states why it is asking, not the rule that allowed
+        if outcome == "ask" and self.settings.mode == "auto" and not hard_ask and hook_perm != "ask":
+            from axon.permissions import auto_mode        # a small classifier model decides what no rule decided
+            from axon.agent.trace import AutoPermissionEvent
+            auto = auto_mode.decide(self, tool, tool_input)
+            self._emit(AutoPermissionEvent(id=block.id, tool=tool.name, outcome=auto.outcome, reason=auto.reason, source=auto.source,
+                                           model=auto.model, usage=auto.usage, cost=auto.cost, duration_s=auto.duration_s))
+            if auto.outcome == "allow":
+                outcome, source, reason = "allow", "auto", auto.reason
+            elif auto.outcome == "deny":
+                self._perm_event(block, "deny", auto.reason, "auto")
+                return self._error_result(block, f"Permission Denied: auto mode blocked this call ({auto.reason}). "
+                                                 "Do not retry it unchanged; choose another approach or ask the user.")
+            else:
+                reason = f"auto: asking — {auto.reason}"
+                decision = _Decision("ask", reason)
 
         if outcome != "allow":
             req = self._hook("PermissionRequest", {"tool_name": tool.name, "tool_input": tool_input, "reason": reason},

@@ -151,6 +151,7 @@ class WriteTool(Tool):
         "additionalProperties": False,
     }
     readonly: ClassVar[bool] = False
+    serial: ClassVar[bool | None] = True      # ordering-sensitive: never concurrent with another call
     default_permission: ClassVar[str] = "ask"
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -249,6 +250,7 @@ class EditTool(Tool):
         "additionalProperties": False,
     }
     readonly: ClassVar[bool] = False
+    serial: ClassVar[bool | None] = True      # ordering-sensitive: never concurrent with another call
     default_permission: ClassVar[str] = "ask"
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -321,6 +323,7 @@ class MultiEditTool(Tool):
         "additionalProperties": False,
     }
     readonly: ClassVar[bool] = False
+    serial: ClassVar[bool | None] = True      # ordering-sensitive: never concurrent with another call
     default_permission: ClassVar[str] = "ask"
 
     def run(self, args: dict[str, Any], ctx: ToolContext) -> str:

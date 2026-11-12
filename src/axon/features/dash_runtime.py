@@ -158,6 +158,8 @@ class EventLog:
 
     def append(self, etype: str, data: dict[str, Any], ts: float | None = None) -> None:
         with self.lock:
+            if etype == "tool_write":                         # live progress only: the tool card is the record
+                return
             if etype in ("text_delta", "thinking_delta"):      # one line per burst of text, not per fragment
                 p = self._pending
                 if p is not None and p["type"] == etype and len(p["data"].get("text", "")) < 8000:
@@ -274,6 +276,23 @@ class Runtime:
         self._next_display: str | None = None
         self._run_turn_orig: Any = None
         self.hub.sink = self._to_log
+        self._notify_fn: Callable[[dict[str, Any]], None] | None = None
+
+    def _on_notify(self, event: dict[str, Any]) -> None:
+        """A notification-sink event (features/notify.py) for this session becomes one page event."""
+        sid = str(event.get("session") or "")
+        if not sid or sid == self.session_id:
+            self.hub.emit("notify", {"event": event})
+
+    def hear_notifications(self) -> None:
+        try:
+            from axon.features import notify
+            if self._notify_fn is None:
+                self._notify_fn = self._on_notify
+            notify.add_listener(self._notify_fn)
+            notify.remember(getattr(self.agent, "settings", None))
+        except Exception:
+            pass
 
     # ── the replayable record ──
     def event_log(self) -> EventLog | None:
@@ -310,6 +329,7 @@ class Runtime:
         self.agent.on_held_event = self._publish      # a fan-out holds events back from the terminal, not from the page
         self.agent.on_held_replay = self._terminal_only
         self.attached = True
+        self.hear_notifications()
         self.hook_turns()
         if self.external:
             from axon.ui.repl_inbox import INBOX
@@ -386,8 +406,31 @@ class Runtime:
         if self._orig is not None:
             self._orig(ev)
 
+    def _publish_live_write(self, ev: Any) -> None:
+        """A file the model is writing: a throttled ``tool_write`` event (path, lines so far, tail of the text) per
+        streaming call, so the page can show it live. Never stored in the replay record; the tool card replaces it."""
+        cls = type(ev).__name__
+        if cls not in ("ToolUseStart", "ToolArgsDelta", "ToolUseComplete"):
+            return
+        try:
+            lw = getattr(self, "_lw_tracker", None)
+            if lw is None:
+                from axon.agent.live_write import LiveWriteTracker
+                lw = self._lw_tracker = LiveWriteTracker(interval=0.2)
+            if cls == "ToolUseStart":
+                lw.start(ev.id, ev.name)
+            elif cls == "ToolUseComplete":
+                lw.finish(ev.id)
+            else:
+                snap = lw.feed(ev.id, ev.fragment)
+                if snap and snap.get("path"):
+                    self.hub.emit("tool_write", {"id": ev.id, **snap})
+        except Exception:
+            pass
+
     def _publish(self, ev: Any) -> None:
         """Send one agent event to the page."""
+        self._publish_live_write(ev)
         try:
             d = web_event(ev)
         except Exception:
@@ -468,7 +511,30 @@ class Runtime:
                 "pending": [k for k in self.pending], "background": bg,
                 "thinking": bool(getattr(s, "thinking", False)), "last": self.last_result,
                 "sandbox": bool(getattr(s, "sandbox_enabled", False)),
+                "goal": self._goal_state(), "budget": self._budget_state(),
                 "suggestion": str(getattr(a, "next_suggestion", "") or "")}
+
+    def _budget_state(self) -> dict[str, Any]:
+        """The spend cap for the composer chip: one short chip, and what a paused session says (agent/budget_pause.py)."""
+        try:
+            from axon.agent import budget_pause as bp
+            d = bp.describe(self.agent)
+            return {"chip": bp.chip(self.agent), "paused": d["paused"], "message": d["message"],
+                    "limit": d["session_limit"], "remaining": d["session_remaining"]}
+        except Exception:
+            return {"chip": "", "paused": False, "message": ""}
+
+    def _goal_state(self) -> dict[str, Any] | None:
+        """The active done-when goal for the composer's goal chip (agent/goal.py); None when none is set."""
+        try:
+            from axon.agent import goal as G
+            text = G.goal_text(self.agent)
+            if not text:
+                return None
+            last = getattr(self.agent, "goal_last", None)
+            return {"text": text[:300], "rounds": G.goal_rounds(self.agent), "last": last if isinstance(last, dict) else None}
+        except Exception:
+            return None
 
     # ── approvals ──
     def approver(self, tool: str, args: dict[str, Any], decision: Any) -> str:
@@ -567,7 +633,14 @@ class Runtime:
             if self.busy:
                 from axon.ui.in_flight import push_queued
                 item = push_queued(agent.message_queue, line, steer=steer)
-                self.hub.emit("queued", {"id": getattr(item, "id", 0), "text": (display or line)[:2000], "steer": steer})
+                from axon.agent.loop import STEER_STATE_TEXT
+                try:
+                    item.shown = True     # the page shows it as soon as it is queued: delivery does not repeat it
+                except Exception:
+                    pass
+                state = agent.steer_state() if steer and callable(getattr(agent, "steer_state", None)) else ""
+                self.hub.emit("queued", {"id": getattr(item, "id", 0), "text": (display or line)[:2000], "steer": steer,
+                                         "state": state, "state_text": STEER_STATE_TEXT.get(state, "")})
                 return {"queued": True, "id": getattr(item, "id", 0), "steer": steer}
             self.turn_active = True
         if self.external:
@@ -658,6 +731,12 @@ class Runtime:
 
     def close(self) -> None:
         self.cancel()
+        if self._notify_fn is not None:
+            try:
+                from axon.features import notify
+                notify.remove_listener(self._notify_fn)
+            except Exception:
+                pass
         if self._log is not None:
             self._log.flush()
         self.detach()

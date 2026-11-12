@@ -106,6 +106,10 @@ def save_provider_choice(preset: ProviderPreset, model: str) -> Path | None:
         cfg["base_url"] = preset.base_url
         cfg["provider"] = preset.id
         cfg["model"] = model
+        cfg["hidden_models"] = [h for h in cfg.get("hidden_models", []) if isinstance(h, dict)
+                                and not (h.get("model") == model and h.get("provider") == preset.id)]
+        if not cfg["hidden_models"]:
+            del cfg["hidden_models"]
         if model not in preset.models:
             customs = [c for c in cfg.get("custom_models", []) if isinstance(c, dict)]
             if not any(c.get("model") == model and c.get("provider") == preset.id for c in customs):

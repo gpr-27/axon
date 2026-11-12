@@ -179,6 +179,7 @@ function wbToolbar() {
 async function wbMoreMenu(anchor) {
   const C = UI.chat; const st = (C && C.st) || {};
   const items = [{ label: 'Search commands and pages', hint: IS_MAC_WB() ? '⌘K' : 'Ctrl+K', run: () => openPalette() },
+    IS_LOOPBACK_WB() ? { label: 'Open on your phone (QR code)', run: () => phoneModal() } : null,
     { label: 'Theme: switch light or dark', run: () => toggleTheme() }, { label: 'Keyboard shortcuts', hint: '?', run: () => helpModal() }, { label: 'Welcome and setup guide', run: () => welcomeOpen(true) }];
   const panels = [];
   panels.push({ label: 'Tasks', hint: (st.background || []).length ? String(st.background.length) + ' running' : 'scheduled and background', run: () => wbOpen('tasks') });
@@ -188,6 +189,23 @@ async function wbMoreMenu(anchor) {
   let nh = 0, np = 0; try { const hd = await api('/api/workbench/hooks?session=' + encodeURIComponent((C && C.sid) || '')); nh = (hd.hooks || []).length; np = (hd.problems || []).length; } catch (e) { /* none */ }
   if (nh || np) panels.push({ label: 'Hooks', hint: np ? (nh ? nh + ' · ' : '') + 'needs attention' : String(nh), run: () => wbOpen('hooks') });
   wbMenu(anchor, [...items, panels.length ? '-' : null, panels.length ? { head: 'Panels' } : null, ...panels], { alignRight: true });
+}
+function IS_LOOPBACK_WB() { return /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname); }
+// ----- phone access: a QR code that signs a phone on the same network into this same session -----
+async function phoneModal() {
+  const body = h('div', { class: 'phone-box' }, h('p', { class: 'muted' }, 'Preparing a code...'));
+  const m = mgModal('Open on your phone', body, [{ label: 'Close', fn: (close) => close() }]);
+  const draw = async (action) => {
+    let r; try { r = await api('/api/phone', { action }); } catch (e) { body.replaceChildren(h('p', { class: 'bad' }, e.message)); return; }
+    if (!r.active) { body.replaceChildren(h('p', null, 'Phone access is off. Signed-in phones were signed out.')); return; }
+    body.replaceChildren(
+      h('p', null, 'Scan this with your phone camera (same Wi-Fi as this computer). It opens this same chat: messages show live here, in the terminal and on the phone.'),
+      h('div', { class: 'phone-qr', html: r.svg, style: 'width:240px;max-width:100%;margin:12px auto;background:#fff;padding:6px;border-radius:8px' }),
+      h('p', { class: 'muted', style: 'word-break:break-all;user-select:all' }, r.link),
+      h('p', { class: 'muted' }, 'The link works once and expires in ' + Math.round(r.expires_in / 60) + ' minutes. Only devices on your own network can connect, and the raw terminal is not offered on the phone.'),
+      h('div', { class: 'acts' }, h('button', { class: 'btn', type: 'button', onclick: () => draw('pair') }, 'New code'), h('button', { class: 'btn danger', type: 'button', onclick: () => draw('stop') }, 'Turn off phone access')));
+  };
+  draw('pair'); return m;
 }
 function IS_MAC_WB() { return /Mac|iPhone|iPad/i.test(navigator.platform || ''); }
 // ----- the chat title and its menu -----
@@ -728,7 +746,7 @@ function confirmBypass(C, mode) {
     document.body.append(scrim); no.focus();
   });
 }
-const WB_MODES = [['default', 'Asks first', 'Ask before edits and commands'], ['acceptEdits', 'Edits allowed', 'Allow file edits, ask for commands'], ['plan', 'Plan only', 'Read-only, writes a plan'], ['bypass', 'Runs without asking', 'No approval prompts']];
+const WB_MODES = [['default', 'Asks first', 'Ask before edits and commands'], ['acceptEdits', 'Edits allowed', 'Allow file edits, ask for commands'], ['plan', 'Plan only', 'Read-only, writes a plan'], ['auto', 'Auto', 'A classifier model decides each call no rule decided'], ['bypass', 'Runs without asking', 'No approval prompts']];
 function wbFooterDraw(C) {
   const f = C.foot; if (!f) return; const st = C.st || {};
   const info = state.info || {}; const us = UI.status || {}; f.model.textContent = st.model || us.model || info.model || 'model'; f.effort.textContent = effortWord(st.effort || us.effort || info.effort); const m = WB_MODES.find(x => x[0] === (st.mode || 'default')) || (st.mode === 'dontAsk' ? ['dontAsk', 'Never asks', 'Denies anything that would ask. Set in settings.json or with --permission-mode.'] : [st.mode, st.mode, '']);   // a mode the menu does not offer is still named truthfully

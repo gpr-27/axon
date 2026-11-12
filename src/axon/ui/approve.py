@@ -111,6 +111,15 @@ def narrow_rule_label(tool_name: str, args: dict[str, Any]) -> str:
         return ""
 
 
+def _diff_preview(tool_name: str, args: dict[str, Any], width: int) -> list[str]:
+    """The compact diff of an edit or write (the same rows the result card shows afterwards); [] when none."""
+    try:
+        from axon.ui import diff_view
+        return diff_view.approval_rows(tool_name, args, width, indent="    ")
+    except Exception:
+        return []
+
+
 def _detail_lines(tool_name: str, args: dict[str, Any], reason: str) -> list[str]:
     cols = plat.term_size()[0]
     width = max(20, cols - 8)
@@ -123,6 +132,12 @@ def _detail_lines(tool_name: str, args: dict[str, Any], reason: str) -> list[str
             lines.append(f"    {SLATE}{plat.truncate_ansi(_clean(args['description']), width)}{RST}")
         lines.append(f"    {DARK_SLATE}runs in {plat.shell_name()}{RST}")
     elif "path" in args or "file_path" in args:
+        preview = _diff_preview(tool_name, args, cols - 4)
+        if preview:
+            lines.extend(preview)
+            if reason:
+                lines.append(f"    {DARK_SLATE}{plat.truncate_ansi(_clean(reason), width)}{RST}")
+            return lines
         lines.append(f"    {WHITE}{BOLD}{plat.truncate_ansi(_clean(args.get('path') or args.get('file_path')), width)}{RST}")
     else:
         try:

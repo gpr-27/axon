@@ -314,7 +314,9 @@ def _save(agent: Any, ws: Path, preset: Any, var: str, key: str, scope: str, tes
     prev = ks.key_status(var, ws)
     path = ks.env_file_for(scope, ws)
     try:
-        ks.set_env_value(path, var, key)
+        from axon.features import vault
+        if not (scope == "user" and vault.store_api_key(var, key)):
+            ks.set_env_value(path, var, key)
     except (OSError, ValueError) as e:
         err(f"Could not save {var}: {e}")
         return 1

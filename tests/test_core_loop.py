@@ -163,7 +163,9 @@ def test_budget_guard_stops_before_expensive_request(workspace: Path) -> None:
                        budget_session_usd=0.000001)
     res = agent.run_turn("hi")
     assert res.stop_reason == "budget_exceeded"
-    assert any(isinstance(e, BudgetEvent) and e.action == "stop" for e in events)
+    # the session cap now pauses (state kept, resumable with /budget raise) instead of ending the work
+    assert any(isinstance(e, BudgetEvent) and e.action == "paused" for e in events)
+    assert agent.budget_pause is not None and agent.budget_pause["scope"] == "session"
 
 
 def test_budget_guard_downgrades_to_small_model(workspace: Path) -> None:
@@ -241,7 +243,7 @@ def test_auto_compaction_uses_small_model_and_emits_event(workspace: Path) -> No
     res = agent.run_turn("next")
     assert res.final_text == "final"
     assert prov.requests[0]["model"] == "tiny-model"  # summariser ran on the cheap model
-    comp = [e for e in events if isinstance(e, CompactionEvent) and not e.preview]
+    comp = [e for e in events if isinstance(e, CompactionEvent) and not e.preview and e.phase != "start"]   # 'start' is the background status line
     assert comp and comp[0].messages_after < comp[0].messages_before and "SUMMARY" in comp[0].summary
     assert "SUMMARY: user wants X" in json.dumps(agent.conversation.messages)
     assert _valid_alternation(agent.conversation.messages)

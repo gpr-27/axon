@@ -65,7 +65,7 @@ LABEL_GAP = 2
 OUTPUT_ROWS = 3          # rows of result preview, the '+N more' pointer included
 CHOOSE_ROWS = 2
 INPUT_ROWS = 2
-COMMAND_ROWS = 6         # rows of a shell command shown exactly before '+N more lines'
+COMMAND_ROWS = 60        # rows of a shell command shown exactly before '+N more lines'
 RUN_ROWS = 2
 SHOW_OPTIONS_FROM = 80   # narrower windows drop the extra options of the input line first ...
 SHOW_CHOOSE_FROM = 60    # ... then the choose line ...
@@ -74,7 +74,7 @@ CHANGED_FILE_ROWS = 4    # files a shell command changed that are listed under i
 DIFF_BODY_ROWS = 8       # changed lines of an Edit / Write card before '+N more lines'
 PLAN_ROWS = 6
 THINK_PREVIEW_CHARS = 100
-THINK_ROWS = 6          # the thought as wrapped rows at the normal level: this many, then a pointer to the rest
+THINK_ROWS = 100_000          # the thought as wrapped rows at the normal level: this many, then a pointer to the rest
 COMPACT_DIFF_ROWS = 6    # changed lines of an Edit / Write at the compact level before '+N more lines'
 
 # Arguments that carry no choice of the model (defaults, limits, plumbing): not worth a place on the input line.
@@ -525,7 +525,8 @@ def _diff_output(c: CardCall, width: int) -> list[str]:
     rows = render.summarize_tool_result(c.name, dict(c.inp), c.content, False, width, detail=1)
     if not rows:
         return [f"{MUTED}(no output){RST}"]
-    shown, hidden = _collapse_diff(rows[1:], DIFF_BODY_ROWS)
+    created = "Created" in strip_ansi(rows[0])[:12]          # a new file: its first lines, not a 'diff'
+    shown, hidden = _collapse_diff(rows[1:], 12 if created else DIFF_BODY_ROWS)
     out = [rows[0]] + shown
     if hidden:
         out.append(_pointer(hidden, c.hint, " lines"))

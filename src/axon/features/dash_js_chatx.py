@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from axon.features import chat_export as cx
 from axon.features.dash_common import DashError
+from axon.features.dash_feed_css import FEED_CSS
 
 if TYPE_CHECKING:  # pragma: no cover
     from axon.features.dashboard import DashServer
@@ -267,6 +268,36 @@ def handle_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any:
 # ── the page ─────────────────────────────────────────────────────────────────
 
 CHATX_CSS = r"""
+/* complete tool cards and per-call statistics (grayscale, no horizontal page scroll at 390px) */
+.tool.both>.tdet .tabs2{display:none}
+.tool.both>.tdet .tpane{display:block!important;min-width:0}
+.tool.both>.tdet .tpane::before{content:none!important;display:none!important}
+.tool.both>.tdet pre.out{max-height:none;overflow:auto;white-space:pre;max-width:100%}
+.tool.both>.tdet{position:static;min-width:0;max-width:100%;overflow:hidden}
+.tool.both>.tdet pre.out.json{white-space:pre}
+.pdoing{font:500 13px/1.5 var(--font-ui);color:var(--ink);margin:0 0 6px;overflow-wrap:anywhere}
+.psec{display:flex;align-items:center;gap:8px;margin:8px 0 3px;font:600 12px/1.6 var(--font-ui);color:var(--ink2)}
+.psec b{font-weight:600;flex:1 1 auto;min-width:0}
+.psec .copy{flex:none;border:1px solid var(--line)}
+.pstat{flex:none;font:400 12px/1.6 var(--font-ui);color:var(--ink2)}
+.pstat[data-s=bad]{color:var(--bad)}
+.json .jk{color:var(--ink)}.json .js{color:var(--ink2)}.json .jn,.json .jb{color:var(--muted);font-style:italic}
+.axpg .clipped{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;margin-top:4px;font-size:12px;color:var(--ink2)}
+.axcount{font-size:12px;margin:0 0 3px}
+.pwhy{margin:2px 0 6px 26px;padding:6px 10px;border-left:2px solid var(--line);font:13px/1.5 var(--font-ui);color:var(--ink)}
+.pwhy p{margin:2px 0;overflow-wrap:anywhere}.plabel{display:block;font:600 12px/1.6 var(--font-ui);color:var(--ink2)}
+.handoff{margin:4px 0 6px 26px;padding:5px 10px;border-radius:8px;background:var(--raised);font:12.5px/1.5 var(--font-ui);color:var(--ink2);overflow-wrap:anywhere}
+.sstats{margin:2px 8px 6px 24px;padding:6px 10px 8px;border-radius:10px;background:var(--raised);font:12px/1.45 var(--font-ui);color:var(--ink2);min-width:0}
+.sstitle{font:600 12px/1.6 var(--font-ui);color:var(--ink2);margin-bottom:3px}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:3px 12px}
+.sc{display:flex;flex-direction:column;min-width:0}
+.sc .sl{color:var(--muted)}.sc .sv{color:var(--ink);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.sc.nr .sv{color:var(--muted);font-style:italic}
+.t-compact .sstats{display:none}
+.tool.think pre.out{white-space:pre-wrap;overflow-wrap:anywhere;max-height:none}
+.tool.both,.pgroup,.prows,.step,.sbody{min-width:0;max-width:100%}
+@media (max-width:560px){.sstats{margin-left:4px;margin-right:0}.sgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.pwhy,.handoff{margin-left:4px}}
+
 .chat-main{position:relative}
 .feed>.entry{position:relative}
 .mxa{position:absolute;right:6px;display:flex;flex-wrap:wrap;gap:2px;max-width:calc(100% - 12px);padding:2px;background:var(--surface);border:1px solid var(--line);border-radius:6px;opacity:0;z-index:6}      /* above the sticky turn header (z-index 4) */
@@ -302,6 +333,7 @@ CHATX_CSS = r"""
 .cx-share .sum{margin:8px 0;font-size:13px}
 .cx-share .sum b{font-weight:600}
 """
+CHATX_CSS += FEED_CSS
 
 JS_CHATX = r"""
 // ---------- chat extras: actions on messages, find, bookmarks, export ----------
@@ -660,3 +692,11 @@ function shareModal(req) {
   load();
 }
 """
+
+from axon.features.dash_js_goal import GOAL_CSS, JS_GOAL  # noqa: E402  (the done-when goal block and chip)
+
+CHATX_CSS += GOAL_CSS
+from axon.features.dash_js_budget import BUDGET_CSS, JS_BUDGET  # noqa: E402  (spend-cap chip and notify alerts)
+CHATX_CSS += BUDGET_CSS
+JS_CHATX += JS_GOAL
+JS_CHATX += JS_BUDGET

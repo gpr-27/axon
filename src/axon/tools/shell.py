@@ -488,6 +488,7 @@ class BashTool(Tool):
         "additionalProperties": False,
     }
     readonly: ClassVar[bool] = False
+    serial: ClassVar[bool | None] = True      # ordering-sensitive: never concurrent with another call
     default_permission: ClassVar[str] = "ask"
 
     def __init__(self) -> None:

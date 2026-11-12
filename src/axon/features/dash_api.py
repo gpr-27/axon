@@ -43,6 +43,9 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
     if route.startswith("/api/manage/"):          # Sessions and Usage controls (dash_manage.py)
         from axon.features import dash_manage
         return dash_manage.get(srv, route, qs)
+    if route == "/api/vault":                     # secret vault, metadata only (dash_vault.py; never on the phone listener)
+        from axon.features import dash_vault
+        return dash_vault.get(srv, route, qs)
     if route.startswith("/api/chatx/"):           # message actions, find, bookmarks (dash_js_chatx.py)
         from axon.features import dash_js_chatx
         return dash_js_chatx.handle_get(srv, route, qs)
@@ -263,6 +266,9 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     if route.startswith("/api/manage/"):          # Sessions and Usage controls (dash_manage.py)
         from axon.features import dash_manage
         return dash_manage.post(srv, route, body)
+    if route.startswith("/api/vault/"):
+        from axon.features import dash_vault
+        return dash_vault.post(srv, route, body)
     if route.startswith("/api/chatx/"):
         from axon.features import dash_js_chatx
         return dash_js_chatx.handle_post(srv, route, body)
@@ -342,6 +348,9 @@ def api_post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
         if mgr is None:
             raise DashError("no running subagents in this session", 404)
         return {"ok": bool(mgr.cancel(_s(body, "task", 40)))}
+    if route == "/api/subagent/say":
+        from axon.features import dash_subagents
+        return dash_subagents.say(srv, _s(body, "session", 300), _int(body.get("n"), 0, 1, 10**6), _s(body, "text", 20_000))
     if route == "/api/subagent/tell":
         rt = srv.runtime(_s(body, "session", 300), create=False)
         mgr = getattr(rt.agent, "subagents", None) if rt else None

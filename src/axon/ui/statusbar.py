@@ -62,6 +62,17 @@ def agent_autocompact_warning(agent: object) -> str:
         return ""
 
 
+def _effort_with_tag(agent: object) -> str:
+    """The effort name plus one short segment for fast mode / auto effort ('quantum · fast ×1.6 · auto low')."""
+    effort = str(agent.settings.effort)  # type: ignore[attr-defined]
+    try:
+        from axon.agent.speed import status_tag
+        tag = status_tag(agent)
+    except Exception:
+        tag = ""
+    return f"{effort} · {tag}" if tag else effort
+
+
 def format_tokens(n: int) -> str:
     """Format token count into readable format (e.g. 4.2k, 1.2M)."""
     if n >= 1_000_000:
@@ -119,13 +130,14 @@ class StatusBar:
         total_tokens: int | None = None,
         cost: float | None = None,
         trace_level: str = "",
+        context_estimated: bool = False,
     ) -> str:
-        """Construct the full styled Axon status line."""
+        """Construct the full styled Axon status line (``context_estimated``: the token count is a local estimate, shown with ``~``)."""
         actual_tokens = context_tokens if context_tokens is not None else (total_tokens if total_tokens is not None else 0)
         actual_cost = session_cost if session_cost is not None else (cost if cost is not None else 0.0)
         w = max(40, term_width() - 4)          # the box never outgrows the window
 
-        tok_str = format_tokens(actual_tokens)
+        tok_str = ("~" if context_estimated else "") + format_tokens(actual_tokens)
         cap_str = format_tokens(context_capacity)
         spark = generate_sparkline(cls._token_history) if len(cls._token_history) >= 2 else ""
         spark_str = f" {CYAN}{spark}{RST}" if spark else ""
@@ -177,6 +189,13 @@ class StatusBar:
         except Exception:
             active_context_tok = agent.conversation.token_estimate() + 7200
 
+        estimated = True
+        try:   # the count-tokens endpoint's exact number replaces the estimate when it measured this conversation
+            exact = agent.context.exact.value_for(agent.conversation, agent.settings.model)
+            if exact:
+                active_context_tok, estimated = int(exact), False
+        except Exception:
+            pass
         cls.record_tokens(active_context_tok)
         try:
             from axon.providers.registry import effective_context_window
@@ -186,12 +205,13 @@ class StatusBar:
         sub_count = len(agent.subagents.all_tasks()) if hasattr(agent, "subagents") and agent.subagents else 0
         bar = cls.format_bar(
             model=agent.settings.model,
-            effort=agent.settings.effort,
+            effort=_effort_with_tag(agent),
             mode=agent.settings.mode,
             context_tokens=active_context_tok,
             context_capacity=cap,
             session_cost=float(agent.ledger.total()),
             subagent_count=sub_count,
             trace_level=str(getattr(getattr(agent, "renderer", None), "trace_level", "") or ""),
+            context_estimated=estimated,
         )
         print(bar)

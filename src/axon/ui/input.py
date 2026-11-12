@@ -31,7 +31,7 @@ from axon.ui.theme import (
 
 _HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
-MODES_CYCLE = ["default", "acceptEdits", "plan", "bypass"]
+MODES_CYCLE = ["default", "acceptEdits", "plan", "auto", "bypass"]
 SWITCH_SESSION = "__SWITCH_SESSION__"
 HISTORY_LIMIT = 1000
 
@@ -261,6 +261,7 @@ _MODE_LABELS = {
     "acceptEdits": ("auto-accept edits on", TEAL, "⏵⏵"),
     "plan": ("plan mode on", PURPLE, "⏸"),
     "dontAsk": ("don't ask on", TEAL, "⏵⏵"),
+    "auto": ("auto mode on", TEAL, "⏵⏵"),
     "bypass": ("bypass permissions on", GOLD, "⚠"),
 }
 

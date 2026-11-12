@@ -87,8 +87,9 @@ def handle_status(agent: Any, arg: str) -> CommandResult:
     style = getattr(s, "output_style", "default") or "default"
     if style != "default":
         kv("Output style", style)
-    if getattr(agent, "fast_mode", False):
-        kv("Fast mode", f"{GOLD}on{RST} {SLATE}(/fast off returns to {getattr(agent, '_fast_prev_model', '')}){RST}")
+    if getattr(agent, "fast_mode", False) or getattr(agent, "fast_speed", False):
+        from axon.agent.speed import status_line as _fast_status
+        kv("Fast mode", f"{GOLD}on{RST} {SLATE}({_fast_status(agent)}){RST}")
     goal = getattr(agent, "goal", None) or getattr(s, "goal", None)
     if goal:
         kv("Goal", f"{WHITE}{goal}{RST}")
@@ -186,11 +187,24 @@ _CONFIG_KEYS: dict[str, str] = {
     "effort": "reasoning effort (/effort)",
     "mode": "permission mode (/mode)",
     "thinking": "stream reasoning (true/false)",
+    "steer_interrupts": "a message typed mid-answer interrupts the answer and is read at once (true/false)",
+    "context_editing": "clear old tool results from what the model sees in long sessions (true/false; the Anthropic API does it itself, every other provider gets the same clearing from Axon)",
+    "context_edit_trigger": "input tokens at which context editing starts clearing (default 100000)",
+    "context_edit_keep": "newest tool results context editing always keeps (default 6)",
+    "context_edit_clear_at_least": "context editing skips a clear that frees fewer tokens than this (default 25000)",
+    "refusal_fallback_model": "model to retry once on when the answer is declined (empty = off; works with any provider)",
+    "server_tool_search": "Anthropic server-side tool search for deferred tools: auto | on | off (other providers use the client-side ToolSearch)",
+    "exact_token_count": "ask the Anthropic count-tokens endpoint for the exact prompt size near the compact threshold (true/false)",
+    "inference_geo": "data residency: global | us | empty for the workspace default; sent on the official Anthropic API only, every other provider ignores it",
     "max_tokens": "max output tokens per call",
     "max_iterations": "max LLM calls per turn",
     "compact_at": "auto-compact threshold (0.85, 85% or 500k tokens)",
+    "compact_keep_turns": "newest user turns kept word for word after the compaction summary (default 2, minimum 1)",
+    "compact_background": "summarize in the background near the threshold while you keep working (true/false)",
+    "compact_background_at": "background compaction starts at this share of the auto-compact point (default 0.8)",
+    "compact_server_side": "let the Anthropic API write the compaction summary (official API and supported models only; other providers compact client-side) (true/false)",
     "max_history_turns": "sliding window in turns (0 = unlimited)",
-    "parallel_tools": "max parallel read-only tools",
+    "parallel_tools": "max read-only tools run at once (1 = one at a time, and the model is asked for one call per reply)",
     "bash_timeout_s": "Bash timeout in seconds",
     "tool_output_cap": "max chars of tool output fed back",
     "base_url": "provider endpoint",
@@ -215,6 +229,15 @@ def _coerce(current: Any, raw: str) -> Any:
 
 
 # Interactive /config panel: key -> (label, choices | None for free text | "bool", settings.json key)
+def _offered_efforts(agent: Any, names: Any) -> list[str]:
+    """The effort names the current model takes (its published capabilities, else a built-in table)."""
+    try:
+        from axon.providers.model_caps import offered_efforts
+        return offered_efforts(str(agent.settings.model), tuple(names))
+    except Exception:
+        return list(names)
+
+
 def _panel_keys(agent: Any) -> list[tuple[str, str, Any, str]]:
     from axon.commands.model_cmds import TRACE_LEVELS, _EFFORTS, _MODES
     from axon.commands.prefs_cmds import THEMES
@@ -226,8 +249,13 @@ def _panel_keys(agent: Any) -> list[tuple[str, str, Any, str]]:
     return [
         ("model", "Model", None, "model"),
         ("mode", "Permission mode", list(_MODES), "permissions.defaultMode"),
-        ("effort", "Reasoning effort", list(_EFFORTS), "effortLevel"),
+        ("effort", "Reasoning effort", _offered_efforts(agent, _EFFORTS), "effortLevel"),
+        ("auto_effort", "Auto effort per message (low for routine follow-ups)", "bool", "autoEffort"),
         ("thinking", "Show thinking", "bool", "alwaysThinkingEnabled"),
+        ("steer_interrupts", "Typing mid-answer interrupts it", "bool", "steerInterrupts"),
+        ("context_editing", "Clear old tool results", "bool", "contextEditing"),
+        ("exact_token_count", "Exact token counts", "bool", "exactTokenCount"),
+        ("parallel_tools", "Parallel tools (1 = off)", ["1", "2", "4", "6", "8"], "parallelTools"),
         ("trace_level", "Trace level", list(TRACE_LEVELS), "traceLevel"),
         ("output_style", "Output style", styles, "outputStyle"),
         ("theme", "Theme", [n for n, _ in THEMES], "theme"),
@@ -292,6 +320,8 @@ def set_config_value(agent: Any, key: str, raw: Any, persist: bool = True) -> st
         elif key == "output_style":
             from axon.commands.prefs_cmds import handle_output_style
             handle_output_style(agent, value)
+        elif key == "parallel_tools":
+            update_settings(agent, parallel_tools=int(value))   # how many read-only tools run at once; 1 also asks the model for one call per reply
         elif key == "forecast_threshold_usd":
             try:
                 value = max(0.0, float(str(value).strip().lstrip("$")))
@@ -339,7 +369,7 @@ def _config_panel(agent: Any) -> CommandResult:
                     return True
                 msg = set_config_value(agent, k, text)
             else:
-                i = choices.index(val) if val in choices else -1
+                i = choices.index(str(val)) if str(val) in choices else -1
                 step = -1 if key == "left" else 1
                 msg = set_config_value(agent, k, choices[(i + step) % len(choices)])
             sel.flash(f"✓ {msg} (saved to ~/.axon/settings.json)")
@@ -548,16 +578,19 @@ def handle_keybindings(agent: Any, arg: str) -> CommandResult:
 
 
 @command("notify", category=CAT, description="Desktop notifications: when they fire (important/all/off), or send a test",
-         usage="/notify [important|all|off|after <seconds>|terminal <off|bell|osc9|osc777>|test [message]]")
+         usage="/notify [status|important|all|off|after <seconds>|terminal <off|bell|osc9|osc777>|webhook <url>|test [message]]")
 def handle_notify(agent: Any, arg: str) -> CommandResult:
     from axon.commands.common import update_settings, update_settings_file
     from axon.ui.notify import NOTIFY_MODES, configure, send_desktop_notification
     words = arg.split()
     sub = words[0].lower() if words else ""
     s = agent.settings
+    from axon.features import notify as sinks_
+    if sinks_.handle_command(agent, arg):          # status, test, webhook, off: every sink, not only the desktop
+        configure(agent.settings)
+        return CommandResult(handled=True)
     if sub in NOTIFY_MODES:
-        update_settings(agent, notifications=sub)
-        update_settings_file({"notifications": sub}, workspace=ws_of(agent))
+        sinks_.persist_mode(agent, sub)
         configure(agent.settings)
         ok(f"Desktop notifications: {sub}")
         return CommandResult(handled=True)

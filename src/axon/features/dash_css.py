@@ -472,6 +472,13 @@ details.adv .card{margin-top:8px}details.adv code{background:var(--code-bg);padd
 @media (prefers-reduced-motion:reduce){.fanout .sa-row.now .sk{animation:none}}
 .sa-ctl{display:flex;gap:6px;padding:6px 10px;border-top:1px solid var(--line)}
 .sa-ctl[hidden]{display:none}
+.sa-crumb{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin:0 0 6px}
+.sa-chip{display:inline-block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:2px 8px;border:1px solid var(--line);border-radius:999px;color:var(--ink);background:var(--surface);vertical-align:middle}
+.sa-chip[data-state=running]{border-color:var(--ink)}.sa-chip[data-state=failed]{border-style:dashed}
+.sa-compose{position:sticky;bottom:0;display:flex;gap:8px;align-items:flex-end;padding:10px 0 12px;background:var(--page);border-top:1px solid var(--line);z-index:5}
+.sa-compose textarea{flex:1;min-width:0;min-height:44px;max-height:200px;resize:vertical;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:inherit;color:var(--ink)}
+.sa-compose textarea:focus{outline:2px solid var(--primary);outline-offset:1px}
+.sa-compose .btn{min-height:44px}
 .sa-ctl .sa-say{flex:1;min-width:0;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);padding:4px 8px;font:inherit;font-size:12px}
 .sa-ctl .sa-say:focus{outline:2px solid var(--primary);outline-offset:1px}
 .sa-row.you .sk,.sa-row.you .sn{color:var(--primary)}

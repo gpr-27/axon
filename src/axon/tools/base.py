@@ -39,6 +39,9 @@ class Tool(ABC):
     description: ClassVar[str]
     schema: ClassVar[dict[str, Any]]
     readonly: ClassVar[bool] = False
+    # True: never runs beside another call of the same batch (file edits, git writes, Bash). None: derived,
+    # every tool that is not read-only is serial. A read-only tool can opt in with True.
+    serial: ClassVar[bool | None] = None
     default_permission: ClassVar[Literal["allow", "ask", "deny"]] = "ask"
     # Hidden tools stay callable through ToolRegistry.get() (e.g. by slash
     # commands) but are not advertised to the model in schemas().
@@ -69,6 +72,15 @@ class Tool(ABC):
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────
+
+def is_serial(tool: Any) -> bool:
+    """Must *tool* run alone (in the order the model asked) when a batch holds several calls?"""
+    target = getattr(tool, "target", tool)
+    explicit = getattr(target, "serial", None)
+    if explicit is not None:
+        return bool(explicit)
+    return not bool(getattr(target, "readonly", False))
+
 
 def human_size(n: int) -> str:
     if n >= 1_048_576:

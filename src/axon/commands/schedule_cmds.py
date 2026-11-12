@@ -21,8 +21,13 @@ USAGE = """/schedule                                    open the task menu
 /schedule add daily 09:00 <prompt>           run every day at 09:00
 /schedule add weekly mon,wed 09:00 <prompt>  run on those days
 /schedule add once 2026-11-09 14:30 <prompt> run once (or: once in 2h)
-    options: --mode readonly|edits   --budget 1.50   --folder DIR   (default: read-only, $1.00, this folder)
-/schedule run|pause|resume|delete|history <id>
+/schedule add cron 30 9 * * 1-5 <prompt>     5-field cron (minute hour day month weekday)
+    options: --mode readonly|edits   --max-cost 1.50|off   --max-tokens 200000   --tz Europe/London   --folder DIR
+             (default: read-only, $1.00 per run, this folder; --budget is the same as --max-cost)
+/schedule pause|resume <id>                  pause keeps the schedule and skips its fires
+/schedule run <id>                           run now; the next scheduled fire does not move
+/schedule next <id>                          the next fire times        /schedule runs <id>   /schedule log   the run log
+/schedule delete|stop <id>
 Tasks run only while Axon is open (this terminal or the app)."""
 
 _SHORT = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -43,9 +48,8 @@ def _money(v: Any) -> str:
 
 
 def _word(status: str) -> str:
-    return {"ok": "succeeded", "failed": "failed", "budget": "hit its spending limit", "stopped": "stopped",
-            "timeout": "timed out", "missed": "missed", "skipped": "skipped", "running": "running",
-            "interrupted": "interrupted"}.get(status, status)
+    from axon.features.schedule_ext import outcome
+    return outcome(status)
 
 
 def _line(t: dict[str, Any]) -> str:
@@ -96,7 +100,7 @@ def parse_add(agent: Any, arg: str, now: float | None = None) -> dict[str, Any]:
     rest: list[str] = []
     i = 0
     while i < len(words):
-        if words[i] in ("--mode", "--budget", "--folder") and i + 1 < len(words):
+        if words[i] in ("--mode", "--budget", "--max-cost", "--max-tokens", "--tz", "--folder") and i + 1 < len(words):
             opts[words[i][2:]] = words[i + 1]
             i += 2
         elif words[i] == "--i-understand":
@@ -124,6 +128,11 @@ def parse_add(agent: Any, arg: str, now: float | None = None) -> dict[str, Any]:
             raise sch.ScheduleError("Say the days and the time, for example: weekly mon,wed 09:00.")
         f["kind"], f["days"], f["at"] = "weekly", parse_days(rest[1]), rest[2]
         rest = rest[3:]
+    elif kind == "cron":
+        if len(rest) < 6:
+            raise sch.ScheduleError("Give five cron fields, for example: cron 30 9 * * 1-5 <prompt>.")
+        f["kind"], f["cron"] = "cron", " ".join(rest[1:6])
+        rest = rest[6:]
     elif kind == "once":
         f["kind"] = "once"
         f["once_at"], rest = parse_once(rest[1:], now)
@@ -133,11 +142,22 @@ def parse_add(agent: Any, arg: str, now: float | None = None) -> dict[str, Any]:
     f["folder"] = opts.get("folder") or str(ws_of(agent))
     mode = opts.get("mode", sch.DEFAULT_MODE)
     f["mode"] = {"read-only": "readonly", "readonly": "readonly", "edits": "edits", "bypass": "bypass"}.get(mode, mode)
-    if "budget" in opts:
+    cost = opts.get("max-cost", opts.get("budget"))
+    if cost is not None:
+        if cost.lower() == "off":
+            f["cap_off"] = True
+        else:
+            try:
+                f["budget_usd"] = float(cost.lstrip("$"))
+            except ValueError:
+                raise sch.ScheduleError("The cap is a number of dollars, for example --max-cost 0.50 (or off).") from None
+    if "max-tokens" in opts:
         try:
-            f["budget_usd"] = float(opts["budget"].lstrip("$"))
+            f["max_tokens"] = int(opts["max-tokens"])
         except ValueError:
-            raise sch.ScheduleError("The budget is a number of dollars, for example --budget 0.50.") from None
+            raise sch.ScheduleError("The token cap is a whole number, for example --max-tokens 200000.") from None
+    if "tz" in opts:
+        f["tz"] = opts["tz"]
     if opts.get("ack"):
         f["bypass_ack"] = True
     return f
@@ -149,18 +169,25 @@ def _print_list(tasks: list[dict[str, Any]]) -> None:
     for t in tasks:
         mark = f"{MINT}●{RST}" if t["running"] else f"{SLATE}○{RST}"
         print(f"    {mark} {CYAN}{t['id']}{RST}  {WHITE}{_line(t)}{RST}")
-        print(f"        {SLATE}{t['folder']} · {sch.MODES[t['mode']][1]} · up to {_money(t['budget_usd'])} per run{RST}")
+        cap = "no cap" if t.get("cap_off") else f"up to {_money(t['budget_usd'])}" + (f" / {t['max_tokens']:,} tokens" if t.get("max_tokens") else "")
+        print(f"        {SLATE}{t['folder']} · {sch.MODES[t['mode']][1]} · {cap} per run{RST}")
 
 
-def _print_history(runs: list[dict[str, Any]]) -> None:
+def _print_history(runs: list[dict[str, Any]], names: bool = False) -> None:
     if not runs:
         info("Nothing has run yet.")
     for r in runs:
         sid = f"  session {r['session_id']}" if r.get("session_id") else ""
-        cost = "" if r.get("status") in ("missed", "skipped") else f"  {_money(r.get('cost_usd'))}"
-        print(f"    {CYAN}{_stamp(r.get('started'))}{RST}  {WHITE}{_word(str(r.get('status')))}{RST}{cost}{SLATE}{sid}{RST}")
+        quiet = r.get("status") in ("missed", "skipped")
+        cost = "" if quiet else f"  {_money(r.get('cost_usd'))}"
+        tok = f" · {r['tokens_in'] + r['tokens_out']:,} tokens" if not quiet and (r.get("tokens_in") or r.get("tokens_out")) else ""
+        dur = f" · {r['duration_s']:g}s" if not quiet and r.get("duration_s") else ""
+        who = f"  {r.get('name', '')}" if names else ""
+        how = "manual" if r.get("trigger") == "manual" else ""
+        print(f"    {CYAN}{_stamp(r.get('started'))}{RST}  {WHITE}{r.get('outcome') or _word(str(r.get('status')))}{RST}{cost}{SLATE}{tok}{dur}"
+              f"{' · ' + how if how else ''}{sid}{who}{RST}")
         if r.get("error"):
-            print(f"        {SLATE}{r['error']}{RST}")
+            print(f"        {SLATE}{(r.get('failure') + ': ') if r.get('failure') and r['failure'] not in r['error'] else ''}{r['error']}{RST}")
 
 
 def _find(s: sch.Scheduler, ident: str) -> dict[str, Any] | None:
@@ -344,14 +371,19 @@ def handle_schedule(agent: Any, arg: str) -> CommandResult:
             t = s.add(parse_add(agent, rest))
             ok(f"Added task {t['id']}: {sch.describe(t)} ({sch.MODES[t['mode']][1]}, up to {_money(t['budget_usd'])} per run). It runs only while Axon is open.")
             return _done()
-        if sub in ("run", "pause", "resume", "delete", "rm", "history", "stop"):
+        if sub == "log":
+            header("Run log", "newest first")
+            _print_history(s.history(None, 30), names=True)
+            print()
+            return _done()
+        if sub in ("run", "pause", "resume", "delete", "rm", "history", "runs", "next", "stop"):
             t = _find(s, rest)
             if t is None:
                 err("No such task. /schedule list shows them." if rest else f"Usage: /schedule {sub} <id>")
                 return _done()
             if sub == "run":
                 s.run_now(t["id"])
-                ok(f"Started '{t['name']}'. It is saved as a session when it finishes.")
+                ok(f"Started '{t['name']}'. It is saved as a session when it finishes. The next scheduled fire is unchanged.")
             elif sub == "stop":
                 ok("Stopping." if s.stop_run(t["id"]) else "It is not running here.")
             elif sub == "pause":
@@ -360,8 +392,18 @@ def handle_schedule(agent: Any, arg: str) -> CommandResult:
             elif sub == "resume":
                 s.set_enabled(t["id"], True)
                 ok(f"Resumed '{t['name']}'.")
-            elif sub == "history":
-                header(t["name"], "run history")
+            elif sub == "next":
+                from axon.features import schedule_ext as ext
+                if not t.get("enabled", True):
+                    info(f"'{t['name']}' is paused; it has no next fire until /schedule resume.")
+                else:
+                    fires = ext.next_fires(t, time.time(), 3)
+                    for ts in fires or []:
+                        print(f"    {CYAN}{ext.local_wall(ts, t.get('tz'))}{RST}")
+                    if not fires:
+                        info("Nothing is scheduled.")
+            elif sub in ("history", "runs"):
+                header(t["name"], "run log")
                 _print_history(s.history(t["id"], 20))
                 print()
             else:

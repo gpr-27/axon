@@ -5,12 +5,13 @@ JS_SETTINGS = r"""
 async function viewSettings(rest) {
   const tab = (rest || 'appearance').split('?')[0];
   return shell('settings', async (pane) => {
-    const tabs = h('div', { class: 'tabs', role: 'tablist' }, ...[['appearance', 'Appearance'], ['providers', 'Providers'], ['preferences', 'Preferences'], ['details', 'Permissions and details']].map(([k, l]) => h('button', { role: 'tab', 'aria-selected': String(k === tab), onclick: () => { location.hash = '#/settings/' + k; } }, l)));
+    const tabs = h('div', { class: 'tabs', role: 'tablist' }, ...[['appearance', 'Appearance'], ['providers', 'Providers'], ['preferences', 'Preferences'], ['vault', 'Vault'], ['details', 'Permissions and details']].map(([k, l]) => h('button', { role: 'tab', 'aria-selected': String(k === tab), onclick: () => { location.hash = '#/settings/' + k; } }, l)));
     const body = h('div');
     pane.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Settings'), h('div', { class: 'sub' }, 'How Axon looks, how it connects to a model, and how it behaves. Keys are saved on this computer and never shown again.'))), tabs, body);
     if (tab === 'appearance') return appearanceTab(body);
     if (tab === 'providers') return providersTab(body, providersOrigin(rest));
     if (tab === 'preferences') return preferencesTab(body);
+    if (tab === 'vault') return vaultTab(body);
     return detailsTab(body);
   }, { key: 'settings:' + (rest || 'appearance').split('?')[0], hash: '#/settings/' + (rest || 'appearance').split('?')[0], title: 'Settings' });
 }

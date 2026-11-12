@@ -305,15 +305,11 @@ def test_every_step_of_a_turn_is_on_screen_at_the_default_level_live_and_after_a
     text = "\n".join(rows)
     # each model call: its number, tools, time and cost
     assert _has(rows, "shead | Step 1", "2 tools", "$") and _has(rows, "shead | Step 2", "1 tool", "$"), text
-    # what the model was sent
-    assert _has(rows, "sline | Sent", "conversation", "system", "tools", "effort", "tools offered"), text
-    assert _has(rows, "sline | Sent", "2 tool results fed back"), text
-    # what came back, and the cache
-    assert _has(rows, "sline | Got", "1.2k in / 80 out", "cache miss: first request of the session"), text
-    assert _has(rows, "sline | Got", "900 cached", "cache hit"), text
+    # no Sent / Got / stats rows between steps: one usage summary closes the turn instead
+    assert not _has(rows, "sline") and not _has(rows, "cache miss"), text
     # which rule or mode let each tool run
     assert _has(rows, "xrow", "Read", "allowed by acceptEdits mode") and _has(rows, "xrow", "Bash", "allowed by rule Bash(echo:*)"), text
-    assert _has(rows, "phead | 2 tools ran together"), text
+    assert _has(rows, "phead | 2 calls ran in parallel"), text
     page.cmd("reload")
     again = page.wait_rows("Step 3")
     assert again == rows, "after a reload the turn reads differently:\n" + "\n".join(again) + "\n--- was\n" + text
@@ -345,7 +341,7 @@ def test_a_turn_that_ran_while_the_connection_was_down_is_drawn_whole_when_it_co
             break
     heads = [r.split(";")[0] for r in rows if r.startswith("shead")]
     assert heads == ["shead | Step 1 ", "shead | Step 2 ", "shead | Step 3 "] * 2, "\n".join(rows)     # each step once, none missing
-    assert sum(1 for r in rows if r.startswith("xrow") and "Tool call" in r) == 6, "\n".join(rows)
+    assert sum(1 for r in rows if r.startswith("xrow") and not r.startswith("xrow | Thinking")) == 6, "\n".join(rows)
     assert len(want) < len(rows)
 
 

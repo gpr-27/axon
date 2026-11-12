@@ -457,6 +457,13 @@ class MemoryLoader:
                 node = InstructionFile(path=idx, scope="auto", content=text)
                 self.seen.add(_file_key(idx))
                 self.loaded.append(node)
+            try:        # the facts Axon saved from what you said are short: give them in full, not only as index lines
+                from axon.agent.auto_memory import startup_topics
+                for tp, ttext in startup_topics(self.workspace):
+                    if not self._excluded(tp):
+                        self.loaded.append(InstructionFile(path=tp, scope="auto", content=ttext))
+            except Exception:
+                pass
         return self.loaded[start:]
 
     def on_file_access(self, file_path: Path | str) -> list[InstructionFile]:
@@ -748,7 +755,9 @@ class MemoryStore:
         if not clean:
             raise ValueError("Memory text is empty.")
         scope = "global" if scope in ("global", "user") else "auto" if scope in ("auto", "private") else "project"
-        return self.learn(clean, category="preferences" if scope == "global" else "conventions", scope=scope)
+        from axon.features import memory_history as _mh
+        with _mh.writing_as("user (# quick-add)"):
+            return self.learn(clean, category="preferences" if scope == "global" else "conventions", scope=scope)
 
     def list_all(self) -> list[MemoryItem]:
         """List memory items from global and project stores; project items override same id."""

@@ -57,21 +57,70 @@ def handle_reload_skills(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
-@command("list-agents", category=CAT, aliases=("peers",),
-         description="List the subagents of this session, with their status and tokens")
-def handle_list_agents(agent: Any, arg: str) -> CommandResult:
+def _roster(agent: Any) -> list[Any]:
+    """The session's subagents, rebuilt from the saved transcripts when this process has not seen them run."""
     mgr = getattr(agent, "subagents", None)
-    tasks = mgr.all_tasks() if mgr is not None and hasattr(mgr, "all_tasks") else []
+    if mgr is None or not hasattr(mgr, "all_tasks"):
+        return []
+    if not mgr.all_tasks():
+        try:
+            from axon.agent.subagent import sync_subagents_for_session
+            sync_subagents_for_session(agent)
+            mgr = agent.subagents
+        except Exception:
+            pass
+    return mgr.all_tasks()
+
+
+@command("list-agents", category=CAT, aliases=("peers",),
+         description="List the subagents of this session, with their status and tokens (open one with /agent <n>)")
+def handle_list_agents(agent: Any, arg: str) -> CommandResult:
+    tasks = _roster(agent)
     header("Agents", f"main + {len(tasks)} subagent(s)")
     if not tasks:
         info("No subagents yet. Ask for parallel work" + typed_only(", or use /subtask <task>") + ".")
         return CommandResult(handled=True)
-    colors = {"running": GOLD, "completed": MINT, "error": ROSE, "exhausted": ROSE}
+    colors = {"running": GOLD, "completed": MINT, "error": ROSE, "exhausted": ROSE, "queued": SLATE, "cancelled": SLATE}
     rows = []
     for t in tasks:
-        rows.append([f"{WHITE}{t.id}{RST}", t.agent_type, f"{colors.get(t.status, SLATE)}{t.status}{RST}",
+        who = f"{t.id}" + (f" ({t.name})" if getattr(t, "name", "") else "")
+        rows.append([f"{WHITE}{who}{RST}", t.agent_type, f"{colors.get(t.status, SLATE)}{t.status}{RST}",
                      clip(t.activity or t.title, 44), f"{t.elapsed_s:.0f}s", fmt_tokens(t.tokens_consumed)])
     table(rows, ["Id", "Type", "Status", "Doing", "Time", "Tokens"])
+    typed_only_hint = typed_only("  /agent <n> shows everything it did; /agent <n> <message> talks to it")
+    if typed_only_hint:
+        print(f"  {SLATE}{typed_only_hint.strip()}{RST}")
+    return CommandResult(handled=True)
+
+
+@command("agent", category=CAT, aliases=("peer",),
+         description="Open a subagent (everything it did: prompt, thinking, every tool call and its answer) or message it",
+         usage="/agent <name|n>             show its whole transcript, every step in full\n"
+               "/agent <name|n> <message>   steer it while it runs, or resume it with its history when it finished\n"
+               "/agent                      the list (same as /list-agents)")
+def handle_agent(agent: Any, arg: str) -> CommandResult:
+    who, _, text = arg.strip().partition(" ")
+    if not who:
+        return handle_list_agents(agent, "")
+    tasks = _roster(agent)
+    mgr = agent.subagents
+    task = mgr.get_task(who.lstrip("#@")) if tasks else None
+    if task is None:
+        err(f"No subagent '{who}'. Known: " + (", ".join(t.id for t in tasks) or "none yet") + ".")
+        return CommandResult(handled=True, success=False)
+    from axon.commands.agent_cmds import _subagent_info, _subagent_log, _subagent_send
+    if text.strip():
+        return _subagent_send(agent, task.id, text.strip())
+    try:
+        parent_id = agent.session.active_session_id.rsplit("_sub_", 1)[0]
+        _subagent_info(agent, parent_id, task)
+    except Exception:
+        pass
+    _subagent_log(task)
+    if task.status == "running":
+        info(f"{task.id} is running. Steer it with /agent {task.index} <message>.")
+    else:
+        info(f"{task.id} has finished. Continue it with /agent {task.index} <message>.")
     return CommandResult(handled=True)
 
 

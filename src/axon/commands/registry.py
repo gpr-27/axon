@@ -383,6 +383,8 @@ def _journal_command(agent: Any, label: str, arg: str, res: CommandResult, start
         if label == "/keys":  # never journal a key typed as an argument
             from axon.providers.keystore import redact_keys_arg
             arg = redact_keys_arg(arg)
+        elif label == "/vault":  # only the subcommand and the item name are journaled, whatever else was typed
+            arg = " ".join(arg.split()[:2])
         data: dict[str, Any] = {"name": label, "arg": arg, "success": bool(res.success),
                                 "duration_s": round(_time.time() - started, 3)}
         if kind == "memory":

@@ -135,7 +135,7 @@ def test_live_timeline_structure(out):
     end = next(i for i, r in enumerate(drows) if "subagent completed" in r)
     nested = [r for r in drows[start + 1:end] if "┊" in r]
     assert len(nested) == 2 and "LLM claude-haiku-4" in nested[0] and "Bash" in nested[1]
-    assert "1 message you typed during the turn sent to the model" in plain
+    assert "you: also check the edge case with None" in plain and "interrupting the current answer" not in plain
     assert "took " in detailed                        # timing under the subagent card, not glued to it
     assert "auto-allowed" not in plain and "approved by you" in plain       # the Task card's run line
     assert "approved by you (once)" in detailed

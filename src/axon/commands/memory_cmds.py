@@ -129,8 +129,16 @@ def quick_memory(agent: Any, text: str) -> Any:
     return CommandResult(handled=True)
 
 
-MEMORY_USAGE = """/memory [--scope global|project|repo] [--type user|feedback|project|reference]   browse
-/memory add [--global|--project|--repo] <text>   save (LLM-distilled; default --repo = .axon/memory)
+MEMORY_USAGE = """/memory                       every scope at a glance: global, project, local, repo notes, auto memory
+/memory show <scope>          read one (scope = global|project|local|repo|auto)
+/memory add <scope> <text>    append a line (global=~/.axon/AXON.md, project=AXON.md, local=AXON.local.md, auto, repo)
+/memory edit <scope> [text]   open it in $EDITOR (or replace its text inline); local is added to .gitignore
+/memory forget <text>         delete every remembered line that contains the text (asks first)
+/memory history [<scope|note>]  who wrote what and when; /memory restore <note> <v>, /memory redact <note> <v> [value]
+/dream [--apply|--undo]       consolidate notes from past sessions (dry run by default)
+/memory auto [on|off]         auto memory: Axon saves durable facts you state, per project
+/memory [--scope global|project|repo] [--type user|feedback|project|reference]   browse notes
+/memory add [--global|--project|--repo] <text>   save a note (LLM-distilled; default --repo = .axon/memory)
 /memory view|edit|remove <n|id|scope:id>   edit <user|project|local> opens the AXON.md file
 /memory move <n|id> <global|project|repo>   /memory search <text>   /memory clear [scope]
 /memory restore [n|name]       list or bring back deleted/overwritten versions
@@ -143,17 +151,7 @@ MEMORY_USAGE = """/memory [--scope global|project|repo] [--type user|feedback|pr
 def _listing(agent: Any, items: list[Any]) -> None:
     ws = ws_of(agent)
     mf = _mf()
-    header("Memory", "loaded into every prompt (indexes) · files on disk")
-    section("Instruction files")
-    for label, p in _instruction_files(ws):
-        if p.exists():
-            try:
-                size = estimate_tokens(p.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                size = 0
-            print(f"    {MINT}●{RST} {SLATE}{label:<8}{RST} {WHITE}{p}{RST} {DARK_SLATE}~{fmt_tokens(size)} tok{RST}")
-        else:
-            print(f"    {DARK_SLATE}○ {label:<8} {p}  (not created{typed_only(' · /memory edit ' + label)}){RST}")
+    _hub_overview(agent)
     for scope in mf.SCOPES:
         d = mf.scope_dir(ws, scope) if scope != "project" else (mf._project_dir_nocreate(ws) or Path("."))
         rows = [(i, m) for i, m in enumerate(items, 1) if m.scope == scope]
@@ -173,6 +171,11 @@ def _listing(agent: Any, items: list[Any]) -> None:
     print()
     typed_hint("    /memory add · view · edit · remove · move · search · restore · reindex · doctor · why · export · import")
     print()
+
+
+def _mh_sha(path: Path) -> str:
+    from axon.features import memory_history
+    return memory_history.file_sha(path)
 
 
 def _resolve(ws: Path, key: str, items: list[Any]) -> Any:
@@ -425,7 +428,155 @@ def _import_cmd(agent: Any, rest: str) -> None:
     _reload(agent)
 
 
-@command("memory", category=CAT, description="Browse, search and manage memory: global, project and repo scopes",
+def _hub() -> Any:
+    from axon.features import memory_hub
+    return memory_hub
+
+
+def _agent_settings(agent: Any) -> Any:
+    return getattr(agent, "settings", None)
+
+
+def _hub_overview(agent: Any) -> None:
+    """The scope overview: path, state, size, last change and whether it is loaded into the prompt."""
+    hub = _hub()
+    ws = ws_of(agent)
+    rows = hub.overview(ws, _agent_settings(agent))
+    header("Memory", "what Axon is given at the start of every session, and what it learned")
+    for r in rows:
+        mark = f"{MINT}●{RST}" if r["loaded"] else f"{DARK_SLATE}○{RST}"
+        if r["kind"] == "file":
+            state = (f"{fmt_tokens(r['size'])}B · {hub.stamp(r['mtime'])}" if r["exists"] and not r["empty"]
+                     else "empty" if r["exists"] else "not created")
+        else:
+            state = f"{r['count']} note{'s' if r['count'] != 1 else ''}" + (f" · {hub.stamp(r['mtime'])}" if r["count"] else "")
+            if r["key"] == "auto" and not r.get("enabled", True):
+                state += " · auto memory is OFF"
+        loaded = "loaded" if r["loaded"] else "not loaded"
+        print(f"    {mark} {WHITE}{r['label']:<12}{RST} {SLATE}{state}{RST} {DARK_SLATE}· {loaded}{RST}")
+        print(f"       {DARK_SLATE}{r['display']}  {r['blurb'].split('(')[0].strip()}{RST}")
+    try:
+        from axon.agent.memory import discover_instruction_files
+        extra = [n for n in discover_instruction_files(ws) if getattr(n, "scope", "") not in ("auto", "global-memory", "repo-memory")
+                 and str(n.path) not in {r["path"] for r in rows}]
+        if extra:
+            print(f"    {MINT}●{RST} {WHITE}{'Other files':<12}{RST} {SLATE}{len(extra)} loaded{RST} {DARK_SLATE}· "
+                  + ", ".join(_short(n.path) for n in extra[:4]) + ("…" if len(extra) > 4 else "") + RST)
+    except Exception:
+        pass
+    typed_hint("    /memory show|add|edit <scope> · forget <text> · auto on|off · why · doctor")
+    print()
+
+
+def _hub_command(agent: Any, sub: str, rest: str) -> bool:
+    """Scope-based subcommands (global|project|local|repo|auto). False when this is not one of them."""
+    hub = _hub()
+    ws = ws_of(agent)
+    first, _, tail = rest.partition(" ")
+    tail = tail.strip()
+    if sub == "auto":
+        want = first.lower()
+        cur = hub.auto_enabled(_agent_settings(agent))
+        if want in ("", "status"):
+            ok(f"Auto memory is {'on' if cur else 'off'}: " + ("Axon saves durable facts you state to this project's notes. /memory auto off turns it off."
+                                                           if cur else "nothing is saved automatically. /memory auto on turns it on."))
+            return True
+        if want not in ("on", "off", "toggle"):
+            usage("/memory auto [on|off]")
+            return True
+        new = (not cur) if want == "toggle" else want == "on"
+        saved = hub.set_auto(new, [agent])
+        ok(f"Auto memory {'on' if new else 'off'}" + (f" {SLATE}(saved to {_short(saved)}){RST}" if saved else ""))
+        return True
+    if sub in ("show", "view", "read", "cat") and hub.is_key(first) and not tail:
+        key = hub.norm(first)
+        row = next(r for r in hub.overview(ws, _agent_settings(agent)) if r["key"] == key)
+        text = hub.read_scope(ws, key)
+        header(row["label"], f"{row['display']} · {'loaded' if row['loaded'] else 'not loaded'}")
+        if not text.strip():
+            print(f"    {SLATE}Empty. /memory add {key} <text> or /memory edit {key}{RST}\n")
+        else:
+            for ln in text.splitlines():
+                print(f"    {WHITE}{ln}{RST}")
+            print()
+        return True
+    if sub in ("add", "learn", "+") and hub.is_key(first) and tail:
+        key = hub.norm(first)
+        try:
+            res = hub.append_line(ws, key, tail)
+        except (ValueError, OSError) as e:
+            err(str(e))
+            return True
+        where = _short(res["path"])
+        if res["action"] == "unchanged":
+            info(f"Already in {hub.LABELS[key]} memory ({where}).")
+        else:
+            ok(f"Remembered in {BOLD}{hub.LABELS[key]}{RST} {SLATE}→ {where}{RST}")
+        if res.get("gitignored"):
+            info("AXON.local.md is personal: it was added to .gitignore.")
+        _say_redaction(list(res.get("redacted") or []))
+        _reload(agent)
+        return True
+    if sub in ("edit", "open") and hub.is_key(first or "project") and (first or "project") != "":
+        key = hub.norm(first or "project")
+        if key in ("repo", "auto"):
+            d = hub.notes_dir(ws, key)
+            if is_tty():
+                _open_folder(d)   # type: ignore[arg-type]
+            else:
+                info(f"{hub.LABELS[key]} are the files in {_short(d)}/ . Edit one in your editor, or: /memory edit <n|id> <new text>")
+            return True
+        p = hub.file_path(ws, key)
+        assert p is not None
+        if tail:                                    # inline replacement, for when there is no editor
+            try:
+                res = hub.write_scope(ws, key, tail)
+            except (ValueError, OSError) as e:
+                err(str(e))
+                return True
+            ok(f"Replaced {hub.LABELS[key]} memory {SLATE}{_short(p)}{RST}")
+            if res.get("gitignored"):
+                info("AXON.local.md is personal: it was added to .gitignore.")
+            _reload(agent)
+            return True
+        if not p.exists():
+            hub.write_scope(ws, key, f"# {'Global' if key == 'global' else ws.name} instructions\n\n")
+            if key == "local":
+                info("AXON.local.md is personal: it was added to .gitignore.")
+        if is_tty():
+            open_in_editor(p)
+            if hub.scan_secrets_in(p):
+                hub.write_scope(ws, key, hub.read_scope(ws, key))      # redacts, keeps the version you saved
+                info("A secret you typed was redacted: memory never stores them.")
+            _reload(agent)
+        else:
+            info(f"Edit {p} in your editor, or: /memory edit {key} <new text>")
+        return True
+    if sub in ("forget", "remove", "delete", "rm", "del") and rest:
+        yes = rest.endswith((" --yes", " -y"))
+        needle = rest.rsplit(" ", 1)[0] if yes else rest
+        if hub.is_key(needle) and sub != "forget":
+            return False
+        if sub != "forget":
+            return False                            # remove/delete keep their id-based meaning
+        if _mf().find_memory(ws, needle) is not None and (needle.isdigit() or ":" in needle):
+            return False
+        hits = hub.forget_matches(ws, needle)
+        if not hits:
+            return False                            # maybe an id/name: the note commands try that next
+        for h in hits[:8]:
+            print(f"    {DARK_SLATE}{hub.LABELS[h['key']]:<11}{RST} {WHITE}{h['line'][:100]}{RST} {DARK_SLATE}{_short(h['path'])}{RST}")
+        if not yes and not confirm(f"Forget {len(hits)} line{'s' if len(hits) != 1 else ''}? (copies are kept: /memory restore)", default=not is_tty()):
+            info("Nothing forgotten.")
+            return True
+        n = hub.forget(ws, hits)
+        ok(f"Forgot {n} line{'s' if n != 1 else ''}")
+        _reload(agent)
+        return True
+    return False
+
+
+@command("memory", category=CAT, description="See and edit all memory: global, project, local, repo notes and auto memory",
          aliases=("mem",), usage=MEMORY_USAGE)
 def handle_memory(agent: Any, arg: str) -> CommandResult:
     ws = ws_of(agent)
@@ -435,6 +586,13 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
     sub = sub.lower()
     rest = rest.strip()
     done = CommandResult(handled=True)
+
+    from axon.commands.memory_history_cmds import handle_history_command
+    if handle_history_command(agent, sub, rest):
+        return done
+
+    if _hub_command(agent, sub, rest):
+        return done
 
     if sub in ("add", "learn", "+"):
         scope, rest = _scope_flag(rest, "repo")
@@ -484,7 +642,11 @@ def handle_memory(agent: Any, arg: str) -> CommandResult:
             err(f"No memory or file '{target}'. Use user, project, local, a number or an id.")
             return done
         if new_text.strip():
-            res = mf.replace_body(ws, m, new_text.strip())
+            try:
+                res = mf.replace_body(ws, m, new_text.strip(), expected_sha=_mh_sha(m.path))
+            except ValueError as e:                   # the note changed meanwhile: say so, never overwrite
+                err(str(e))
+                return done
             ok(f"Updated memory {BOLD}{m.name}{RST} {SLATE}{_short(res.path)}{RST}")
             for n in res.notes():
                 info(n)
@@ -597,6 +759,12 @@ def browser_entries(agent: Any, items: list[Any]) -> list[Any]:
     ws = ws_of(agent)
     mf = _mf()
     entries: list[Any] = []
+    hub = _hub()
+    for r in hub.overview(ws, _agent_settings(agent)):
+        st = (("empty" if r["exists"] else "not created") if r["kind"] == "file" and (r["empty"] or not r["exists"])
+              else f"{r['size']:,} bytes" if r["kind"] == "file" else f"{r['count']} note{'s' if r['count'] != 1 else ''}")
+        entries.append(SelectItem(label=f"{r['label']:<12} {r['display']}", value=("scope", r["key"]), group="Memory scopes",
+                                  hint=f"{st} · {'loaded' if r['loaded'] else 'not loaded'}", badge=f"{MINT}●{RST}" if r["loaded"] else "○"))
     for scope in mf.SCOPES:
         d = mf.scope_dir(ws, scope) if scope != "project" else (mf._project_dir_nocreate(ws) or Path("."))
         group = f"{SCOPE_TITLE[scope]}  {_short(d)}/"
@@ -607,8 +775,11 @@ def browser_entries(agent: Any, items: list[Any]) -> list[Any]:
                                       search=f"{m.description} {m.body[:300]} {scope} {m.type}"))
         if not rows:
             entries.append(SelectItem(label="(empty)", value=("none", None), group=group))
+    own = {r["path"] for r in hub.overview(ws) if r["kind"] == "file"}
     for label, p in _instruction_files(ws):
-        entries.append(SelectItem(label=f"{label:<8} {_short(p)}", value=("file", label, p), group="Instruction files (AXON.md …)",
+        if str(p) in own:
+            continue                     # global, project and local are the scope rows above
+        entries.append(SelectItem(label=f"{label:<8} {_short(p)}", value=("file", label, p), group="Other instruction files",
                                   hint="" if p.exists() else "create", badge=f"{MINT}●{RST}" if p.exists() else "○"))
     tools = [("add", "Remember something new…", "save to a scope"), ("why", "Why was each file loaded?", "tokens and reasons"),
              ("doctor", "Doctor: index health, stale, broken paths", ""), ("reindex", "Rebuild MEMORY.md indexes", "fixes orphans"),
@@ -642,7 +813,9 @@ def memory_picker(agent: Any, items: list[Any]) -> bool:
         acted = True
         if kind == "none":
             continue
-        if kind == "mem":
+        if kind == "scope":
+            _scope_actions(agent, chosen.value[1])
+        elif kind == "mem":
             _memory_actions(agent, chosen.value[1])
         elif kind == "file":
             _, label, path = chosen.value
@@ -670,6 +843,42 @@ def memory_picker(agent: Any, items: list[Any]) -> bool:
             ok(f"Auto memory {'on' if not auto else 'off'}" + (f" {SLATE}(saved to {saved}){RST}" if saved else ""))
         elif kind == "dir":
             _open_folder(Path(chosen.value[1]))
+
+
+def _scope_actions(agent: Any, key: str) -> None:
+    """Actions for one scope row of the browser: view, edit, add a line, delete."""
+    from axon.ui.picker import SelectItem, Selector
+    hub = _hub()
+    ws = ws_of(agent)
+    row = next(r for r in hub.overview(ws, _agent_settings(agent)) if r["key"] == key)
+    acts = [SelectItem(label="View", value="show", hint=row["display"]),
+            SelectItem(label="Edit in $EDITOR" if row["kind"] == "file" else "Open the folder", value="edit"),
+            SelectItem(label="Add a line…", value="add"),
+            SelectItem(label="Delete (a copy is kept)" if row["kind"] == "file" else "Delete all notes (copies are kept)", value="delete")]
+    if key == "auto":
+        on = hub.auto_enabled(_agent_settings(agent))
+        acts.append(SelectItem(label=f"Auto memory: {'on' if on else 'off'} (Enter toggles)", value="toggle"))
+    acts.append(SelectItem(label="Back", value="back"))
+    pick = Selector(acts, title=row["label"], subtitle=f"{row['display']} · {row['blurb']}").run()
+    if pick is None or pick.value == "back":
+        return
+    v = pick.value
+    if v in ("show", "edit"):
+        handle_memory(agent, f"{v} {key}")
+        if v == "show" and is_tty():
+            input("  (Enter to go back) ")
+    elif v == "add":
+        from axon.ui.menus import ask_text
+        text = ask_text(f"Add to {row['label']} memory")
+        if text:
+            handle_memory(agent, f"add {key} {text}")
+    elif v == "delete":
+        if confirm(f"Delete {row['label']} memory? A copy is kept: /memory restore", default=False):
+            res = hub.delete_scope(ws, key)
+            ok(f"Deleted {res['removed']} item(s) from {row['label']} memory")
+            _reload(agent)
+    elif v == "toggle":
+        handle_memory(agent, "auto toggle")
 
 
 def _sel(value: str, label: str) -> Any:

@@ -320,7 +320,8 @@ def request_headers(base_url: str, key: str, api_format: str) -> dict[str, str]:
     if api_format != "anthropic":
         headers["authorization"] = f"Bearer {key}"
         return headers
-    headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+    from axon.providers.anthropic_wire import api_version
+    headers.update({"x-api-key": key, "anthropic-version": api_version(base_url)})
     if not is_official_anthropic(base_url):
         headers["authorization"] = f"Bearer {key}"
     return headers
@@ -504,8 +505,62 @@ def remove_models(eid: str, path: Path | None = None) -> int:
     return removed
 
 
+def _hidden_entries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = data.get("hidden_models")
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+def hidden_models(eid: str, path: Path | None = None) -> set[str]:
+    """Models the user removed from provider *eid*'s picker (config.toml ``hidden_models``)."""
+    try:
+        data = _read_config(path or axon_config_file())
+    except ValueError:
+        return set()
+    return {str(e["model"]) for e in _hidden_entries(data) if e.get("provider") == eid and e.get("model")}
+
+
+def delete_model(eid: str, model: str, path: Path | None = None) -> str:
+    """Remove *model* from provider *eid*'s picker: a saved custom model is forgotten, a built-in or
+    provider-listed one is hidden. Returns "removed", "hidden" or "" when nothing changed."""
+    cfg_path = path or axon_config_file()
+    data = _read_config(cfg_path)
+    entries = _custom_model_entries(data)
+    kept = [e for e in entries if not (e.get("provider") == eid and e.get("model") == model)]
+    outcome = ""
+    if len(kept) != len(entries):
+        if kept:
+            data["custom_models"] = kept
+        else:
+            data.pop("custom_models", None)
+        outcome = "removed"
+    hidden = _hidden_entries(data)
+    if not any(e.get("provider") == eid and e.get("model") == model for e in hidden):
+        hidden.append({"model": model, "provider": eid})
+        data["hidden_models"] = hidden
+        outcome = outcome or "hidden"
+    if outcome:
+        _write_config(cfg_path, data)
+    return outcome
+
+
+def unhide_model(eid: str, model: str, path: Path | None = None) -> bool:
+    """Show *model* in provider *eid*'s picker again."""
+    cfg_path = path or axon_config_file()
+    data = _read_config(cfg_path)
+    hidden = _hidden_entries(data)
+    kept = [e for e in hidden if not (e.get("provider") == eid and e.get("model") == model)]
+    if len(kept) == len(hidden):
+        return False
+    if kept:
+        data["hidden_models"] = kept
+    else:
+        data.pop("hidden_models", None)
+    _write_config(cfg_path, data)
+    return True
+
+
 __all__ = [
-    "EndpointChange", "EndpointTest", "RemoteModels", "ToolProbe", "add_models", "apply_endpoint_overrides", "default_url",
+    "EndpointChange", "EndpointTest", "RemoteModels", "ToolProbe", "add_models", "apply_endpoint_overrides", "delete_model", "hidden_models", "unhide_model", "default_url",
     "fetch_models", "http_get", "http_post", "is_custom", "is_overridden", "load_endpoints", "models_url", "norm",
     "parse_model_ids", "probe_tool_support", "remove_models", "request_headers", "reset_endpoint", "save_endpoint", "saved_models", "set_native_tools",
     "slug", "suggest_env_var", "suggest_id", "test_endpoint", "url_warning", "valid_url",

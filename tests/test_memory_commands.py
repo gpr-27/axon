@@ -188,4 +188,4 @@ def test_prompt_explains_saving_compactly(workspace, _home) -> None:
     assert str(mf.scope_dir(workspace, "project")) not in off and str(_home / "memory") in off
     from axon.agent.state import estimate_content_tokens
     block = text[text.index("Memory:"):].replace(str(mf.scope_dir(workspace, "project")), "P").replace(str(_home / "memory"), "G")
-    assert estimate_content_tokens(block) < 140     # the prompt text itself; the two folder paths add ~20-40 more
+    assert estimate_content_tokens(block) < 160     # (+~12 tokens for the unasked-save sentence) the prompt text itself; the two folder paths add ~20-40 more

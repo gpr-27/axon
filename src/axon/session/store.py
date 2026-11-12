@@ -1126,6 +1126,11 @@ def restore_retry_state(agent: Any, session_id: str | None = None) -> None:
         agent.last_failed_turn = failed
     except Exception:
         pass
+    try:                                    # the done-when goal (its round limit and last verdict) comes back too
+        from axon.agent.goal import restore_goal
+        restore_goal(agent, str(session_id or getattr(agent.session, "active_session_id", "") or ""))
+    except Exception:
+        pass
 
 
 def _journal(kind: str, data: dict[str, Any], store: "SessionStore") -> None:

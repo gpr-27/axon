@@ -238,7 +238,7 @@ def items() -> list[Item]:
              "text", apply=_model_field("fallback_model")),
         Item("small_model", "Small model", "cheap model for compaction, /fast and side tasks ('-' = main model)", M,
              "text", apply=_model_field("small_model")),
-        Item("mode", "Permission mode", "default asks · acceptEdits · plan (read-only) · bypass", P, "choice",
+        Item("mode", "Permission mode", "default asks · acceptEdits · plan (read-only) · auto (classifier) · bypass", P, "choice",
              choices=_choices_from("mode")),
         Item("permissions", "Allow / ask / deny rules", "per-tool rules and extra working directories", P, "command",
              command="/permissions", value=_rules_value),

@@ -58,18 +58,33 @@ async function viewAgents(sid) {
     async function draw() {
       let d; try { d = await saRoster(sid || '', true); } catch (e) { body.replaceChildren(errorBox(e.message)); return; }
       if (!d.subagents.length) body.replaceChildren(h('div', { class: 'empty' }, h('strong', null, 'No subagents yet'), 'When Axon delegates work with the Task tool, each subagent appears here and streams while it runs.'));
-      else body.replaceChildren(table([
-        { label: '', fmt: saDot },
-        { label: 'Subagent', fmt: r => h('div', null, h('a', { href: r.session_id ? '#/agent/' + encodeURIComponent(r.session_id) : null }, h('b', null, '#' + r.index + ' ' + (r.type ? r.type + ' · ' : '') + r.title)), r.activity ? h('div', { class: 'muted', style: 'font-size:12px' }, r.activity) : null, h('div', { class: 'muted', style: 'font-size:12px;max-width:60ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, r.prompt || '')) },
-        { label: 'Status', fmt: saStatusLabel }, { label: 'Model', key: 'model' },
-        { label: 'Parent step', fmt: r => saParentLink(sid, r) },
-        { label: 'Calls', cls: 'r', fmt: r => r.tool_calls || 0 }, { label: 'Tokens', cls: 'r', fmt: r => tok(r.tokens || 0) }, { label: 'Cost', cls: 'r', fmt: r => r.cost != null ? usd(r.cost) : 'n/a' }, { label: 'Time', cls: 'r', fmt: r => r.elapsed ? dur(r.elapsed) : 'n/a' },
-        { label: '', fmt: r => saActions(sid, r, draw) },
-      ], d.subagents));
+      else body.replaceChildren(saPageBoard(sid, d.subagents, draw));
       notes.replaceChildren(...(d.notes || []).map(n => notice(n, 'warn')));
     }
     await draw(); const t = setInterval(() => { if (!closed) draw(); }, 2500); onLeave(() => clearInterval(t));
   }, { key: 'agents:' + sid, hash: '#/agents/' + encodeURIComponent(sid || ''), title: 'Subagents' });
+}
+// The board on the Subagents page: the same lanes and timeline as in the chat step, drawn from the roster (live and finished).
+function saPageBoard(sid, rows, again) {
+  const now = Date.now() / 1000; const run = rows.filter(r => r.live).length, wait = rows.filter(r => r.queued).length;
+  const tokens = rows.reduce((a, r) => a + (r.tokens || 0), 0), cost = rows.reduce((a, r) => a + (r.cost || 0), 0);
+  const head = h('h5', null, rows.length + (rows.length === 1 ? ' subagent' : ' subagents') + ' · ' + ([run ? run + ' running' : '', wait ? wait + ' queued' : ''].filter(Boolean).join(' · ') || 'all finished') + (tokens ? ' · ' + tok(tokens) + ' tokens' : '') + (cost ? ' · ' + usd(cost) : ''));
+  const tl = h('div', { class: 'fo-tl' }); const grid = h('div', { class: 'fo-grid' });
+  saTimeline(tl, rows.map(r => ({ n: r.index, state: r.live ? 'run' : r.queued ? 'wait' : (r.status === 'completed' || r.status === 'finished') ? 'ok' : (r.status === 'error' || r.status === 'cancelled' || r.status === 'failed') ? 'bad' : 'stop', t0: r.queued ? null : (r.started_at != null ? r.started_at : null), t1: r.live ? null : (r.ended_at != null ? r.ended_at : (r.started_at != null ? r.started_at + (r.elapsed || 0) : null)) })).sort((a, b) => a.n - b.n), now);
+  for (const r of rows) {
+    const state = r.live ? 'run' : r.queued ? 'wait' : (r.status === 'completed' || r.status === 'finished') ? 'ok' : (r.status === 'error' || r.status === 'cancelled' || r.status === 'failed') ? 'bad' : 'stop';
+    const meta = [r.type, r.tokens ? tok(r.tokens) + ' tokens' : '', r.cost != null && r.cost > 0 ? usd(r.cost) : '', r.tool_calls ? axPlural(r.tool_calls, 'call') : ''].filter(Boolean);
+    const word = r.live ? 'running' + (r.max_steps ? ' ' + r.steps + '/' + r.max_steps : '') : r.queued ? 'queued' : (r.status || 'unknown');
+    const task = String(r.prompt || r.title || '').split('\n').find(x => x.trim()) || '';
+    const link = r.session_id ? '#/agent/' + encodeURIComponent(r.session_id) : null;
+    const act = r.parent_step ? saParentLink(sid, r) : null;
+    grid.append(h('div', { class: 'fo-lane', 'data-state': state, 'data-n': r.index },
+      h('div', { class: 'fo-lh' }, h('div', { class: 'fo-t' }, mkEl(state === 'wait' || state === 'stop' ? 'stop' : state), h('a', { href: link, title: 'Open the full subagent chat' }, '#' + r.index + ' ' + (r.title || 'Subagent')), h('span', { class: 'fo-stat' }, word), h('span', { class: 'fo-time' }, r.elapsed ? dur(r.elapsed) : '')),
+        h('div', { class: 'fo-meta' }, meta.map(x => h('span', null, x))), task && task !== r.title ? h('div', { class: 'fo-task', title: task }, task) : null,
+        r.activity ? h('div', { class: 'fo-last', title: r.activity }, r.activity) : null),
+      h('div', { class: 'fo-acts' }, saActions(sid, r, again), act ? h('span', { class: 'muted' }, 'from ', act) : null)));
+  }
+  return h('div', { class: 'fanout page', 'data-n': rows.length, 'data-state': run ? 'run' : 'ok' }, head, tl, grid);
 }
 function saFact(label, value) { return h('span', { class: 'pill' }, label + ' ', h('b', null, value)); }
 function saStepRow(s) {
@@ -88,17 +103,28 @@ async function viewAgent(subSid) {
     const m = page.meta; C.first = page.first;
     const facts = h('div', { class: 'sub' }); const controls = h('div', { class: 'controls' }); const panels = h('div'); const live = h('div');
     const earlier = h('button', { class: 'btn earlier', hidden: !page.has_before, onclick: async () => { const p = await api('/api/session/' + encodeURIComponent(subSid) + '?limit=40&before=' + C.first); const f = document.createDocumentFragment(); historyNodes(p.entries, C).forEach(x => f.append(x)); earlier.after(f); C.first = p.first; earlier.hidden = !p.has_before; } }, 'Load earlier messages');
-    main.append(h('div', { class: 'head' }, h('div', null, h('h1', null, 'Subagent ' + num + ': ' + ((D && D.subagent && D.subagent.title) || m.title)), facts), controls), panels, live, earlier, feed, h('p', { class: 'muted', id: 'agent-note' }));
+    const crumb = h('nav', { class: 'sa-crumb', 'aria-label': 'Breadcrumb' }, h('a', { href: '#/chat/' + encodeURIComponent(parent) }, 'Parent chat'), h('span', null, '/'), h('a', { href: '#/agents/' + encodeURIComponent(parent) }, 'Subagents'), h('span', null, '/'), h('b', null, '#' + num));
+    const chip = h('span', { class: 'sa-chip', 'data-state': 'unknown' }, '...');
+    const composer = h('form', { class: 'sa-compose', autocomplete: 'off' });
+    const box = h('textarea', { rows: 2, maxlength: 20000, 'aria-label': 'Message to subagent ' + num, placeholder: 'Message this subagent' });
+    const sendBtn = h('button', { type: 'submit', class: 'btn primary' }, 'Send');
+    composer.append(box, sendBtn);
+    main.append(crumb, h('div', { class: 'head' }, h('div', null, h('h1', null, chip, ' Subagent ' + num + ': ' + ((D && D.subagent && D.subagent.title) || m.title)), facts), controls), panels, live, earlier, feed, h('p', { class: 'muted', id: 'agent-note' }), composer);
     historyNodes(page.entries, C).forEach(x => feed.append(x)); if (page.entries.length) C.lastIdx = page.entries[page.entries.length - 1].i;
     wireHistory(C);
     const stepBox = h('div'); let stepsShown = new Set();
     function drawHead() {
       const r = D && D.subagent; const status = r ? saStatusLabel(r) : 'unknown';
+      const st = !r ? 'unknown' : r.live ? 'running' : (r.status === 'error' || r.status === 'cancelled') ? 'failed' : r.status === 'queued' ? 'queued' : 'done';
+      chip.dataset.state = st; chip.textContent = st;
+      const ro = !!(D && D.lease);
+      box.disabled = ro; sendBtn.disabled = ro;
+      box.placeholder = ro ? 'Held by another process: message it from there' : st === 'running' ? 'Steer subagent ' + num + ' (it reads this before its next step)' : 'Continue subagent ' + num + ' (resumes it with its full history)';
       facts.replaceChildren(saFact('status', status), ' ', saFact('type', (r && r.type) || 'not recorded'), ' ', saFact('model', m.model || (r && r.model) || '?'), ' ', saFact('cost', usd(m.cost)), ' ', saFact('tokens', tok(m.tokens)), ' ',
         saFact('duration', r && r.elapsed ? dur(r.elapsed) : 'not recorded'), ' ', saFact('model calls', r && r.iterations ? String(r.iterations) : (r && r.live ? String(r.steps) : 'not recorded')), ' ', saFact('entries', String(m.messages)),
         r && r.parent_step ? [' ', h('span', { class: 'pill' }, 'parent ', h('a', { href: '#/chat/' + encodeURIComponent(parent), onclick: (e) => { e.preventDefault(); saGoto(parent, r.parent_step); } }, 'Task step ' + (r.parent_step.entry + 1) + (r.parent_step.inferred ? ' (by order)' : '')))] : null);
       controls.replaceChildren(h('a', { class: 'btn', href: '#/agents/' + encodeURIComponent(parent) }, 'All subagents'), h('a', { class: 'btn', href: '#/chat/' + encodeURIComponent(parent) }, 'Parent session'),
-        r && r.live ? h('button', { class: 'btn danger', onclick: () => saStop(parent, r, tick) }, 'Stop') : null, r && r.live ? h('button', { class: 'btn', onclick: () => saTell(parent, r) }, 'Tell') : null,
+        r && r.live ? h('button', { class: 'btn danger', onclick: () => saStop(parent, r, tick) }, 'Stop') : null,
         h('button', { class: 'btn', onclick: () => toggleAll(feed, true) }, 'Expand all'), h('button', { class: 'btn', onclick: () => toggleAll(feed, false) }, 'Collapse all'), h('button', { class: 'btn', onclick: () => shareModal({ kind: 'session', id: subSid }) }, 'Share'));
     }
     function drawPanels() {
@@ -133,6 +159,14 @@ async function viewAgent(subSid) {
       } catch (e) { return false; } finally { busy = false; if (again) { again = false; setTimeout(tick, 300); } }
     }
     drawHead(); drawPanels(); drawLive();
+    let burst = 0;
+    const follow = () => { burst = Date.now() + 120000; const loop = async () => { if (C.closed || Date.now() > burst) return; const live = await tick(); if (live || Date.now() < burst - 110000) setTimeout(loop, 1000); else burst = 0; }; loop(); };
+    composer.addEventListener('submit', async (e) => {
+      e.preventDefault(); const t = box.value.trim(); if (!t) return; box.disabled = sendBtn.disabled = true;
+      try { const res = await api('/api/subagent/say', { session: parent, n: num, text: t }); box.value = ''; toast(res.kind === 'resumed' ? 'Resumed subagent ' + num : 'Sent: it reads this before its next step'); follow(); }
+      catch (er) { toast(er.message); } finally { box.disabled = sendBtn.disabled = !!(D && D.lease); box.focus(); }
+    });
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); composer.requestSubmit(); } });
     // live: the parent's own event stream carries this subagent's steps (subagent_step) and its end (subagent)
     if (D && D.subagent && D.subagent.live) {
       let timer = 0;
@@ -214,24 +248,43 @@ function saRow(s) {
     h('span', { class: 'sd' }, s.duration_s ? dur(s.duration_s) : ''));
 }
 function saSecs(C, S) { return S.dur != null ? S.dur : Math.max(0, (S.state === 'run' ? nowS(C) : (S.last || S.t0)) - S.t0); }
+const SA_STATE_WORD = { run: 'running', wait: 'queued', ok: 'done', stop: 'no end recorded', bad: 'failed' };
 function saLaneHead(C, S) {
   const L = S.lane; if (!L) return;
-  L.el.dataset.state = S.state;
-  L.stat.textContent = S.state === 'run' ? 'running' : S.state === 'wait' ? 'queued' : S.state === 'ok' ? 'done' : S.state === 'stop' ? 'no end recorded' : 'failed';
-  L.meta.replaceChildren(...[S.type, S.model, dur(saSecs(C, S)), S.tokens ? tok(S.tokens) + ' tokens' : '', S.usd ? usd(S.usd) : ''].filter(Boolean).map(x => h('span', null, x)));
+  L.el.dataset.state = S.state; setMk(L.mk, S.state === 'wait' ? 'stop' : S.state);
+  L.stat.textContent = SA_STATE_WORD[S.state] || 'failed';
+  L.time.textContent = S.state === 'wait' ? '' : dur(saSecs(C, S));
+  L.meta.replaceChildren(...[S.type, S.tokens ? tok(S.tokens) + ' tokens' : '', S.usd ? usd(S.usd) : ''].filter(Boolean).map(x => h('span', null, x)));
+  const st = S.step; const last = S.state === 'run' && st ? (st.kind === 'llm' ? 'thinking' : (st.name || 'tool') + (st.summary ? ' · ' + st.summary : '')) : '';
+  L.last.textContent = last; L.last.hidden = !last; L.last.title = last;
 }
 function saLane(C, S) {
   if (S.lane) return S.lane;
   const list = h('div', { class: 'sa-steps fo-steps' });
-  const stat = h('span', { class: 'fo-stat' }), meta = h('div', { class: 'fo-meta' });
-  const el = h('div', { class: 'fo-lane', 'data-n': S.n }, h('div', { class: 'fo-lh' }, h('div', { class: 'fo-t' }, h('a', { href: '#/agent/' + encodeURIComponent(saId(C.sid, S.n)), title: S.title }, '#' + S.n + ' ' + (S.title || 'Subagent')), stat), meta), list);
-  const L = S.lane = { el, list, stat, meta, now: h('div', { class: 'sa-row now' }, h('span', { class: 'sk' }, '●'), h('span', { class: 'sn' }, 'working'), h('span', { class: 'ss' }, ''), h('span', { class: 'sd' }, '')) };
+  const stat = h('span', { class: 'fo-stat' }), meta = h('div', { class: 'fo-meta' }), time = h('span', { class: 'fo-time' }), last = h('div', { class: 'fo-last', hidden: true }), mk = mkEl('run');
+  const el = h('div', { class: 'fo-lane', 'data-n': S.n }, h('div', { class: 'fo-lh' }, h('div', { class: 'fo-t' }, mk, h('a', { href: '#/agent/' + encodeURIComponent(saId(C.sid, S.n)), title: 'Open the full subagent chat' }, '#' + S.n + ' ' + (S.title || 'Subagent')), stat, time), meta, last), list);
+  const L = S.lane = { el, list, stat, meta, time, last, mk, now: h('div', { class: 'sa-row now' }, h('span', { class: 'sk' }, '●'), h('span', { class: 'sn' }, 'working'), h('span', { class: 'ss' }, ''), h('span', { class: 'sd' }, '')) };
   if (!S.steps.length) list.append(h('div', { class: 'sa-empty' }, 'Waiting for the first step...'));
   for (const s of S.steps) list.append(saRow(s));
-  if (S.state === 'run') list.append(L.now);
   if (S.state === 'bad' && S.detail) list.append(h('div', { class: 'sa-row err' }, h('span', { class: 'sk' }, '✕'), h('span', { class: 'sn' }, 'error'), h('span', { class: 'ss', title: S.detail }, S.detail)));
   saLaneHead(C, S); return L;
 }
+// The concurrency timeline: one bar per subagent on one shared time axis, so overlap is visible at a glance.
+// items: [{ n, state, t0, t1 (null while running) }]; now: the clock the running bars reach to.
+function saTimeline(box, items, now) {
+  const rows = items.filter(x => x.t0 != null);
+  if (!rows.length) { box.replaceChildren(h('div', { class: 'sa-empty' }, 'No timing is recorded for these subagents.')); return; }
+  const T0 = Math.min(...rows.map(x => x.t0)), T1 = Math.max(T0 + 1, ...rows.map(x => x.t1 != null ? x.t1 : now)); const span = T1 - T0;
+  const inner = h('div', { class: 'fo-tl-in', role: 'img', 'aria-label': 'Timeline of when each subagent ran' });
+  for (const x of items) {
+    const track = h('div', { class: 'fo-track' });
+    if (x.t0 != null) { const e = x.t1 != null ? x.t1 : now; track.append(h('i', { class: 'fo-bar ' + x.state, style: 'left:' + (100 * (x.t0 - T0) / span).toFixed(2) + '%;width:' + Math.max(0.8, 100 * (e - x.t0) / span).toFixed(2) + '%', title: '#' + x.n + ' ' + (SA_STATE_WORD[x.state] || '') + ' · ' + dur(e - x.t0) })); }
+    inner.append(h('div', { class: 'fo-trow' }, h('span', { class: 'fo-tn' }, '#' + x.n), track));
+  }
+  inner.append(h('div', { class: 'fo-axis' }, h('span', null, '0s'), h('span', null, dur(span / 2)), h('span', null, dur(span))));
+  box.replaceChildren(inner);
+}
+function saTlOf(C, all) { const now = nowS(C); return all.map(S => ({ n: S.n, state: S.state, t0: S.state === 'wait' ? null : S.t0, t1: S.state === 'run' ? null : (S.dur != null ? S.t0 + S.dur : (S.last || S.t0)) })).sort((a, b) => a.n - b.n); }
 function subagentStep(C, ev) {
   const n = Number(String(ev.task_id || '').replace(/^sub-/, '')) || 0; if (!n) return;
   const S = saBoard(C, n, ev);
@@ -240,7 +293,7 @@ function subagentStep(C, ev) {
   if (S.lane) {
     const L = S.lane; if (L.list.querySelector('.sa-empty')) L.list.replaceChildren();
     const stick = L.list.scrollTop + L.list.clientHeight >= L.list.scrollHeight - 24;
-    L.list.append(saRow(S.step)); if (S.state === 'run') L.list.append(L.now);
+    L.list.append(saRow(S.step));
     while (L.list.children.length > 300) L.list.firstChild.remove();
     if (stick) L.list.scrollTop = L.list.scrollHeight;
     saLaneHead(C, S);
@@ -276,11 +329,11 @@ function fanoutDraw(C, turn) {
   if (!all.length) return;
   let b = turn.fanout;
   if (!b || !b.el.isConnected) {
-    const head = h('h5', null, ''), grid = h('div', { class: 'fo-grid' });
-    const el = h('div', { class: 'fanout', role: 'group', 'aria-label': 'Subagents running side by side' }, head, grid);
+    const head = h('h5', null, ''), grid = h('div', { class: 'fo-grid' }), tl = h('div', { class: 'fo-tl' });
+    const el = h('div', { class: 'fanout', role: 'group', 'aria-label': 'Subagents running side by side' }, head, tl, grid);
     const after = all.map(x => x.notice).filter(x => x && x.isConnected).pop();
     if (after) after.after(el); else (turn.body || C.feed).append(el);
-    b = turn.fanout = { el, head, grid };
+    b = turn.fanout = { el, head, grid, tl };
   }
   for (const S of all) { (S.notes || []).forEach(x => x.remove()); S.notes = []; }   // the lanes say all of this now
   const run = all.filter(x => x.state === 'run').length;
@@ -288,7 +341,9 @@ function fanoutDraw(C, turn) {
   b.el.setAttribute('aria-label', all.length > 1 ? 'Subagents running side by side' : 'Subagent');
   const wait = all.filter(x => x.state === 'wait').length;
   const now = [run ? run + ' running' : '', wait ? wait + ' queued' : ''].filter(Boolean).join(' · ');
-  b.head.textContent = (all.length > 1 ? 'Fanned out · ' + all.length + ' subagents · ' + (now || 'all finished') : 'Subagent · ' + (now ? (run ? 'running' : 'queued') : 'finished')) + (tokens ? ' · ' + tok(tokens) + ' tokens' : '') + (cost ? ' · ' + usd(cost) : '');
+  b.head.textContent = (all.length > 1 ? all.length + ' subagents in parallel · ' + (now || 'all finished') : 'Subagent · ' + (now ? (run ? 'running' : 'queued') : 'finished')) + (tokens ? ' · ' + tok(tokens) + ' tokens' : '') + (cost ? ' · ' + usd(cost) : '');
+  b.el.dataset.state = run ? 'run' : wait ? 'wait' : 'ok'; b.el.dataset.n = String(all.length);
+  b.tl.hidden = all.length < 2; if (all.length > 1) saTimeline(b.tl, saTlOf(C, all), nowS(C));
   for (const S of all) {
     const lane = saLane(C, S);
     lane.el.style.order = String(S.n);           // lanes sit in the order the model asked for them, whichever started first
@@ -301,6 +356,7 @@ function fanoutDraw(C, turn) {
     const live = Object.values(C.subBoard || {}).filter(x => x.state === 'run');
     if (C.closed || !live.length) { clearInterval(C.saTimer); C.saTimer = 0; }
     for (const S of live) saLaneHead(C, S);
+    const fo = turn.fanout, every = Object.values(C.subBoard || {}).filter(x => x.turn === turn); if (fo && every.length > 1) saTimeline(fo.tl, saTlOf(C, every), nowS(C));
   }, 1000);
 }
 // The replayed log is done: draw the lanes it filled, and say so for a subagent whose end was never recorded (an interrupted turn).
@@ -351,7 +407,8 @@ function subagentEvent(C, ev) {
   note.append(h('a', { class: 'plink', href }, line));
   (cur ? cur.body : C.feed).append(note);
   if (ev.phase === 'start' && n && cur) {
-    const card = Object.values(cur.tools || {}).find(c => c.dataset.task === '1' && !c.dataset.sub);
+    const open = Object.values(cur.tools || {}).filter(c => c.dataset.task === '1' && !c.dataset.sub);   // parallel Task calls start in any order: match by the description the title came from
+    const card = open.find(c => c.axIn && c.axIn.description && String(ev.title || '').startsWith(String(c.axIn.description).slice(0, 40))) || open[0];
     if (card) { card.dataset.sub = String(n); const a = card.querySelector('.next a.plink'); if (a) { a.href = href; a.textContent = 'Open subagent ' + n; } }
   }
   if (n) {

@@ -50,7 +50,7 @@ def _results(path: Path) -> dict[int, list[dict[str, Any]]]:
     for rec in iter_records(path):
         if rec.get("type") == "subagent_result" and isinstance(rec.get("data"), dict):
             try:
-                out.setdefault(int(rec["data"].get("index")), []).append(rec["data"])
+                out.setdefault(int(rec["data"].get("index")), []).append({**rec["data"], "_ts": rec.get("timestamp")})
             except (TypeError, ValueError):
                 continue
     return out
@@ -165,8 +165,12 @@ def roster(srv: "DashServer", sid: str) -> dict[str, Any]:
                 r["tokens"] = sum(int(x.get("input_tokens") or 0) + int(x.get("output_tokens") or 0) for x in runs) or r.get("tokens", 0)
                 r["cost"] = round(sum(float(x.get("cost") or 0) for x in runs), 5) if runs else r.get("cost")
             r["prompt"] = r.get("prompt") or str(last.get("prompt") or "")[:600]
+        if last and not r.get("live") and isinstance(last.get("_ts"), (int, float)):
+            r["ended_at"] = float(last["_ts"])
+            r["started_at"] = round(float(last["_ts"]) - float(last.get("elapsed_s") or 0), 2)
         t = live.get(r["index"])
         if t is not None and r.get("live"):
+            r["started_at"] = float(getattr(t, "start_time", now) or now)
             r["elapsed"] = round(max(0.0, now - float(getattr(t, "start_time", now) or now)), 1)
             r["call_id"] = getattr(t, "call_id", "") or r.get("call_id", "")
         if not r.get("live") and not last and r.get("has_transcript"):
@@ -259,3 +263,37 @@ def detail(srv: "DashServer", sid: str, n: int) -> dict[str, Any]:
     out["step_note"] = ("Step lines come from the live event stream recorded by this app; a subagent run before the app was watching "
                         "has none, and its messages and tool calls are in the transcript below.") if not out["steps"] else ""
     return out
+
+
+def say(srv: "DashServer", sid: str, n: int, text: str) -> dict[str, Any]:
+    """A message typed by the user for one subagent (the page's composer in the subagent chat).
+
+    A running subagent reads it before its next step; a finished or stopped one is resumed with its whole history and the
+    new run is appended to the same transcript. Same rule as ``/agent <n> <text>`` in the terminal (``user_message``)."""
+    from axon.agent.subagent import sync_subagents_for_session, user_message
+    from axon.errors import ToolError
+    text = (text or "").strip()
+    if not text:
+        raise DashError("the message is empty")
+    rt = srv.runtime(sid, create=True)
+    if rt is None:
+        raise DashError("no such session", 404)
+    path = _parent_path(srv, sid, rt)
+    if _holder(path.parent if path is not None else None) is not None:
+        raise DashError("this session is open in another process; message the subagent from there", 409)
+    agent = rt.agent
+    mgr = getattr(agent, "subagents", None)
+    key = f"sub-{n}"
+    if (mgr is None or mgr.get_task(key) is None) and not (mgr is not None and mgr.running_count()):
+        try:
+            sync_subagents_for_session(agent)        # a session reopened after a restart: rebuild the roster from disk
+        except Exception:
+            pass
+        mgr = getattr(agent, "subagents", None)
+    if mgr is None or mgr.get_task(key) is None:
+        raise DashError("no such subagent", 404)
+    try:
+        kind, task = user_message(agent, key, text)
+    except ToolError as e:
+        raise DashError(str(e), 409) from None
+    return {"ok": True, "kind": kind, "task": task.id, "status": task.status}

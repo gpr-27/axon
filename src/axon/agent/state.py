@@ -11,7 +11,7 @@ from typing import Any, Callable
 from axon.errors import StaleFileError
 from axon.providers.base import AssistantTurn, TextBlock, ToolResultBlock, ToolUseBlock
 
-def _extract_images_and_text(text: str) -> list[dict[str, Any]] | str:
+def _extract_images_and_text(text: str, vision: bool = True) -> list[dict[str, Any]] | str:
     """Detect image filepaths in user prompt and encode them into multimodal content blocks and OCR context."""
     from axon.agent.images import compact_image_paths
     clean_text, attachments = compact_image_paths(text)
@@ -22,7 +22,7 @@ def _extract_images_and_text(text: str) -> list[dict[str, Any]] | str:
     blocks: list[dict[str, Any]] = []
     ocr_descriptions: list[str] = []
     for att in attachments:
-        b64 = att.read_base64()
+        b64 = att.read_base64() if vision else ""
         if b64:
             blocks.append({
                 "type": "image",
@@ -39,13 +39,21 @@ def _extract_images_and_text(text: str) -> list[dict[str, Any]] | str:
             desc += f"\n  Extracted Text / OCR from screenshot:\n  \"\"\"\n  {ocr_t}\n  \"\"\""
         ocr_descriptions.append(desc)
 
+    if not vision:      # a text-only model: the OCR text stands in for the picture, and the note says so
+        note = ("[The current model cannot see images, so the picture was not sent; its text was read by OCR "
+                "and may contain errors.]")
+        ocr_descriptions.append(note)
     context_prefix = f"Attached Image Details ({len(attachments)} item{'s' if len(attachments) != 1 else ''}):\n" + "\n".join(ocr_descriptions)
 
+    if not blocks and clean_text:
+        return f"{clean_text}\n\n{context_prefix}"
     if clean_text:
         full_text = f"{clean_text}\n\n{context_prefix}"
         blocks.append({"type": "text", "text": full_text})
-    elif not blocks:
+    elif not blocks and vision:
         return text
+    elif not blocks:
+        return f"Analyze attached image:\n\n{context_prefix}"
     else:
         blocks.append({"type": "text", "text": f"Analyze attached image:\n\n{context_prefix}"})
 
@@ -118,9 +126,10 @@ class Conversation:
     def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
         self.messages: list[dict[str, Any]] = list(messages or [])
 
-    def append_user(self, text: str, attach_images: bool = True) -> None:
-        """*attach_images*: turn image paths in the text into image blocks (the user's own prompts only)."""
-        processed = _extract_images_and_text(text) if isinstance(text, str) and attach_images else text
+    def append_user(self, text: str, attach_images: bool = True, vision: bool = True) -> None:
+        """*attach_images*: turn image paths in the text into image blocks (the user's own prompts only).
+        *vision*: False for a model that cannot see pictures: the OCR text and a note go in instead of the image."""
+        processed = _extract_images_and_text(text, vision) if isinstance(text, str) and attach_images else text
         self.messages.append({"role": "user", "content": processed})
 
     def append_assistant(self, turn: AssistantTurn) -> None:
@@ -513,6 +522,7 @@ class QueuedMessage:
     text: str
     steer: bool = False   # typed mid-turn: delivered inside the running turn between tool rounds
     plain: bool = False   # not typed by the person (a scheduled prompt): reaches the model as text, never as a command
+    shown: bool = False   # the UI already printed this message where it was typed (delivery must not echo it again)
 
 def _journal_queue(action: str, **data: Any) -> None:
     """Every queue change goes to the activity journal (nothing typed is ever silently lost)."""
@@ -540,6 +550,10 @@ class MessageQueue:
             self.items.append(item)
         _journal_queue("push", id=item.id, text=item.text, steer=item.steer, pending=len(self.items))
         return item
+
+    def has_steer(self) -> bool:
+        with self._lock:
+            return any(getattr(it, "steer", False) for it in self.items)
 
     def drain_steer(self) -> list[QueuedMessage]:
         """Remove and return every steer-flagged item (in order); plain queued prompts stay."""

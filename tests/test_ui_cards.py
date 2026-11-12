@@ -37,7 +37,7 @@ def test_created_file_card_header_gutter_and_more_hint(monkeypatch):
     monkeypatch.setattr(render, "_MORE_HINT", "/output 7")
     rows = _plain(tool_result_rows("Write", {"path": "src/shop/cart.py", "content": PY},
                                    "Successfully wrote 1 characters (45 lines) to src/shop/cart.py. Created file.", width=80))
-    assert rows[0].startswith("✚ Created src/shop/cart.py · +45 · ■ Python · 45 lines · ")
+    assert rows[0].startswith("✚ Created src/shop/cart.py · ■ Python · 45 lines · ")
     assert rows[0].endswith("KB") or rows[0].endswith(" B")
     assert rows[1].split() == ["1", "+", "def", "f0(x):"] and rows[2].split()[:4] == ["2", "+", "return", "x"]
     assert rows[30].split()[:2] == ["30", "+"]
@@ -95,7 +95,7 @@ def test_diff_hunks_and_wrapping_keep_the_gutter():
     old = "\n".join(f"line {i}" for i in range(1, 40))
     new = old.replace("line 3\n", "line three\n").replace("line 30", "line thirty " + "x" * 80)
     rows = _plain(cards.diff_rows(old, new, 1, 60, ""))
-    assert any("┈┈┈ line" in r for r in rows)                       # hunk separator with its line number
+    assert any("unchanged lines" in r for r in rows)                  # hunk separator says how much was skipped
     assert all(display_width(r) <= 60 for r in rows)
     wrapped = [r for r in rows if r.lstrip().startswith("↪")]
     assert wrapped, rows                                             # long + line wrapped under the gutter
@@ -246,7 +246,7 @@ def test_table_numbers_right_aligned_and_callout_continuation():
 def test_ascii_fallbacks(monkeypatch):
     monkeypatch.setenv("AXON_ASCII", "1")
     rows = tool_result_rows("Write", {"path": "a.py", "content": "x = 1\n"}, "Created file.", width=60)
-    assert rows[0].startswith("+ Created a.py - +1 - Python - 1 line")
+    assert rows[0].startswith("+ Created a.py - Python - 1 line")
     diff = tool_result_rows("Edit", {"path": "zz.py", "old_string": "a", "new_string": "b"}, "ok", width=60)
     assert diff[0] == "~ Edited zz.py - +1 -1"
     chart = format_markdown("```chart\na: 4\nb: 2\n```", max_width=40)
@@ -382,7 +382,7 @@ def test_replay_and_transcript_use_the_same_cards():
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "w1", "content": "Created file."}]},
     ]
     rows = [strip_ansi(r) for r in render.format_conversation_replay(msgs, width=80)]
-    assert any("✚ Created k.py · +2 · ■ Python · 2 lines" in r for r in rows)
+    assert any("✚ Created k.py · ■ Python · 2 lines" in r for r in rows)
     assert any(r.rstrip().endswith("1 + a = 1") for r in rows)
     card = render.transcript_card_rows("Write", '{"path": "k.py", "content": "a = 1\\nb = 2\\n"}', "Created file.", 70)
     assert card and strip_ansi(card[0]).startswith("✚ Created k.py") and strip_ansi(card[2]).strip() == "2 + b = 2"

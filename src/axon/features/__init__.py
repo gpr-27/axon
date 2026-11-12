@@ -28,7 +28,11 @@ FEATURE_MODULES: tuple[str, ...] = (
     "axon.features.scaffold",
     "axon.features.journal",
     "axon.features.credentials",
+    "axon.features.batch_cmd",
+    "axon.features.files_cmd",
+    "axon.features.semindex_tool",
     "axon.marketplace.feature",
+    "axon.evals.feature",
 )
 
 

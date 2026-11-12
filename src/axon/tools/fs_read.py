@@ -50,12 +50,8 @@ def _attach_image(p: Path, data: bytes, rel: str, size: int, ctx: ToolContext) -
     """Carry the picture itself with the result when the provider takes images; None keeps the text notice.
     Formats a provider cannot take (BMP, TIFF, HEIC, AVIF, ICO) or files that are too big go through macOS sips."""
     from axon.providers.base import MAX_TOOL_IMAGE_BYTES, ImageRef
-    provider = getattr(ctx.agent, "provider", None)
-    try:
-        ok = bool(provider is not None and provider.supports("tool_images"))
-    except Exception:
-        ok = False
-    if not ok:
+    from axon.tools import pdf_render
+    if not pdf_render.vision_ok(ctx):       # provider takes pictures and the model can see them
         return None
     prep = ff.prepare_model_image(p, size, MAX_TOOL_IMAGE_BYTES)
     if prep is None:
@@ -78,7 +74,7 @@ def _image_notice(p: Path, data: bytes, rel: str) -> str:
         ocr = _extract_ocr_text(p).strip()
     except Exception:
         ocr = ""
-    why = ("A tool result cannot carry the picture itself; to let the model see it, the user can reference the image path in their prompt."
+    why = ("The picture itself was not sent to the model; to let it see the picture, the user can reference the image path in their prompt."
            if p.suffix.lower() in ff.MODEL_IMAGE_MEDIA else
            f"{p.suffix.upper().lstrip('.')} is not a format the model takes and no converter (macOS sips) is available.")
     head = f"[Image file: {rel} ({len(data):,} bytes{_image_dims(data)}). {why}"
@@ -251,7 +247,15 @@ class ReadTool(Tool):
 
         if kind == "pdf" or data[:5] == b"%PDF-":
             ctx.file_state.record_read(p)
-            return self._read_pdf(p, data, rel, size, offset, limit, cap, args.get("pages"))
+            from axon.tools import pdf_native
+            native = pdf_native.attach(p, rel, size, args.get("pages"), ctx)       # a document block, when the model takes PDFs
+            if native is not None:
+                return native
+            from axon.tools import pdf_render
+            visual = pdf_render.read_visual(p, rel, size, args.get("pages"), ctx, cap)      # page pictures, or OCR for scans
+            if visual is not None:
+                return visual
+            return self._read_pdf(p, data, rel, size, offset, limit, cap, args.get("pages")) + pdf_render.take_note()
 
         if kind == "ipynb":
             if size > MAX_NOTEBOOK_BYTES:
@@ -440,6 +444,12 @@ class ReadTool(Tool):
     def summarize(self, args: dict[str, Any], output: str, is_error: bool = False) -> str:
         if is_error:
             return default_summary(output, True)
+        from axon.tools import pdf_native
+        pdf_line = pdf_native.summary_line(output)
+        if pdf_line:
+            from axon.providers import files_api
+            note = files_api.card_note(str(args.get("path") or args.get("file_path") or ""))
+            return f"{pdf_line} · {note}" if note else pdf_line
         nums = re.findall(r"^\s*(\d+)→(.*)$", output, re.M)
         if not nums:  # notices: image, binary, empty, notebook
             first = output.split("\n", 1)[0].strip().strip("[]=").strip()

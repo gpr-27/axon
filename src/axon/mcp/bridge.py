@@ -966,6 +966,7 @@ class MCPToolBridge:
         self.workspace = Path(workspace) if workspace else Path.cwd()
         self._connections: dict[str, MCPServerConnection] = {}
         self._server_tools: dict[str, list[MCPToolWrapper]] = {}
+        self._pins: dict[str, list[dict[str, Any]]] = {}   # tool lists pinned for the session (spec.pin_tools)
         self._generic: list[Tool] = [MCPListResourcesTool(self), MCPReadResourceTool(self)]
         self._generic_registered = False
         self._registry: Any = None
@@ -1036,7 +1037,12 @@ class MCPToolBridge:
             taken = {t.name for n, ts in self._server_tools.items() if n != conn.name for t in ts}
             wrappers: list[MCPToolWrapper] = []
             skipped: list[tuple[str, str]] = []
-            for spec in conn.tools:
+            from axon.mcp import toolctl
+            srv_spec = getattr(conn, "spec", None)
+            offered, denied = toolctl.filter_specs(srv_spec, toolctl.pinned(self._pins, srv_spec, conn.name, list(conn.tools)))
+            for d in denied:
+                skipped.append((d, "left out by this server's allowedTools / deniedTools"))
+            for spec in offered:
                 problem = tool_problem(spec)
                 if problem:  # one malformed schema would make every API request fail
                     skipped.append((str(spec.get("name", "?")), problem))

@@ -96,8 +96,9 @@ def fetch_provider_models(preset: "ProviderPreset", api_key: str, base_url: str 
             return None, None
         headers = default_headers(url)
         if preset.api_format == "anthropic":
-            endpoint = f"{url.rstrip('/').removesuffix('/v1')}/v1/models"
-            headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+            endpoint = f"{url.rstrip('/').removesuffix('/v1')}/v1/models?limit=1000"
+            from axon.providers.anthropic_wire import api_version
+            headers.update({"x-api-key": api_key, "anthropic-version": api_version(url)})
             if not is_official_anthropic(url):
                 headers["authorization"] = f"Bearer {api_key}"
         else:
@@ -111,6 +112,11 @@ def fetch_provider_models(preset: "ProviderPreset", api_key: str, base_url: str 
         items = data.get("data", data.get("models")) if isinstance(data, dict) else data
         if not isinstance(items, list):
             return None, resp.status_code
+        try:
+            from axon.providers import model_caps
+            model_caps.record(items)    # capabilities / lifecycle / supported_parameters the list publishes
+        except Exception:
+            pass
         ids = [str(it.get("id") or it.get("name") or "") if isinstance(it, dict) else str(it) for it in items]
         ids = sorted({i for i in ids if i and is_chat_model_id(i)})
         # Keep the preset's own order (curated, best first) for the models still offered, then the rest.
@@ -425,6 +431,14 @@ def custom_key_var(base_url: str) -> str:
 def find_api_key(env_vars: list[str] | tuple[str, ...]) -> str | None:
     """First usable key among `env_vars`: process environment first, then ~/.axon/.env (exact names)."""
     names = [v for v in env_vars if v]
+    try:
+        from axon.features import vault          # migrated keys: the vault first, then env, then the legacy file
+        for var in names:
+            val = vault.api_key_for(var) or ""
+            if _valid_key(val):
+                return val
+    except Exception:
+        pass
     for var in names:
         val = os.environ.get(var, "").strip()
         if _valid_key(val):
@@ -448,6 +462,12 @@ def save_api_key(env_var: str, value: str) -> Path:
     if not clean or "\n" in clean or "\r" in clean:
         raise ValueError("API key must be a non-empty single line")
     path = axon_env_file()
+    try:
+        from axon.features import vault
+        if vault.store_api_key(env_var, clean):
+            return path
+    except Exception:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     replaced = False
@@ -583,8 +603,61 @@ def get_linked_providers(agent: Any = None) -> list[ProviderPreset]:
     return linked
 
 
+_LIVE_TTL = 600.0
+_live_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+
+
+def _preset_key(preset: "ProviderPreset", agent: Any = None) -> str:
+    names = list(dict.fromkeys([*(preset.env_vars or ()), preset.env_var or ""]))
+    key = find_api_key([n for n in names if n]) or ""
+    if not key and agent is not None:
+        try:
+            if find_preset_by_url(agent.settings.base_url) is preset:
+                cur = agent.settings.api_key
+                key = cur.get_secret_value() if hasattr(cur, "get_secret_value") else str(cur or "")
+        except Exception:
+            pass
+    return "" if key == "local" else key
+
+
+def discover_models(preset: "ProviderPreset", agent: Any = None, *, force: bool = False, timeout: float = 4.0) -> list[str]:
+    """The models the provider itself lists for the user's key (cached ~10 min); [] when it can't be read.
+
+    This is what makes a model released tomorrow show up in the picker without editing anything."""
+    import time
+    if preset.id in ("ollama", "lmstudio"):
+        return []   # local servers are queried live on every listing already
+    url = effective_base_url(preset)
+    ck = (preset.id, url)
+    hit = _live_cache.get(ck)
+    if hit and not force and time.monotonic() - hit[0] < _LIVE_TTL:
+        return list(hit[1])
+    key = _preset_key(preset, agent)
+    if preset.requires_key and not key:
+        return []
+    live, _status = fetch_provider_models(preset, key, url, timeout=timeout)
+    if live:
+        _live_cache[ck] = (time.monotonic(), list(live))
+        return list(live)
+    return list(hit[1]) if hit else []
+
+
+def prefetch_models(presets: list["ProviderPreset"], agent: Any = None, wait: float = 3.0) -> None:
+    """Fill the live-model cache for *presets* in parallel, waiting at most *wait* seconds."""
+    import concurrent.futures as cf
+    todo = [p for p in presets if p.id not in ("ollama", "lmstudio")]
+    if not todo:
+        return
+    pool = cf.ThreadPoolExecutor(max_workers=min(8, len(todo)))
+    try:
+        cf.wait([pool.submit(discover_models, p, agent, timeout=wait) for p in todo], timeout=wait)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def get_models_for_provider(preset: ProviderPreset, agent: Any = None) -> list[str]:
-    """Models for one provider: live local models, user-saved custom models, then preset models."""
+    """Models for one provider: live local models, user-saved custom models, the preset's curated list, then
+    any other models the provider has listed (cached by ``discover_models``). Models the user deleted are left out."""
     models: list[str] = []
     seen: set[str] = set()
 
@@ -608,7 +681,15 @@ def get_models_for_provider(preset: ProviderPreset, agent: Any = None) -> list[s
 
     for m in preset.models:
         add(m)
-    return models
+    cached = _live_cache.get((preset.id, effective_base_url(preset)))
+    for m in (cached[1] if cached else []):
+        add(m)
+    try:
+        from axon.providers.endpoints import hidden_models
+        hidden = hidden_models(preset.id)
+    except Exception:
+        hidden = set()
+    return [m for m in models if m not in hidden]
 
 
 def get_curated_model_choices(active_base_url: str = "") -> list[tuple[str, str, str]]:

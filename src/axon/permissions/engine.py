@@ -578,7 +578,8 @@ class PermissionEngine:
     # ── decision ──
     def check(self, tool: Any, args: dict[str, Any], mode: Mode | None = None) -> Decision:
         mode = mode or self.settings.mode
-        decision = self._check(tool, args, mode)
+        # auto mode: the rules apply as in default mode; what would ask is then put to the classifier (permissions/auto_mode.py)
+        decision = self._check(tool, args, "default" if mode == "auto" else mode)
         if mode == "dontAsk" and decision.outcome == "ask":
             return Decision("deny", f"dontAsk mode denies anything that would prompt. {decision.reason}", decision.rule)
         return decision

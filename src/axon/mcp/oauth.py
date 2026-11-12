@@ -84,10 +84,24 @@ class TokenStore:
     def get(self, key: str) -> dict[str, Any]:
         with self._lock:
             rec = self._read().get(key)
-            return dict(rec) if isinstance(rec, dict) else {}
+            rec = dict(rec) if isinstance(rec, dict) else {}
+            if self.path == auth_store_path():          # tokens migrated into the secret vault are read from there first
+                from axon.features import vault
+                vt = vault.oauth_tokens(key)
+                if vt:
+                    rec["tokens"] = vt
+            return rec
 
     def update(self, key: str, **fields: Any) -> None:
         with self._lock:
+            if "tokens" in fields and self.path == auth_store_path():
+                from axon.features import vault
+                if fields["tokens"] is None:
+                    vault.forget_oauth(key)
+                elif vault.store_oauth_tokens(key, fields["tokens"]):
+                    fields = {k: v for k, v in fields.items() if k != "tokens"}
+                    if not fields:
+                        return
             data = self._read()
             rec = data.get(key) if isinstance(data.get(key), dict) else {}
             rec.update({k: v for k, v in fields.items() if v is not None})
@@ -98,6 +112,9 @@ class TokenStore:
 
     def delete(self, key: str) -> bool:
         with self._lock:
+            if self.path == auth_store_path():
+                from axon.features import vault
+                vault.forget_oauth(key)
             data = self._read()
             if key not in data:
                 return False

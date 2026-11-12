@@ -146,6 +146,9 @@ class ServerSpec:
     headers_helper: str = ""                 # shell command printing a JSON object of extra headers
     oauth: dict[str, Any] = field(default_factory=dict)   # clientId, callbackPort, scopes, authServerMetadataUrl
     always_load: bool | None = None          # True: never defer behind ToolSearch; False: always defer
+    allow_tools: list[str] = field(default_factory=list)   # only these tools (names or * patterns) are offered; empty = all
+    deny_tools: list[str] = field(default_factory=list)    # these tools are never offered (checked after allow_tools)
+    pin_tools: bool = False                  # the tool list seen first stays fixed for the session (no mid-session changes)
     timeout_explicit: bool = False           # "timeout" was written in the config (a hard per-call limit)
     approval: str = "approved"               # approved | pending | rejected (project .mcp.json servers)
     managed: bool = False                    # provided by the organization (managed settings / managed-mcp.json)
@@ -179,6 +182,15 @@ class ServerSpec:
         if helper and not isinstance(helper, str):
             raise ValueError(f"MCP server '{name}': 'headersHelper' must be a command string")
         always = raw.get("alwaysLoad", raw.get("always_load"))
+
+        def _names(*keys: str) -> list[str]:
+            for k in keys:
+                v = raw.get(k)
+                if isinstance(v, str):
+                    v = [x for x in v.replace(",", " ").split() if x]
+                if isinstance(v, list):
+                    return [str(x) for x in v if str(x).strip()]
+            return []
         return cls(
             name=name,
             type=infer_type(raw),
@@ -195,6 +207,8 @@ class ServerSpec:
             headers_helper=str(helper),
             oauth=dict(raw.get("oauth") or {}),
             always_load=always if isinstance(always, bool) else None,
+            allow_tools=_names("allowedTools", "allow_tools"), deny_tools=_names("deniedTools", "denyTools", "deny_tools"),
+            pin_tools=bool(raw.get("pinTools", raw.get("pin_tools", False))),
             timeout_explicit=explicit and timeout > 0,
             disabled_by="file" if raw.get("disabled") else "",
         )
@@ -219,6 +233,12 @@ class ServerSpec:
                 out["oauth"] = dict(self.oauth)
         if self.always_load is not None:
             out["alwaysLoad"] = self.always_load
+        if self.allow_tools:
+            out["allowedTools"] = list(self.allow_tools)
+        if self.deny_tools:
+            out["deniedTools"] = list(self.deny_tools)
+        if self.pin_tools:
+            out["pinTools"] = True
         if self.timeout != DEFAULT_TIMEOUT or self.timeout_explicit:
             out["timeout"] = self.timeout
         if self.disabled and self.disabled_by != "project":
@@ -272,6 +292,7 @@ class ServerSpec:
             headers={k: expand_vars(v, lookup, mask) for k, v in self.headers.items()},
             timeout=self.timeout, disabled=self.disabled, scope=self.scope, source=self.source,
             headers_helper=self.headers_helper, oauth=dict(self.oauth), always_load=self.always_load,
+            allow_tools=list(self.allow_tools), deny_tools=list(self.deny_tools), pin_tools=self.pin_tools,
             timeout_explicit=self.timeout_explicit, approval=self.approval, managed=self.managed,
             disabled_by=self.disabled_by,
         )

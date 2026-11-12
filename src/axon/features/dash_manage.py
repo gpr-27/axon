@@ -747,12 +747,27 @@ def set_budget(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
 MEM_BODY_MAX = 20_000
 
 
+def _file_sha(path: Any) -> str:
+    from axon.features import memory_history
+    return memory_history.file_sha(path)
+
+
+def _expected(body: dict[str, Any]) -> str | None:
+    """The sha256 the page read the memory at; a write over a newer version is refused (409)."""
+    v = body.get("expected_sha")
+    return v if isinstance(v, str) and len(v) <= 64 else None
+
+
+def _conflict(e: Exception) -> "DashError":
+    return DashError(str(e), 409)
+
+
 def _mem_row(m: Any) -> dict[str, Any]:
     from axon.features.dashboard import redact_text
     body = str(m.body)
     return {"scope": m.scope, "id": m.id, "file": m.file, "name": redact_text(str(m.name))[:200], "type": m.type,
             "description": redact_text(str(m.description))[:300], "body": redact_text(body[:MEM_BODY_MAX]), "cut": len(body) > MEM_BODY_MAX,
-            "updated": m.updated, "path": _home_short(m.path)}
+            "updated": m.updated, "path": _home_short(m.path), "sha": _file_sha(m.path)}
 
 
 def memory_report(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
@@ -819,7 +834,9 @@ def memory_update(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
     m = _mem_find(srv, body)
     text = _mem_body(body)
     try:
-        res = mf.replace_body(srv.workspace, m, text)
+        res = mf.replace_body(srv.workspace, m, text, expected_sha=_expected(body))
+    except ValueError as e:
+        raise _conflict(e) from None
     except OSError as e:
         raise DashError(f"Could not save it ({type(e).__name__}).", 500) from None
     return {"ok": True, "action": res.action, "id": m.id, "scope": m.scope, "notes": res.notes()}
@@ -833,6 +850,101 @@ def memory_delete(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
     except OSError as e:
         raise DashError(f"Could not delete it ({type(e).__name__}).", 500) from None
     return {"ok": True, "id": m.id, "scope": m.scope, "kept": "A copy is kept; /memory restore brings it back."}
+
+
+# ─── memory scopes (the same module the terminal's /memory uses) ─────────────
+
+def _scope_key(body: dict[str, Any]) -> str:
+    from axon.features import memory_hub as hub
+    try:
+        return hub.norm(_s(body, "key", 20))
+    except ValueError as e:
+        raise DashError(str(e)) from None
+
+
+def _scope_row(srv: "DashServer", r: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    from axon.features.dashboard import redact_text
+    row = {k: r[k] for k in ("key", "label", "blurb", "kind", "display", "exists", "empty", "size", "mtime", "count", "loaded")}
+    row["modified"] = hub.stamp(r["mtime"])
+    if r["key"] == "auto":
+        row["enabled"] = bool(r.get("enabled", True))
+    if r["kind"] == "file":
+        text = hub.read_scope(srv.workspace, r["key"])
+        secret = bool(hub.mf.scan_secrets(text))
+        row.update(text=redact_text(text) if secret else text, locked=secret, sha=_file_sha(hub.file_path(srv.workspace, r["key"])),
+                   why_locked="This file holds a value that looks like a secret, so it is shown masked and cannot be saved from here. Edit the file directly." if secret else "")
+    return row
+
+
+def memory_scopes(srv: "DashServer", qs: dict[str, str]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    rts = srv.all_runtimes()
+    st = rts[0].agent.settings if rts else None          # no live agent: the settings file is the truth (a cached object goes stale)
+    return {"scopes": [_scope_row(srv, r) for r in hub.overview(srv.workspace, st)], "auto": hub.auto_enabled(st),
+            "summary": hub.summary(srv.workspace, st), "workspace": str(srv.workspace)}
+
+
+def memory_scope_save(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    key = _scope_key(body)
+    if key not in hub.FILE_KEYS:
+        raise DashError("Edit notes one by one in the list below.")
+    text = _s(body, "text", hub.MAX_FILE_BYTES + 1)
+    if hub.mf.scan_secrets(hub.read_scope(srv.workspace, key)):
+        raise DashError("That file holds a secret-looking value; edit it directly.", 409)
+    try:
+        res = hub.write_scope(srv.workspace, key, text, expected_sha=_expected(body))
+    except ValueError as e:
+        from axon.features.memory_history import Conflict
+        raise DashError(str(e), 409 if isinstance(e, Conflict) else 413) from None
+    except OSError as e:
+        raise DashError(f"Could not save it ({type(e).__name__}).", 500) from None
+    _reload_live(srv)
+    return {"ok": True, **{k: res[k] for k in ("action", "key", "redacted", "gitignored")}}
+
+
+def memory_scope_add(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    key = _scope_key(body)
+    try:
+        res = hub.append_line(srv.workspace, key, _mem_body(body) if "body" in body else _s(body, "text", 2000))
+    except ValueError as e:
+        raise DashError(str(e)) from None
+    except OSError as e:
+        raise DashError(f"Could not save it ({type(e).__name__}).", 500) from None
+    _reload_live(srv)
+    return {"ok": True, **{k: res[k] for k in ("action", "key", "redacted", "gitignored")}}
+
+
+def memory_scope_delete(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    key = _scope_key(body)
+    try:
+        res = hub.delete_scope(srv.workspace, key)
+    except OSError as e:
+        raise DashError(f"Could not delete it ({type(e).__name__}).", 500) from None
+    _reload_live(srv)
+    return {"ok": True, "removed": res["removed"], "key": key, "kept": "A copy is kept; /memory restore brings it back."}
+
+
+def memory_auto(srv: "DashServer", body: dict[str, Any]) -> dict[str, Any]:
+    from axon.features import memory_hub as hub
+    if not isinstance(body.get("enabled"), bool):
+        raise DashError("'enabled' must be true or false")
+    agents = [rt.agent for rt in srv.all_runtimes()]
+    saved = hub.set_auto(body["enabled"], agents)
+    if saved is None:
+        raise DashError("Could not save the setting (settings.json is unreadable).", 500)
+    return {"ok": True, "enabled": body["enabled"]}
+
+
+def _reload_live(srv: "DashServer") -> None:
+    for rt in srv.all_runtimes():
+        try:
+            rt.agent.reload_memory()
+        except Exception:
+            pass
 
 
 # ─── dispatch ────────────────────────────────────────────────────────────────
@@ -854,10 +966,26 @@ def get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
         return budgets(srv)
     if route == "/api/manage/memory":
         return memory_report(srv, qs)
+    if route == "/api/manage/memory/scopes":
+        return memory_scopes(srv, qs)
+    from axon.features import dash_memory_extra
+    res = dash_memory_extra.get(srv, route, qs)
+    if res is not None:
+        return res
     raise DashError("not found", 404)
 
 
 def post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
+    """Memory writes made here are logged as coming from the dashboard."""
+    if route.startswith("/api/manage/memory"):
+        from axon.features import dash_memory_extra, memory_history
+        with memory_history.writing_as("dashboard"):
+            res = dash_memory_extra.post(srv, route, body)
+            return res if res is not None else _post(srv, route, body)
+    return _post(srv, route, body)
+
+
+def _post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
     if route == "/api/manage/sessions/update":
         return update_session(srv, body)
     if route == "/api/manage/sessions/delete":
@@ -876,4 +1004,12 @@ def post(srv: "DashServer", route: str, body: dict[str, Any]) -> Any | None:
         return memory_update(srv, body)
     if route == "/api/manage/memory/delete":
         return memory_delete(srv, body)
+    if route == "/api/manage/memory/scope":
+        return memory_scope_save(srv, body)
+    if route == "/api/manage/memory/scope/add":
+        return memory_scope_add(srv, body)
+    if route == "/api/manage/memory/scope/delete":
+        return memory_scope_delete(srv, body)
+    if route == "/api/manage/memory/auto":
+        return memory_auto(srv, body)
     raise DashError("not found", 404)

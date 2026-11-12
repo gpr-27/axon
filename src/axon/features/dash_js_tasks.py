@@ -21,8 +21,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from axon.features.dashboard import DashServer
 
 _PUBLIC = ("id", "name", "prompt", "folder", "kind", "every_s", "at", "days", "once_at", "mode", "budget_usd", "catch_up",
-           "enabled", "when", "state", "running", "next_at", "last_run", "last_status", "created")
-_RUN = ("run", "task", "name", "status", "reason", "started", "ended", "cost_usd", "session_id", "error", "missed", "mode")
+           "enabled", "when", "state", "running", "next_at", "last_run", "last_status", "created", "cron", "tz", "cap_off", "max_tokens")
+_RUN = ("run", "task", "name", "status", "reason", "started", "ended", "cost_usd", "session_id", "error", "missed", "mode", "outcome", "trigger", "failure", "duration_s", "tokens_in", "tokens_out")
 
 
 def _task(t: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +60,13 @@ def api_get(srv: "DashServer", route: str, qs: dict[str, str]) -> Any | None:
         except ValueError:
             limit = 30
         return {"runs": [_run(r) for r in s.history(qs.get("id") or None, limit)]}
+    if route == "/api/tasks/next":
+        from axon.features import schedule_ext as ext
+        t = s.get(qs.get("id") or "")
+        if t is None:
+            raise DashError("No such task", 404)
+        fires = ext.next_fires(t, time.time(), 3) if t.get("enabled", True) else []
+        return {"fires": [{"at": f, "label": ext.local_wall(f, t.get("tz"))} for f in fires]}
     if route == "/api/tasks/recent":
         try:
             since = float(qs.get("since") or 0)
@@ -112,6 +119,8 @@ TASKS_CSS = r"""
 .tk .runs .r .num{margin-left:auto;color:var(--ink2)}
 .tkform{display:grid;gap:10px;margin:8px 0}
 .tkform label{display:grid;gap:3px;font-size:12.5px;color:var(--ink2)}
+.tkform input,.tkform select,.tkform textarea{font-size:16px}
+.tk .runs .r.tap{cursor:pointer}.tk .runs .det{flex-basis:100%;color:var(--ink2);overflow-wrap:anywhere}
 .tkform input[type=text],.tkform input[type=number],.tkform input[type=time],.tkform input[type=datetime-local],.tkform select,.tkform textarea{background:var(--page);border:1px solid var(--line);border-radius:5px;padding:6px 9px;color:var(--ink);width:100%}
 .tkform textarea{min-height:84px;resize:vertical}
 .tkform .inl{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -127,8 +136,8 @@ JS_TASKS = r"""
 const TK = { data: null, open: {}, timer: 0 };
 const TK_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 function tkWhen(ts) { return ts ? new Date(ts * 1000).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'none'; }
-function tkStatusWord(s) { return ({ ok: 'Succeeded', failed: 'Failed', budget: 'Stopped at its spending limit', stopped: 'Stopped', timeout: 'Timed out', missed: 'Missed', skipped: 'Skipped', running: 'Running', interrupted: 'Interrupted' })[s] || s || ''; }
-function tkStatusCls(s) { return s === 'ok' ? 'ok' : (s === 'failed' || s === 'budget' || s === 'timeout' || s === 'interrupted') ? 'bad' : s === 'running' ? 'run' : ''; }
+function tkStatusWord(s) { return ({ succeeded: 'Succeeded', budget_exceeded: 'Stopped at its cap', cancelled: 'Cancelled', ok: 'Succeeded', failed: 'Failed', budget: 'Stopped at its spending limit', stopped: 'Stopped', timeout: 'Timed out', missed: 'Missed', skipped: 'Skipped', running: 'Running', interrupted: 'Interrupted' })[s] || s || ''; }
+function tkStatusCls(s) { return (s === 'ok' || s === 'succeeded') ? 'ok' : (s === 'failed' || s === 'budget' || s === 'budget_exceeded' || s === 'timeout' || s === 'interrupted') ? 'bad' : s === 'running' ? 'run' : ''; }
 function tkLocalInput(ts) { const d = new Date(ts * 1000); const p = (n) => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()); }
 
 function tasksMount(P, extra) {
@@ -158,12 +167,16 @@ function tkCard(t, d, redraw) {
   const loadRuns = async () => {
     try {
       const r = await api('/api/tasks/history?id=' + encodeURIComponent(t.id) + '&limit=15');
-      runs.replaceChildren(...(r.runs.length ? r.runs.map(x => h('div', { class: 'r' },
-        h('span', { class: 'st ' + tkStatusCls(x.status) }, tkStatusWord(x.status)), h('span', null, tkWhen(x.started)),
-        x.reason === 'manual' ? h('span', { class: 'muted' }, 'run by hand') : x.reason === 'catch-up' ? h('span', { class: 'muted' }, 'catch-up') : null,
-        x.session_id ? h('a', { href: '#/chat/' + encodeURIComponent(x.session_id), title: 'Open this run as a chat' }, 'Open') : null,
-        h('span', { class: 'num' }, x.status === 'missed' || x.status === 'skipped' ? '' : usd(x.cost_usd || 0)),
-        x.error ? h('div', { class: 'muted', style: 'flex-basis:100%' }, x.error) : null)) : [h('span', { class: 'muted' }, 'Nothing has run yet.')]));
+      const quiet = (x) => x.status === 'missed' || x.status === 'skipped';
+      runs.replaceChildren(...(r.runs.length ? r.runs.map(x => {
+        const det = h('div', { class: 'det', hidden: true }, [x.failure ? 'Reason: ' + x.failure : '', x.duration_s ? 'Took ' + dur(x.duration_s) : '', (x.tokens_in || x.tokens_out) ? ((x.tokens_in || 0) + (x.tokens_out || 0)).toLocaleString() + ' tokens' : '', x.ended ? 'Ended ' + tkWhen(x.ended) : ''].filter(Boolean).join(' · '));
+        return h('div', { class: 'r tap', onclick: (e) => { if (e.target.tagName !== 'A') det.hidden = !det.hidden; } },
+          h('span', { class: 'st ' + tkStatusCls(x.outcome || x.status) }, tkStatusWord(x.outcome || x.status)), h('span', null, tkWhen(x.started)),
+          x.trigger === 'manual' ? h('span', { class: 'muted' }, 'run by hand') : x.reason === 'catch-up' ? h('span', { class: 'muted' }, 'catch-up') : null,
+          x.session_id ? h('a', { href: '#/chat/' + encodeURIComponent(x.session_id), title: 'Open this run as a chat' }, 'Transcript') : null,
+          h('span', { class: 'num' }, quiet(x) ? '' : usd(x.cost_usd || 0)),
+          x.error ? h('div', { class: 'muted', style: 'flex-basis:100%' }, x.error) : null, quiet(x) ? null : det);
+      }) : [h('span', { class: 'muted' }, 'Nothing has run yet.')]));
     } catch (e) { runs.replaceChildren(errorBox(e.message)); }
   };
   if (TK.open[t.id]) loadRuns();
@@ -171,7 +184,7 @@ function tkCard(t, d, redraw) {
     h('h4', null, t.name, t.last_status ? h('span', { class: 'st ' + tkStatusCls(t.last_status) }, tkStatusWord(t.last_status)) : null, t.running ? h('span', { class: 'st run' }, 'Running') : null),
     h('div', { class: 'meta' }, t.when + ' · ' + state),
     h('div', { class: 'meta', title: t.folder }, t.folder),
-    h('div', { class: 'meta' }, modeLabel + ' · up to ' + usd(t.budget_usd) + ' per run'),
+    h('div', { class: 'meta' }, modeLabel + ' · ' + (t.cap_off ? 'no cap' : 'up to ' + usd(t.budget_usd) + (t.max_tokens ? ' / ' + t.max_tokens.toLocaleString() + ' tokens' : '')) + ' per run'),
     h('div', { class: 'acts' },
       act('Run now', async () => { await api('/api/tasks/run', { id: t.id }); toast('Started'); }),
       t.running ? act('Stop', async () => { await api('/api/tasks/stop', { id: t.id }); }) : null,
@@ -189,13 +202,18 @@ function tkEdit(t, d, redraw) {
   const name = h('input', { type: 'text', value: t.name, maxlength: 80, placeholder: 'Optional. Defaults to the start of the prompt.', 'aria-label': 'Task name' });
   const prompt = h('textarea', { 'aria-label': 'What the task should do', placeholder: 'For example: Read the changes from the last day and write a short summary to SUMMARY.md' }, t.prompt);
   const folder = h('input', { type: 'text', value: t.folder, 'aria-label': 'Folder' });
-  const kind = h('select', { 'aria-label': 'How often' }, ...[['interval', 'Every so often'], ['daily', 'Every day'], ['weekly', 'On certain days'], ['once', 'Once']].map(([v, l]) => h('option', { value: v, selected: t.kind === v }, l)));
+  const kind = h('select', { 'aria-label': 'How often' }, ...[['interval', 'Every so often'], ['daily', 'Every day'], ['weekly', 'On certain days'], ['once', 'Once'], ['cron', 'Cron (advanced)']].map(([v, l]) => h('option', { value: v, selected: t.kind === v }, l)));
   const ev = t.every_s || 3600; const unit = ev % 86400 === 0 ? 86400 : ev % 3600 === 0 ? 3600 : 60;
   const num = h('input', { type: 'number', min: 1, step: 1, value: Math.round(ev / unit), 'aria-label': 'Interval length' });
   const per = h('select', { 'aria-label': 'Interval unit' }, ...[[60, 'minutes'], [3600, 'hours'], [86400, 'days']].map(([v, l]) => h('option', { value: v, selected: v === unit }, l)));
   const at = h('input', { type: 'time', value: t.at || '09:00', 'aria-label': 'Time of day' });
   const days = TK_DAYS.map((n, i) => h('input', { type: 'checkbox', checked: (t.days || [0, 1, 2, 3, 4]).includes(i), 'aria-label': n }));
   const when = h('input', { type: 'datetime-local', value: tkLocalInput(t.once_at || (Date.now() / 1000 + 3600)), 'aria-label': 'Date and time' });
+  const cron = h('input', { type: 'text', value: t.cron || '30 9 * * 1-5', placeholder: 'minute hour day month weekday', 'aria-label': 'Cron schedule' });
+  const tz = h('input', { type: 'text', value: t.tz || '', placeholder: 'Timezone, e.g. Europe/London (blank: this computer)', 'aria-label': 'Timezone' });
+  const rowCron = h('div', { class: 'inl' }, cron);
+  const capOff = h('input', { type: 'checkbox', checked: !!t.cap_off, 'aria-label': 'No spending cap' });
+  const maxTok = h('input', { type: 'number', min: 1000, step: 1000, value: t.max_tokens || '', placeholder: 'Optional', 'aria-label': 'Token cap per run' });
   const rowEvery = h('div', { class: 'inl' }, 'Every', num, per), rowAt = h('div', { class: 'inl' }, 'At', at);
   const rowDays = h('div', { class: 'inl' }, ...TK_DAYS.map((n, i) => h('label', null, days[i], n))), rowOnce = h('div', { class: 'inl' }, 'On', when);
   const mode = h('select', { 'aria-label': 'What the task may do' }, ...d.modes.map(m => h('option', { value: m.id, selected: t.mode === m.id }, m.label)));
@@ -207,7 +225,7 @@ function tkEdit(t, d, redraw) {
   const catchUp = h('input', { type: 'checkbox', checked: !!t.catch_up, 'aria-label': 'Run once if missed' });
   const err = h('div');
   const sync = () => {
-    rowEvery.hidden = kind.value !== 'interval'; rowAt.hidden = !(kind.value === 'daily' || kind.value === 'weekly'); rowDays.hidden = kind.value !== 'weekly'; rowOnce.hidden = kind.value !== 'once';
+    rowEvery.hidden = kind.value !== 'interval'; rowAt.hidden = !(kind.value === 'daily' || kind.value === 'weekly'); rowDays.hidden = kind.value !== 'weekly'; rowOnce.hidden = kind.value !== 'once'; rowCron.hidden = kind.value !== 'cron'; tz.hidden = !(kind.value === 'cron' || kind.value === 'daily' || kind.value === 'weekly');
     modeHelp.textContent = (d.modes.find(m => m.id === mode.value) || {}).help || ''; warn.hidden = mode.value !== 'bypass';
   };
   kind.addEventListener('change', sync); mode.addEventListener('change', sync); sync();
@@ -215,7 +233,8 @@ function tkEdit(t, d, redraw) {
   const close = () => scrim.remove();
   scrim.addEventListener('click', (e) => { if (e.target === scrim) close(); }); scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   const save = async () => {
-    const f = { name: name.value, prompt: prompt.value, folder: folder.value, kind: kind.value, mode: mode.value, budget_usd: parseFloat(budget.value), catch_up: catchUp.checked };
+    const f = { name: name.value, prompt: prompt.value, folder: folder.value, kind: kind.value, mode: mode.value, budget_usd: parseFloat(budget.value), catch_up: catchUp.checked, cap_off: capOff.checked, max_tokens: parseInt(maxTok.value, 10) || null, tz: tz.value.trim() };
+    if (kind.value === 'cron') f.cron = cron.value;
     if (kind.value === 'interval') f.every_s = (parseFloat(num.value) || 0) * parseInt(per.value, 10);
     if (kind.value === 'daily' || kind.value === 'weekly') f.at = at.value;
     if (kind.value === 'weekly') f.days = days.map((c, i) => c.checked ? i : -1).filter(i => i >= 0);
@@ -227,9 +246,11 @@ function tkEdit(t, d, redraw) {
   scrim.append(h('div', { class: 'modal tkmodal' }, h('h3', null, isNew ? 'New task' : 'Edit task'),
     h('div', { class: 'tkform' },
       h('label', null, 'What should it do?', prompt), h('label', null, 'Folder it runs in', folder), h('label', null, 'Name', name),
-      h('label', null, 'How often', kind), rowEvery, rowAt, rowDays, rowOnce,
+      h('label', null, 'How often', kind), rowEvery, rowAt, rowDays, rowOnce, rowCron, tz,
       h('label', null, 'What it may do', mode), modeHelp, warn,
       h('label', null, 'Spending limit per run (dollars)', budget),
+      h('label', null, 'Token cap per run (for models with no known price)', maxTok),
+      h('label', { class: 'inl', style: 'display:flex;gap:6px;align-items:center' }, capOff, 'No cap (not recommended)'),
       h('label', { class: 'inl', style: 'display:flex;gap:6px;align-items:center' }, catchUp, 'If Axon was closed at the time, run once when it next opens (otherwise it is only recorded as missed)'),
       h('p', { class: 'muted' }, 'Runs only while Axon is open. It cannot ask questions, so anything that needs your approval is refused. Each run is saved as a chat you can open.')),
     err, h('div', { class: 'acts' }, h('button', { class: 'btn primary', type: 'button', onclick: save }, isNew ? 'Add task' : 'Save'), h('button', { class: 'btn', type: 'button', onclick: close }, 'Cancel'))));

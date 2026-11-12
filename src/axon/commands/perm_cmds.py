@@ -91,7 +91,7 @@ def handle_permissions(agent: Any, arg: str) -> CommandResult:
     header("Permissions", f"mode {mode}")
     kv("Workspace", agent.settings.workspace)
     kv("Mode", {"default": "ask before edits/commands", "acceptEdits": "auto-approve edits in workspace",
-                "plan": "read-only", "dontAsk": "deny anything that would prompt", "bypass": "approve everything except deny rules"}.get(mode, mode))
+                "plan": "read-only", "auto": "a classifier model decides calls no rule decided", "dontAsk": "deny anything that would prompt", "bypass": "approve everything except deny rules"}.get(mode, mode))
     entries = perms.list_rules() if hasattr(perms, "list_rules") else []
     for kind, color in (("deny", ROSE), ("ask", GOLD), ("allow", MINT)):
         rows = [e for e in entries if e.kind == kind]

@@ -115,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", help="Provider preset id (e.g. anthropic, openai, openrouter, ollama)")
     parser.add_argument("--base-url", dest="base_url", help="Provider API base URL")
     parser.add_argument("--mode", "--permission-mode", dest="mode", type=_permission_mode, metavar="MODE",
-                        help="Permission mode: default, acceptEdits, plan, bypass (also bypassPermissions, manual)")
+                        help="Permission mode: default, acceptEdits, plan, auto, bypass (also bypassPermissions, manual)")
     parser.add_argument("--effort", choices=["reflex", "balanced", "synapse", "quantum", "low", "medium", "high", "xhigh", "max"], help="Reasoning effort tier")
     parser.add_argument("--workspace", help="Workspace root directory")
     parser.add_argument("-c", "--continue", dest="continue_session", action="store_true", help="Resume the latest session")
@@ -162,7 +162,7 @@ def _permission_mode(value: str) -> str:
     mode = normalize_mode(value)
     if mode is None:
         raise argparse.ArgumentTypeError(
-            f"invalid permission mode '{value}' (choose default, acceptEdits, plan, dontAsk, bypass, bypassPermissions, manual)")
+            f"invalid permission mode '{value}' (choose default, acceptEdits, plan, dontAsk, auto, bypass, bypassPermissions, manual)")
     return mode
 
 
@@ -541,6 +541,11 @@ def build_agent(
             agent.title_provider = make_provider(settings.model, settings, role="title")   # a short call on the session's model
         except Exception:
             agent.title_provider = None
+    try:   # OpenTelemetry trace export: a no-op unless settings.json "telemetry.enabled" (or AXON_ENABLE_TELEMETRY) is on
+        from axon.features.otel import attach as _otel_attach
+        _otel_attach(agent)
+    except Exception:
+        pass
     return agent
 
 
@@ -1202,7 +1207,7 @@ def _open_session_switcher(agent: Any, renderer: Any) -> str | None:
 
 
 def _quick_memory(agent: Any, line: str) -> None:
-    """`# note` saves a project memory; `#~ note` (or `#user note`) saves a user memory."""
+    """`# note` saves a project memory; `#global note` (or `#~ note`) a user memory; `#local note` a private one (AXON.local.md)."""
     from axon.agent.memory import MemoryStore
     from axon.ui.theme import MINT, ROSE, RST, SLATE
     body = line[1:]
@@ -1211,6 +1216,18 @@ def _quick_memory(agent: Any, line: str) -> None:
         scope, body = "global", body[1:]
     elif body.lower().startswith(("user ", "global ")):
         scope, body = "global", body.split(" ", 1)[1]
+    elif body.lower().startswith(("local ", "~l ")):          # personal note for this project: AXON.local.md, git-ignored
+        text = body.split(" ", 1)[1].strip()
+        try:
+            from axon.features import memory_hub
+            res = memory_hub.append_line(agent.settings.workspace, "local", text)
+        except Exception as e:
+            print(f"  {ROSE}Could not save memory: {e}{RST}\n")
+            return
+        _journal("memory", {"scope": "local", "text": text}, agent=agent)
+        print(f"  {MINT}Saved local memory:{RST} {text[:80]} {SLATE}(AXON.local.md, private" + (", added to .gitignore" if res.get("gitignored") else "") + f"){RST}\n")
+        getattr(agent, "reload_memory", lambda: None)()
+        return
     try:
         item = MemoryStore(agent.settings.workspace).add(body, scope=scope)
     except Exception as e:
@@ -1236,6 +1253,8 @@ def render_turn_footer(renderer: Any, agent: Any, res: Any, elapsed: float) -> b
         renderer.turn_footer(**kwargs)
         return False
     error = "" if res.stop_reason == "declined" else str(res.error or res.final_text or "")
+    if getattr(agent, "budget_pause", None) is not None:
+        error = ""            # the paused-budget line was already shown once (BudgetEvent); not again under the footer
     try:
         params = inspect.signature(renderer.turn_footer).parameters
     except (TypeError, ValueError, AttributeError):

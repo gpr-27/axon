@@ -45,6 +45,9 @@ class TaskTool(Tool):
             "isolation": {"type": "string", "enum": ["worktree"], "description": "Run in a temporary git worktree"},
             "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"],
                        "description": "Effort level for this run"},
+            "budget": {"type": "integer", "minimum": 20000,
+                       "description": "Token budget for this subagent's whole run (at least 20000): it is told the countdown "
+                                      "and paces itself. Default: the agent definition's, else none"},
         },
         "required": ["prompt"],
         "additionalProperties": False,
@@ -84,7 +87,20 @@ class TaskTool(Tool):
             model=str(args.get("model") or "").strip() or None,
             isolation=iso or None,
             effort=str(args.get("effort") or "").strip().lower() or None,
+            budget=_budget_arg(args.get("budget")),
         )
+
+
+def _budget_arg(raw: Any) -> int | None:
+    if raw in (None, "", 0):
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        raise ToolError(f"budget must be a number of tokens (20000 or more), got {raw!r}.") from None
+    if n < 20_000:
+        raise ToolError("budget must be at least 20000 tokens (the API refuses smaller task budgets).")
+    return n
 
 
 class SendMessageTool(Tool):

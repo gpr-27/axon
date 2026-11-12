@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - anthropic>=1 ships httpx2
 from axon.errors import ProviderError
 from axon.providers.base import (
     StreamCanceller,
+    refresh_http_pool,
     retry_event,
     AssistantTurn,
     Block,
@@ -61,6 +62,7 @@ from axon.providers.transport import (
     should_retry_status,
 )
 from axon.providers import prompt_tools
+from axon.providers import toolflow as _toolflow
 from axon.providers import transport as _transport
 
 # Message fields that strict OpenAI-compatible servers reject (Groq, Mistral, OpenAI, ...).
@@ -226,7 +228,7 @@ def sanitize_openai_messages(messages: list[dict[str, Any]], *, strict: bool = F
             if tool_images and picture_refs:
                 from axon.providers.base import load_image_refs
                 parts: list[dict[str, Any]] = [{"type": "image_url", "image_url": {"url": f"data:{mt};base64,{b64}"}}
-                                               for mt, b64 in load_image_refs(picture_refs)]
+                                               for mt, b64 in load_image_refs(picture_refs) if mt.startswith("image/")]   # a PDF read earlier on Claude stays as its text note
                 if parts:
                     sanitized.append({"role": "user", "content": [{"type": "text", "text": "Image(s) returned by the tool call(s) above:"}, *parts]})
         elif role == "tool":
@@ -402,6 +404,11 @@ class OpenAICompatProvider:
         """Abort the in-flight stream (of *thread_ident*, default all) from another thread."""
         return self._canceller.cancel(thread_ident)
 
+    def refresh_client(self) -> None:
+        """Evict every pooled HTTP connection of a shared client (requests without one already open a fresh one)."""
+        if self._client is not None:
+            refresh_http_pool(self._client)
+
     # ── helpers ──────────────────────────────────────────────────────────
     @property
     def _last_turn(self) -> AssistantTurn | None:  # backwards-compatible accessor
@@ -448,6 +455,8 @@ class OpenAICompatProvider:
         if self._preset is not None and self._preset.id == "openrouter":
             headers.setdefault("http-referer", "https://github.com/axon-terminal")
             headers.setdefault("x-title", "Axon")
+        from axon.features.otel import propagation_headers   # {} unless telemetry.propagate is on and this is the user's own endpoint
+        headers.update(propagation_headers(self.settings))
         return headers
 
     def _prompt_tools_mode(self) -> bool:
@@ -502,6 +511,7 @@ class OpenAICompatProvider:
         body["max_completion_tokens" if use_mct else "max_tokens"] = limit
         if tools:
             body["tools"] = normalize_tools_for_chat(tools)
+            _toolflow.apply_openai(body, rejected, str(self.settings.base_url or ""))   # parallel_tool_calls: false when asked
         reasoning = openai_reasoning_effort(effort)
         if reasoning and is_reasoning_model(model) and "reasoning" not in rejected:
             bare = _bare(model)
@@ -593,6 +603,8 @@ class OpenAICompatProvider:
                         body.pop("reasoning_effort", None)
                     elif feature == "no_stream_options":
                         body.pop("stream_options", None)
+                    elif feature == "no_parallel_flag":
+                        body.pop("parallel_tool_calls", None)
 
                 acc: dict[int, _ToolAcc] = {}
                 stop: list[StopReason] = ["end_turn"]
@@ -651,6 +663,10 @@ class OpenAICompatProvider:
                     tried.add("mt")
                     self._learn(model, "use_max_tokens")
                     continue
+                if "parallel_tool_calls" in body and "no_parallel_flag" not in tried and _toolflow.rejected_openai(status, err):
+                    tried.add("no_parallel_flag")      # this host does not know the field: strip it and retry once
+                    self._learn(model, "parallel_tool_calls")
+                    continue
                 if "cache_control" in err and "no_cache_control" not in tried:
                     tried.add("no_cache_control")
                     chat_messages = [{**m, "content": _strip_cache_control(m.get("content"))} for m in chat_messages]
@@ -670,6 +686,10 @@ class OpenAICompatProvider:
                 turn.usage = _estimate_usage(chat_messages, turn)
             for tu in turn.tool_uses:
                 yield ToolUseComplete(id=tu.id)
+            _kept_ids = {tu.id for tu in turn.tool_uses}
+            for _a in acc.values():        # a call cut off mid-arguments is dropped (never run): close its live row too
+                if _a.started and _a.id and _a.id not in _kept_ids:
+                    yield ToolUseComplete(id=_a.id)
             turn.model = wire_model
             state.turn = turn
             yield TurnComplete(stop_reason=turn.stop_reason, usage=turn.usage)
@@ -741,6 +761,9 @@ class OpenAICompatProvider:
                     return
                 delay = backoff_delay(attempt)
                 reason = f"{type(e).__name__}: {e}"
+                self.refresh_client()   # a transport error: never retry on the (possibly dead) pooled connection
+                if attempt == 0:
+                    delay = 0.0         # the first retry of a transport error goes at once
             self._canceller.check()
             if delay is None:
                 return
@@ -806,6 +829,7 @@ class OpenAICompatProvider:
             yield ToolUseStart(id=tc.id, name=tc.name)
 
     def _parse_chat(self, resp: Any, state: StreamState, acc: dict[int, _ToolAcc], stop: list[StopReason], thinking: bool, outcome: _Outcome) -> Iterator[StreamEvent]:
+        refused = False   # the model's own refusal text (message.refusal) counts as a refusal like finish_reason content_filter
         for _event, chunk in self._sse(resp):
             if not isinstance(chunk, dict):
                 continue
@@ -835,6 +859,11 @@ class OpenAICompatProvider:
             if isinstance(content, str) and content:
                 state.text_parts.append(content)
                 yield TextDelta(text=content)
+            said_no = delta.get("refusal")
+            if isinstance(said_no, str) and said_no:
+                refused = True
+                state.text_parts.append(said_no)
+                yield TextDelta(text=said_no)
 
             raw_calls = delta.get("tool_calls")
             if isinstance(raw_calls, list):
@@ -876,7 +905,7 @@ class OpenAICompatProvider:
                     stop[0] = "tool_use"
                 elif fr == "length":
                     stop[0] = "max_tokens"
-                elif fr == "content_filter":
+                elif fr == "content_filter" or refused:
                     stop[0] = "refusal"
                 else:
                     stop[0] = "end_turn"
@@ -895,6 +924,7 @@ class OpenAICompatProvider:
                 return acc[oi]
             return None
 
+        refused = False
         for event, chunk in self._sse(resp):
             if not isinstance(chunk, dict):
                 continue
@@ -913,6 +943,12 @@ class OpenAICompatProvider:
             if et in ("response.output_text.delta", "response.text.delta"):
                 d = chunk.get("delta") or chunk.get("text") or ""
                 if isinstance(d, str) and d:
+                    state.text_parts.append(d)
+                    yield TextDelta(text=d)
+            elif et == "response.refusal.delta":
+                d = chunk.get("delta") or ""
+                if isinstance(d, str) and d:
+                    refused = True
                     state.text_parts.append(d)
                     yield TextDelta(text=d)
             elif et in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.reasoning.delta", "response.thought.delta"):
@@ -957,7 +993,10 @@ class OpenAICompatProvider:
             elif et in ("response.completed", "response.done", "response.incomplete"):
                 outcome.complete = True
                 st = resp_obj.get("status", "") if resp_obj else ""
-                if et == "response.incomplete" or st == "incomplete":
+                why = str(((resp_obj or {}).get("incomplete_details") or {}).get("reason") or "")
+                if refused or why == "content_filter":
+                    stop[0] = "refusal"
+                elif et == "response.incomplete" or st == "incomplete":
                     stop[0] = "max_tokens"
                 else:
                     stop[0] = "tool_use" if acc else "end_turn"
@@ -996,8 +1035,8 @@ class OpenAICompatProvider:
             native["reasoning_content"] = state.thinking
         if kept:
             native["tool_calls"] = [
-                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments or "{}"}}
-                for tc, _ in kept
+                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": (tc.arguments or "{}") if blk.parse_error is None else json.dumps(blk.input)}}
+                for tc, blk in kept
             ]
         return AssistantTurn(blocks=blocks, stop_reason=stop_reason, usage=state.usage, native=native)
 
@@ -1054,7 +1093,18 @@ class OpenAICompatProvider:
             return not self._azure
         if feature == "tool_images":
             # Only endpoints known to take image_url parts; everything else keeps the text-only result.
-            return getattr(self._preset, "id", "") in ("openai", "gemini")
+            if getattr(self._preset, "id", "") in ("openai", "gemini"):
+                return True
+            try:    # any other endpoint whose model list says the model takes pictures (image_url parts)
+                from axon.providers import model_caps
+                model = str(getattr(self.settings, "model", ""))
+                known = model_caps.allows(model, "image_input")
+                if known is not None:
+                    return known
+                from axon.tools.pdf_render import name_looks_visual
+                return name_looks_visual(model)
+            except Exception:
+                return False
         return False
 
 

@@ -82,6 +82,9 @@ def miss_detail(resent: int, extra_cost: float | None) -> str:
     return out
 
 
+REFUSAL_NEXT_STEP = "next: /model to retry elsewhere, set refusal_fallback_model in /config, or /clear"
+
+
 def refusal_detail(details: Any) -> str:
     """` (category: cyber) · <explanation> · suggested model: X · /model to retry with another` or "" when the API gave nothing."""
     if not isinstance(details, dict):
@@ -89,7 +92,7 @@ def refusal_detail(details: Any) -> str:
     cat, why, rec = (" ".join(str(details.get(k) or "").split()) for k in ("category", "explanation", "recommended_model"))
     if not (cat or why or rec):
         return ""
-    parts = [f"category: {cat}" if cat else "", why, f"suggested model: {rec}" if rec else "", "retry with another model using /model"]
+    parts = [f"category: {cat}" if cat else "", why, f"suggested model: {rec}" if rec else "", REFUSAL_NEXT_STEP]
     return " · " + " · ".join(p for p in parts if p)
 
 

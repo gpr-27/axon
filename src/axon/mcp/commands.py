@@ -22,6 +22,7 @@
     /mcp scope <name> user|project|local   move a server to another scope
     /mcp env <name> NAME=VALUE ... [--unset NAME]   keys and variables (keys go to ~/.axon/.env)
     /mcp timeout <name> <seconds>        time limit for the server
+    /mcp filter <name> allow|deny <tool>... | defer on|off|auto | pin on|off   which tools are offered, deferred or pinned
     /mcp tool <name> [<tool>|*] allow|ask|deny|reset   permission per tool
     /mcp dashboard [--check]             every connector, skill and plugin on one screen
     /mcp export [file] | /mcp import <file>   the whole setup as one JSON file
@@ -314,6 +315,8 @@ def _cmd_get(ctx: _Ctx, args: list[str]) -> None:
         _out(f"    Timeout: {spec.timeout:g}s per tool call")
     if spec.always_load is not None:
         _out(f"    alwaysLoad: {str(spec.always_load).lower()}")
+    if spec.allow_tools or spec.deny_tools or spec.pin_tools:
+        _out(f"    Tool controls: allow={spec.allow_tools or 'all'} deny={spec.deny_tools or 'none'} pin={'on' if spec.pin_tools else 'off'}")
     if conn and conn.connected:
         info = conn.client.server_info if conn.client else {}
         label = f"{info.get('name', '')} {info.get('version', '')}".strip()
@@ -641,6 +644,12 @@ def _cmd_enable(ctx: _Ctx, args: list[str], enable: bool) -> None:
     else:
         ctx.bridge.disconnect_server(name)
         _ok(f"Disabled '{name}' (tools unregistered).")
+
+
+def _cmd_filter(ctx: _Ctx, args: list[str]) -> None:
+    from axon.mcp import toolctl
+    if toolctl.run(ctx.config, args, _ok if args[1:] else _out, _err):
+        ctx.connect(args[0])
 
 
 def _cmd_restart(ctx: _Ctx, args: list[str]) -> None:
@@ -1238,6 +1247,7 @@ _COMMANDS = {
     "serve": _cmd_serve, "add-from-claude-desktop": _cmd_add_from_desktop,
     "add": _cmd_add, "remove": _cmd_remove, "rm": _cmd_remove, "delete": _cmd_remove,
     "enable": lambda c, a: _cmd_enable(c, a, True), "disable": lambda c, a: _cmd_enable(c, a, False),
+    "filter": _cmd_filter, "tool-filter": _cmd_filter,
     "restart": _cmd_restart, "reconnect": _cmd_restart,
     "connect": _cmd_connect, "start": _cmd_connect,
     "disconnect": _cmd_disconnect, "stop": _cmd_disconnect,

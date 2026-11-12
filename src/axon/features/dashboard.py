@@ -61,7 +61,7 @@ PAGE_BUDGET_CHARS = 1_500_000  # soft cap on the HTML of one transcript page
 GIST_MAX_BYTES = 1_000_000
 APPROVAL_TIMEOUT_S = 300
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.\-]{1,200}")
-REPLY_MODES = ("default", "plan", "acceptEdits")   # bypass is never offered
+REPLY_MODES = ("default", "plan", "acceptEdits", "auto")   # bypass is never offered
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
        "img-src 'self' data:; media-src 'self'; frame-src 'self' http://localhost:* http://127.0.0.1:*; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; "
@@ -1028,6 +1028,9 @@ _STREAM_TYPES = {"system", "text_delta", "thinking_delta", "tool_use", "tool_res
                  "llm_call_end", "approval_request", "result", "error", "retry"}
 
 
+_SLIM_LIMIT = 200_000     # the page shows a tool's whole input and output; only a truly huge one is cut (and says so)
+
+
 def _slim(ev: dict[str, Any]) -> dict[str, Any] | None:
     t = ev.get("type")
     if t not in _STREAM_TYPES:
@@ -1036,13 +1039,16 @@ def _slim(ev: dict[str, Any]) -> dict[str, Any] | None:
     if t == "system":
         ev = {k: ev.get(k) for k in ("type", "subtype", "session_id", "model", "mode")}
     elif t == "tool_result" and isinstance(ev.get("content"), str):
-        ev["content"] = redact_text(ev["content"][:4000])
+        full = redact_text(ev["content"])
+        ev["content"] = full[:_SLIM_LIMIT]
+        if len(full) > _SLIM_LIMIT:
+            ev["truncated_from"] = len(full)
     elif t == "tool_use":
         shown = redact_text(json.dumps(ev.get("input"), ensure_ascii=False, default=str))
         try:
-            ev["input"] = json.loads(shown) if len(shown) <= 4000 else {"value": shown[:4000]}
+            ev["input"] = json.loads(shown) if len(shown) <= _SLIM_LIMIT else {"value": shown[:_SLIM_LIMIT]}
         except ValueError:
-            ev["input"] = {"value": shown[:4000]}
+            ev["input"] = {"value": shown[:_SLIM_LIMIT]}
     elif t == "permission":
         ev = {k: (redact_text(v) if isinstance(v, str) else v) for k, v in ev.items()}
     return ev
@@ -1099,6 +1105,8 @@ class DashServer(ThreadingHTTPServer):
         self.attach = Attachments()
         from axon.features.dash_pty import PtyManager
         self.pty = PtyManager()
+        from axon.features.dash_phone import PhoneAccess
+        self.phone = PhoneAccess(self)
         self._settings_cache: dict[str, Any] = {}
         self.provider_choice: dict[str, Any] = {}      # what the person picked in this page; it beats environment defaults
         super().__init__((LOOPBACK_HOST, port), _Handler)
@@ -1551,8 +1559,24 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(status, {"error": message})
 
     # ── checks ──
+    @property
+    def _lan(self) -> bool:
+        """True when this request came in on the phone listener rather than loopback."""
+        try:
+            return self.server.phone.serves(int(self.request.getsockname()[1]))
+        except Exception:
+            return False
+
+    def _origins(self) -> set[str]:
+        return self.server.phone.origins() if self._lan else self.server.allowed_origins()
+
     def _host_ok(self) -> bool:
         host, port = _split_host(self.headers.get("Host", ""))
+        if self._lan:
+            if not self.server.phone.host_ok(host, port):
+                self._err(403, "Host header must be this machine's address")
+                return False
+            return True
         if not is_loopback(host) or (port is not None and port != self.server.port):
             self._err(403, "Host header must be this dashboard's loopback address")
             return False
@@ -1561,13 +1585,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _cookie_ok(self) -> bool:
         for part in (self.headers.get("Cookie") or "").split(";"):
             k, _, v = part.strip().partition("=")
-            if k == COOKIE_NAME and v and hmac.compare_digest(v.encode(), self.server.cookie.encode()):
-                return True
+            if k == COOKIE_NAME and v:
+                if self._lan:
+                    if self.server.phone.cookie_ok(v):
+                        return True
+                elif hmac.compare_digest(v.encode(), self.server.cookie.encode()):
+                    return True
         return False
 
     def _origin_ok(self) -> bool:
         origin = self.headers.get("Origin")
-        if origin not in self.server.allowed_origins() or self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+        if origin not in self._origins() or self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
             self._err(403, "cross-origin request refused")
             return False
         return True
@@ -1579,10 +1607,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._err(403, "cross-origin request refused")
             return False
         origin = self.headers.get("Origin")
-        if origin is not None and origin not in self.server.allowed_origins():
+        if origin is not None and origin not in self._origins():
             self._err(403, "cross-origin request refused")
             return False
         return True
+
+    def _lan_blocked(self, route: str) -> bool:
+        """The phone listener serves chat, files and commands, not the raw terminal/shell or the phone controls themselves."""
+        if not self._lan:
+            return False
+        from axon.features.dash_phone import BLOCKED_PREFIXES
+        if route.startswith(BLOCKED_PREFIXES) or route.startswith("/api/phone"):
+            self._err(403, "not available from a phone: use the terminal or the browser on this computer")
+            return True
+        return False
+
+    def _phone_post(self, body: dict[str, Any]) -> dict[str, Any]:
+        ph = self.server.phone
+        action = str(body.get("action") or "pair")
+        if action == "stop":
+            ph.stop()
+            return ph.status()
+        try:
+            ph.start(str(body.get("ip") or "") or None)
+        except OSError as e:
+            raise DashError(str(e)) from None
+        link = ph.pairing_url()
+        from axon.features.dash_phone import PAIR_TTL
+        from axon.features.qr import qr_svg
+        return {**ph.status(), "link": link, "svg": qr_svg(link), "expires_in": int(PAIR_TTL)}
 
     def _body(self, limit: int = MAX_BODY) -> dict[str, Any]:
         if "application/json" not in (self.headers.get("Content-Type") or "").lower():
@@ -1627,13 +1680,14 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/":
                 tok = qs.get("t")
                 if tok is not None:
-                    if hmac.compare_digest(tok.encode(), self.server.token.encode()):
+                    lan = self._lan
+                    if self.server.phone.consume(tok) if lan else hmac.compare_digest(tok.encode(), self.server.token.encode()):
                         self.send_response(302)
                         self.send_header("Location", "/")
-                        self.send_header("Set-Cookie", f"{COOKIE_NAME}={self.server.cookie}; Path=/; HttpOnly; SameSite=Strict")
+                        self.send_header("Set-Cookie", f"{COOKIE_NAME}={self.server.phone.cookie if lan else self.server.cookie}; Path=/; HttpOnly; SameSite=Strict")
                         self._headers("text/plain; charset=utf-8", 0)
                     else:
-                        self._send(403, b"Invalid dashboard token. Use the URL printed by axon dash.", "text/plain; charset=utf-8")
+                        self._send(403, b"This link was already used or has expired. Run /phone in Axon for a new QR code." if lan else b"Invalid dashboard token. Use the URL printed by axon dash.", "text/plain; charset=utf-8")
                     return
                 if not self._cookie_ok():
                     page = (b"<!doctype html><meta charset=utf-8><title>Axon: signed out</title><meta name=viewport content='width=device-width'>"
@@ -1654,6 +1708,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._err(401, "missing or invalid dashboard cookie")
                 return
             if route.startswith("/api/") and not self._same_site_ok():
+                return
+            if self._lan_blocked(route):
+                return
+            if route == "/api/phone":
+                self._json(200, self.server.phone.status())
                 return
             if route.startswith("/static/"):
                 from axon.features import dashboard_web as web
@@ -1698,6 +1757,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {"sessions": rows, "scope": scope})
         elif route == "/api/extensions":
             self._json(200, extensions_data(srv.workspace, srv.agent))
+        elif route in ("/api/agentver/list", "/api/agentver/diff"):    # read-only: fine on the phone listener too
+            from axon.features import dash_agentver
+            self._json(200, dash_agentver.get(srv, route, qs))
         elif route == "/api/share/file":
             item = srv.exports.get(qs.get("sha", ""))
             if item is None:
@@ -1780,7 +1842,12 @@ class _Handler(BaseHTTPRequestHandler):
         u = urlsplit(self.path)
         route = u.path
         srv = self.server
+        if self._lan_blocked(route):
+            return
         try:
+            if route == "/api/phone":
+                self._json(200, self._phone_post(self._body()))
+                return
             if route == "/api/attach":
                 self._json(200, self._attach({k: v[-1] for k, v in parse_qs(u.query).items()}))
                 return
@@ -1807,6 +1874,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if run:
                     run.cancel()
                 self._json(200, {"ok": True})
+            elif route == "/api/agentver/act":
+                if self._lan:        # rollback writes the agent file: this computer only
+                    raise DashError("Rolling back or pinning an agent is not available from a phone; use this computer.", 403)
+                from axon.features import dash_agentver
+                self._json(200, dash_agentver.post(srv, body))
             elif route == "/api/share/preview":
                 self._json(200, self._share_preview(body))
             elif route == "/api/share/gist":
@@ -2159,12 +2231,32 @@ def _start_scheduler() -> None:
         pass
 
 
+def _ensure_server(agent: Any, port: int = DEFAULT_PORT) -> DashServer | None:
+    """The running in-terminal dashboard, started if needed. None (after printing why) when it cannot start."""
+    srv: DashServer | None = _LIVE["server"]
+    if srv is not None and _LIVE["thread"] is not None and _LIVE["thread"].is_alive():
+        srv.agent = agent
+        return srv
+    ws = getattr(getattr(agent, "settings", None), "workspace", None) or Path.cwd()
+    try:
+        srv = _bind(port, Path(ws), agent)
+    except OSError as e:
+        print(f"Could not start the dashboard: {e}")
+        return None
+    t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.3}, name="axon-dash", daemon=True)
+    t.start()
+    _LIVE.update(server=srv, thread=t)
+    _start_scheduler()
+    return srv
+
+
 def _dash_command(agent: Any, arg: str) -> None:
     toks = (arg or "").split()
     srv: DashServer | None = _LIVE["server"]
     alive = srv is not None and _LIVE["thread"] is not None and _LIVE["thread"].is_alive()
     if "stop" in toks:
         if alive:
+            srv.phone.stop()  # type: ignore[union-attr]
             srv.shutdown()  # type: ignore[union-attr]
             srv.shutdown_runs()  # type: ignore[union-attr]
             srv.server_close()  # type: ignore[union-attr]
@@ -2176,24 +2268,46 @@ def _dash_command(agent: Any, arg: str) -> None:
     no_open = "--no-open" in toks
     port = next((int(t) for t in toks if t.isdigit()), DEFAULT_PORT)
     reused = alive
-    if alive:
-        srv.agent = agent  # type: ignore[union-attr]
-    else:
-        ws = getattr(getattr(agent, "settings", None), "workspace", None) or Path.cwd()
-        try:
-            srv = _bind(port, Path(ws), agent)
-        except OSError as e:
-            print(f"Could not start the dashboard: {e}")
-            return
-        t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.3}, name="axon-dash", daemon=True)
-        t.start()
-        _LIVE.update(server=srv, thread=t)
-        _start_scheduler()
-    opened = False if no_open else open_browser(srv.open_url)  # type: ignore[union-attr]
+    srv = _ensure_server(agent, port)
+    if srv is None:
+        return
+    opened = False if no_open else open_browser(srv.open_url)
     if reused:
         print("Dashboard already running; reusing it.")
-    _announce(srv, opened, sys.stdout)  # type: ignore[arg-type]
+    _announce(srv, opened, sys.stdout)
     print("  The page and this terminal share one session: messages, chats and folders changed in either show in both.")
+    print("  Want it on your phone? Type /phone for a QR code.")
+
+
+def _phone_command(agent: Any, arg: str) -> None:
+    toks = (arg or "").split()
+    srv: DashServer | None = _LIVE["server"]
+    if "stop" in toks or "off" in toks:
+        if srv is not None and srv.phone.stop():
+            print("Phone access is off. Phones that were signed in are signed out.")
+        else:
+            print("Phone access was not on.")
+        return
+    srv = _ensure_server(agent)
+    if srv is None:
+        return
+    ip = next((t for t in toks if t.count(".") == 3), None)
+    try:
+        srv.phone.start(ip)
+    except OSError as e:
+        print(f"Could not open phone access: {e}")
+        return
+    link = srv.phone.pairing_url()
+    print("\nScan this with your phone's camera (same Wi-Fi as this computer):\n")
+    try:
+        from axon.features.qr import qr_terminal
+        print(qr_terminal(link))
+    except Exception:
+        pass
+    print(f"\n  {link}")
+    print("  The link works once and expires in 10 minutes; type /phone again for a new one.")
+    print("  Your phone then chats in this same session: messages show live in the terminal, the browser and the phone.")
+    print("  Only devices on your own network can connect. The raw terminal is not offered on the phone. '/phone stop' turns it off.\n")
 
 
 CLI_SUBCOMMANDS = {"open": dash_main, "dash": dash_main}
@@ -2202,7 +2316,10 @@ try:
     from axon.features import FeatureCommand
     COMMANDS = [FeatureCommand(name="/open", handler=_dash_command, category="Integrations", aliases=("/dash", "/web"),
                                description="Open the Axon app in your browser (chat, files, shell, commands, usage)",
-                               usage="/open [port] [--no-open] | /open stop")]
+                               usage="/open [port] [--no-open] | /open stop"),
+                FeatureCommand(name="/phone", handler=_phone_command, category="Integrations", aliases=("/mobile", "/qr"),
+                               description="Continue this chat from your phone: scan a QR code (same Wi-Fi)",
+                               usage="/phone | /phone stop")]
 except (ImportError, AttributeError):
     COMMANDS = []
 

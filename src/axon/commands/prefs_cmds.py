@@ -366,36 +366,12 @@ def _restore_connection(agent: Any, model: str) -> None:
         pass
 
 
-@command("fast", category=CAT_MODEL, description="Toggle the small/fast model for this session",
-         usage="/fast [on|off]   (uses settings.small_model; set it with smallModel in settings.json)")
+@command("fast", category=CAT_MODEL, description="Fast mode: the API's fast speed where the model has it, else the provider's fast model",
+         usage="/fast [on|off|status]\n/fast model <id>   the model /fast switches to on providers without native fast mode\n"
+               "/fast on model     use the fast model even where API fast mode exists")
 def handle_fast(agent: Any, arg: str) -> CommandResult:
-    from axon.commands.model_cmds import switch_model
-    a = arg.strip().lower()
-    on_now = bool(getattr(agent, "fast_mode", False))
-    want = True if a in ("on", "true", "1") else False if a in ("off", "false", "0") else not on_now
-    if a and a not in ("on", "off", "true", "false", "1", "0", "toggle"):
-        usage("/fast [on|off]")
-        return _done()
-    if want == on_now:
-        info(f"Fast mode is already {'on' if on_now else 'off'} ({agent.settings.model}).")
-        return _done()
-    if want:
-        small = getattr(agent.settings, "small_model", None)
-        if not small or small == agent.settings.model:
-            warn("No small model configured. Set smallModel in ~/.axon/settings.json" + typed_only(" or /config small_model <model>") + ".")
-            return _done()
-        prev = agent.settings.model
-        agent._fast_prev_connection = _connection_of(agent.settings)
-        if switch_model(agent, small, persist=False) is False:
-            return _done()
-        agent.fast_mode = True
-        agent._fast_prev_model = prev
-        ok(f"⚡ Fast mode on: {CYAN}{small}{RST} {SLATE}(was {prev}{typed_only('; /fast off to return')}){RST}")
-    else:
-        prev = getattr(agent, "_fast_prev_model", None) or agent.settings.model
-        _restore_connection(agent, prev)
-        agent.fast_mode = False
-        ok(f"Fast mode off: back to {CYAN}{prev}{RST}")
+    from axon.agent.speed import run_fast
+    run_fast(agent, arg)
     return _done()
 
 
@@ -426,29 +402,12 @@ def handle_focus(agent: Any, arg: str) -> CommandResult:
 
 # ─── /goal ─────────────────────────────────────────────────────────────────
 
-@command("goal", category=CAT_MODEL, description="Set a session goal shown in the status and sent to the model",
-         usage="/goal                 show the goal\n/goal <condition>     set it (the model keeps working toward it)\n/goal clear           remove it")
+@command("goal", category=CAT_MODEL, description="Set done-when criteria; a separate grader checks them after each turn and sends back the gaps",
+         usage="/goal                  show the goal and its last verdict\n/goal <done-when>      set it (free text or a short checklist)\n"
+               "/goal budget N         max grader rounds per turn (default 3, max 10)\n/goal clear            remove it")
 def handle_goal(agent: Any, arg: str) -> CommandResult:
-    a = " ".join(arg.split())
-    current = getattr(agent, "goal", None) or getattr(agent.settings, "goal", None)
-    if not a:
-        if current:
-            kv("Goal", f"{WHITE}{current}{RST}")
-            print()
-        else:
-            info("No session goal." + typed_only(" /goal <condition> sets one."))
-        return _done()
-    if a.lower() in ("clear", "off", "none", "-", "reset"):
-        agent.goal = None
-        update_settings(agent, goal=None)
-        ok("Session goal cleared")
-        return _done()
-    agent.goal = a[:500]
-    update_settings(agent, goal=agent.goal)
-    ok(f"Goal set: {WHITE}{agent.goal}{RST}")
-    hint("    Shown in the status view and the prompt; the model is told to keep working until it holds.")
-    print()
-    return _done()
+    from axon.commands.goal_cmds import handle_goal_command      # the done-when logic lives in goal_cmds / agent.goal
+    return handle_goal_command(agent, arg)
 
 
 def goal_prompt_section(agent_or_settings: Any) -> str | None:
@@ -458,9 +417,9 @@ def goal_prompt_section(agent_or_settings: Any) -> str | None:
         g = getattr(agent_or_settings.settings, "goal", None)
     if not g:
         return None
-    return (f"# Session goal\nThe user set this goal for the session: {g}\n"
-            "Keep working toward it. Before you finish a turn, check whether the goal holds; if it does not, "
-            "say what is still missing and continue when possible.")
+    return (f"# Session goal\nThe user set this done-when goal for the session: {g}\n"
+            "Keep working toward it. When you finish a turn, an independent grader checks it against the evidence "
+            "(files changed, command output); show your evidence, and expect gaps to be sent back to you.")
 
 
 # ─── /terminal-setup ───────────────────────────────────────────────────────

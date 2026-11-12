@@ -863,6 +863,9 @@ def cmd_budget(agent: Any, arg: str) -> None:
     if getattr(agent, "settings", None) is None:
         _emit(["  " + ch.paint("No active session settings.", "WARNING")])
         return
+    from axon.features import budget_cmd           # raise / turn / task, and `off` while paused: pause and resume
+    if budget_cmd.handle(agent, arg or ""):
+        return
     a = (arg or "").strip().lower()
     head, _, rest = a.partition(" ")
     if head in ("day", "daily", "month", "monthly"):
@@ -883,7 +886,7 @@ def cmd_budget(agent: Any, arg: str) -> None:
         except Exception as e:
             _emit(["  " + ch.paint(f"Could not update the budget: {e}", "ERROR")])
             return
-    _emit([""] + budget_lines(agent) + ([""] + project_budget_lines(agent) if not a else []) + [""])
+    _emit([""] + budget_lines(agent) + budget_cmd.extra_lines(agent) + ([""] + project_budget_lines(agent) if not a else []) + [""])
 
 
 # ─── HTML report ───────────────────────────────────────────────────────────

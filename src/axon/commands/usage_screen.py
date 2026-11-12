@@ -422,6 +422,23 @@ def _warning_lines(agent: Any, width: int) -> list[str]:
     return [f"  {r}" if i == 0 else f"    {r}" for i, r in enumerate(rows)]
 
 
+def _geo_line(agent: Any) -> str:
+    """One short mention when data residency (inference_geo) is set: the setting and, when the API reported it, where inference ran."""
+    try:
+        from axon.providers.geo_wire import normalize
+        want = normalize(getattr(getattr(agent, "settings", None), "inference_geo", ""))
+        if not want:
+            return ""
+        ran = ""
+        for e in reversed(list(getattr(session_ledger(agent), "entries", []) or [])):
+            ran = str(getattr(getattr(e, "usage", None), "inference_geo", "") or "")
+            if ran:
+                break
+        return f"{WHITE}{want}{RST}" + (f"  {SLATE}ran in {ran}{RST}" if ran and ran != want else "")
+    except Exception:
+        return ""
+
+
 def usage_lines(agent: Any, width: int) -> list[str]:
     """Body of the Usage tab (without the autocompact warning, which the screen pins above it)."""
     out: list[str] = []
@@ -443,6 +460,9 @@ def usage_lines(agent: Any, width: int) -> list[str]:
         else:
             kv("Code changes", f"{MINT}+{su.added}{RST} {ROSE}-{su.removed}{RST} lines in {su.edited_files} file"
                f"{'' if su.edited_files == 1 else 's'}  {SLATE}edit tools{RST}")
+        geo = _geo_line(agent)
+        if geo:
+            kv("Inference geo", geo)
         out.append("")
         heads = ["Model", "Input", "Output", "Cache read", "Cache write", "Cost"]
         trows = [[m.model, tok(m.input), tok(m.output), tok(m.cache_read), tok(m.cache_write),
@@ -480,6 +500,17 @@ def usage_lines(agent: Any, width: int) -> list[str]:
         color = MINT if frac < 0.75 else (GOLD if frac < 1 else ROSE)
         out.append(_fit(f"    {SLATE}{pad(label.capitalize() + ' budget', 22)}{RST} {bar(frac, cells, color)} "
                         f"{color}{frac * 100:.0f}%{RST} {SLATE}{usd(spent)} of {usd(limit)}{RST}", width))
+    tb = getattr(getattr(agent, "settings", None), "task_budget_tokens", None)
+    if tb:       # one short mention: what the model's task-budget countdown has used of its total
+        from axon.agent.budget_pause import task_used
+        out.append(_fit(f"    {SLATE}{pad('Task budget', 22)}{RST} {SLATE}{tok(task_used(agent))} of {tok(tb)} tokens{RST}", width))
+    try:       # one line, only while OpenTelemetry export is on
+        from axon.features.otel import usage_line
+        tl = usage_line(agent)
+        if tl:
+            out.append(_fit(f"    {SLATE}{tl}{RST}", width))
+    except Exception:
+        pass
     c = contributors()
     out += spending_lines(agent, width, cells)
     from axon.features import quota
@@ -578,6 +609,11 @@ def context_lines(agent: Any, width: int) -> list[str]:
     return [_fit(x, width) for x in _capture(handle_context, agent)]
 
 
+def _notify_summary(s: Any) -> str:
+    n = len((getattr(s, "notify_sinks", None) or {}).get("webhooks") or [])
+    return f"desktop {getattr(s, 'notifications', 'important')}" + (f", {n} webhook{'s' if n != 1 else ''}" if n else "") + "  (/notify status)"
+
+
 def config_lines(agent: Any, width: int) -> list[str]:
     from axon.commands.system_cmds import _setting_sources
     from axon.ui.theme import current_theme, kv_lines
@@ -590,6 +626,8 @@ def config_lines(agent: Any, width: int) -> list[str]:
         ("Max output", f"{tok(s.max_tokens)} tokens"),
         ("Session budget", usd(s.session_cost_ceiling) if float(s.session_cost_ceiling or 0) > 0 else "none"),
         ("Turn budget", usd(s.budget_turn_usd) if s.budget_turn_usd else "none"),
+        ("Task budget", f"{tok(s.task_budget_tokens)} tokens" if getattr(s, "task_budget_tokens", None) else "off"),
+        ("Notifications", _notify_summary(s)),
         ("Theme", current_theme()),
         ("Workspace", str(s.workspace)),
         ("Setting files", ", ".join(_setting_sources(agent)) or "defaults only"),

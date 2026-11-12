@@ -338,8 +338,11 @@ def _record(ws: Path, path: Path, action: str, scope: str) -> None:
 
 
 def write_memory(ws: Path, scope: str, *, name: str, body: str, description: str = "", type_: str = "project",
-                 file: str = "", extra: dict[str, Any] | None = None, created: str = "") -> WriteResult:
-    """Create or update one memory: secrets redacted, previous version trashed, written atomically, indexed."""
+                 file: str = "", extra: dict[str, Any] | None = None, created: str = "",
+                 expected_sha: str | None = None) -> WriteResult:
+    """Create or update one memory: secrets redacted, previous version trashed, written atomically, indexed.
+    ``expected_sha``: the sha256 of the file text the caller read; a different current text raises
+    ``memory_history.Conflict`` and nothing is written."""
     scope = norm_scope(scope)
     name = one_line(name) or "memory"
     type_ = type_ if type_ in TYPES else "project"
@@ -359,6 +362,9 @@ def write_memory(ws: Path, scope: str, *, name: str, body: str, description: str
             path = d / f"{slugify(name)}-{n}.md"
             n += 1
     existing = parse_memory(path, scope) if path.exists() else None
+    if expected_sha is not None:
+        from axon.features import memory_history as _mh
+        _mh.check(f"'{name}'", path, expected_sha)
     desc = one_line(description) or derive_description(body)
     stamp = today()
     if existing is not None:
@@ -380,17 +386,23 @@ def write_memory(ws: Path, scope: str, *, name: str, body: str, description: str
         if backup is None:
             raise OSError(f"Could not keep the previous version of {path}; nothing was changed.")
     action = "updated" if existing is not None or backup else "created"
+    try:
+        before = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
+    except OSError:
+        before = None
     _write_atomic(path, text)
     _record(ws, path, action, scope)
+    from axon.features import memory_history as _mh
+    _mh.record(ws, _mh.note_key(scope, path.name), before, text, action)
     warning = upsert_index(ws, scope, name, path.name, desc)
     return WriteResult(path, action, backup, labels, warning)
 
 
-def replace_body(ws: Path, mem: Memory, text: str) -> WriteResult:
+def replace_body(ws: Path, mem: Memory, text: str, expected_sha: str | None = None) -> WriteResult:
     derived = mem.description == derive_description(mem.body)
     return write_memory(ws, mem.scope, name=mem.name, body=text,
                         description=derive_description(text) if derived else mem.description,
-                        type_=mem.type, file=mem.file, created=mem.created, extra=mem.meta)
+                        type_=mem.type, file=mem.file, created=mem.created, extra=mem.meta, expected_sha=expected_sha)
 
 
 def delete_memory(ws: Path, mem: Memory) -> Path | None:
@@ -399,6 +411,12 @@ def delete_memory(ws: Path, mem: Memory) -> Path | None:
     if backup is None and mem.path.is_file():
         raise OSError(f"Could not keep a copy of {mem.path}; not deleted.")
     _record(ws, mem.path, "deleted", mem.scope)
+    from axon.features import memory_history as _mh
+    try:
+        _before = mem.path.read_text(encoding="utf-8", errors="replace") if mem.path.is_file() else None
+    except OSError:
+        _before = None
+    _mh.record(ws, _mh.note_key(mem.scope, mem.file), _before, None, "deleted")
     try:
         mem.path.unlink()
     except FileNotFoundError:
@@ -459,14 +477,20 @@ def guard_write(ws: Path, path: Path, new_text: str) -> tuple[str, list[str]]:
         new_text = redact(new_text)
         notes.append(f"Redacted {', '.join(labels)} before saving: secrets are never stored in memory.")
     p = Path(path).expanduser()
+    from axon.features import memory_history as _mh
+    _old = None
     if p.is_file():
         try:
-            if p.read_text(encoding="utf-8", errors="replace") != new_text:
+            _old = p.read_text(encoding="utf-8", errors="replace")
+            if _old != new_text:
                 kept = trash_copy(ws, scope, p, "replaced")
                 if kept:
                     notes.append(f"Previous version kept: {kept}")
         except OSError:
             pass
+    if _old != new_text and p.name != INDEX:
+        with _mh.writing_as("model (Write/Edit tool)"):      # the tool writes right after this returns
+            _mh.record(ws, _mh.note_key(scope, p.name), _old, new_text, "written")
     return new_text, notes
 
 

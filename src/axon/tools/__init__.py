@@ -22,6 +22,7 @@ from axon.tools.search import GlobTool, GrepTool, LsTool
 from axon.tools.code_graph import CodeSearchTool
 from axon.tools.shell import BashTool
 from axon.tools.todo import TodoWriteTool
+from axon.tools.advisor_tool import AdvisorTool
 from axon.tools.web import WebFetchTool
 from axon.tools.web_search import WebSearchTool
 from axon.tools.task import TaskTool, SendMessageTool, ExitPlanModeTool, EnterPlanModeTool
@@ -130,6 +131,7 @@ def create_default_registry() -> ToolRegistry:
         SkillTool(),
         AskUserQuestionTool(),
         DoctorTool(),
+        AdvisorTool(),          # advertised only while advisor_model is set
     ]
     for extra in feature_tools():
         if all(extra.name != t.name for t in tools):

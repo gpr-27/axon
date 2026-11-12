@@ -64,6 +64,7 @@ include = ["axon*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.json", "*.toml", "*.txt", "py.typed"]
+"axon.evals" = ["*.jsonl"]
 "axon.features" = ["templates/*/template.json", "templates/**/*.tmpl", "agents/*.md", "i18n/*.json"]
 
 [tool.pytest.ini_options]

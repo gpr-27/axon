@@ -173,7 +173,7 @@ def test_fast_mode_is_session_only(workspace: Path, isolate_user_home: Path, mon
     assert not (isolate_user_home / ".axon" / "config.toml").exists()  # never persisted
     b = _make(workspace)
     dispatch_command("/fast on", b)
-    assert "No small model configured" in capsys.readouterr().out
+    assert "No fast model" in capsys.readouterr().out
 
 
 def test_goal_set_show_clear(agent: Agent, capsys):

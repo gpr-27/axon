@@ -30,6 +30,9 @@ from axon.commands.memory_cmds import (  # noqa: F401
     handle_init, handle_learn, handle_memory, handle_optimize, handle_prompt, quick_memory,
 )
 from axon.commands import parity_cmds  # noqa: F401
+from axon.commands import vault_cmds  # noqa: F401  (/vault)
+from axon.commands import memory_history_cmds  # noqa: F401
+from axon.commands import advisor_cmds  # noqa: F401  (/advisor)
 from axon.commands import marketplace_cmds  # noqa: F401  (/marketplace, /connectors, /store)
 from axon.commands.endpoint_cmds import handle_endpoint  # noqa: F401
 from axon.commands.keys_cmds import handle_keys  # noqa: F401
@@ -43,6 +46,7 @@ from axon.commands.prefs_cmds import (  # noqa: F401
     handle_color, handle_fast, handle_goal, handle_output_style, handle_release_notes, handle_statusline,
     handle_terminal_setup, handle_theme, handle_vim,
 )
+from axon.commands.telemetry_cmds import handle_telemetry  # noqa: F401
 from axon.commands.workspace_cmds import handle_add_dir, handle_cd, handle_loop, purge  # noqa: F401
 from axon.commands.session_cmds import (  # noqa: F401
     handle_branch_cmd as handle_branch, handle_clear, handle_delete, handle_exit, handle_export, handle_history,

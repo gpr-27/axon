@@ -126,6 +126,13 @@ def switch_model(agent: Any, chosen: str, preset: Any = None, persist: bool = Tr
     print(f"\n  {TEAL}✓ Model:{RST} {BOLD}{WHITE}{chosen}{RST}{via}")
     scope = "saved as your default" if persist else "this session only"
     print(f"    {SLATE}{f'was {prev_model} · ' if prev_model and prev_model != chosen else ''}used from the next message · {scope}{RST}")
+    try:
+        from axon.providers.model_caps import deprecation_warning
+        dep = deprecation_warning(chosen)
+        if dep:
+            warn(dep)
+    except Exception:
+        pass
     if preset is not None:
         from axon.ui.provider_picker import print_endpoint_notice
         print_endpoint_notice(preset)
@@ -233,6 +240,13 @@ def handle_effort(agent: Any, arg: str) -> CommandResult:
     if a in ("status", "show", "current"):
         cur = str(agent.settings.effort)
         info(f"Effort: {BOLD}{cur}{RST} {SLATE}({_EFFORT_DESC.get(cur, '')}){RST}")
+        from axon.providers.model_caps import offered_efforts
+        from axon.agent.speed import take_note
+        info(f"{SLATE}{agent.settings.model} takes: {', '.join(offered_efforts(str(agent.settings.model), tuple(_EFFORTS)))}"
+             f" · auto effort {'on' if getattr(agent.settings, 'auto_effort', False) else 'off'} (/config auto_effort){RST}")
+        note = take_note(agent)
+        if note:
+            info(f"{SLATE}{note}{RST}")
         return CommandResult(handled=True)
     if a in ("auto", "default", "reset"):
         a = str(type(agent.settings).model_fields["effort"].default)
@@ -241,9 +255,11 @@ def handle_effort(agent: Any, arg: str) -> CommandResult:
         usage("/effort [reflex|balanced|synapse|quantum]")
         return CommandResult(handled=True)
     if not chosen:
-        opts = [f"{e:<9} {_EFFORT_DESC[e]}" for e in _EFFORTS]
+        from axon.providers.model_caps import offered_efforts
+        offered = offered_efforts(str(agent.settings.model), tuple(_EFFORTS))   # only what the model takes
+        opts = [f"{e:<9} {_EFFORT_DESC[e]}" for e in offered]
         cur = _EFFORT_ALIASES.get(str(agent.settings.effort).lower(), "quantum")
-        sel = _pick(opts, "Reasoning effort", current=opts[_EFFORTS.index(cur)])
+        sel = _pick(opts, "Reasoning effort", current=opts[offered.index(cur)] if cur in offered else opts[-1])
         chosen = sel.split()[0] if sel else None
     if not chosen or chosen == agent.settings.effort:
         info(f"Effort unchanged: {agent.settings.effort}")
@@ -253,10 +269,10 @@ def handle_effort(agent: Any, arg: str) -> CommandResult:
     return CommandResult(handled=True)
 
 
-_MODES = ["default", "acceptEdits", "plan", "bypass"]
+_MODES = ["default", "acceptEdits", "plan", "auto", "bypass"]
 _MODE_ALIASES = {
     "default": "default", "manual": "default", "ask": "default", "normal": "default",
-    "acceptedits": "acceptEdits", "accept": "acceptEdits", "auto": "acceptEdits", "edits": "acceptEdits",
+    "acceptedits": "acceptEdits", "accept": "acceptEdits", "edits": "acceptEdits", "auto": "auto", "classifier": "auto",
     "plan": "plan", "readonly": "plan",
     "bypass": "bypass", "bypasspermissions": "bypass", "yolo": "bypass",
 }
@@ -264,6 +280,7 @@ _MODE_DESC = {
     "default": "ask before edits and commands",
     "acceptEdits": "auto-approve file edits in the workspace",
     "plan": "read-only exploration, no changes",
+    "auto": "a classifier model approves or refuses each call no rule decided",
     "bypass": "approve everything (deny rules still apply)",
 }
 
@@ -274,12 +291,12 @@ def set_mode(agent: Any, mode: str) -> None:
             f"so it would run as default. Staying in {agent.settings.mode}.")
         return
     update_settings(agent, mode=mode)
-    color = {"default": SLATE, "acceptEdits": MINT, "plan": GOLD, "bypass": ROSE}.get(mode, WHITE)
+    color = {"default": SLATE, "acceptEdits": MINT, "plan": GOLD, "auto": TEAL, "bypass": ROSE}.get(mode, WHITE)
     print(f"\n  {TEAL}✓ Permission mode:{RST} {color}{BOLD}{mode}{RST} {SLATE}— {_MODE_DESC[mode]}{RST}\n")
 
 
-@command("mode", category=CAT, description="Permission mode: default | acceptEdits | plan | bypass",
-         usage="/mode [default|acceptEdits|plan|bypass]   (Shift+Tab cycles)")
+@command("mode", category=CAT, description="Permission mode: default | acceptEdits | plan | auto | bypass",
+         usage="/mode [default|acceptEdits|plan|auto|bypass]   (Shift+Tab cycles)")
 def handle_mode(agent: Any, arg: str) -> CommandResult:
     a = arg.strip()
     chosen = _MODE_ALIASES.get(a.lower()) if a else None

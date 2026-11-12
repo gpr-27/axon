@@ -117,7 +117,7 @@ button.rrow:hover,a.rrow:hover{color:var(--ink);background:var(--raised);box-sha
 .fw{background:none;border:0;padding:2px 0;color:var(--ink2);cursor:pointer;font-size:12.5px;border-radius:4px;max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fw:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
 .fw-model{color:var(--ink)}
-.fw-mode.mode-default{color:var(--warn)}.fw-mode.mode-bypass{color:var(--bad)}.fw-mode.mode-plan{color:var(--info)}.fw-mode.mode-acceptEdits{color:var(--ink)}
+.fw-mode.mode-default{color:var(--warn)}.fw-mode.mode-bypass{color:var(--bad)}.fw-mode.mode-plan{color:var(--info)}.fw-mode.mode-auto{color:var(--ink)}.fw-mode.mode-acceptEdits{color:var(--ink)}
 .ring{display:inline-grid;place-items:center;width:18px;height:18px;cursor:help}.ring svg{display:block}
 .cplus,.cmic{width:30px;height:30px;display:grid;place-items:center;background:none;border:0;border-radius:50%;color:var(--ink2);cursor:pointer;padding:0;flex:none}
 .cplus:hover,.cmic:hover{background:var(--raised);color:var(--ink)}.cmic[aria-pressed=true]{color:var(--bad);background:var(--raised)}

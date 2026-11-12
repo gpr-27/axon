@@ -47,7 +47,8 @@ def build_ping_request(preset: ProviderPreset | None, api_key: str, base_url: st
     headers["accept"] = "application/json"
     fmt = preset.api_format if preset else ("anthropic" if is_official_anthropic(base_url) else "openai")
     if fmt == "anthropic":
-        headers["anthropic-version"] = "2023-06-01"
+        from axon.providers.anthropic_wire import api_version
+        headers["anthropic-version"] = api_version(base_url)
         headers["x-api-key"] = api_key
         if not is_official_anthropic(base_url):
             headers["authorization"] = f"Bearer {api_key}"  # Anthropic-compatible gateways use Bearer

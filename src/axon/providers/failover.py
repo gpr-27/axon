@@ -59,6 +59,16 @@ class FailoverProvider:
                     pass
         return hit
 
+    def refresh_client(self) -> None:
+        """Evict the pooled HTTP connections of the primary and every fallback provider."""
+        for prov in [self.primary, *list(self._fallbacks.values())]:
+            fn = getattr(prov, "refresh_client", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+
     def _fallback_provider(self, model: str) -> Any:
         prov = self._fallbacks.get(model)
         if prov is None:

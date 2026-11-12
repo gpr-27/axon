@@ -41,7 +41,7 @@ def test_previous_message_id_is_sent_and_diagnostics_are_read(_clean_env: Any) -
     prov = anthropic_provider(handler)
     first = _call(prov)
     second = _call(prov)
-    assert "diagnostics" not in bodies[0]                      # nothing earlier to compare with
+    assert bodies[0]["diagnostics"] == {"previous_message_id": None}   # opts in; nothing earlier to compare with
     assert bodies[1]["diagnostics"] == {"previous_message_id": "msg_a"}
     assert first.diagnostics is None and second.diagnostics == diag
 
@@ -60,10 +60,10 @@ def test_rejected_diagnostics_are_dropped_for_the_session(_clean_env: Any) -> No
 
     prov = anthropic_provider(handler)
     _call(prov)
-    turn = _call(prov)                                          # sent with the field, rejected, retried without it
+    turn = _call(prov)                                          # the first call opts in, is rejected and retried without it
     _call(prov)                                                 # the field is not tried again
     sent = ["diagnostics" in b for b in bodies]
-    assert sent == [False, True, False, False] and turn.text is not None
+    assert sent == [True, False, False, False] and turn.text is not None
 
 
 def test_gateways_never_get_the_field(_clean_env: Any) -> None:
@@ -111,7 +111,8 @@ def _refusal_line(capsys: Any, **extra: Any) -> str:
 
 def test_refusal_without_details_is_unchanged(capsys: Any) -> None:
     out = _refusal_line(capsys)
-    assert "the model declined to answer" in out and "/model" not in out and "category" not in out
+    assert "the model declined to answer" in out and "category" not in out
+    assert "next:" in out and "refusal_fallback_model" in out        # one next-step line when there is no fallback model
 
 
 def test_refusal_with_details_names_category_explanation_model_and_hint(capsys: Any) -> None:

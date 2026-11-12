@@ -12,8 +12,9 @@ from its tool_use.
 from __future__ import annotations
 import json
 import re
+from contextlib import nullcontext
 from typing import Any
-from axon.agent.state import Conversation, estimate_content_tokens, is_turn_start
+from axon.agent.state import Conversation, estimate_content_tokens, is_tool_result_message, is_turn_start
 from axon.config import Settings
 from axon.waitmarks import waiting
 
@@ -96,6 +97,8 @@ class ContextManager:
         # tool_use id -> {"label", "tokens"}: results the user pinned (/pin). Never trimmed, evicted or summarised away.
         self.pins: dict[str, dict[str, Any]] = {}
         self.last_receipt: dict[str, Any] | None = None   # the last summary split: sizes, summary, replaced messages (/compact --last)
+        from axon.agent.exact_count import ExactCounter
+        self.exact = ExactCounter()                       # exact prompt size from the count-tokens endpoint (when it was asked)
 
     # ── budgeting ───────────────────────────────────────────────────
     def context_window(self, model: str | None = None) -> int:
@@ -114,8 +117,17 @@ class ContextManager:
         sys_text = "".join(str(b.get("text", "")) for b in system)
         return max(0, int(len(sys_text) / 3.7)) + max(0, int(len(json.dumps(tools, separators=(",", ":"), default=str)) / 4.0))
 
-    def projected_tokens(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+    def estimated_tokens(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
         return conv.token_estimate() + self.overhead_tokens(system, tools)
+
+    def projected_tokens(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+        """The prompt size: the endpoint's exact count when it measured this conversation, else the local estimate."""
+        exact = self.exact.value_for(conv, self.settings.model)
+        return exact if exact is not None else self.estimated_tokens(conv, system, tools)
+
+    def projected_reading(self, conv: Conversation, system: list[dict[str, Any]], tools: list[dict[str, Any]]) -> tuple[int, bool]:
+        exact = self.exact.value_for(conv, self.settings.model)
+        return (exact, True) if exact is not None else (self.estimated_tokens(conv, system, tools), False)
 
     def threshold(self, model: str | None = None) -> int:
         """Auto-compact point: ``compact_at`` (default 75%) of the context window in use, but never past
@@ -244,22 +256,41 @@ class ContextManager:
                         block["content"] = STALE_PLACEHOLDER
 
     # ── rung 3 ──────────────────────────────────────────────────────
+    def keep_turns(self, override: int | None = None) -> int:
+        """Newest user turns kept word for word after the summary: *override*, else ``compact_keep_turns`` (at least 1)."""
+        n = override if override is not None else getattr(self.settings, "compact_keep_turns", 2)
+        try:
+            return max(1, int(n))
+        except (TypeError, ValueError):
+            return 2
+
     @staticmethod
-    def split_point(conv: Conversation, keep_turns: int = 2) -> int:
+    def safe_cut(messages: list[dict[str, Any]], cut: int) -> int:
+        """Move *cut* back until the first kept message is not a tool result, so a tool_use and its
+        tool_result are never split between the summarized part and the kept tail. 0: nothing can be cut."""
+        cut = min(max(0, int(cut)), len(messages))
+        while 0 < cut < len(messages) and is_tool_result_message(messages[cut]):
+            cut -= 1
+        return cut
+
+    def split_point(self, conv: Conversation, keep_turns: int | None = None) -> int:
         """Index of the first message to keep: the start of the ``keep_turns``-th last user turn."""
+        keep = self.keep_turns(keep_turns)
         starts = [i for i, m in enumerate(conv.messages) if is_turn_start(m)]
-        if len(starts) <= keep_turns:
+        if len(starts) <= keep:
             # Few (long agentic) turns: cut before an assistant message, keeping the last 4 messages.
             n = len(conv.messages)
             for i in range(n - 4, 1, -1):
                 if conv.messages[i].get("role") == "assistant":
-                    return i
+                    return self.safe_cut(conv.messages, i)
             return 0
-        return starts[-max(1, keep_turns)]
+        return self.safe_cut(conv.messages, starts[-keep])
 
-    def _summarize_older_turns(self, conv: Conversation, summary_text: str | None = None, keep_turns: int = 2) -> bool:
-        """Replace older turns with a summary message, cutting at a clean boundary."""
-        cut = self.split_point(conv, keep_turns)
+    def _summarize_older_turns(self, conv: Conversation, summary_text: str | None = None, keep_turns: int | None = None,
+                               cut: int | None = None) -> bool:
+        """Replace older turns with a summary message, cutting at a clean boundary. *cut* (a background summary
+        that covers exactly ``messages[:cut]``) overrides the boundary; the messages after it stay untouched."""
+        cut = self.split_point(conv, keep_turns) if cut is None else self.safe_cut(conv.messages, cut)
         if cut <= 0:
             return False
         old_msgs = conv.messages[:cut]
@@ -323,8 +354,9 @@ class ContextManager:
         provider: Any,
         model: str,
         instructions: str = "",
-        keep_turns: int = 2,
+        keep_turns: int | None = None,
         thinking: bool = False,
+        quiet: bool = False,
     ) -> tuple[str | None, Any]:
         """Ask the provider for a summary of the turns before the split point.
         Returns (summary or None, usage or None). Does not modify the conversation."""
@@ -336,7 +368,7 @@ class ContextManager:
         if instructions:
             ask += f"\nAdditional focus: {instructions}"
         try:
-            with waiting("compact", model=model):       # the status line under the spinner says what is happening
+            with (nullcontext() if quiet else waiting("compact", model=model)):       # the status line under the spinner says what is happening (not for a background summary)
                 stream = provider.stream(
                     model=model,
                     system=[{"type": "text", "text": SUMMARY_SYSTEM}],
@@ -359,7 +391,7 @@ class ContextManager:
         provider: Any,
         model: str,
         instructions: str = "",
-        keep_turns: int = 2,
+        keep_turns: int | None = None,
     ) -> Any:
         """Summarize older turns with an LLM call and apply it. Returns the call's Usage (or None).
         Falls back to the heuristic summary when the provider fails."""

@@ -85,6 +85,7 @@ class AgentDefinition:
     memory: str | None = None             # user | project | local: a persistent notes directory
     background: bool = False              # always run in the background
     effort: str | None = None
+    task_budget: int | None = None        # Messages API task budget (tokens) this agent paces itself against
     isolation: str | None = None          # "worktree"
     color: str | None = None
     initial_prompt: str = ""              # first user turn when this agent is the main session (--agent)
@@ -94,6 +95,7 @@ class AgentDefinition:
     spawn_types: list[str] | None = None  # Agent(a, b): the only subagent types this agent may start (--agent)
     fast_model: bool = False              # default to the session's small/fast model (explore, plan)
     fork: bool = False                    # inherits the conversation so far (subagent_type "fork")
+    version: int = 0                      # recorded history version of the file this came from (0: untracked)
 
 
 BUILTIN_AGENTS: tuple[AgentDefinition, ...] = (
@@ -162,6 +164,12 @@ def _parse_list(raw: str) -> list[str]:
     return [t.strip("'\"").strip() for t in _split_top(raw) if t.strip("'\"").strip()]
 
 
+def _budget_tokens(raw: Any) -> int | None:
+    """``taskBudget: 50000`` in an agent's frontmatter (tokens; 20,000 at least, or the API refuses it)."""
+    from axon.providers.task_budget import clamp_total
+    return clamp_total(raw) if raw not in (None, "", False) else None
+
+
 _FIELD_ALIASES = {
     "allowedtools": "tools", "disallowedtools": "disallowed", "maxturns": "maxturns", "permissionmode": "permissionmode",
     "mcpservers": "mcpservers", "omitclaudemd": "omitclaudemd", "initialprompt": "initialprompt",
@@ -169,7 +177,7 @@ _FIELD_ALIASES = {
 }
 _KNOWN_FIELDS = {"name", "description", "tools", "disallowed", "model", "permissionmode", "maxturns", "skills", "mcpservers",
                  "hooks", "memory", "background", "omitclaudemd", "effort", "isolation", "color", "initialprompt",
-                 "autocompactwindow", "experimental", "readonly"}
+                 "taskbudget", "budget", "autocompactwindow", "experimental", "readonly"}
 PERMISSION_MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan", "manual")
 COLORS = ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -271,7 +279,10 @@ def parse_agent_file(path: Path, source: str, report: list[str] | None = None) -
         if report is not None:
             report.append(f"{path}: unrecognized field(s) ignored: {', '.join(unknown[:5])}")
 
-    return _definition_from_meta(meta, body, name, source, path, f"Custom agent from {path.name}")
+    d = _definition_from_meta(meta, body, name, source, path, f"Custom agent from {path.name}")
+    from axon.agent.agent_history import observe
+    d.version = observe(source, name, text, path)       # records a new version when the content changed
+    return d
 
 
 def _definition_from_meta(meta: dict[str, Any], body: str, name: str, source: str, path: Path | None,
@@ -316,6 +327,7 @@ def _definition_from_meta(meta: dict[str, Any], body: str, name: str, source: st
         memory=memory if memory in ("user", "project", "local") else None,
         background=_as_bool(meta.get("background")),
         effort=effort if effort in EFFORTS else None,
+        task_budget=_budget_tokens(meta.get("taskbudget", meta.get("budget"))),
         isolation=iso if iso == "worktree" else None,
         color=color if color in COLORS else None,
         initial_prompt="" if plugin else str(meta.get("initialprompt") or "").strip(),
@@ -510,6 +522,12 @@ def load_agent_definitions(workspace: Path, report: list[str] | None = None,
     return list(by_name.values())
 
 
+def version_label(d: AgentDefinition) -> str:
+    """``name@v3`` for a file-based definition with a recorded version (shown in the Task card / subagent row)."""
+    from axon.agent.agent_history import version_label as _vl
+    return _vl(d)
+
+
 FORK_AGENT = AgentDefinition(
     name="fork", description="Inherits the whole conversation so far; same system prompt, tools and model as the main agent.",
     fork=True,
@@ -517,7 +535,8 @@ FORK_AGENT = AgentDefinition(
 
 
 def get_agent_definition(workspace: Path, name: str | None, extra_dirs: list[tuple[str, Path]] | None = None) -> AgentDefinition | None:
-    wanted = (name or "general-purpose").strip().lower().removeprefix("agent-")
+    from axon.agent.agent_history import base_name
+    wanted = base_name((name or "general-purpose").strip().lower().removeprefix("agent-"))   # a "name@v3" label resolves to the name
     if wanted == "fork":
         return FORK_AGENT
     if wanted == "claude":      # the documented name of the catch-all
@@ -525,7 +544,8 @@ def get_agent_definition(workspace: Path, name: str | None, extra_dirs: list[tup
     defs = load_agent_definitions(workspace, extra_dirs=extra_dirs)
     for d in defs:
         if d.name.lower() == wanted:
-            return d
+            from axon.agent.agent_history import pinned_definition
+            return pinned_definition(workspace, d)        # a session pin keeps the pinned text
     # A plugin agent is also reachable by its bare name while only one plugin provides it.
     hits = [d for d in defs if d.source.startswith("plugin:") and d.name.lower().rsplit(":", 1)[-1] == wanted]
     return hits[0] if len(hits) == 1 else None
@@ -605,6 +625,7 @@ class SubagentTask:
     dismissed: bool = False   # cleared from the agent list with x (its transcript and report are kept)
     model_param: str = ""     # the Task call's model / effort: they also apply when it is resumed
     effort_param: str = ""
+    budget_param: int = 0     # the Task call's task budget in tokens (0 = the agent definition's)
     first_background: bool | None = None   # how it first ran: a resumed run keeps that tool set
     one_shot: bool = False    # Explore / Plan: no follow-up messages
     report_to: Any = field(default=None, repr=False, compare=False)   # the subagent that resumed it gets its report
@@ -741,8 +762,15 @@ class SubagentManager:
             queue = getattr(live, "message_queue", None)
             if task is None or task.status != "running" or queue is None or task.closing:
                 return None
-            queue.push(text, steer=True)
+            item = queue.push(text, steer=True)
+            try:
+                setattr(item, "shown", True)     # the entry below is where the person sees it: delivery does not repeat it
+                from axon.agent.loop import STEER_STATE_TEXT
+                state = live.steer_state() if callable(getattr(live, "steer_state", None)) else "next_step"
+            except Exception:  # noqa: BLE001
+                state, STEER_STATE_TEXT = "next_step", {"next_step": "included in the model's next step"}
             task.add_entry("note", f"you: {text}")
+            task.add_entry("note", STEER_STATE_TEXT.get(state, STEER_STATE_TEXT["next_step"]))
             return task
 
     def take_messages(self, task_id: str) -> list[str]:
@@ -1476,6 +1504,7 @@ def run_subagent(
     name: str = "",
     isolation: str | None = None,
     effort: str | None = None,
+    budget: int | None = None,
     resume: SubagentTask | None = None,
     task: SubagentTask | None = None,
     unlimited: bool = False,
@@ -1509,6 +1538,7 @@ def run_subagent(
     if resume is not None:
         model = model or resume.model_param or None
         effort = effort or resume.effort_param or None
+        budget = budget or resume.budget_param or None
     model_param, effort_param = (model or ""), (effort or "")
     run_model = _resolve_model(parent, agent_def, model)
     model = run_model
@@ -1519,10 +1549,13 @@ def run_subagent(
         if task.status != "running":
             parent.subagents.reopen(task, max_iter)
     elif task is None:
-        task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=agent_def.name,
+        task = parent.subagents.register(prompt, max_steps=max_iter, title=description or None, agent_type=version_label(agent_def),
                                          call_id=call_id, name=name, limit=None if unlimited else max_concurrent_subagents())
     task.model = model
     task.model_param, task.effort_param = model_param, effort_param
+    from axon.providers.task_budget import clamp_total
+    sub_budget = clamp_total(budget) or agent_def.task_budget      # its own budget: never the main session's
+    task.budget_param = int(clamp_total(budget) or 0)
     task.one_shot = agent_def.source == "builtin" and agent_def.name.lower() in ("explore", "plan")
     if task.first_background is None:
         task.first_background = bool(task.background or background_tools)
@@ -1541,7 +1574,7 @@ def run_subagent(
         try:
             from axon.agent.trace import SubagentEvent
             emit(SubagentEvent(
-                phase=phase, task_id=task.id, agent_type=agent_def.name, title=task.title, model=model,
+                phase=phase, task_id=task.id, agent_type=version_label(agent_def), title=task.title, model=model,
                 cost=cost, input_tokens=int(getattr(usage, "input", 0) or 0),
                 output_tokens=int(getattr(usage, "output", 0) or 0), status=status,
                 duration_s=time.time() - started if phase == "end" else 0.0, iterations=iterations,
@@ -1675,8 +1708,7 @@ def run_subagent(
             if said.strip():
                 task.activity = "Writing · " + " ".join(said.split())[-70:]
         elif isinstance(event, SteerEvent):
-            n = int(event.count or 0)
-            task.add_entry("delivered", f"{n} message{'s' if n != 1 else ''} from you sent to the model after step {event.iteration}")
+            task.add_entry("delivered", "included in the model's next step")
         elif isinstance(event, ThinkingDelta):
             th = (getattr(event, "text", "") or "").strip()
             if len(th) > 10:
@@ -1723,6 +1755,7 @@ def run_subagent(
     try:
         mode, no_prompt = _effective_mode(parent.settings.mode, agent_def.permission_mode)
         updates: dict[str, Any] = {"max_iterations": max_iter, "workspace": sub_ws, "model": model, "mode": mode,
+                                   "task_budget_tokens": sub_budget,
                                    "parallel_tools": max(4, int(getattr(parent.settings, "parallel_tools", 1) or 1))}
         if not agent_def.fork:
             # Its own system prompt plus environment details: not the main prompt, output style or --append-system-prompt.
@@ -1830,7 +1863,7 @@ def run_subagent(
                     break
                 earlier_reports.append((result.final_text or "").strip())
                 from axon.agent.loop import STEER_PREFIX
-                task.add_entry("delivered", f"{len(late)} message{'s' if len(late) != 1 else ''} from you sent to the model as one more turn")
+                task.add_entry("delivered", "included in the model's next step")
                 result = run_to_end("\n".join(f"{STEER_PREFIX} {t}" for t in late))
             note_undelivered()
             if result.stop_reason == "interrupted" and task.stopped:
@@ -1885,6 +1918,12 @@ def run_subagent(
                 sub_cost = float(record_usage(parent.ledger, model, agg, source=agent_def.name) or 0)
             except Exception:
                 pass
+        try:     # webhooks and open pages hear that a subagent ended (names and a number only, never its report)
+            from axon.features import notify as _notify
+            _word = {"error": "failed", "interrupted": "was stopped"}.get(result.stop_reason, "finished")
+            _notify.emit_for_agent(_main_agent(parent), "subagent_finished", f"Subagent #{task.index} ({agent_def.name}) {_word}")
+        except Exception:
+            pass
         if result.stop_reason in ("error", "interrupted"):
             reason = _sub_error_text(result) if result.stop_reason == "error" else "stopped before it finished"
             if result.stop_reason == "error":
@@ -2004,7 +2043,8 @@ def _main_agent(agent: Any) -> Any:
 
 def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None = None, subagent_type: str | None = None,
                      max_iterations: int | None = None, description: str = "", call_id: str = "", model: str | None = None,
-                     name: str = "", isolation: str | None = None, effort: str | None = None) -> str:
+                     name: str = "", isolation: str | None = None, effort: str | None = None,
+                     budget: int | None = None) -> str:
     """Run a subagent on its own thread and return at once; its report is queued for the delegating agent as a
     message when it finishes. Errors in choosing the agent type are raised here, before anything starts."""
     if not hasattr(parent, "subagents") or parent.subagents is None:
@@ -2024,7 +2064,7 @@ def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None 
         _check_spawn_depth(parent, agent_def)
         limit = max_concurrent_subagents()
         task = parent.subagents.register(prompt, max_steps=_step_limit(parent, agent_def, max_iterations), limit=limit,
-                                         title=description or None, agent_type=agent_def.name, call_id=call_id, name=name)
+                                         title=description or None, agent_type=version_label(agent_def), call_id=call_id, name=name)
         verb = "Queued" if task.status == "queued" else "Started"
     task.background = True
     if verb == "Queued":
@@ -2034,7 +2074,7 @@ def spawn_background(prompt: str, parent: Agent, *, resume: SubagentTask | None 
         try:
             report = run_subagent(prompt, parent, max_iterations=max_iterations, subagent_type=subagent_type,
                                   description=description, model=model, name=name, isolation=isolation, effort=effort,
-                                  resume=task if resume is not None else None, task=None if resume is not None else task)
+                                  budget=budget, resume=task if resume is not None else None, task=None if resume is not None else task)
         except Exception as e:  # noqa: BLE001
             report = f"[Subagent #{task.index} ({task.title}) failed: {type(e).__name__}: {e}]"
             parent.subagents.fail(task.id, str(e))

@@ -198,6 +198,10 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `max_history_turns` | `AXON_MAX_HISTORY_TURNS` | – | `0` |
 | `session_cost_ceiling` | `AXON_SESSION_COST_CEILING` | – | `50.00` |
 | `compact_at` | `AXON_COMPACT_AT` | `compactAt` | `0.75` |
+| `compact_keep_turns` | `AXON_COMPACT_KEEP_TURNS` | `compactKeepTurns` | `2` |
+| `compact_background` | `AXON_COMPACT_BACKGROUND` | `compactBackground` | `true` |
+| `compact_background_at` | `AXON_COMPACT_BACKGROUND_AT` | `compactBackgroundAt` | `0.8` |
+| `compact_server_side` | `AXON_COMPACT_SERVER_SIDE` | `compactServerSide` | `false` |
 | `large_input_tokens` | `AXON_LARGE_INPUT_TOKENS` | `largeInputTokens` | `0` |
 | `parallel_tools` | `AXON_PARALLEL_TOOLS` | `parallelTools` | `6` |
 | `bash_timeout_s` | `AXON_BASH_TIMEOUT_S` | – | `180` |
@@ -251,6 +255,8 @@ where one exists), or as the environment variable `AXON_<NAME>`.
 | `notifications` | `AXON_NOTIFICATIONS` | `preferredNotifChannel` | `"important"` |
 | `notify_after_seconds` | `AXON_NOTIFY_AFTER_SECONDS` | `notifyAfterSeconds` | `30.0` |
 | `terminal_notify` | `AXON_TERMINAL_NOTIFY` | `terminalNotify` | `"off"` |
+| `notify_sinks` | – | `notifications` (object form) | `{}` |
+| `task_budget_tokens` | `AXON_TASK_BUDGET_TOKENS` | `taskBudgetTokens` | unset |
 | `tips_refresh_minutes` | `AXON_TIPS_REFRESH_MINUTES` | `tipsRefreshMinutes` | `15.0` |
 | `auto_title` | `AXON_AUTO_TITLE` | `autoTitle` | `true` |
 | `title_llm` | `AXON_TITLE_LLM` | `titleLlm` | `true` |
@@ -418,3 +424,102 @@ a prompt are dropped, Tab included, so type-ahead can never answer one or open t
 ```json
 { "bindings": { "chat:externalEditor": ["ctrl+e"], "app:todos": null } }
 ```
+
+## Spend caps, task budgets and notification sinks
+
+`/budget` shows the caps, what is spent and what is left. `/budget session <usd|off>` and `/budget turn <usd|off>` set the
+caps; when the session cap is reached Axon pauses at a safe point (never between a tool call and its result), keeps the
+whole conversation, and says so once. `/budget raise <usd>` (or the web page's button) lifts the cap and continues
+from where it paused. Subagent spend counts toward the session cap.
+
+`/budget task <tokens|off>` (setting `task_budget_tokens`, at least 20000) sends the Messages API `task_budget`
+(a beta advisory countdown the model paces itself against). It is sent only to Claude models that take it, on the Claude
+API; elsewhere it is silently left out. The Task tool's `budget` argument, or `budget:` in an agent's frontmatter, gives a
+subagent its own.
+
+Notification sinks live in one `notifications` object in settings.json (the plain string form still means the desktop
+mode only):
+
+```json
+"notifications": {
+  "mode": "important",
+  "web": true,
+  "allowPrivate": false,
+  "webhooks": [{"url": "https://example.com/hook", "secret": "whsec_...", "events": ["requires_action", "idle"]}]
+}
+```
+
+Events: `requires_action`, `budget_reached`, `idle`, `run_failed`, `scheduled_task_finished`, `subagent_finished`. A webhook
+gets `{"id","type","time","session","summary"}` with headers `webhook-id`, `webhook-timestamp` and
+`webhook-signature: v1,<base64 HMAC-SHA256 of "id.timestamp.body">` (the Standard Webhooks scheme the Managed Agents
+webhooks use). The `id` is the same on every retry, so dedupe on it and reject timestamps older than five minutes. Delivery
+is on a background thread with a 5 second timeout and three attempts; it never delays a turn. Only http and https are
+allowed, and private or loopback targets are refused unless `allowPrivate` is set. Open dashboard and phone pages get the
+events too and show an in-page alert plus a tab-title change (and a browser notification if allowed); iOS only delivers
+alerts while the page is open, since web push needs an installed app. `/notify status|test|webhook <url>|off` manages them.
+
+## Semantic code search (opt-in)
+
+Off by default. `/index --backend ollama --model nomic-embed-text` (or `openai`, `voyage`) checks the backend, enables the
+feature and `/index` builds the index in the background (`axon index` does it in the foreground). Settings block in the
+user `settings.json` (never in a project file; the key is read from the named environment variable, not stored):
+
+```json
+{ "semanticSearch": { "enabled": true, "backend": "ollama", "model": "nomic-embed-text",
+                      "baseUrl": "http://localhost:11434", "keyEnv": "", "maxChunks": 100000 } }
+```
+
+Backends: Ollama (`/api/embed`), any OpenAI-compatible `/v1/embeddings` endpoint, Voyage AI. **Remote backends receive the
+text of the indexed files and your search queries**; the first index asks for confirmation and remembers the host
+(`/index --status` shows it). Secret files (`.env`, `*.pem`, keys), secret-looking chunks, binaries, big files, lockfiles,
+vendored directories and anything ignored by `.gitignore` or `.axonignore` are never sent. The `semantic_search` tool is
+available to the model only while the feature is on and an index exists. `/index off` disables it (and can delete the index).
+
+## OpenTelemetry trace export (`telemetry`)
+
+Off by default. When on, Axon exports OpenTelemetry **traces** over OTLP/HTTP (JSON) to a collector you choose. It works
+with every provider: each model request is a `gen_ai` client span whatever backend served it. No OpenTelemetry package is
+needed. `/telemetry status|on|off|test` controls it; `/usage` shows one line while it is on.
+
+```json
+"telemetry": {
+  "enabled": true,
+  "endpoint": "http://localhost:4318",
+  "headers": { "authorization": "Bearer ..." },
+  "sampleRate": 1.0,
+  "captureContent": false,
+  "resourceAttributes": { "deployment.environment": "dev" },
+  "serviceName": "axon",
+  "propagate": false
+}
+```
+
+`endpoint` gets `/v1/traces` appended unless it already ends with it. Without `endpoint`, the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME` are read; `AXON_ENABLE_TELEMETRY=1` turns it on from the environment.
+**Only your user settings and your own environment can set these**: a project's settings.json (including its `env`
+block) cannot, the same rule as `notify_sinks`.
+
+**Span tree per user turn:** `axon.turn` (root) with children `chat <model>` (one per model request, kind CLIENT),
+`execute_tool <name>`, `invoke_agent <type>` (a subagent run, linked to the turn, with its own `chat` and
+`execute_tool` steps below it), `axon.compaction`, `axon.goal_check`, `axon.advisor` and `axon.permission_check`.
+
+**Sent by default (metadata only):** `gen_ai.conversation.id` (the Axon session id), `gen_ai.operation.name`,
+`gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens` /
+`cache_read.input_tokens` / `cache_creation.input_tokens`, `gen_ai.response.finish_reasons`,
+`gen_ai.response.time_to_first_chunk`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.agent.name`, and
+`axon.*` attributes: cost in USD, retries, iteration, tool status and duration, permission decision, source and mode,
+result size (lines and bytes), subagent status, compaction counts. Also the resource (`service.name`, `service.version`)
+and your `resourceAttributes`. **Never sent by default:** prompts, replies, thinking, file contents, tool input or output.
+
+**`captureContent: true`** adds `gen_ai.input.messages` (your prompt), `gen_ai.output.messages` (the reply),
+`gen_ai.tool.call.arguments` and `gen_ai.tool.call.result`, advisor question and advice, and a subagent's task title.
+Text is passed through the same secret redactor as the session journal and capped at 0.75 MB per span
+(`axon.content.truncated` is set when cut). Redaction is pattern based: treat the collector as trusted.
+
+`sampleRate` (0 to 1) is decided per turn. `propagate: true` adds a W3C `traceparent` header to model requests, only
+when `base_url` is an endpoint you configured yourself (a gateway, a local server), never a public vendor host unless
+you list it in `propagateHosts`; the header carries only trace and span ids.
+
+Export runs on a background thread with a bounded queue (2048 spans; overflow is dropped and counted), 3 s timeouts, 3
+tries with backoff, and a flush at exit. A failing or slow collector never slows or fails a turn.

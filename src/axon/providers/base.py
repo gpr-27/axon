@@ -45,6 +45,7 @@ class ToolResultBlock:
 
 
 MAX_TOOL_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_TOOL_PDF_BYTES = 24 * 1024 * 1024
 
 
 def load_image_refs(refs: Any) -> list[tuple[str, str]]:
@@ -56,9 +57,10 @@ def load_image_refs(refs: Any) -> list[tuple[str, str]]:
             continue
         try:
             p = Path(str(ref["path"]))
-            if p.stat().st_size > MAX_TOOL_IMAGE_BYTES:
+            mt = str(ref.get("media_type") or "image/png")
+            if p.stat().st_size > (MAX_TOOL_PDF_BYTES if mt == "application/pdf" else MAX_TOOL_IMAGE_BYTES):
                 continue
-            out.append((str(ref.get("media_type") or "image/png"), base64.b64encode(p.read_bytes()).decode("ascii")))
+            out.append((mt, base64.b64encode(p.read_bytes()).decode("ascii")))
         except OSError:
             continue
     return out
@@ -66,6 +68,16 @@ def load_image_refs(refs: Any) -> list[tuple[str, str]]:
 Block = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock
 
 StopReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal", "model_context_window_exceeded"]
+
+def _sum_speed(a: Any, b: Any) -> str:
+    """Speed of a summed usage: that of the non-empty side, "" (standard) when fast and standard calls mix."""
+    sa, sb = getattr(a, "speed", ""), getattr(b, "speed", "")
+    if not (a.input or a.output):
+        return sb
+    if not (b.input or b.output):
+        return sa
+    return sa if sa == sb else ""
+
 
 @dataclass(frozen=True)
 class Usage:
@@ -76,6 +88,10 @@ class Usage:
     reasoning: int = 0
     # Portion of cache_write written with the 1-hour TTL (billed higher than 5-minute writes).
     cache_write_1h: int = 0
+    # "fast" when the call ran at Anthropic fast-mode speed (billed at a premium); "" for standard speed.
+    speed: str = ""
+    # Where inference ran, as reported by the API (usage.inference_geo); "" when not reported.
+    inference_geo: str = ""
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
@@ -85,6 +101,8 @@ class Usage:
             cache_write=self.cache_write + other.cache_write,
             reasoning=self.reasoning + other.reasoning,
             cache_write_1h=self.cache_write_1h + getattr(other, "cache_write_1h", 0),
+            speed=_sum_speed(self, other),
+            inference_geo=self.inference_geo if self.inference_geo == getattr(other, "inference_geo", "") else (self.inference_geo or getattr(other, "inference_geo", "")),
         )
 
 @dataclass
@@ -320,7 +338,16 @@ def abort_http_response(resp: Any) -> None:
             ns = (getattr(obj, "extensions", None) or {}).get("network_stream")
             sock = ns.get_extra_info("socket") if ns is not None else None
             if sock is not None:
-                sock.shutdown(_socket.SHUT_RDWR)
+                # Shut down only the READ side, at the plain socket level. A full SHUT_RDWR on a TLS socket (what
+                # this did before) poisoned the next request of the process: right after a steer interrupt the
+                # following model call died with ``ReadError [Errno 32] Broken pipe`` (reproduced against a local
+                # TLS server: 10 of 12 interrupted turns failed with SHUT_RDWR, none with SHUT_RD). SHUT_RD still
+                # wakes the blocked read at once; and ssl.SSLSocket.shutdown() is bypassed because it drops the
+                # socket's TLS object while the streaming thread is still using it.
+                if isinstance(sock, _socket.socket):
+                    _socket.socket.shutdown(sock, _socket.SHUT_RD)
+                else:
+                    sock.shutdown(_socket.SHUT_RD)
                 if _sys.platform == "win32":
                     # Winsock's shutdown() does not wake a blocked (or later) recv(); closing does, and
                     # a read on a closed Windows socket fails at once instead of polling fd -1.
@@ -330,6 +357,22 @@ def abort_http_response(resp: Any) -> None:
             continue
     for obj in (resp, target):
         close = getattr(obj, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def refresh_http_pool(client: Any) -> None:
+    """Drop every pooled connection of an SDK / httpx client (the next request opens a fresh one).
+
+    Used before a retry after a transport error (ReadError, Broken pipe, connection reset, ...) so a retry can
+    never reuse a dead keep-alive connection. Safe on any object: unknown shapes are ignored."""
+    http = getattr(client, "_client", client)
+    transports = [getattr(http, "_transport", None), *list((getattr(http, "_mounts", None) or {}).values())]
+    for transport in transports:
+        close = getattr(transport, "close", None)
         if callable(close):
             try:
                 close()

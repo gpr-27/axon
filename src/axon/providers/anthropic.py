@@ -33,7 +33,7 @@ from axon.providers.base import (
     parse_tool_arguments,
 )
 from axon.providers import transport as _transport
-from axon.providers.base import StreamCanceller, retry_event
+from axon.providers.base import StreamCanceller, refresh_http_pool, retry_event
 from axon.providers.transport import (
     note_rate_limits,
     backoff_delay,
@@ -82,6 +82,11 @@ _EFFORT_MAX = ("claude-opus-4-6", "claude-sonnet-4-6")
 _THINKING_BUDGET = {"low": 2_048, "medium": 6_000, "high": 16_000, "xhigh": 32_000}
 
 
+def _geo_reported(raw: Any) -> str:
+    from axon.providers.geo_wire import reported
+    return reported(raw)
+
+
 def _bare(model: str) -> str:
     m = (model or "").lower().rsplit("/", 1)[-1]
     return re.sub(r"(?<=\d)\.(?=\d)", "-", m)
@@ -115,6 +120,12 @@ def build_thinking_params(model: str, *, thinking: bool, effort: str | None, max
     out: dict[str, Any] = {}
     mode = thinking_mode(model)
     level = canonical_effort(effort)
+    from axon.providers import model_caps
+    live_caps = model_caps.live(model)
+    if live_caps is not None and live_caps.source == "live" and live_caps.thinking_types:
+        # The Models API said which thinking types and effort levels this model takes: send nothing else.
+        return model_caps.build_thinking_params(live_caps, model=model, thinking=thinking, level=level,
+                                                max_tokens=max_tokens, budgets=_THINKING_BUDGET)
     if thinking:
         if mode in ("always_on", "adaptive"):
             out["thinking"] = {"type": "adaptive", "display": "summarized"}
@@ -141,7 +152,13 @@ def _image_block(url: str) -> dict[str, Any] | None:
     return None
 
 
-def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _compaction_as_text(block: dict[str, Any]) -> dict[str, Any] | None:
+    """A server compaction block sent where the beta is not armed (a resumed session, the setting turned off): its summary as text."""
+    text = str(block.get("content") or "").strip()
+    return {"type": "text", "text": f"[Summary of the earlier conversation]\n\n{text}"} if text else None
+
+
+def to_anthropic_messages(messages: list[dict[str, Any]], keep_compaction: bool = False) -> list[dict[str, Any]]:
     """Normalize history for the Messages API: convert OpenAI tool_calls / role=tool, drop empty
     turns and non-standard fields, and make every tool_use answered by a tool_result."""
     out: list[dict[str, Any]] = []
@@ -183,6 +200,10 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                         blocks.append(img)
                 elif b.get("type") == "text" and not b.get("text"):
                     continue
+                elif b.get("type") == "compaction" and not keep_compaction:
+                    as_text = _compaction_as_text(b)
+                    if as_text:
+                        blocks.append(as_text)
                 else:
                     blocks.append(dict(b))
         else:
@@ -236,7 +257,8 @@ def _attach_tool_images(messages: list[dict[str, Any]]) -> None:
             pics = load_image_refs(block.pop("images"))
             if pics and isinstance(block.get("content"), str):
                 block["content"] = [{"type": "text", "text": block["content"] or "(image)"},
-                                    *({"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}} for mt, b64 in pics)]
+                                    *({"type": "document" if mt == "application/pdf" else "image",     # tool_result content may hold document blocks
+                                   "source": {"type": "base64", "media_type": mt, "data": b64}} for mt, b64 in pics)]
 
 
 _VALID_TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -478,6 +500,9 @@ class AnthropicProvider:
         self._cache_last_only = False  # set when a gateway rejects cache_control placement
         self._official = False
         self._diagnostics_on = True    # cleared for the session when the API rejects the diagnostics field
+        self.context_edit: dict[str, Any] | None = None       # context_management for the next call (set by the agent loop)
+        self.last_context_edit: dict[str, Any] | None = None  # what the API reported clearing on the last call
+        self._context_edit_off = False  # the endpoint rejected the field: stop sending it this session
         self._prev_message_ids: dict[tuple[int, bool], str] = {}
         self._canceller = StreamCanceller()
         key_obj = getattr(settings, "api_key", None)
@@ -509,6 +534,10 @@ class AnthropicProvider:
                 # SDK 1.x reads ANTHROPIC_API_KEY when api_key is None; SDK 2.x rejects api_key + auth_token together
                 # and does not read the environment once any credential is passed.
                 kwargs["api_key"] = key or "none"
+        from axon.providers.anthropic_wire import api_version, LEGACY_API_VERSION
+        wire_version = api_version(base)
+        if wire_version != LEGACY_API_VERSION:   # the SDK pins its own (older) version header; the official host gets the current one
+            kwargs["default_headers"] = {**kwargs.get("default_headers", {}), "anthropic-version": wire_version}
         if is_agentrouter(base):
             kwargs["default_headers"] = {**kwargs.get("default_headers", {}), **{k: v for k, v in default_headers(base).items() if k.startswith(("user-agent", "x-stainless"))}}
         if http_client is not None:
@@ -551,29 +580,75 @@ class AnthropicProvider:
             cap = None
         limit = max(1, min(int(max_tokens), cap) if cap else int(max_tokens))
 
+        from axon.providers.anthropic_wire import has_compaction
+        compact_armed = bool(self._official and not getattr(self, "_compact_off", False) and has_compaction(self.context_edit))
         sys_blocks, tool_defs, msgs = limit_cache_breakpoints(
-            system, normalize_tools_for_anthropic(tools), strip_thinking(to_anthropic_messages(messages), keep_current_turn=True))
+            system, normalize_tools_for_anthropic(tools),
+            strip_thinking(to_anthropic_messages(messages, keep_compaction=compact_armed), keep_current_turn=True))
         if self._cache_last_only:
             sys_blocks, tool_defs, msgs = cache_on_last_message_only(sys_blocks, tool_defs, msgs)
+        from axon.providers import files_api       # large attachments by file id (official host), indexed once elsewhere
+        msgs_inline = msgs
+        files_key = getattr(getattr(self.settings, "api_key", None), "get_secret_value", lambda: "")()
+        msgs = files_api.use_file_ids(msgs, str(self.settings.base_url), files_key)
+        files_retry = msgs is not msgs_inline      # file ids were substituted: one re-upload retry if one is gone (404)
         kwargs: dict[str, Any] = {"model": wire_model, "max_tokens": limit, "messages": msgs}
         if sys_blocks:
             kwargs["system"] = sys_blocks
         if tool_defs:
             kwargs["tools"] = tool_defs
+            from axon.providers import toolflow
+            toolflow.apply(kwargs, wire_model, official=self._official)   # eager input streaming, disable_parallel_tool_use
+            from axon.providers import toolsearch
+            toolsearch.apply(kwargs, wire_model, official=self._official, settings=self.settings)   # defer_loading + server tool search
         extra = build_thinking_params(wire_model, thinking=thinking, effort=effort, max_tokens=limit)
         if extra:
             kwargs["extra_body"] = extra
-        if model.lower().endswith("[1m]") or self._aliases.get(model, "").lower().endswith("[1m]"):
-            if _matches(wire_model, ("claude-sonnet-4", "claude-sonnet-4-5")):
-                kwargs["extra_headers"] = {"anthropic-beta": "context-1m-2025-08-07"}
+        from axon.providers import task_budget as _tb       # advisory task budget: supported models on the Claude API only
+        _tb.apply(kwargs, wire_model, None if getattr(self, "_task_budget_off", False) else getattr(self, "task_budget_tokens", None),
+                  official=self._official)
+        # (the context-1m-2025-08-07 beta is gone: retired 2026-04-30 for Sonnet 4 / 4.5, and the header no longer has an effect.)
+        from axon.providers import model_caps as _mc, speed_wire as _sw
+        self.last_speed_note = ""
+        if getattr(self, "fast_speed", False) and not getattr(self, "_fast_off", False) and _sw.supports_fast(wire_model, official=self._official):
+            _sw.apply_fast(kwargs, wire_model)          # API fast mode: `speed: "fast"` (+ beta header where the model needs it)
+        from axon.providers import geo_wire as _geo
+        if not getattr(self, "_geo_off", False):
+            _geo.apply(kwargs, wire_model, getattr(self.settings, "inference_geo", ""), official=self._official)   # data residency
+        marks = []
+        if getattr(self, "turn_effort", None) or getattr(self, "_effort_state", None):
+            _out = (kwargs.get("extra_body") or {}).get("output_config") or {}
+            marks = _sw.update_marks(self.__dict__.setdefault("_effort_state", {}), getattr(self, "turn_effort", None),
+                                     kwargs["messages"], _out.get("effort"), wire_model)
+        if (marks and not getattr(self, "_mid_effort_off", False) and _sw.supports_mid_effort(wire_model, official=self._official)
+                and _mc.thinking_type_sent(kwargs.get("extra_body")) not in ("between_tools", "disabled")):
+            from axon.providers.anthropic_wire import add_beta as _add_beta
+            kwargs["messages"], applied = _sw.inject_effort_marks(kwargs["messages"], marks)   # per-message effort keeps the cache
+            if applied:
+                _add_beta(kwargs, _sw.BETA_MID_EFFORT)
+        self.last_context_edit = None
+        if self.context_edit and self._official and not self._context_edit_off and _mc.allows(wire_model, "context_management") is not False:
+            from axon.providers.anthropic_wire import apply_context_management   # server-side clearing of old tool results (beta)
+            apply_context_management(kwargs, self.context_edit)
+            if not compact_armed:
+                from axon.providers.anthropic_wire import strip_compaction_edit
+                strip_compaction_edit(kwargs)       # compaction was turned off for this session (the endpoint refused it)
+
+        from axon.agent import refusal as _refusal       # refusal_fallback_model: fallback-credit beta (token echoed on the retry)
+        if not getattr(self, "_credit_off", False):
+            _refusal.apply_credit(kwargs, self.settings, official=self._official, token=_refusal.take_credit())
 
         diag_key = (threading.get_ident(), bool(tool_defs))
         prev_id = self._prev_message_ids.get(diag_key)
-        if self._official and self._diagnostics_on and prev_id:
+        if self._official and self._diagnostics_on:
             # Claude API only: ask which part of the request broke the cache, relative to the previous call.
-            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), "diagnostics": {"previous_message_id": prev_id}}
+            # The first call sends null: that opts in (the API stores a fingerprint only for opted-in requests).
+            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), "diagnostics": {"previous_message_id": prev_id or None}}
 
         stripped_thinking = False
+        toolflow_stripped = False
+        toolsearch_stripped = False
+        credit_stripped = False
         dropped_signatures = False
         retry_no = 0
         self._canceller.begin()
@@ -599,6 +674,40 @@ class AnthropicProvider:
                     # with the HTTP status of the stream itself (200). Use the status the error type stands for.
                     status = stream_error_status(body)
                 text = f"{getattr(e, 'message', '')} {body or ''} {e}".lower()
+                if not emitted[0] and _sw.is_fast_request(kwargs) and (status in (429, 529) or (status == 400 and "speed" in text)):
+                    _sw.strip_fast(kwargs)       # fast capacity is separate: resend at standard speed (a prompt-cache miss)
+                    self._fast_off = status == 400   # a 400 means the model/endpoint has no fast mode: stop asking this session
+                    self.last_speed_note = f"fast mode {status}: resent at standard speed (prompt cache miss)"
+                    yield retry_event(1, 1, 0.0, self.last_speed_note)
+                    continue
+                if not emitted[0] and _geo.is_set(kwargs) and _geo.rejected(status, text):
+                    _geo.strip(kwargs)               # the endpoint or model takes no inference_geo: resend without it, once
+                    self._geo_off = True
+                    continue
+                if not emitted[0] and kwargs.get("messages") and _sw.mark_rejected(status, text) and any(
+                        m.get("role") == "system" for m in kwargs["messages"] if isinstance(m, dict)):
+                    _sw.strip_effort_marks(kwargs)   # the model/endpoint takes no per-message effort: keep the top-level one
+                    self._mid_effort_off = True
+                    continue
+                if not emitted[0] and _tb.rejected(status, text) and _tb.strip(kwargs):
+                    self._task_budget_off = True   # the endpoint does not take a task budget: stop sending it this session
+                    continue
+                if not emitted[0] and status == 400 and "compact" in text and not getattr(self, "_compact_off", False):
+                    from axon.providers.anthropic_wire import strip_compaction_edit
+                    if strip_compaction_edit(kwargs):
+                        self._compact_off = True       # the endpoint or model does not take server compaction: client-side only from now on
+                        compact_armed = False
+                        kwargs["messages"] = [
+                            {**m, "content": [(_compaction_as_text(b) or {"type": "text", "text": ""}) if isinstance(b, dict) and b.get("type") == "compaction" else b
+                                              for b in m["content"]]} if isinstance(m.get("content"), list) else m
+                            for m in kwargs["messages"]]
+                        continue
+                if (not emitted[0] and status == 400 and "context_management" in kwargs.get("extra_body", {})
+                        and any(k in text for k in ("context_management", "context-management", "context management", "clear_tool_uses", "anthropic-beta"))):
+                    from axon.providers.anthropic_wire import strip_context_management
+                    strip_context_management(kwargs)
+                    self._context_edit_off = True  # the endpoint does not take context editing: stop sending it this session
+                    continue
                 if (not emitted[0] and status == 400 and "diagnostics" in kwargs.get("extra_body", {}) and "diagnostics" in text):
                     self._diagnostics_on = False   # the API does not take the field: stop sending it this session
                     rest = {k: v for k, v in kwargs["extra_body"].items() if k != "diagnostics"}
@@ -607,6 +716,24 @@ class AnthropicProvider:
                     else:
                         kwargs.pop("extra_body", None)
                     continue
+                if not emitted[0] and status == 400 and not credit_stripped and _refusal.strip_credit(kwargs, text):
+                    credit_stripped = self._credit_off = True        # the endpoint does not know the fallback-credit beta: retry without it
+                    continue
+                if not emitted[0] and status == 400 and not toolsearch_stripped:
+                    from axon.providers import toolsearch
+                    if toolsearch.strip(kwargs, text):
+                        toolsearch_stripped = True    # the endpoint does not know defer_loading / tool search: retry with every tool loaded
+                        continue
+                if not emitted[0] and files_retry and files_api.is_missing_file_error(status, text):
+                    files_retry = False               # a cached file id expired or was deleted: forget it, upload again, retry once
+                    files_api.session_for(str(self.settings.base_url), files_key).forget_ids(kwargs["messages"])
+                    kwargs["messages"] = files_api.use_file_ids(msgs_inline, str(self.settings.base_url), files_key)
+                    continue
+                if not emitted[0] and status == 400 and not toolflow_stripped:
+                    from axon.providers import toolflow
+                    if toolflow.strip(kwargs, text):
+                        toolflow_stripped = True      # the endpoint does not know a tool streaming/parallel field: retry plain
+                        continue
                 if (not emitted[0] and not stripped_thinking and status == 400 and set(kwargs.get("extra_body", {})) - {"diagnostics"}
                         and any(k in text for k in ("thinking", "effort", "output_config", "budget_tokens", "adaptive"))):
                     diag = kwargs.get("extra_body", {}).get("diagnostics")
@@ -636,9 +763,13 @@ class AnthropicProvider:
                 if not emitted[0] and retryable and retry_no < budget:
                     resp = getattr(e, "response", None)
                     delay = backoff_delay(min(retry_no, 4), parse_retry_after(getattr(resp, "headers", None)))
+                    if status is None and retry_no == 0:
+                        delay = 0.0             # the pool was just refreshed: the first retry of a transport error goes at once
                     retry_no += 1
                     state.text_parts.clear()  # unshown leftovers of the failed attempt (thinking when hidden)
                     state.thinking_parts.clear()
+                    if status is None:
+                        self.refresh_client()   # a transport error: never retry on the (possibly dead) pooled connection
                     yield retry_event(retry_no, budget, delay,
                                       f"HTTP {status} from anthropic" if status else f"{type(e).__name__}: {e}")
                     _transport._sleep(delay)
@@ -653,11 +784,21 @@ class AnthropicProvider:
         """Abort the in-flight stream (of *thread_ident*, default all) from another thread."""
         return self._canceller.cancel(thread_ident)
 
+    def refresh_client(self) -> None:
+        """Evict every pooled HTTP connection: the next request opens a fresh one (after a transport error)."""
+        refresh_http_pool(self._client)
+
     def _run(self, kwargs: dict[str, Any], state: StreamState, emitted: list[bool], thinking: bool, wire_model: str = "") -> Iterator[StreamEvent]:
         buffers: dict[int, dict[str, Any]] = {}
         blocks: list[Block] = []
         diagnostics: dict[str, Any] | None = None
         stop_details: dict[str, Any] | None = None
+        compaction_blocks: list[dict[str, Any]] = []     # server-side compaction summaries, in stream order
+        iter_rows: list[dict[str, int]] = []             # usage.iterations entries of type compaction
+        from axon.features.otel import propagation_headers   # {} unless telemetry.propagate is on and this is the user's own endpoint
+        _tp = propagation_headers(self.settings)
+        if _tp:
+            kwargs["extra_headers"] = {**(kwargs.get("extra_headers") or {}), **_tp}
         with self._canceller.open_stream(lambda: self._client.messages.stream(**kwargs)) as stream:
             note_rate_limits(getattr(getattr(stream, "response", None), "headers", None), self.name)
             saw_stop = False
@@ -683,6 +824,8 @@ class AnthropicProvider:
                         buffers[idx] = {"type": "thinking", "text": getattr(cb, "thinking", "") or "", "signature": getattr(cb, "signature", None)}
                     elif ctype == "text":
                         buffers[idx] = {"type": "text", "text": getattr(cb, "text", "") or ""}
+                    elif ctype == "compaction":      # server-side compaction: the whole summary arrives in one compaction_delta
+                        buffers[idx] = {"type": "compaction", "content": getattr(cb, "content", None), "signature": getattr(cb, "signature", None)}
                     elif ctype == "tool_use":
                         buffers[idx] = {"type": "tool_use", "id": cb.id, "name": cb.name, "json": ""}
                         emitted[0] = True
@@ -699,6 +842,10 @@ class AnthropicProvider:
                         if th and thinking:
                             emitted[0] = True
                             yield ThinkingDelta(text=th)
+                    elif dtype == "compaction_delta":
+                        if buf is not None and buf.get("type") == "compaction":
+                            buf["content"] = getattr(d, "content", None) or buf.get("content")
+                            buf["signature"] = getattr(d, "signature", None) or buf.get("signature")
                     elif dtype == "signature_delta":
                         if buf is not None:
                             buf["signature"] = (buf.get("signature") or "") + (getattr(d, "signature", "") or "")
@@ -721,6 +868,10 @@ class AnthropicProvider:
                     buf = buffers.get(event.index)
                     if not buf:
                         continue
+                    if buf["type"] == "compaction":
+                        compaction_blocks.append({k: v for k, v in (("type", "compaction"), ("content", buf.get("content")),
+                                                                    ("signature", buf.get("signature"))) if v is not None})
+                        continue
                     if buf["type"] == "thinking":
                         blocks.append(ThinkingBlock(text=buf["text"], signature=buf.get("signature")))
                     elif buf["type"] == "text":
@@ -732,8 +883,11 @@ class AnthropicProvider:
                     for holder in (event, getattr(event, "delta", None)):
                         diagnostics = _object_field(holder, "diagnostics") or diagnostics
                         stop_details = _object_field(holder, "stop_details") or stop_details
+                        self.last_context_edit = _object_field(holder, "context_management") or self.last_context_edit  # server-side clearing report
                     u = getattr(event, "usage", None)
                     if u is not None:
+                        from axon.providers.anthropic_wire import compaction_iterations
+                        iter_rows = compaction_iterations(u) or iter_rows      # (the SDK's final message drops usage.iterations)
                         state.usage = self._usage(u, state.usage)
             if not saw_stop:
                 # The connection ended without message_stop: a cut stream, not a finished reply.
@@ -743,22 +897,40 @@ class AnthropicProvider:
         stop_reason: StopReason = getattr(final_msg, "stop_reason", None) or "end_turn"  # type: ignore[assignment]
         diagnostics = _object_field(final_msg, "diagnostics") or diagnostics
         stop_details = _object_field(final_msg, "stop_details") or stop_details
+        self.last_context_edit = _object_field(final_msg, "context_management") or self.last_context_edit
         if not getattr(state, "message_id", ""):
             state.message_id = str(getattr(final_msg, "id", "") or "")
         raw_usage = getattr(final_msg, "usage", None)
         usage = self._usage(raw_usage, Usage()) if raw_usage is not None else state.usage
+        if iter_rows and raw_usage is not None:
+            from axon.providers.anthropic_wire import compaction_iterations
+            if not compaction_iterations(raw_usage):       # the summarizing call is billed too: count it
+                from dataclasses import replace as _replace
+                usage = _replace(usage, input=usage.input + sum(r["input_tokens"] + r["cache_read_input_tokens"] + r["cache_creation_input_tokens"] for r in iter_rows),
+                                 output=usage.output + sum(r["output_tokens"] for r in iter_rows))
         state.usage = usage
 
         native: list[Any] = []
         for b in getattr(final_msg, "content", []) or []:
             native.append(b.model_dump(exclude_none=True) if hasattr(b, "model_dump") else b)
+        if compaction_blocks:       # the SDK does not accumulate compaction_delta: put the streamed summary back
+            queue = list(compaction_blocks)
+            native = [queue.pop(0) if isinstance(n, dict) and n.get("type") == "compaction" and queue else n for n in native]
+            if not any(isinstance(n, dict) and n.get("type") == "compaction" for n in native):
+                native = [*compaction_blocks, *native]
 
         # A tool_use the turn can't complete (truncated JSON at max_tokens) is dropped from both the
         # normalized blocks and the replayed content so history never holds an unanswered tool_use.
-        drop = {b.id for b in blocks if isinstance(b, ToolUseBlock) and b.parse_error and stop_reason == "max_tokens"}
-        if drop:
-            blocks = [b for b in blocks if not (isinstance(b, ToolUseBlock) and b.id in drop)]
-            native = [n for n in native if not (isinstance(n, dict) and n.get("type") == "tool_use" and n.get("id") in drop)]
+        # Fine-grained tool streaming: the API does not validate the input, so a call can end invalid. The call is
+        # kept (with an empty input in the replayed content) and the loop answers it with an INVALID_JSON error,
+        # so the model sees what happened and retries; it is never executed.
+        cut = {b.id for b in blocks if isinstance(b, ToolUseBlock) and b.parse_error and stop_reason == "max_tokens"}
+        if cut:
+            why_cut = "Tool call cut off by the output limit (max_tokens), so its input is incomplete"
+            blocks = [ToolUseBlock(id=b.id, name=b.name, input=b.input, parse_error=why_cut)
+                      if isinstance(b, ToolUseBlock) and b.id in cut else b for b in blocks]
+            native = [{**n, "input": {}} if isinstance(n, dict) and n.get("type") == "tool_use" and n.get("id") in cut else n
+                      for n in native]
         has_tools = any(isinstance(b, ToolUseBlock) for b in blocks)
         if has_tools and stop_reason in ("max_tokens", "end_turn", "stop_sequence"):
             stop_reason = "tool_use"
@@ -787,8 +959,20 @@ class AnthropicProvider:
             w1h = split.get("ephemeral_1h_input_tokens")
         write_1h = int(w1h) if isinstance(w1h, int) else prev.cache_write_1h
         total_in = uncached + cache_read + cache_write if uncached or cache_read or cache_write else prev.input
-        return Usage(input=total_in, output=g("output_tokens", prev.output), cache_read=cache_read, cache_write=cache_write,
-                     reasoning=prev.reasoning, cache_write_1h=min(write_1h, cache_write))
+        out_t = g("output_tokens", prev.output)
+        try:
+            from axon.providers.anthropic_wire import compaction_iterations
+            for it in compaction_iterations(raw):    # server-side compaction: its summarizing call is billed too (top-level excludes it)
+                total_in += it["input_tokens"] + it["cache_read_input_tokens"] + it["cache_creation_input_tokens"]
+                out_t += it["output_tokens"]
+                cache_read += it["cache_read_input_tokens"]
+                cache_write += it["cache_creation_input_tokens"]
+        except Exception:
+            pass
+        return Usage(input=total_in, output=out_t, cache_read=cache_read, cache_write=cache_write,
+                     reasoning=prev.reasoning, cache_write_1h=min(write_1h, cache_write),
+                     speed="fast" if getattr(raw, "speed", None) == "fast" else "",
+                     inference_geo=_geo_reported(raw) or prev.inference_geo)
 
     def finalize(self) -> AssistantTurn:
         state: StreamState | None = getattr(self._local, "state", None)
@@ -811,6 +995,33 @@ class AnthropicProvider:
             content.append(block)
         return [{"role": "user", "content": content}]
 
+    def count_tokens(self, *, model: str, system: list[dict[str, Any]], messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                     context_management: dict[str, Any] | None = None, timeout: float = 2.0) -> int:
+        """Exact input tokens of the request :meth:`stream` would send (POST /v1/messages/count_tokens, free, rate limited).
+
+        Official host only (gateways rarely implement it). One attempt with a hard timeout and no retries: the caller
+        (agent.exact_count) decides what a failure means. Raises the SDK's error on a non-2xx answer."""
+        if not self._official:
+            raise RuntimeError("count_tokens is only available on the official Anthropic API")
+        wire_model = self._wire_model(model)
+        sys_blocks, tool_defs, msgs = limit_cache_breakpoints(
+            system, normalize_tools_for_anthropic(tools), strip_thinking(to_anthropic_messages(messages), keep_current_turn=True))
+        if self._cache_last_only:
+            sys_blocks, tool_defs, msgs = cache_on_last_message_only(sys_blocks, tool_defs, msgs)
+        kwargs: dict[str, Any] = {"model": wire_model, "messages": msgs}
+        if sys_blocks:
+            kwargs["system"] = sys_blocks
+        if tool_defs:
+            kwargs["tools"] = tool_defs
+        if context_management and not self._context_edit_off:
+            from axon.providers.anthropic_wire import apply_context_management, COMPACT_EDIT
+            counted = {**context_management, "edits": [e for e in context_management.get("edits", []) if e.get("type") != COMPACT_EDIT]}
+            if counted["edits"]:       # a summary is not simulated: the count is what the model sees after clearing
+                apply_context_management(kwargs, counted)
+        result = self._client.with_options(timeout=timeout, max_retries=0).messages.count_tokens(**kwargs)
+        return int(getattr(result, "input_tokens", 0) or 0)
+
     def supports(self, feature: str) -> bool:
-        return feature in ("tools", "thinking", "prompt_caching", "streaming", "tool_images")
+        return feature in ("tools", "thinking", "prompt_caching", "streaming", "tool_images", "tool_pdf") or (
+            feature == "count_tokens" and self._official)
 

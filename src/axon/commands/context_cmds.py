@@ -393,12 +393,26 @@ def _safe_cut_fallback(messages: list[dict[str, Any]], keep: int = 4) -> int:
 
 
 @command("compact", category=CAT, description="Summarise older turns to free context (optional focus)",
-         usage="/compact [instructions for the summary]\n/compact --last   what the last compaction replaced, with its summary")
+         usage="/compact [instructions for the summary]\n/compact --last     what the last compaction replaced, with its summary\n"
+               "/compact --cancel   drop a background summary that is being written\n"
+               "The newest compact_keep_turns turns stay word for word; only older turns are summarized.")
 def handle_compact(agent: Any, arg: str) -> CommandResult:
     if arg.strip() == "--last":
         from axon.features.insights import show_last_compaction
         show_last_compaction(agent)
         return CommandResult(handled=True)
+    if arg.strip() == "--cancel":
+        from axon.agent.compaction import cancel_background
+        if not cancel_background(agent, announce=False):
+            info("No background compaction is running.")
+        else:
+            ok("Background compaction cancelled.")
+        return CommandResult(handled=True)
+    try:
+        from axon.agent.compaction import cancel_background
+        cancel_background(agent)          # this compaction rewrites the history: a background summary's cut would no longer match
+    except Exception:
+        pass
     conv = agent.conversation
     before_n = len(conv.messages)
     if before_n <= 2:
@@ -421,13 +435,13 @@ def handle_compact(agent: Any, arg: str) -> CommandResult:
     u = None
     if ctx is not None and hasattr(ctx, "summarize_with_provider"):
         try:
-            u = ctx.summarize_with_provider(conv, agent.provider, agent.settings.model, instructions=arg, keep_turns=1)
+            u = ctx.summarize_with_provider(conv, agent.provider, agent.settings.model, instructions=arg)
             record_usage(getattr(agent, "ledger", None), agent.settings.model, u, "compaction")
             used_llm = u is not None
         except Exception as e:
             err(f"Summarisation failed: {e}")
     elif ctx is not None and hasattr(ctx, "_summarize_older_turns"):
-        ctx._summarize_older_turns(conv, keep_turns=1)
+        ctx._summarize_older_turns(conv)
     else:
         cut = _safe_cut_fallback(conv.messages)
         if cut > 0:

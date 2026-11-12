@@ -126,7 +126,15 @@ def context_breakdown(agent: Any, real_used: int | None = None) -> dict[str, Any
                          for i in sorted(msg_items, key=lambda i: -i["tokens"])[:12]]
     fixed = sum(v for k, v in cats.items() if k not in ("messages", "autocompact", "free"))
     calibrated = False
-    if real_used and real_used > fixed + cats["messages"]:
+    exact = None
+    try:   # the count-tokens endpoint measured this very conversation: that number is exact, not estimated
+        exact = agent.context.exact.value_for(agent.conversation, agent.settings.model)
+    except Exception:
+        exact = None
+    if exact:
+        cats["messages"] = max(0, exact - fixed)
+        calibrated = True
+    elif real_used and real_used > fixed + cats["messages"]:
         cats["messages"] = real_used - fixed
         calibrated = True
     used = fixed + cats["messages"]
@@ -135,7 +143,7 @@ def context_breakdown(agent: Any, real_used: int | None = None) -> dict[str, Any
     cats["free"] = max(0, window - used - buffer)
     rows = [{"key": k, "label": label, "tokens": cats[k], "pct": round(100 * cats[k] / window, 1) if window else 0.0} for k, label in CATEGORIES]
     return {"window": window, "used": used, "pct": round(100 * used / window) if window else 0, "threshold": threshold,
-            "rows": rows, "deferred": deferred, "lists": lists, "calibrated": calibrated,
+            "rows": rows, "deferred": deferred, "lists": lists, "calibrated": calibrated, "exact": bool(exact),
             "estimate": "Token counts are estimates (about 3.7 characters per token) unless the provider reported the total."}
 
 

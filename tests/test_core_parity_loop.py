@@ -562,17 +562,17 @@ def test_session_title_property_and_cancel_all(workspace: Path) -> None:
 
 def test_goal_prompt_and_single_stop_check(workspace: Path) -> None:
     events: list[Any] = []
-    prov = FakeProvider(scripted("did part", "goal confirmed", "next turn"))
+    prov = FakeProvider(scripted("did part", "next turn"))
     agent = make_agent(prov, workspace, events=events)
     agent.goal = "all tests pass"
     res = agent.run_turn("work on it")
-    assert res.final_text == "goal confirmed" and len(prov.requests) == 2
+    # a read-only turn is not graded (the grader flow itself is covered in tests/test_goal.py)
+    assert res.final_text == "did part" and len(prov.requests) == 1
     assert "all tests pass" in "\n".join(b["text"] for b in prov.requests[0]["system"])
-    assert "[Goal check]" in json.dumps(prov.requests[1]["messages"][-1])
     assert any(s.kind == "goal_check" for s in agent.last_trace.steps)
     agent.goal = None
     agent.run_turn("again")
-    assert len(prov.requests) == 3
+    assert len(prov.requests) == 2
 
 
 def test_prompt_color_setting_maps() -> None:

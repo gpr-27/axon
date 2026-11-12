@@ -215,7 +215,7 @@ def test_bash_file_commands_and_redirects_follow_file_rules(workspace):
 
 def test_dontask_denies_what_would_prompt(workspace):
     assert normalize_mode("dontAsk") == "dontAsk"
-    assert normalize_mode("manual") == "default" and normalize_mode("auto") == "default"
+    assert normalize_mode("manual") == "default" and normalize_mode("auto") == "auto"      # auto is its own mode now (classifier)
     e = eng(workspace, allow=["Bash(npm test)", "AskUserQuestion"], ask=["Bash(git push *)"])
     assert e.check(BASH, {"command": "rm x"}, "dontAsk").outcome == "deny"
     assert e.check(BASH, {"command": "npm test"}, "dontAsk").outcome == "allow"

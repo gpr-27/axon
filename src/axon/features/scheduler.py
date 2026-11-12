@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-KINDS = ("interval", "daily", "weekly", "once")
+KINDS = ("interval", "daily", "weekly", "once", "cron")
 # name -> (permission mode of the SDK, plain label, one-line explanation)
 MODES: dict[str, tuple[str, str, str]] = {
     "readonly": ("plan", "Read-only", "Can read and search the folder. Cannot change anything or run commands."),
@@ -71,6 +71,9 @@ def _hhmm(text: Any) -> tuple[int, int]:
 def next_after(task: dict[str, Any], after: float) -> float | None:
     """The first time this task is due strictly after *after* (epoch seconds, local calendar), or None."""
     kind = task.get("kind")
+    if kind == "cron":
+        from axon.features import schedule_ext as ext
+        return ext.cron_next(str(task.get("cron") or ""), after, task.get("tz"))
     if kind == "interval":
         return after + float(task.get("every_s") or MIN_INTERVAL_S)
     if kind == "once":
@@ -80,9 +83,13 @@ def next_after(task: dict[str, Any], after: float) -> float | None:
         return None
     h, m = _hhmm(task.get("at"))
     days = set(task.get("days") or range(7)) if kind == "weekly" else set(range(7))
-    start = datetime.fromtimestamp(after).replace(hour=h, minute=m, second=0, microsecond=0)
+    from axon.features import schedule_ext as ext
+    tz = ext.zone(task.get("tz"))
+    start = (datetime.fromtimestamp(after, tz) if tz else datetime.fromtimestamp(after)).replace(hour=h, minute=m, second=0, microsecond=0)
     for i in range(0, 9):
         cand = start + timedelta(days=i)
+        if tz is not None:
+            cand = cand.replace(tzinfo=tz)
         if cand.weekday() in days and cand.timestamp() > after:
             return cand.timestamp()
     return None
@@ -98,6 +105,8 @@ def _every_words(s: float) -> str:
 
 def describe(task: dict[str, Any]) -> str:
     kind = task.get("kind")
+    if kind == "cron":
+        return f"Cron {task.get('cron')}" + (f" ({task['tz']})" if task.get("tz") else "")
     if kind == "interval":
         return _every_words(float(task.get("every_s") or 0)).capitalize()
     if kind == "daily":
@@ -176,8 +185,18 @@ def clean_task(fields: dict[str, Any], base: dict[str, Any] | None = None, now: 
     t["folder"] = check_folder(t.get("folder"))
     kind = t.get("kind")
     if kind not in KINDS:
-        raise ScheduleError("Choose how often: every so often, daily, weekly or once.")
-    if kind == "interval":
+        raise ScheduleError("Choose how often: every so often, daily, weekly, once or a cron schedule.")
+    from axon.features import schedule_ext as ext
+    try:
+        t["tz"] = ext.check_tz(t.get("tz"))
+        if kind == "cron":
+            t["cron"] = " ".join(str(t.get("cron") or "").split())
+            ext.parse_cron(t["cron"])
+    except ext.CronError as e:
+        raise ScheduleError(str(e)) from None
+    if kind == "cron":
+        pass
+    elif kind == "interval":
         try:
             every = float(t.get("every_s"))
         except (TypeError, ValueError):
@@ -216,12 +235,23 @@ def clean_task(fields: dict[str, Any], base: dict[str, Any] | None = None, now: 
     if not 0.01 <= budget <= MAX_BUDGET_USD:
         raise ScheduleError(f"The spending limit per run must be between $0.01 and ${MAX_BUDGET_USD:g}.")
     t["budget_usd"] = round(budget, 4)
-    t["catch_up"] = bool(t.get("catch_up", kind != "interval"))
+    t["catch_up"] = bool(t.get("catch_up", kind not in ("interval", "cron")))     # cron runs are never replayed unless asked
+    t["cap_off"] = bool(t.get("cap_off", False))
+    mt = t.get("max_tokens")
+    if mt in (None, "", 0):
+        t["max_tokens"] = None
+    else:
+        try:
+            t["max_tokens"] = int(mt)
+        except (TypeError, ValueError):
+            raise ScheduleError("The token cap must be a whole number.") from None
+        if t["max_tokens"] < 1000:
+            raise ScheduleError("The token cap must be at least 1000.")
     t["enabled"] = bool(t.get("enabled", True))
     return t
 
 
-_EDITABLE = {"name", "prompt", "folder", "kind", "every_s", "at", "days", "once_at", "mode", "budget_usd", "catch_up", "enabled", "bypass_ack"}
+_EDITABLE = {"name", "prompt", "folder", "kind", "every_s", "at", "days", "once_at", "mode", "budget_usd", "catch_up", "enabled", "bypass_ack", "cron", "tz", "cap_off", "max_tokens"}
 
 
 # ─── safe text for notices ────────────────────────────────────────────────────
@@ -265,12 +295,20 @@ class RunControl:
 def sdk_runner(task: dict[str, Any], ctl: RunControl) -> dict[str, Any]:
     """Run the task's prompt as a normal session in its folder. Returns status, cost, session id and error."""
     from axon.features.sdk import AxonOptions, AxonSession, SDKError
-    opts = AxonOptions(workspace=task["folder"], mode=MODES[task["mode"]][0], max_budget_usd=float(task["budget_usd"]),
-                       append_system_prompt=UNATTENDED_NOTE)
+    from axon.features import schedule_ext as ext
+    cap = None if task.get("cap_off") else float(task["budget_usd"])
+    over = {"turn_token_budget": int(task["max_tokens"])} if task.get("max_tokens") else {}
+    opts = AxonOptions(workspace=task["folder"], mode=MODES[task["mode"]][0], max_budget_usd=cap,
+                       append_system_prompt=UNATTENDED_NOTE, settings_overrides=over or None)
     try:
         session = AxonSession(opts)
     except SDKError as e:
-        return {"status": "failed", "error": str(e)[:300], "cost_usd": 0.0, "session_id": ""}
+        return {"status": "failed", "error": str(e)[:300], "cost_usd": 0.0, "session_id": "", "failure": "setup_error"}
+    st = session.agent.settings
+    why = ext.cap_problem(task, str(getattr(st, "model", "") or ""), getattr(st, "provider", None))
+    if why:                                    # fail closed: no enforceable cap, so the run does not start
+        session.close()
+        return {"status": "skipped", "error": why, "cost_usd": 0.0, "session_id": "", "failure": "price_unknown"}
     timer = threading.Timer(RUN_TIMEOUT_S, lambda: ctl.cancel("timeout"))
     timer.daemon = True
     timer.start()
@@ -292,7 +330,12 @@ def sdk_runner(task: dict[str, Any], ctl: RunControl) -> dict[str, Any]:
     err = ""
     if status in ("failed", "budget"):
         err = " ".join(str(res.error or res.text or stop).split())[:300]
-    return {"status": status, "cost_usd": float(res.cost_usd or 0.0), "session_id": res.session_id, "error": err, "stop_reason": stop}
+    usage = res.usage or {}
+    failure = {"budget": "cap_reached", "timeout": "timeout", "stopped": "cancelled"}.get(status, "")
+    if status == "failed":
+        failure = "max_iterations" if stop == "max_iterations" else "model_error"
+    return {"status": status, "cost_usd": float(res.cost_usd or 0.0), "session_id": res.session_id, "error": err, "stop_reason": stop,
+            "failure": failure, "tokens_in": int(usage.get("input_tokens", 0) or 0), "tokens_out": int(usage.get("output_tokens", 0) or 0)}
 
 
 # ─── the scheduler ────────────────────────────────────────────────────────────
@@ -399,7 +442,7 @@ class Scheduler:
                     for k in ("id", "created", "last_run", "last_status"):
                         if k in old:
                             t[k] = old[k]
-                    schedule_changed = any(k in fields for k in ("kind", "every_s", "at", "days", "once_at", "enabled"))
+                    schedule_changed = any(k in fields for k in ("kind", "every_s", "at", "days", "once_at", "enabled", "cron", "tz"))
                     if schedule_changed or t.get("next_at") is None:
                         t["next_at"] = next_after(t, now) if t["enabled"] else None
                     tasks[i] = t
@@ -440,6 +483,24 @@ class Scheduler:
                     self._compact(path)
             except OSError:
                 pass
+
+    def prune(self) -> None:
+        """Apply the log's retention (age and count) now."""
+        from axon.features import schedule_ext as ext
+        path = self._file("runs.jsonl")
+        with self._mutex(self.folder):
+            recs = self._records(path)
+            keep = ext.retain(recs, self.clock(), ext.RETAIN_DAYS, HISTORY_KEEP)
+            if len(keep) != len(recs):
+                self._rewrite(path, keep)
+
+    def _rewrite(self, path: Path, keep: list[dict[str, Any]]) -> None:
+        tmp = path.with_name(f".runs.{os.getpid()}.tmp")
+        try:
+            tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
 
     def _compact(self, path: Path) -> None:
         keep = self._records(path)[-HISTORY_KEEP:]
@@ -482,7 +543,8 @@ class Scheduler:
             if rec.get("status") == "running" and not self._run_alive(rec):
                 rec["status"] = "interrupted"
                 rec["error"] = rec.get("error") or "Axon closed before the run finished."
-            out.append(rec)
+            from axon.features import schedule_ext as ext
+            out.append(ext.view(rec))
             if len(out) >= limit:
                 break
         return out
@@ -553,7 +615,8 @@ class Scheduler:
                 res = {"status": "failed", "error": f"{type(e).__name__}: {e}"[:300]}
             final = {"run": rec["run"], "task": rec["task"], "status": str(res.get("status") or "ok"), "ended": self.clock(),
                      "cost_usd": round(float(res.get("cost_usd") or 0.0), 6), "session_id": str(res.get("session_id") or ""),
-                     "error": str(res.get("error") or "")[:300]}
+                     "error": str(res.get("error") or "")[:300], "failure": str(res.get("failure") or ""),
+                     "tokens_in": int(res.get("tokens_in") or 0), "tokens_out": int(res.get("tokens_out") or 0)}
             self._append(final)
             try:
                 with self._mutex(self.folder):
@@ -583,6 +646,9 @@ class Scheduler:
         """Start whatever is due. Returns the ids of the tasks started. Safe to call from several processes."""
         now = self.clock()
         started: list[str] = []
+        if now - getattr(self, "_pruned", 0.0) > 3600:
+            self._pruned = now
+            self.prune()
         for snap in self._read():
             if not snap.get("enabled", True):
                 continue
@@ -604,7 +670,7 @@ class Scheduler:
                 continue
             if self._start(task, reason) is None:
                 self._append({"run": uuid.uuid4().hex[:10], "task": task["id"], "name": task.get("name", ""), "status": "skipped",
-                              "started": now, "ended": now, "error": "The previous run was still going, so this one was skipped."})
+                              "started": now, "ended": now, "error": "skipped: previous run still active", "failure": "overlap"})
             else:
                 started.append(task["id"])
         return started
@@ -701,4 +767,9 @@ def ensure_started() -> Scheduler | None:
         return None
     s = get_scheduler()
     s.start()
+    try:
+        from axon.features import notify
+        notify.install_scheduler()          # webhooks and open pages hear about finished scheduled tasks
+    except Exception:
+        pass
     return s

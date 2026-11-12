@@ -391,6 +391,11 @@ def _usage_parts(usage: Any) -> tuple[int, int, int, int, int]:
 def cost_details(model: str, usage: Any, *, provider: str | None = None, group_ratio: float | Decimal = 1) -> CostResult:
     """Cost of one call plus whether the model was priced. `usage` is a Usage or a dict."""
     q = price_for(model, provider)
+    speed = usage.get("speed") if isinstance(usage, Mapping) else getattr(usage, "speed", "")
+    if speed == "fast":     # Anthropic fast mode: premium rates (caching multipliers stack on top)
+        from dataclasses import replace as _replace
+        from axon.providers.speed_wire import fast_quote
+        q = fast_quote(_replace(q, model=model))
     total_in, out, cache_read, cache_write, write_1h = _usage_parts(usage)
     uncached = max(0, total_in - cache_read - cache_write)
     c_in = (Decimal(uncached) / _MILLION) * q.input

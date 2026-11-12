@@ -130,7 +130,6 @@ function axView(model) {
     for (const t of d.todos) box.append(h('div', { class: 'todo ' + (t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'now' : '') }, h('span', null, t.status === 'completed' ? '☑' : t.status === 'in_progress' ? '▶' : '☐'), h('span', null, String(t.content || ''))));
     return box;
   }
-  if (model.kind === 'bash') return h('div', { class: 'cview muted' }, 'Exit code ' + d.code);
   return null;
 }
 // The sentence of a row while its tool is still running (no output yet to describe).
@@ -162,14 +161,133 @@ function axCard(card, ev, text) {
   if (failed) line = axFirstLine(text).trim().slice(0, 240) || line;
   else line = line.replace(/ and it succeeded$/, '');
   const ta = card.querySelector('.ta'); if (ta) { ta.textContent = line; ta.title = line; }
+  if (card.axDoing) card.axDoing.textContent = failed ? (model.sentence || line) : line;
   const ch = card.querySelector('.chips'); if (ch) { ch.replaceChildren(); if (!failed || model.kind === 'tests') for (const c of model.chips || []) ch.append(h('span', { class: 'chip2' + (c.c ? ' ' + c.c : '') }, c.t)); }
   const view = axView(model); const o = card.querySelector('.p-out');
   if (view && o) {
-    const raw = h('details', { class: 'rawout' }, h('summary', null, 'Full output'));
+    const raw = h('details', { class: 'rawout' }, h('summary', null, 'Show raw output'));
     while (o.firstChild) raw.append(o.firstChild);
     o.append(view, raw);
   }
   card.classList.add('c-' + model.kind);
+}
+
+
+// ----- complete, tidy tool cards: remembered open state, JSON input, line-paged output, the batch reason, the hand-off line -----
+function axCardsOpen() { try { return lsGet('axon-cards-open') !== '0'; } catch (e) { return true; } }
+function axCardsRemember(open) { try { lsSet('axon-cards-open', open ? '1' : '0'); } catch (e) { /* not saved */ } }
+// A block of text shown 200 lines at a time; it always says how many lines remain. Lines are drawn through renderLine (text nodes only).
+function axPager(lines, renderLine, cls, per, preview) {
+  per = per || 200; const wrap = h('div', { class: 'paged axpg' }); const pre = h('pre', { class: cls || 'out' }); wrap.append(pre);
+  let shown = 0; const foot = h('div', { class: 'clipped' }); const note = h('span', null, ''); const next = h('button', { class: 'more', type: 'button' }, ''); const all = h('button', { class: 'more', type: 'button' }, 'Show all');
+  foot.append(note, next, all);
+  const draw = (n) => {
+    const end = Math.min(lines.length, shown + n);
+    for (let i = shown; i < end; i++) { renderLine(pre, lines[i]); pre.append('\n'); }
+    shown = end; const left = lines.length - shown;
+    if (!left) { foot.remove(); return; }
+    if (preview) { note.textContent = ''; next.hidden = true; all.textContent = 'Show all (' + lines.length.toLocaleString() + ' lines)'; return; }
+    note.textContent = 'Showing ' + shown.toLocaleString() + ' of ' + lines.length.toLocaleString() + ' lines. ' + left.toLocaleString() + ' more lines remain. ';
+    next.textContent = 'Show next ' + Math.min(per, left).toLocaleString();
+  };
+  next.addEventListener('click', () => draw(per)); all.addEventListener('click', () => draw(lines.length));
+  draw(preview ? Math.min(per, lines.length) : per); if (shown < lines.length) wrap.append(foot);
+  return wrap;
+}
+function axPlainLine(pre, ln) { pre.append(document.createTextNode(ln)); }
+const AX_JSON_RE = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+function axJsonLine(pre, ln) {   // colors one line of pretty-printed JSON with spans around text nodes
+  let last = 0, m; AX_JSON_RE.lastIndex = 0;
+  while ((m = AX_JSON_RE.exec(ln))) {
+    if (m.index > last) pre.append(document.createTextNode(ln.slice(last, m.index)));
+    const cls = m[1] ? (m[2] ? 'jk' : 'js') : m[3] ? 'jb' : 'jn';
+    if (m[1] && m[2]) pre.append(h('span', { class: 'jk' }, m[1]), document.createTextNode(m[2])); else pre.append(h('span', { class: cls }, m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < ln.length) pre.append(document.createTextNode(ln.slice(last)));
+}
+// The input is shown once: the command or the main arguments. The raw JSON the model sent is one click away.
+function axMainInput(name, inp) {
+  const box = h('div', { class: 'axmain' });
+  const path = inp.file_path || inp.path || inp.notebook_path;
+  if (typeof inp.command === 'string') { box.append(h('pre', { class: 'out nolink cmd' }, inp.command)); return box; }
+  if (typeof inp.old_string === 'string' && typeof inp.new_string === 'string') { box.append(h('div', { class: 'kv1' }, h('span', { class: 'k' }, 'file'), h('span', null, String(path || ''))), diffEl(lineDiff(inp.old_string, inp.new_string), '--- ' + (path || 'file'))); return box; }
+  if (typeof inp.content === 'string') { box.append(h('div', { class: 'kv1' }, h('span', { class: 'k' }, 'file'), h('span', null, String(path || ''))), axPager(inp.content.replace(/\n$/, '').split('\n'), axPlainLine, 'out nolink', 4, true)); return box; }
+  const keys = Object.keys(inp);
+  if (!keys.length) { box.append(h('div', { class: 'muted' }, '(no arguments)')); return box; }
+  for (const k of keys) { const v = inp[k]; const t = typeof v === 'string' ? v : JSON.stringify(v); box.append(h('div', { class: 'kv1' }, h('span', { class: 'k' }, k), h('span', null, t.length > 400 ? t.slice(0, 400) + '…' : t))); }
+  return box;
+}
+function axInputView(name, inp, text) {
+  const box = h('div', { class: 'axin' });
+  box.append(axMainInput(name, inp || {}));
+  box.append(h('details', { class: 'rawin' }, h('summary', null, 'Show raw'), axPager(String(text || '{}').split('\n'), axJsonLine, 'out nolink json')));
+  return box;
+}
+function axOutView(text) {
+  const t = String(text == null ? '' : text); if (!t) return h('div', { class: 'muted' }, '(the tool returned no output)');
+  const lines = t.replace(/\n$/, '').split('\n');
+  return h('div', { class: 'axout' }, axPager(lines, axPlainLine, 'out', 4, true));
+}
+function axToolStat(card) {
+  if (!card || !card.axStat) return;
+  const st = card.dataset.state; const td = card.querySelector('.td'); const t = td ? td.textContent : '';
+  card.axStat.textContent = st === 'run' ? 'running' : st === 'wait' ? 'waiting for your permission' : st === 'bad' ? 'failed' + (t ? ' after ' + t : '') : st === 'ok' ? 'finished' + (t ? ' in ' + t : '') : '';
+  card.axStat.dataset.s = st || '';
+}
+// When every call of a step has answered, say so: these results go back to the model, in the next step.
+function axHandoff(cur, st, card) {
+  if (!st || st.open > 0 || !(st.standalone.length + st.groups.length)) return;
+  if (!st.hand) st.hand = h('div', { class: 'handoff' });
+  st.hand.textContent = 'Results go to step ' + (st.n + 1); st.body.append(st.hand);
+}
+function axHandReset(st) { if (st && st.hand) { st.hand.remove(); st.hand = null; } }
+
+// ----- the numbers of every model call (every step, tools or not). Only values the server reported; the rest say so. -----
+const AX_NR = 'not reported';
+function axFirstToken(C, ev) {
+  if (ev.type !== 'text_delta' && ev.type !== 'thinking_delta' && ev.type !== 'tool_use') return;
+  const st = C.cur && C.cur.step; if (!st || !st.sd || st.sd.ttft != null || st.ended || typeof ev.ts !== 'number' || st.t0 == null) return;
+  const d = ev.ts - st.t0; if (d >= 0) { st.sd.ttft = d; axStats(st); }
+}
+function axRequest(C, ev) {
+  const st = C.cur && C.cur.step; if (!st || !st.sd) return; const sd = st.sd;
+  if (ev.provider) sd.provider = ev.provider; if (ev.model) sd.model = ev.model; if (ev.message_count != null) sd.msgs = ev.message_count;
+  sd.req = { max: ev.max_tokens, effort: ev.effort, thinking: ev.thinking, conv: ev.conversation_tokens, sys: ev.system_tokens, tools: ev.tool_schema_tokens, toolCount: ev.tool_count };
+  axStats(st);
+}
+function axCacheStatus(C, ev) {
+  const st = C.cur && C.cur.step; if (!st || !st.sd) return; const sd = st.sd;
+  if (sd.ctxUsed == null && ev.context_tokens && ev.context_window) { sd.ctxUsed = ev.context_tokens; sd.ctxWin = ev.context_window; axStats(st); }
+}
+function axRetry(C, ev) {
+  const st = C.cur && C.cur.step; if (!st || !st.sd) return;
+  (st.sd.retries = st.sd.retries || []).push(ev); axStats(st);
+}
+function axStepEnd(cur, st, ev) {
+  const sd = st.sd; if (!sd) return; const u = ev.usage || null;
+  sd.ended = true; sd.cost = typeof ev.cost === 'number' ? ev.cost : null; sd.dur = typeof ev.duration_s === 'number' ? ev.duration_s : null; sd.stop = ev.stop_reason || '';
+  sd.turnCost = cur.cost; sd.outcome = ev.outcome || 'ok'; sd.error = ev.error || '';
+  if (ev.model) sd.model = ev.model;
+  if (ev.context_used && ev.context_window) { sd.ctxUsed = ev.context_used; sd.ctxWin = ev.context_window; }
+  const have = u && !(u._stored && !(u.input_tokens || u.output_tokens));
+  sd.usage = have ? u : null; if (ev.cost_breakdown && Object.keys(ev.cost_breakdown).length) sd.breakdown = ev.cost_breakdown;
+  axStats(st);
+}
+// The per-call numbers are not drawn between steps any more: the turn's one usage summary (turnUsage) carries them.
+function axStats(st) { /* intentionally empty */ }
+function axTurnUsage(cur) {
+  const rows = (cur.stepData || []).filter(x => x); if (!rows.length) return null;
+  const N = (v) => Number(v || 0).toLocaleString();
+  const cache = rows.some(r => r.cread); const tbl = h('table', { class: 'tusage-t' }, h('thead', null, h('tr', null, ...['Step', 'Model', 'In', 'Out', cache ? 'Cached' : null, 'Time', 'Cost'].filter(Boolean).map((x, i) => h('th', { class: i > 1 ? 'r' : '' }, x)))));
+  const tb = h('tbody'); let ti = 0, to = 0, tc = 0, td = 0, cost = 0;
+  for (const r of rows) {
+    ti += r.tin || 0; to += r.tout || 0; tc += r.cread || 0; td += r.dur || 0; cost += r.cost || 0;
+    tb.append(h('tr', null, h('td', null, String(r.n)), h('td', { class: 'mdl' }, r.model || ''), h('td', { class: 'r' }, N(r.tin)), h('td', { class: 'r' }, N(r.tout)), cache ? h('td', { class: 'r' }, r.cread ? N(r.cread) : '') : null, h('td', { class: 'r' }, axDur(r.dur)), h('td', { class: 'r' }, r.cost ? usd(r.cost) : '')));
+  }
+  if (rows.length > 1) tb.append(h('tr', { class: 'tot' }, h('td', null, 'Total'), h('td'), h('td', { class: 'r' }, N(ti)), h('td', { class: 'r' }, N(to)), cache ? h('td', { class: 'r' }, tc ? N(tc) : '') : null, h('td', { class: 'r' }, axDur(td)), h('td', { class: 'r' }, cost ? usd(cost) : '')));
+  tbl.append(tb);
+  return h('div', { class: 'tusage' }, h('div', { class: 'tusage-h' }, 'Usage'), h('div', { class: 'tusage-s' }, rows.length > 1 ? tbl : tbl), );
 }
 
 // ----- notifications (opt in in Settings, only while the tab is hidden; the choices and the sending live in dash_js_tasks) -----
@@ -177,6 +295,7 @@ function axNotifyOn() { return typeof Notification !== 'undefined' && Notificati
 function axNotify(title, body, tag) { axnTell(title, body, tag); }
 // One hook for live events (called first thing in applyEvent).
 function axOnEvent(C, ev) {
+  axFirstToken(C, ev);
   if (C.replaying) return;
   if (ev.type === 'turn_start') C.turnT0 = Date.now();
   if (ev.type === 'turn_end') axnTurnEnd(C, ev);

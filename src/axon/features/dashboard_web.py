@@ -4,7 +4,7 @@ from __future__ import annotations
 
 INDEX_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <title>Axon</title>
 <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
@@ -186,6 +186,7 @@ from axon.features.dash_js_files import JS_FILES  # noqa: E402
 from axon.features.dash_js_frame import JS_FRAME  # noqa: E402
 from axon.features.dash_js_insights import JS_INSIGHTS  # noqa: E402
 from axon.features.dash_js_manage import JS_MANAGE  # noqa: E402
+from axon.features.dash_js_memory_extra import JS_MEMORY_EXTRA  # noqa: E402
 from axon.features.dash_js_md import JS_MD  # noqa: E402
 from axon.features.dash_js_settings import JS_SETTINGS  # noqa: E402
 from axon.features.dash_js_subagents import JS_SUBAGENTS  # noqa: E402
@@ -197,10 +198,13 @@ from axon.features.dash_js_welcome import JS_WELCOME, WELCOME_CSS  # noqa: E402
 from axon.features.dash_js_i18n import I18N_CSS, JS_I18N, asset as i18n_asset, lang_type_scale  # noqa: E402
 from axon.features.dash_js_a11y import A11Y_CSS, JS_A11Y  # noqa: E402
 from axon.features.dash_js_tasks import JS_TASKS, TASKS_CSS  # noqa: E402
+from axon.features.dash_js_agentver import JS_AGENTVER  # noqa: E402
+from axon.features.dash_vault import JS_VAULT  # noqa: E402
 
 from axon.features.dash_js_library import JS_LIBRARY, LIBRARY_CSS  # noqa: E402
+from axon.features.dash_mobile_css import MOBILE_CSS, MOBILE_JS  # noqa: E402
 
-APP_JS = '(() => {\n"use strict";\n' + i18n_asset("i18n.js")[0] + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_CONTEXT + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_CMDCARDS + JS_WELCOME + JS_I18N + JS_TASKS + JS_COMPARE + JS_CHATX + JS_LIBRARY + JS_A11Y + "\n})();\n"
+APP_JS = '(() => {\n"use strict";\n' + i18n_asset("i18n.js")[0] + JS_CORE + JS_MD + JS_FRAME + JS_CHAT + JS_CARDS + JS_FILES + JS_TERM + JS_WORKBENCH + JS_WORKBENCH_PANELS + JS_WORKBENCH_RAIL + JS_CONTEXT + JS_INSIGHTS + JS_SETTINGS + JS_TOOLS + JS_SUBAGENTS + JS_MANAGE + JS_MEMORY_EXTRA + JS_CMDCARDS + JS_WELCOME + JS_I18N + JS_TASKS + JS_COMPARE + JS_CHATX + JS_LIBRARY + JS_A11Y + JS_AGENTVER + JS_VAULT + MOBILE_JS + "\n})();\n"
 
 
 def asset(name: str) -> tuple[str, str] | None:
@@ -213,7 +217,7 @@ def asset(name: str) -> tuple[str, str] | None:
         return APPEARANCE_JS, "text/javascript; charset=utf-8"
     if name == "app.css":
         sheet = d.theme_css() + APP_CSS + APP_LAYOUT_CSS + APPEARANCE_CSS + DESIGN_CSS + WORKBENCH_CSS + CMDCARDS_CSS + COMPARE_CSS + WELCOME_CSS + I18N_CSS + TASKS_CSS + CHATX_CSS + LIBRARY_CSS + CONTEXT_CSS + A11Y_CSS
-        return sheet + type_overrides(sheet) + TYPE_TAIL + FINISH_CSS + lang_type_scale(sheet + FINISH_CSS), "text/css; charset=utf-8"
+        return sheet + type_overrides(sheet) + TYPE_TAIL + FINISH_CSS + lang_type_scale(sheet + FINISH_CSS) + MOBILE_CSS, "text/css; charset=utf-8"
     if name in ("icon.svg", "logo.svg"):
         svg = d.logo_svg()
         if name == "icon.svg":

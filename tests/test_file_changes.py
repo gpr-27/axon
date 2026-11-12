@@ -48,7 +48,7 @@ def test_full_rewrite_still_shows_a_coloured_diff(tmp_path, monkeypatch, capsys)
 def test_created_file_is_drawn_as_additions():
     rows = _plain(tool_result_rows("Write", {"path": "a.py", "content": "x = 1\ny = 2\n"},
                                    "Successfully wrote 12 characters (2 lines) to a.py. Created file.", width=80))
-    assert rows[0].startswith("✚ Created a.py · +2 · ■ Python · 2 lines")
+    assert rows[0].startswith("✚ Created a.py · ■ Python · 2 lines")
     assert rows[1].split() == ["1", "+", "x", "=", "1"]
     assert rows[2].split() == ["2", "+", "y", "=", "2"]
 
@@ -188,9 +188,9 @@ def test_rename_row_and_restored_history():
     change = filechanges.FileChange("linkedin/hi.txt", "renamed", None, None, "x\n", "x\n", old_path="linkedin/hi.tht")
     rows = _plain(render._cards.file_change_rows([change], 100))
     assert rows[0].startswith("✎ 1 file changed")
-    assert "➜ Renamed  linkedin/hi.txt  from linkedin/hi.tht · same content" in rows[1]
+    assert "➜ Renamed  linkedin/hi.tht → linkedin/hi.txt · same content" in rows[1]
     restored = _plain(tool_result_rows("Bash", {"command": "mv a b"},
                                        "ok\n[Files changed by this command: renamed a → b, created c.md (+2)]", width=100))
     text = "\n".join(restored)
-    assert "➜ Renamed  b" in text and "from a" in text and "✚ Created  c.md" in text and "+2" in text
+    assert "➜ Renamed  a → b" in text and "✚ Created  c.md" in text and "+2" in text
     assert "[Files changed" not in text          # the raw line becomes the change list

@@ -59,6 +59,7 @@ _INTROS = {
 _MODE_HELP = {
     "default": "Asks before edits and commands.", "acceptEdits": "Edits inside the workspace run without asking; commands still ask.",
     "plan": "Read-only: the model plans and cannot change files or run commands.", "dontAsk": "Anything not explicitly allowed is refused instead of asking.",
+    "auto": "A classifier model approves or refuses each call no rule decided; uncertain or dangerous calls ask.",
     "bypass": "Nothing asks. Only deny rules and hard safety checks apply.",
 }
 _KIND_HELP = {
@@ -193,7 +194,7 @@ def _messages(view: _View) -> tuple[list[dict[str, Any]], str]:
                             "payload": {"id": rid, "target": rid}})
         if info.get("droppable"):
             actions.append({"label": "Drop", "api": "/api/insights/ctxmap_drop", "payload": {"id": rid}})
-        return _item(rid or f"r{idx}", label or "tool result", subtitle=f"tool result · message {idx}", tokens=_tok(body),
+        return _item(rid or f"r{idx}", label or "tool result", subtitle=f"tool result · message {idx + 1}", tokens=_tok(body),
                      kind="tool_result", lang="text", body=text, badges=badges, actions=actions, meta=[["Call id", rid or "-"]],
                      explain=info.get("why") or "What the tool returned. Dropping it keeps a short stub in context and the full text on disk.")
 
@@ -208,6 +209,7 @@ def _messages(view: _View) -> tuple[list[dict[str, Any]], str]:
             continue
         blocks = content if isinstance(content, list) else []
         parts: list[str] = []
+        thoughts: list[str] = []
         calls: list[dict[str, Any]] = []
         results: list[tuple[str, Any]] = []
         for b in blocks:
@@ -218,7 +220,8 @@ def _messages(view: _View) -> tuple[list[dict[str, Any]], str]:
             elif b.get("type") == "tool_use":
                 calls.append({"id": str(b.get("id", "")), "name": str(b.get("name", "")), "input": b.get("input") or {}})
             elif b.get("type") in ("thinking", "redacted_thinking"):
-                parts.append("[thinking]\n" + str(b.get("thinking") or ""))
+                if b.get("thinking"):
+                    thoughts.append(str(b.get("thinking")))
             elif b.get("type") == "text":
                 parts.append(str(b.get("text", "")))
             else:
@@ -233,17 +236,34 @@ def _messages(view: _View) -> tuple[list[dict[str, Any]], str]:
                 args = {"arguments": fn.get("arguments")}
             calls.append({"id": str(tc.get("id", "")), "name": str(fn.get("name", "")), "input": args})
         text = "\n\n".join(p for p in parts if p)
-        if text or calls or not results:
-            body = text
-            for c in calls:
-                body += ("\n\n" if body else "") + f"-> {c['name']} ({c['id']})\n" + _json(c["input"])
-            snippet = " ".join(re.sub(r"[*`#>]+", "", re.sub(r"^\[thinking\]\s*", "", text)).split())
-            snippet = snippet[:70] + ("..." if len(snippet) > 70 else "")
+        thought = "\n\n".join(thoughts)
+        if text or thought or calls or not results:
             who = {"user": "You", "assistant": "Axon"}.get(role, role)
-            title = f"{who}: {snippet}" if snippet else (f"{who} calls " + ", ".join(c["name"] for c in calls) if calls else f"{who} message {idx}")
-            items.append(_item(f"m{idx}", title, subtitle=f"{role} · message {idx}" + (f" · {len(calls)} tool call(s)" if calls else ""),
-                               tokens=_tok(content), kind="message", lang="markdown" if role != "assistant" or not calls else "text",
-                               body=body, meta=[["Role", role], ["Message", str(idx)]] + ([["Tool calls", ", ".join(c["name"] for c in calls)]] if calls else []),
+            sections: list[str] = []
+            if thought:
+                sections.append("### Thinking\n\n" + thought)
+            if text:
+                sections.append(("### Answer\n\n" if role == "assistant" and (thought or calls) else "") + text)
+            for c in calls:
+                sections.append(f"### Tool call: {c['name']}\n\n`{c['id']}`\n\n```json\n{_json(c['input'])}\n```")
+            body = "\n\n".join(sections)
+            shown = text or thought
+            snippet = " ".join(re.sub(r"[*`#>]+", "", shown).split())
+            snippet = snippet[:90] + ("..." if len(snippet) > 90 else "")
+            if text:
+                title = f"{who}: {snippet}"
+            elif calls:
+                title = f"{who} calls " + ", ".join(c["name"] for c in calls)
+            elif thought:
+                title = f"{who} thinking: {snippet}"
+            else:
+                title = f"{who} message {idx}"
+            badges = (["thinking"] if thought else []) + ([f"{len(calls)} tool call{'s' if len(calls) != 1 else ''}"] if calls else [])
+            meta = [["Role", role], ["Message", str(idx + 1) + " of " + str(len(msgs))]]
+            if calls:
+                meta.append(["Tool calls", ", ".join(c["name"] for c in calls)])
+            items.append(_item(f"m{idx}", title, subtitle=f"{role} · message {idx + 1}", tokens=_tok(content), kind="message", lang="markdown",
+                               body=body, badges=badges, meta=meta,
                                tool_calls=[{"id": c["id"], "name": c["name"], "input": _scrub(c["input"])} for c in calls],
                                explain="A turn of the conversation, sent back to the model on every call. /compact summarises older turns."))
         for rid, body in results:
@@ -564,7 +584,7 @@ def inspect_section(agent: Any, section: str) -> dict[str, Any]:
         tokens, pct = view.breakdown["used"], float(view.breakdown["pct"])
     else:
         tokens, pct = (this["tokens"], this["pct"]) if this else (None, 0.0)
-    return {"section": section, "title": title, "intro": _INTROS[section], "tokens": tokens, "pct": pct, "window": window, "estimate": True,
+    return {"section": section, "title": title, "intro": _INTROS[section], "tokens": tokens, "pct": pct, "window": window, "estimate": not view.breakdown.get("exact"),
             "sections": rows, "items": items, "note": note}
 
 

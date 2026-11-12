@@ -289,6 +289,8 @@ def allowed_because(outcome: str, source: str = "", reason: str = "", approval: 
     outcome = str(outcome or "").lower()
     source = str(source or "")
     reason = str(reason or "")
+    if source == "auto":      # auto mode's classifier: 'auto: allowed — read-only search in workspace'
+        return f"auto: {'allowed' if outcome == 'allow' else 'denied' if outcome == 'deny' else 'asking'} — {reason}".rstrip(" —")
     if outcome == "deny":
         if source == "user" or approval == "deny":
             return "declined by you"
@@ -326,6 +328,8 @@ def short_allowed(text: str) -> str:
         return ""
     if low.startswith("allowed (rule ") and flat.endswith(")"):
         return flat
+    if low.startswith("auto: "):
+        return flat if len(flat) <= 80 else flat[:79] + "…"
     if low.startswith("approved by you"):
         return "approved by you"
     if low.startswith("declined by you"):

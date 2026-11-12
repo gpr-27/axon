@@ -85,7 +85,7 @@ def push_queued(queue: Any, text: str, steer: bool = False) -> Any:
 
 
 # Read-only commands that answer immediately while a turn runs (everything else is queued).
-INSTANT_COMMANDS = frozenset({"cost", "usage", "ledger", "context", "tokens", "status", "help", "tasks", "tell", "msg", "list-agents", "peers", "stop"})
+INSTANT_COMMANDS = frozenset({"cost", "usage", "ledger", "context", "tokens", "status", "help", "tasks", "tell", "msg", "list-agents", "peers", "agent", "peer", "stop"})
 
 def is_instant_command(line: str) -> bool:
     """True for a read-only built-in that may run beside the turn (``/context limit ...`` changes
@@ -468,13 +468,25 @@ class InFlightInputListener:
         queue = getattr(self.agent, "message_queue", None)
         if queue is not None:
             item = push_queued(queue, line, steer=steer)
-            how = "will be shown to the model at the next step" if steer else "runs next"
+            from axon.agent.loop import STEER_STATE_TEXT
+            state = STEER_STATE_TEXT.get(self._steer_state(), "") if steer else "runs after this answer"
             if footer is not None and footer.height():
                 # the pinned footer lists the queue under the input box: nothing is printed into the reply
-                # that is streaming above it
-                footer.notice(f"queued #{item.id}", 2.0)
+                # that is streaming above it; the turn echoes the message when the model reads it
+                footer.notice(f"queued #{item.id}" + (f" \u00b7 {state}" if state else ""), 3.0)
             else:
-                _say(f"\n  {CYAN}📥 Queued #{item.id} ({len(queue)} pending, {how}):{RST} {WHITE}{line}{RST}\n")
+                try:
+                    item.shown = True
+                except Exception:
+                    pass
+                _say(f"\n  {CYAN}\u203a you:{RST} {WHITE}{line}{RST}\n    {SLATE}{state}{RST}\n")
+
+    def _steer_state(self) -> str:
+        fn = getattr(self.agent, "steer_state", None)
+        try:
+            return fn() if callable(fn) else "next_step"
+        except Exception:
+            return "next_step"
 
     def _run_instant(self, line: str) -> None:
         """Run a read-only slash command right now, beside the running turn, instead of queueing it."""

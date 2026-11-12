@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from axon.errors import ConfigError
 
-Mode = Literal["default", "acceptEdits", "plan", "dontAsk", "bypass"]
+Mode = Literal["default", "acceptEdits", "plan", "dontAsk", "auto", "bypass"]
 TraceLevel = Literal["compact", "normal", "detailed", "debug"]
 Effort = Literal["reflex", "balanced", "synapse", "quantum", "low", "medium", "high", "xhigh", "max", "hyper"]
 
@@ -46,6 +46,8 @@ _PROJECT_FORBIDDEN_ENV = frozenset({
     "OTEL_LOG_RAW_API_BODIES", "ENABLE_BETA_TRACING_DETAILED", "BETA_TRACING_ENDPOINT", "AXON_ENABLE_TELEMETRY",
     "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_TRACES_EXPORTER", "OTEL_LOG_USER_PROMPTS", "OTEL_LOG_ASSISTANT_RESPONSES",
     "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_TOOL_DETAILS",
+    "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SERVICE_NAME", "AXON_TELEMETRY_CAPTURE_CONTENT",
     "AXON_SHELL_PREFIX", "AXON_SHELL", "AXON_MANAGED_DIR", "AXON_MCP_ALLOWLIST_ENV", "AXON_SUBPROCESS_ENV_SCRUB",
     "AXON_SERVE_TOKEN", "AXON_TOKEN", "AXON_DISABLE_ALL_HOOKS",
 })
@@ -166,6 +168,12 @@ class Settings(BaseSettings):
     small_model: str | None = None       # cheap model for compaction / background tasks (defaults to `model`)
     effort: Effort = "quantum"
     thinking: bool = True
+    steer_interrupts: bool = True        # a message typed mid-answer cuts the current model call and is read at once
+    context_editing: bool = True         # clear old tool results from what the model sees (Anthropic server-side where supported, else client-side)
+    context_edit_trigger: int = 100_000  # input tokens at which clearing starts
+    context_edit_keep: int = 6           # newest tool results always kept
+    context_edit_clear_at_least: int = 25_000  # skip a clear that would free less than this (it breaks the prompt cache)
+    exact_token_count: bool = True       # ask the count-tokens endpoint for the exact prompt size near the compact threshold
     mode: Mode = "bypass"                # owner decision: bypass by default; use --mode to change
     workspace: Path = Field(default_factory=Path.cwd)
     max_tokens: int = 128_000
@@ -175,13 +183,20 @@ class Settings(BaseSettings):
     max_history_turns: int = 0  # Sliding context window in turns (0 = unlimited)
     session_cost_ceiling: Decimal = Decimal("50.00")
     compact_at: float = 0.75            # auto-compact at this share of the context limit
+    compact_keep_turns: int = 1         # newest user turns kept word for word after the summary (only older turns are summarized); 1 = like /compact always did
+    compact_background: bool = True     # start summarizing near the threshold while you keep working, then swap the summary in
+    compact_background_at: float = 0.8  # background compaction starts at this share of the auto-compact point
+    compact_server_side: bool = False   # official Anthropic API + supported models: the API writes the summary (beta); other providers compact client-side
     large_input_tokens: int = 0         # a single message above this is saved and sent as its start and end; 0: automatic; below 0: send whole
     parallel_tools: int = 6
+    auto_effort: bool = False            # pick the reasoning effort per message / step (low for routine follow-ups) without breaking the cache
+    fast_models: dict[str, str] = {}     # provider id -> model /fast switches to where the provider has no native fast mode
     bash_timeout_s: int = 180
     sandbox_enabled: bool = False        # run Bash under the OS sandbox (macOS sandbox-exec, Linux bwrap)
     sandbox_allow_network: bool = False  # the sandbox blocks network access unless this is true
     lsp_diagnostics_after_edit: bool = True   # append new language-server errors to Edit, Write and MultiEdit results
     tool_output_cap: int = 150_000
+    pdf_mode: Literal["auto", "native", "images", "text"] = "auto"   # how Read shows a PDF: auto picks native, page images, OCR or text by what the model accepts
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
     settings_file: str | None = None     # --settings <file>: its /path rules anchor at that file's folder
     hooks: dict[str, list[HookSpec]] = Field(default_factory=dict)
@@ -196,12 +211,23 @@ class Settings(BaseSettings):
     budget_session_usd: float | None = None
     budget_action: Literal["warn", "stop", "downgrade"] = "stop"
     forecast_threshold_usd: float | None = 0.25   # a cost estimate shows under the message box above this (0 or None = off)
+    # Messages API task budget (advisory token countdown for the whole agentic loop); None = off, minimum 20,000.
+    task_budget_tokens: int | None = None
+    inference_geo: str = ""              # data residency: '' (workspace default), global or us; sent on the official Anthropic API only
+    # The ``notifications`` object of settings.json (webhooks, web alerts); the plain string form stays the desktop mode.
+    notify_sinks: dict[str, Any] = Field(default_factory=dict)
+    # The ``telemetry`` object of settings.json (OpenTelemetry trace export, off by default); see axon.features.otel.
+    telemetry: dict[str, Any] = Field(default_factory=dict)
     # Instruction files: axon-md-or-agents-md | axon-md-and-agents-md | axon-md | managed-only
     instruction_files: str = "axon-md-or-agents-md"
     auto_memory: bool = True
     memory_excludes: list[str] = Field(default_factory=list)
     # Failover chain: comma list or list of models tried when the primary keeps failing (429/5xx/overload).
     fallback_model: str | list[str] | None = None
+    # One retry on this model when the model declines (refusal / content filter); empty = off. Never loops.
+    refusal_fallback_model: str = ""
+    # Server-side tool search (Anthropic accelerator for deferred tools): auto | on | off. The client-side ToolSearch is the general path.
+    server_tool_search: str = "auto"
     routing: dict[str, Any] | None = None
     # Extra directories the session may read/edit (--add-dir, permissions.additionalDirectories).
     additional_dirs: list[Path] = Field(default_factory=list)
@@ -247,6 +273,22 @@ class Settings(BaseSettings):
     disable_all_hooks: bool = False
     prompt_color: str | None = None     # /color, settings.json promptColor
     goal: str | None = None             # /goal: session goal (prompt section + one bounded Stop check)
+    # Advisor: the main model can call consult_advisor to ask a stronger model (any provider) for guidance. None = off.
+    advisor_model: str | None = None
+    advisor_max_per_turn: int = 3
+    advisor_max_per_session: int = 12
+    # Semantic code search (opt-in, default off): an embedding backend (ollama | openai | voyage) indexes the workspace.
+    # User-level only: a repo may not choose where file contents are sent. The key is read from `embedding_key_env`.
+    embedding_enabled: bool = False
+    embedding_backend: str = "ollama"
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_key_env: str | None = None
+    embedding_max_chunks: int = 100000
+    # Permission mode "auto": a small classifier model decides the calls no rule decided. None = small_model, else the main model.
+    auto_model: str | None = None
+    auto_timeout_s: float = 20.0
+    auto_tool_overrides: dict[str, str] = Field(default_factory=dict)   # {"WebFetch": "allow", "Bash": "ask"}
 
     @field_validator("cleanup_period_days", mode="before")
     @classmethod
@@ -405,7 +447,10 @@ class Settings(BaseSettings):
                         mapped.pop(key)
                 level = "project"
             if level == "project":
-                for blocked in ("api_key", "base_url", "vim_insert_mode_remaps", "spellcheck"):
+                for blocked in ("api_key", "base_url", "vim_insert_mode_remaps", "spellcheck",
+                                "auto_tool_overrides", "notify_sinks", "telemetry", "auto_model", "advisor_model",
+                                "embedding_enabled", "embedding_backend", "embedding_model", "embedding_base_url",
+                                "embedding_key_env", "embedding_max_chunks"):   # a repo may not pre-approve tools or send events/summaries elsewhere
                     if blocked in mapped:
                         warnings.append(f"Ignoring '{blocked}' from project settings file {src} (set it in user config).")
                         mapped.pop(blocked)
@@ -417,6 +462,12 @@ class Settings(BaseSettings):
         project_env_keys: set[str] = set()
         user_env = _axon_home() / ".env"
         key_vars = set(PROVIDER_KEY_ENV_VARS) | set(preset_key_env_vars())
+        try:                                     # migrated keys come from the user-level vault (never from a project file)
+            from axon.features import vault as _vault
+            for _k, _v in _vault.api_keys_for_environ(sorted(key_vars)).items():
+                os.environ.setdefault(_k, _v)
+        except Exception:
+            pass
         for dotenv, is_project in ((ws / ".env", True), (user_env, False)):
             if dotenv.is_file():
                 for k, v in _parse_dotenv(dotenv).items():
@@ -521,7 +572,12 @@ def _preset_owning_url(url: str) -> str | None:
 
 
 _JSON_KEY_MAP = {
+    "advisorModel": "advisor_model", "advisor_model": "advisor_model",
+    "advisorMaxCallsPerTurn": "advisor_max_per_turn", "advisorMaxCallsPerSession": "advisor_max_per_session",
+    "autoModeModel": "auto_model", "auto_model": "auto_model", "autoModeTimeout": "auto_timeout_s",
+    "autoModeTools": "auto_tool_overrides", "telemetry": "telemetry",
     "model": "model", "smallModel": "small_model", "small_model": "small_model",
+    "autoEffort": "auto_effort", "auto_effort": "auto_effort", "fastModels": "fast_models", "fast_models": "fast_models",
     "effortLevel": "effort", "effort": "effort", "baseUrl": "base_url", "base_url": "base_url",
     "provider": "provider", "traceLevel": "trace_level", "trace_level": "trace_level",
     "maxTurns": "max_iterations", "maxRetries": "max_retries", "max_retries": "max_retries", "parallelTools": "parallel_tools", "compactAt": "compact_at", "largeInputTokens": "large_input_tokens", "large_input_tokens": "large_input_tokens",
@@ -529,6 +585,16 @@ _JSON_KEY_MAP = {
     "axonMdExcludes": "memory_excludes", "claudeMdExcludes": "memory_excludes",
     "appendSystemPrompt": "append_system_prompt", "isolateWorktrees": "isolate_worktrees",
     "verbose": "verbose", "alwaysThinkingEnabled": "thinking",
+    "steerInterrupts": "steer_interrupts", "steer_interrupts": "steer_interrupts",
+    "contextEditing": "context_editing", "context_editing": "context_editing",
+    "contextEditTrigger": "context_edit_trigger", "context_edit_trigger": "context_edit_trigger",
+    "contextEditKeep": "context_edit_keep", "context_edit_keep": "context_edit_keep",
+    "contextEditClearAtLeast": "context_edit_clear_at_least", "context_edit_clear_at_least": "context_edit_clear_at_least",
+    "compactKeepTurns": "compact_keep_turns", "compact_keep_turns": "compact_keep_turns", "compactBackground": "compact_background", "compact_background": "compact_background",
+    "compactBackgroundAt": "compact_background_at", "compact_background_at": "compact_background_at", "compactServerSide": "compact_server_side", "compact_server_side": "compact_server_side",
+    "exactTokenCount": "exact_token_count", "exact_token_count": "exact_token_count",
+    "refusalFallbackModel": "refusal_fallback_model", "refusal_fallback_model": "refusal_fallback_model",
+    "serverToolSearch": "server_tool_search", "server_tool_search": "server_tool_search",
     "fallbackModel": "fallback_model", "fallback_model": "fallback_model", "routing": "routing",
     "outputStyle": "output_style", "output_style": "output_style",
     "replyLanguage": "reply_language", "reply_language": "reply_language",
@@ -540,6 +606,8 @@ _JSON_KEY_MAP = {
     "suggestions": "suggestions", "promptSuggestionEnabled": "suggestions",
     "contextLimit": "context_limit", "context_limit": "context_limit",
     "notifications": "notifications", "preferredNotifChannel": "notifications",
+    "inferenceGeo": "inference_geo", "inference_geo": "inference_geo",
+    "taskBudgetTokens": "task_budget_tokens", "task_budget_tokens": "task_budget_tokens",
     "terminalNotify": "terminal_notify", "terminal_notify": "terminal_notify",
     "notifyAfterSeconds": "notify_after_seconds", "notify_after_seconds": "notify_after_seconds",
     "workbenchHint": "workbench_hint", "workbench_hint": "workbench_hint", "tips": "tips", "spinnerTipsEnabled": "tips", "tipsLlm": "tips_llm", "tips_llm": "tips_llm",
@@ -560,9 +628,8 @@ _JSON_KEY_MAP = {
     "promptColor": "prompt_color", "prompt_color": "prompt_color",
     "mouseClickExpand": "mouse_click_expand", "mouse_click_expand": "mouse_click_expand",
 }
-# "auto" needs a classifier model that Axon does not have; the documented fallback when auto mode isn't available is Manual.
 _MODE_MAP = {"bypassPermissions": "bypass", "bypass": "bypass", "acceptEdits": "acceptEdits", "plan": "plan",
-             "default": "default", "manual": "default", "dontAsk": "dontAsk", "auto": "default"}
+             "default": "default", "manual": "default", "dontAsk": "dontAsk", "auto": "auto"}
 
 
 def normalize_mode(value: Any) -> str | None:
@@ -585,6 +652,13 @@ def map_json_settings(data: dict[str, Any], apply_env: bool = True) -> dict[str,
             out[_JSON_KEY_MAP[k]] = v
     if not isinstance(out.get("vim_insert_mode_remaps", {}), dict):
         out.pop("vim_insert_mode_remaps")
+    if isinstance(data.get("notifications"), dict):      # the object form: one block for every notification sink
+        from axon.features.notify import split_block
+        out.pop("notifications", None)
+        out.update(split_block(data["notifications"]))
+    if isinstance(data.get("semanticSearch"), dict):     # {"enabled", "backend", "model", "baseUrl", "keyEnv", "maxChunks"}
+        from axon.features.semindex_config import split_block as _sem_split
+        out.update(_sem_split(data["semanticSearch"]))
     if isinstance(data.get("editorMode"), str):
         out["vim_mode"] = data["editorMode"].strip().lower() == "vim"
     perms = data.get("permissions")

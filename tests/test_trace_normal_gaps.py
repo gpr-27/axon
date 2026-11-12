@@ -244,4 +244,4 @@ def test_normal_says_when_the_goal_check_asks_the_model_again(capsys) -> None:
     _step(r)
     r.on_event(GoalCheckEvent(goal="all tests pass", iteration=1))
     out = _out(capsys)
-    assert "goal check" in out and "all tests pass" in out
+    assert "checking the goal" in out and "all tests pass" in out

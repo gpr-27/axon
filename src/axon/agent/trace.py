@@ -123,7 +123,7 @@ class LargeInputEvent:
 
 @dataclass(frozen=True)
 class CompactionEvent:
-    trigger: str                   # auto | manual
+    trigger: str                   # auto | manual | background | server | overflow
     messages_before: int
     messages_after: int
     tokens_before: int
@@ -134,6 +134,7 @@ class CompactionEvent:
     blocked_by_hook: bool = False
     summary: str = ""
     preview: bool = False
+    phase: str = ""                # background compaction only: start | failed | stale | cancelled ("" for a finished compaction)
 
 
 @dataclass(frozen=True)
@@ -183,13 +184,27 @@ class SteerEvent:
     count: int
     texts: tuple[str, ...] = ()
     iteration: int = 0
+    mode: str = "next_step"   # "interrupt": the running answer was cut to read it; "next_step": read at a step boundary
+    shown: bool = False       # the UI already echoed the message where it was typed
 
 
 @dataclass(frozen=True)
 class GoalCheckEvent:
-    """The model ended its turn while a /goal is set: one bounded re-prompt asks it to verify the goal."""
+    """The model ended its turn while a /goal is set. ``phase``: "start" (the grader is running), "verdict" (its
+    per-criterion result, with its own usage/cost) or "skipped" (read-only turn, nothing to verify)."""
     goal: str
     iteration: int = 0
+    phase: str = "start"
+    round: int = 0
+    max_rounds: int = 0
+    verdict: str = ""              # satisfied | needs_revision | failed_unrecoverable | interrupted
+    criteria: tuple = ()           # [{criterion, met, evidence, gap}]
+    summary: str = ""
+    note: str = ""
+    model: str = ""
+    usage: Any = None
+    cost: float = 0.0
+    duration_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -221,7 +236,7 @@ class CacheStatus:
 @dataclass(frozen=True)
 class BudgetEvent:
     scope: str                     # turn | session | day | month
-    action: str                    # warn | stop | downgrade | notice (a quiet heads-up at 50, 80 and 100 percent)
+    action: str                    # warn | stop | downgrade | paused | notice (a quiet heads-up at 50, 80 and 100 percent)
     spent_usd: float
     projected_usd: float
     limit_usd: float
@@ -237,12 +252,49 @@ class MemoryLoadedEvent:
     reason: str                    # startup | on-demand | path-rule
     trigger: str = ""
     tokens: int = 0
+    message: str = ""              # reason "saved": what was saved to memory
+
+
+@dataclass(frozen=True)
+class ContextEditEvent:
+    """The API cleared old tool results from what the model saw (server-side context editing)."""
+    cleared_tool_uses: int
+    cleared_input_tokens: int
+    message: str = ""              # the one line shown: 'cleared 12 old tool results \u00b7 saved ~38k tokens'
+
+
+@dataclass(frozen=True)
+class AdvisorEvent:
+    """One consult_advisor call: the question, the advice (full text) and the advisor's own usage/cost (row 'advisor')."""
+    id: str
+    question: str
+    advice: str = ""
+    model: str = ""
+    usage: Any = None
+    cost: float = 0.0
+    duration_s: float = 0.0
+    error: str = ""                # set when no advice came back (cap reached, timeout, provider error)
+
+
+@dataclass(frozen=True)
+class AutoPermissionEvent:
+    """Auto mode's decision for one tool call. ``usage`` is None for a cached decision, a dangerous pattern or a read-only
+    tool; otherwise the classifier's cost is the 'permission check' row."""
+    id: str
+    tool: str
+    outcome: str                   # allow | deny | ask
+    reason: str = ""
+    source: str = "classifier"     # classifier | cache | dangerous | readonly | override | error
+    model: str = ""
+    usage: Any = None
+    cost: float = 0.0
+    duration_s: float = 0.0
 
 
 TRACE_EVENT_TYPES = (
     LLMRequestInfo, LLMCallEnd, ToolTiming, PermissionDecisionEvent, HookEvent, RetryEvent,
     CompactionEvent, LargeInputEvent, SubagentEvent, ToolRationale, CacheStatus, BudgetEvent, MemoryLoadedEvent,
-    SubagentStep, ThinkingBoost, SteerEvent, GoalCheckEvent,
+    SubagentStep, ThinkingBoost, SteerEvent, GoalCheckEvent, ContextEditEvent, AdvisorEvent, AutoPermissionEvent,
 )
 
 
@@ -548,6 +600,18 @@ class TurnTrace:
                 self._add("steer", _jsonable(event))
             elif isinstance(event, GoalCheckEvent):
                 self._add("goal_check", _jsonable(event))
+                if event.phase == "verdict":
+                    self.cost += float(event.cost or 0.0)       # the grader's call is part of the turn's cost
+            elif isinstance(event, AdvisorEvent):
+                self._add("advisor", _jsonable(event))
+                self.cost += float(event.cost or 0.0)
+            elif isinstance(event, AutoPermissionEvent):
+                step = self._open_tools.get(event.id)
+                if step is not None:
+                    step.data["auto"] = {"outcome": event.outcome, "reason": event.reason, "source": event.source}
+                if event.usage is not None:          # only a paid classifier call needs a step (its usage-table row)
+                    self._add("auto_permission", _jsonable(event))
+                self.cost += float(event.cost or 0.0)
             elif isinstance(event, ToolRationale):
                 step = self._open_tools.get(event.id)
                 if step is not None:

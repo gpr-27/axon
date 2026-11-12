@@ -170,14 +170,12 @@ def test_thinking_tools_and_answer_sections_come_in_that_order_with_air_between(
     r.on_event(TurnComplete(stop_reason="end_turn", usage=Usage(input=3900, output=20)))
     out = _out(capsys)
     assert out.index("✻ THINKING") < out.index("▣ TOOLS · 1 call") < out.index("▍ ANSWER") < out.index("▎ Bash works.")
-    assert "THINKING  0.1s\n│   The user wants Bash tested. I will run an echo." in out      # the thought, wrapped under its label
-    assert "I will run an echo.\n│ \n│ ▣ TOOLS" in out                       # one blank row before the TOOLS block
-    assert out.count("\n│ \n") == 2                                          # ... and one between the steps
+    assert "THINKING\n" in out and "The user wants Bash tested. I will run an echo." in out      # the thought streams under its label
     assert "▣ TOOLS · 1 call · allowed: bypass mode\n│" in out
     assert "→ 1 result (" in out
 
 
-def test_thinking_is_shown_as_written_at_normal_with_a_pointer_when_it_is_very_long(capsys):
+def test_thinking_is_shown_whole_at_normal_even_when_very_long(capsys):
     short = "word " * 60                                # 300 characters: all of it is shown
     r = Renderer(trace_level="normal", show_thinking=True)
     _step(r, 1)
@@ -191,7 +189,7 @@ def test_thinking_is_shown_as_written_at_normal_with_a_pointer_when_it_is_very_l
     r.on_event(ThinkingDelta(long))
     r.on_event(TextDelta("done\n"))
     out = _out(capsys)
-    assert 0 < out.count("word") < 600 and "more lines" in out and "/transcript" in out
+    assert out.count("word") == 600 and "more lines" not in out
     r = Renderer(trace_level="detailed", show_thinking=True)
     _step(r, 1)
     r.on_event(ThinkingDelta(long))
@@ -248,7 +246,7 @@ def test_a_shell_command_is_shown_exactly_with_all_its_lines():
     assert 1 < len(rows) <= 6 and " ".join(rows) == long.strip()           # wrapped at spaces, nothing lost
     many = "\n".join(f"echo {i}" for i in range(12))
     rows = _fields(_card_text("Bash", "x", {"command": many}, width=90))["input"]
-    assert rows[0] == "echo 0" and rows[-1] == "… +7 more lines · /output 7" and len(rows) == 6
+    assert rows == [f"echo {i}" for i in range(12)]                    # a command is shown complete, every line
 
 
 def _slashes(rows):

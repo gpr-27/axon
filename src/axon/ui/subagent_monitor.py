@@ -20,20 +20,20 @@ from typing import Any
 
 from axon import platform as plat
 from axon.ui.picker import LiveFrame, _write
-from axon.ui.theme import (AMBER, BOLD, CYAN, DARK_SLATE, GOLD, ITALIC, LAVENDER, MINT, ROSE, RST, SLATE, WHITE,
-                           sanitize, strip_ansi, wrap_ansi)
+from axon.ui.parallel_board import span_bar
+from axon.ui.theme import BOLD, ERROR, ITALIC, MUTED, PRIMARY, RST, SUBTLE, TEXT, glyph, sanitize, strip_ansi, wrap_ansi
 
 _HAS_TERMIOS = plat.HAS_TERMIOS  # back-compat flag
 
-# status -> (glyph, colour, label, progress-strip fill)
+# status -> (glyph, ASCII glyph, colour, label): grayscale plus the one teal accent, red only for a failure
 _STATUS: dict[str, tuple[str, str, str, str]] = {
-    "completed": ("✓", MINT, "done", "━"),
-    "error": ("✗", ROSE, "failed", "╳"),
-    "exhausted": ("!", AMBER, "step limit", "╍"),
-    "cancelled": ("⊘", SLATE, "cancelled", "─"),
-    "running": ("▶", CYAN, "running", "┅"),
-    "pending": ("○", SLATE, "queued", "┄"),
-    "queued": ("○", AMBER, "queued", "┄"),      # over the concurrent limit: waiting for a free slot
+    "completed": ("✓", "+", TEXT, "done"),
+    "error": ("✗", "x", ERROR, "failed"),
+    "exhausted": ("!", "!", TEXT, "step limit"),
+    "cancelled": ("⊘", "-", MUTED, "cancelled"),
+    "running": ("▶", ">", PRIMARY, "running"),
+    "pending": ("○", "o", SUBTLE, "queued"),
+    "queued": ("○", "o", MUTED, "queued"),      # over the concurrent limit: waiting for a free slot
 }
 _FINISHED = ("completed", "exhausted", "error", "cancelled")
 _PROMPT_LINES = 3         # the task as shown above a transcript (Ctrl+O shows all of it)
@@ -41,8 +41,15 @@ _DEFAULT_HEIGHT = 40      # frame height when the caller does not know the windo
 _WIDE = 64                # from this width a row keeps the activity on its own line of the table
 
 
+def _mark(key: str) -> tuple[str, str, str]:
+    uni, ascii_, color, label = _STATUS[key]
+    return (uni if glyph("ok") == "✓" else ascii_), color, label
+
+
 def _st(t: Any) -> tuple[str, str, str, str]:
-    return _STATUS.get(str(getattr(t, "status", "pending")), _STATUS["pending"])
+    """(glyph, colour, label, status) of a row; the glyph is ASCII where the terminal cannot draw the Unicode one."""
+    status = str(getattr(t, "status", "pending"))
+    return (*_mark(status if status in _STATUS else "pending"), status)
 
 
 def _one_line(text: Any) -> str:
@@ -127,31 +134,31 @@ def _stats(t: Any, now: float) -> str:
     # irrelevant: "2 steps", not "step 2 · limit 25".
     running = getattr(t, "status", "") in ("running", "pending", "queued")
     if running and max_steps:
-        step_txt = f"{SLATE}step{RST} {WHITE}{steps}{RST} {SLATE}· limit {max_steps}{RST}"
+        step_txt = f"{MUTED}step{RST} {TEXT}{steps}{RST} {MUTED}· limit {max_steps}{RST}"
     else:
-        step_txt = f"{WHITE}{steps}{RST} {SLATE}step{'s' if steps != 1 else ''}{RST}"
-    parts = [step_txt, f"{WHITE}{_clock(_elapsed(t, now))}{RST}"]
+        step_txt = f"{TEXT}{steps}{RST} {MUTED}step{'s' if steps != 1 else ''}{RST}"
+    parts = [step_txt, f"{TEXT}{_clock(_elapsed(t, now))}{RST}"]
     retries, resumes = int(getattr(t, "retries", 0) or 0), int(getattr(t, "resumes", 0) or 0)
     runs = int(getattr(t, "runs", 1) or 1)
     if runs > 1:
-        parts.append(f"{CYAN}run {runs}{RST}")
+        parts.append(f"{PRIMARY}run {runs}{RST}")
     if retries:
-        parts.append(f"{AMBER}⟳ {retries} retr{'ies' if retries != 1 else 'y'}{RST}")
+        parts.append(f"{TEXT}⟳ {retries} retr{'ies' if retries != 1 else 'y'}{RST}")
     if resumes:
-        parts.append(f"{CYAN}↻ {resumes} resume{'s' if resumes != 1 else ''}{RST}")
+        parts.append(f"{PRIMARY}↻ {resumes} resume{'s' if resumes != 1 else ''}{RST}")
     calls = int(getattr(t, "tool_calls", 0) or 0)
     if calls:
-        parts.append(f"{WHITE}{calls}{RST} {SLATE}tool{'s' if calls != 1 else ''}{RST}")
+        parts.append(f"{TEXT}{calls}{RST} {MUTED}tool{'s' if calls != 1 else ''}{RST}")
     toks = int(getattr(t, "tokens_consumed", 0) or 0)
     if toks:
-        parts.append(f"{WHITE}{_tok(toks)}{RST} {SLATE}tok{RST}")
+        parts.append(f"{TEXT}{_tok(toks)}{RST} {MUTED}tok{RST}")
     in_t, out_t = int(getattr(t, "input_tokens", 0) or 0), int(getattr(t, "output_tokens", 0) or 0)
     if in_t or out_t:
-        parts.append(f"{SLATE}{_tok(in_t)} in · {_tok(out_t)} out{RST}")
+        parts.append(f"{MUTED}{_tok(in_t)} in · {_tok(out_t)} out{RST}")
     cost = float(getattr(t, "cost", 0.0) or 0.0)
     if cost:
-        parts.append(f"{SLATE}${cost:.4f}{RST}")
-    return f" {DARK_SLATE}·{RST} ".join(parts)
+        parts.append(f"{MUTED}${cost:.4f}{RST}")
+    return f" {SUBTLE}·{RST} ".join(parts)
 
 
 def _activity(t: Any) -> str:
@@ -166,15 +173,15 @@ def _doing(t: Any) -> tuple[str, str]:
     """(what to show in the "doing" column, its colour): the activity while running, the outcome afterwards."""
     status = str(getattr(t, "status", "pending"))
     if status == "error":
-        return _one_line(getattr(t, "error_msg", "") or "failed (no reason reported)"), ROSE
+        return _one_line(getattr(t, "error_msg", "") or "failed (no reason reported)"), ERROR
     if status == "completed":
-        return _first_result_line(t), SLATE
+        return _first_result_line(t), MUTED
     if status == "exhausted":
-        return f"stopped at the step limit ({getattr(t, 'steps', 0)}/{getattr(t, 'max_steps', 0)})", AMBER
+        return f"stopped at the step limit ({getattr(t, 'steps', 0)}/{getattr(t, 'max_steps', 0)})", TEXT
     if status == "cancelled":
-        return "stopped by you", SLATE
+        return "stopped by you", MUTED
     act = _activity(t)
-    return act, AMBER if act.lower().startswith(("retrying", "resuming")) else SLATE
+    return act, TEXT if act.lower().startswith(("retrying", "resuming")) else MUTED
 
 
 def _label(t: Any) -> str:
@@ -203,55 +210,103 @@ def _first_result_line(t: Any) -> str:
 
 # ─── The list ──────────────────────────────────────────────────────────────
 
-_NUM_T, _NUM_C, _NUM_K = 7, 5, 6       # time, tools and tokens columns (right-aligned, always there)
+_NUM_T, _NUM_C, _NUM_K, _NUM_D = 7, 5, 6, 8       # time, tools, tokens and cost columns (right-aligned)
+_BAR_MIN_WIDTH = 78       # from this width the table draws a bar per agent on one shared time axis
+_COST_MIN_WIDTH = 100     # and a cost column
 
 
-def _numbers(t: Any, now: float) -> str:
+def _cost_text(t: Any) -> str:
+    cost = float(getattr(t, "cost", 0.0) or 0.0)
+    return "-" if cost <= 0 else (f"${cost:.3f}" if cost < 10 else f"${cost:.1f}")
+
+
+def _numbers(t: Any, now: float, cost: bool = False) -> str:
     calls = getattr(t, "tool_calls", 0)
     toks = getattr(t, "tokens_consumed", 0)
     c = "-" if calls is None else str(int(calls or 0))
     k = "-" if not toks else _tok(int(toks))
-    return f"{WHITE}{_clock(_elapsed(t, now)):>{_NUM_T}}{RST} {SLATE}{c:>{_NUM_C}} {k:>{_NUM_K}}{RST}"
+    text = f"{TEXT}{_clock(_elapsed(t, now)):>{_NUM_T}}{RST} {MUTED}{c:>{_NUM_C}} {k:>{_NUM_K}}"
+    return text + (f" {_cost_text(t):>{_NUM_D}}" if cost else "") + RST
 
 
-def _table_layout(tasks: list[Any], width: int) -> dict[str, int]:
+def _axis(tasks: list[Any], now: float) -> tuple[float, float]:
+    """The shared time axis of a set of agents: from the first start to now (or to the last finish)."""
+    starts = [float(getattr(t, "start_time", 0.0) or 0.0) for t in tasks]
+    starts = [s for s in starts if s]
+    if not starts:
+        return now, now + 1.0
+    t0 = min(starts)
+    live = any(getattr(t, "status", "") in ("running", "pending", "queued") for t in tasks)
+    ends = [float(getattr(t, "start_time", 0.0) or 0.0) + float(getattr(t, "elapsed_s", 0.0) or 0.0) for t in tasks
+            if getattr(t, "start_time", 0.0)]
+    return t0, max(now if live else max(ends, default=now), t0 + 1.0)
+
+
+def _bar_cells(t: Any, bar_w: int, axis: tuple[float, float], now: float) -> str:
+    """One agent's bar: where in the shared axis it was running. Teal while it runs, gray once it has finished,
+    red when it failed; an agent that has not started has an empty (dotted) track."""
+    t0, t1 = axis
+    start = float(getattr(t, "start_time", 0.0) or 0.0)
+    status = str(getattr(t, "status", "pending"))
+    if not start or status in ("pending", "queued"):
+        return f"{SUBTLE}{glyph('hunk') * bar_w}{RST}"
+    end = now if status == "running" else start + float(getattr(t, "elapsed_s", 0.0) or 0.0)
+    before, fill, after = span_bar(start, end, t0, t1, bar_w)
+    color = PRIMARY if status == "running" else ERROR if status == "error" else MUTED
+    return f"{SUBTLE}{before}{RST}{color}{fill}{RST}{SUBTLE}{after}{RST}"
+
+
+def _table_layout(tasks: list[Any], width: int, bars: bool = False) -> dict[str, int]:
     """Column widths for this set of rows: stable while the agents run, whatever their activity says."""
     id_w = max([plat.str_width(_label(t)) for t in tasks] or [1])
-    right = _NUM_T + _NUM_C + _NUM_K + 2
+    cost_w = _NUM_D + 1 if bars and width >= _COST_MIN_WIDTH and any(float(getattr(t, "cost", 0.0) or 0.0) > 0 for t in tasks) else 0
+    bar_w = 0
+    if bars and width >= _BAR_MIN_WIDTH:
+        bar_w = max(8, min(24, (width - _BAR_MIN_WIDTH) // 3 + 8))
+    right = _NUM_T + _NUM_C + _NUM_K + 2 + cost_w + (bar_w + 1 if bar_w else 0)
     rest = width - 6 - id_w - 1 - right - 1       # "  ❯ ▶ " + id + " " ... " " + numbers
     if width < _WIDE:
-        return {"id": id_w, "name": max(6, rest), "type": 0, "doing": 0, "right": right}
+        return {"id": id_w, "name": max(6, rest), "type": 0, "doing": 0, "right": right, "bar": 0, "cost": 0}
     names = max([plat.str_width(_display_name(t)) for t in tasks] or [8])
     type_w = 0
     if width >= 110:
         type_w = min(16, max([plat.str_width(_one_line(getattr(t, "agent_type", ""))) for t in tasks] or [0]))
     avail = rest - (type_w + 2 if type_w else 0)
     name_w = max(14, min(names, int(avail * 0.5)))
-    return {"id": id_w, "name": name_w, "type": type_w, "doing": max(8, avail - name_w - 2), "right": right}
+    return {"id": id_w, "name": name_w, "type": type_w, "doing": max(8, avail - name_w - 2), "right": right,
+            "bar": bar_w, "cost": cost_w}
 
 
-def _table_head(lay: dict[str, int], width: int, noun: str = "agent") -> str:
+def _table_head(lay: dict[str, int], width: int, noun: str = "agent", axis: tuple[float, float] | None = None) -> str:
     left = " " * (6 + lay["id"] + 1) + _pad(noun, lay["name"])
     if lay["type"]:
         left += "  " + _pad("type", lay["type"])
     if lay["doing"]:
         left += "  " + _pad("doing", lay["doing"])
-    row = f"{left} {'time':>{_NUM_T}} {'tools':>{_NUM_C}} {'tok':>{_NUM_K}}"
-    return _fit(f"{DARK_SLATE}{row}{RST}", width)
+    bar = ""
+    if lay.get("bar"):
+        end = _clock(axis[1] - axis[0]) if axis else ""
+        bar = " " + "0s" + " " * max(1, lay["bar"] - 2 - plat.str_width(end)) + end
+        bar = bar[: lay["bar"] + 1]
+    row = f"{left}{bar} {'time':>{_NUM_T}} {'tools':>{_NUM_C}} {'tok':>{_NUM_K}}" + (f" {'cost':>{_NUM_D}}" if lay.get("cost") else "")
+    return _fit(f"{SUBTLE}{row}{RST}", width)
 
 
-def _table_row(t: Any, lay: dict[str, int], width: int, selected: bool, now: float) -> list[str]:
-    glyph, color, _, _ = _st(t)
-    cursor = f"{CYAN}{BOLD}❯{RST}" if selected else " "
-    weight = f"{WHITE}{BOLD}" if selected else WHITE
+def _table_row(t: Any, lay: dict[str, int], width: int, selected: bool, now: float,
+               axis: tuple[float, float] | None = None) -> list[str]:
+    glyph_, color, _, _ = _st(t)
+    cursor = f"{PRIMARY}{BOLD}{glyph('prompt')}{RST}" if selected else " "
+    weight = f"{TEXT}{BOLD}" if selected else TEXT
     label = f"{_label(t):>{lay['id']}}"
     doing, tone = _doing(t)
-    line = f"  {cursor} {color}{glyph}{RST} {SLATE}{label}{RST} {weight}{_pad(_display_name(t), lay['name'])}{RST}"
+    line = f"  {cursor} {color}{glyph_}{RST} {MUTED}{label}{RST} {weight}{_pad(_display_name(t), lay['name'])}{RST}"
     if lay["type"]:
-        line += f"  {LAVENDER}{_pad(_one_line(getattr(t, 'agent_type', '')), lay['type'])}{RST}"
+        line += f"  {MUTED}{_pad(_one_line(getattr(t, 'agent_type', '')), lay['type'])}{RST}"
     if lay["doing"]:
         line += f"  {tone}{_pad(doing, lay['doing'])}{RST}"
-    rows = [_fit(f"{line} {_numbers(t, now)}", width)]
+    if lay.get("bar") and axis is not None:
+        line += " " + _bar_cells(t, lay["bar"], axis, now)
+    rows = [_fit(f"{line} {_numbers(t, now, bool(lay.get('cost')))}", width)]
     if not lay["doing"]:                          # narrow: the activity gets its own line, under the name
         indent = " " * (6 + lay["id"] + 1)
         rows.append(_fit(f"{indent}{tone}{_shorten(doing, width - len(indent) - 1)}{RST}", width))
@@ -259,25 +314,26 @@ def _table_row(t: Any, lay: dict[str, int], width: int, selected: bool, now: flo
 
 
 def agent_table(tasks: list[Any], width: int, selected: int | None = None, now: float | None = None,
-                max_rows: int | None = None, noun: str = "agent") -> list[str]:
+                max_rows: int | None = None, noun: str = "agent", bars: bool = False) -> list[str]:
     """The aligned agent table (head + rows); also used under the prompt. Lists a window of at most *max_rows*
     screen rows around *selected* and says how many are out of view."""
     now = time.time() if now is None else now
-    lay = _table_layout(tasks, width)
+    lay = _table_layout(tasks, width, bars)
+    axis = _axis(tasks, now) if lay["bar"] else None
     per = 2 if not lay["doing"] else 1
     fit = len(tasks) if max_rows is None else max(1, (max_rows - 1) // per)
     first = 0
     if len(tasks) > fit:
         fit = max(1, ((max_rows or 2) - 2) // per)      # one line says how many are hidden
         first = min(max(0, (selected or 0) - fit // 2), len(tasks) - fit)
-    lines = [_table_head(lay, width, noun)]
+    lines = [_table_head(lay, width, noun, axis)]
     for i, t in enumerate(tasks[first:first + fit], start=first):
-        lines += _table_row(t, lay, width, i == selected, now)
+        lines += _table_row(t, lay, width, i == selected, now, axis)
     hidden = len(tasks) - fit
     if hidden > 0:
         above, below = first, len(tasks) - first - fit
         bits = ([f"↑ {above} above"] if above else []) + ([f"↓ {below} below"] if below else [])
-        lines.append(_fit(f"    {DARK_SLATE}{' · '.join(bits)}{RST}", width))
+        lines.append(_fit(f"    {SUBTLE}{' · '.join(bits)}{RST}", width))
     return lines
 
 
@@ -287,11 +343,15 @@ def _header(tasks: list[Any], width: int, now: float, title: str = "Subagents") 
     counts = {k: sum(1 for t in tasks if getattr(t, "status", "pending") == k) for k in _STATUS}
     shown = [k for k in ("running", "completed", "error", "exhausted", "cancelled", "queued", "pending") if counts[k]]
     total_tok = sum(int(getattr(t, "tokens_consumed", 0) or 0) for t in tasks)
-    right = f"{SLATE}{_tok(total_tok) + ' tok · ' if total_tok else ''}{_clock(_wall(tasks, now))}{RST}"
+    total_cost = sum(float(getattr(t, "cost", 0.0) or 0.0) for t in tasks)
+    facts = ([f"{_tok(total_tok)} tok"] if total_tok else []) + ([f"${total_cost:.3f}"] if total_cost else []) + [_clock(_wall(tasks, now))]
+    sep = f" {glyph('dot')} "
+    right = f"{MUTED}{sep.join(facts)}{RST}"
     left = ""
     for long in (True, False):
-        chips = "  ".join(f"{_STATUS[k][1]}{_STATUS[k][0]} {counts[k]}{' ' + _STATUS[k][2] if long else ''}{RST}" for k in shown)
-        left = f"  {GOLD}{BOLD}◆ {title}{RST}   {chips}"
+        chips = "  ".join(f"{_mark(k)[1]}{_mark(k)[0]} {counts[k]}{' ' + _mark(k)[2] if long else ''}{RST}"
+                          for k in shown)
+        left = f"  {PRIMARY}{BOLD}{glyph('diamond')} {title}{RST}   {chips}"
         gap = width - plat.str_width(left) - plat.str_width(right)
         if gap >= 2:
             return left + " " * gap + right
@@ -302,7 +362,7 @@ def _footer(items: list[tuple[str, str]], width: int) -> list[str]:
     rows: list[str] = []
     cur = " "
     for key, desc in items:
-        piece = f" {WHITE}{BOLD}{key}{RST} {DARK_SLATE}{desc}{RST}"
+        piece = f" {TEXT}{BOLD}{key}{RST} {SUBTLE}{desc}{RST}"
         if plat.str_width(cur) + plat.str_width(piece) + 1 > width and cur.strip():
             rows.append(cur)
             cur = " "
@@ -320,6 +380,8 @@ def _list_footer(tasks: list[Any], selected: int, width: int, console: bool) -> 
     if tasks:
         items.append(_x_hint(tasks[min(selected, len(tasks) - 1)]))
     items += [("esc", "back to the prompt")] if console else [("q", "queue"), ("esc", "stop the turn"), ("/btw", "ask aside")]
+    if not console:      # said once, at the bottom of the board: the same as ⏎ on a row, for an agent by name or number
+        items.append(("/agent <n>", "open one"))
     return _footer(items, width)
 
 
@@ -327,23 +389,23 @@ def _list_footer(tasks: list[Any], selected: int, width: int, console: bool) -> 
 
 def _title_line(t: Any, width: int, indent: str = "  ") -> str:
     glyph, color, _, _ = _st(t)
-    prefix = f"{indent}{CYAN}◂{RST} {color}{BOLD}{glyph}{RST} {WHITE}{BOLD}{_label(t)}{RST} "
+    prefix = f"{indent}{PRIMARY}◂{RST} {color}{BOLD}{glyph}{RST} {TEXT}{BOLD}{_label(t)}{RST} "
     a_type, model = _one_line(getattr(t, "agent_type", "")), _one_line(getattr(t, "model", ""))
     right = ""
     for a, m in ((a_type, model), (a_type, ""), ("", "")):
-        right = (f"{LAVENDER}{a}{RST}" if a else "") + (f" {DARK_SLATE}·{RST} " if a and m else "") + (f"{SLATE}{m}{RST}" if m else "")
+        right = (f"{MUTED}{a}{RST}" if a else "") + (f" {SUBTLE}·{RST} " if a and m else "") + (f"{MUTED}{m}{RST}" if m else "")
         if width - plat.str_width(prefix) - plat.str_width(right) - 2 >= min(24, plat.str_width(_display_name(t))):
             break
     room = width - plat.str_width(prefix) - plat.str_width(right) - (2 if right else 0)
-    left = prefix + f"{WHITE}{BOLD}{_shorten(_display_name(t), max(4, room))}{RST}"
+    left = prefix + f"{TEXT}{BOLD}{_shorten(_display_name(t), max(4, room))}{RST}"
     gap = width - plat.str_width(left) - plat.str_width(right)
     return _fit(left + " " * max(2, gap) + right if right else left, width)
 
 
-def _kv(label: str, value_rows: list[str], width: int, color: str = WHITE) -> list[str]:
+def _kv(label: str, value_rows: list[str], width: int, color: str = TEXT) -> list[str]:
     out = []
     for i, r in enumerate(value_rows or [""]):
-        lab = f"{SLATE}{label:<7}{RST}" if i == 0 else " " * 7
+        lab = f"{MUTED}{label:<7}{RST}" if i == 0 else " " * 7
         out.append(_fit(f"    {lab}{color}{r}{RST}", width))
     return out
 
@@ -419,27 +481,27 @@ def transcript_lines(t: Any, width: int, expanded: bool = False) -> list[str]:
     """The whole transcript as display lines (the caller shows a window of them)."""
     own = getattr(t, "transcript", None)
     if callable(own):                       # a shell or a background turn: its output
-        return [_fit(f"    {SLATE}{sanitize(strip_ansi(str(ln)))}{RST}", width) for ln in own()] or [f"    {SLATE}(no output yet){RST}"]
+        return [_fit(f"    {MUTED}{sanitize(strip_ansi(str(ln)))}{RST}", width) for ln in own()] or [f"    {MUTED}(no output yet){RST}"]
     entries = _entries(t)
     room = max(8, width - 6)
     lines: list[str] = []
     if not entries:
         for log in (list(getattr(t, "live_logs", None) or [])[-8:] or ["(starting…)"]):
-            lines.append(_fit(f"    {DARK_SLATE}│{RST} {WHITE}{_one_line(log)}{RST}", width))
+            lines.append(_fit(f"    {SUBTLE}│{RST} {TEXT}{_one_line(log)}{RST}", width))
     last_text = ""
     for e in entries:
         kind, raw, err = str(e.get("kind", "")), str(e.get("text", "") or ""), bool(e.get("is_error"))
         text = _one_line(raw)
         if kind == "step":
             head = f"── {text or 'Step'} "
-            lines.append(_fit(f"    {DARK_SLATE}{head}{'─' * max(0, min(60, room) - plat.str_width(head))}{RST}", width))
+            lines.append(_fit(f"    {SUBTLE}{head}{'─' * max(0, min(60, room) - plat.str_width(head))}{RST}", width))
         elif kind == "text":
             last_text = raw.strip()
-            lines += [_fit(f"    {WHITE}{r}{RST}", width) for r in _rows_for(raw, room)]
+            lines += [_fit(f"    {TEXT}{r}{RST}", width) for r in _rows_for(raw, room)]
         elif kind == "tool":
-            lines.append(_fit(f"    {CYAN}▸{RST} {WHITE}{text}{RST}", width))
+            lines.append(_fit(f"    {PRIMARY}▸{RST} {TEXT}{text}{RST}", width))
         elif kind == "result":
-            color = ROSE if err else SLATE
+            color = ERROR if err else MUTED
             full = str(e.get("full") or raw)
             body = [ln for ln in sanitize(strip_ansi(full)).splitlines() if ln.strip()]
             if expanded and len(body) > 1:
@@ -447,41 +509,41 @@ def transcript_lines(t: Any, width: int, expanded: bool = False) -> list[str]:
             else:
                 first = _one_line(body[0]) if body else "(no output)"
                 more = f" ({len(body)} lines)" if len(body) > 1 else ""
-                lines.append(_fit(f"      {color}↳ {plat.truncate_ansi(first, max(8, room - 4 - len(more)))}{RST}{DARK_SLATE}{more}{RST}", width))
+                lines.append(_fit(f"      {color}↳ {plat.truncate_ansi(first, max(8, room - 4 - len(more)))}{RST}{SUBTLE}{more}{RST}", width))
         elif kind == "thinking":
             rows = _wrap(text, room - 2)
             shown = rows if expanded else rows[:2]
             if len(rows) > len(shown) and shown:
                 shown[-1] = plat.truncate_ansi(shown[-1] + " …", room - 2)
-            lines.extend(_fit(f"      {DARK_SLATE}{ITALIC}{'∴ ' if i == 0 else '  '}{r}{RST}", width) for i, r in enumerate(shown))
+            lines.extend(_fit(f"      {SUBTLE}{ITALIC}{'∴ ' if i == 0 else '  '}{r}{RST}", width) for i, r in enumerate(shown))
         elif kind == "note":
-            lines.extend(_fit(f"    {MINT}{'›' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_rows_for(raw, room)))
+            lines.extend(_fit(f"    {TEXT}{'›' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_rows_for(raw, room)))
         elif kind == "delivered":
-            lines.append(_fit(f"    {MINT}✓ {text}{RST}", width))
+            lines.append(_fit(f"    {TEXT}✓ {text}{RST}", width))
         elif kind == "retry":
-            lines.extend(_fit(f"    {AMBER}{'⟳' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:2]))
+            lines.extend(_fit(f"    {TEXT}{'⟳' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:2]))
         elif kind == "resume":
-            lines.extend(_fit(f"    {CYAN}{'↻' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:2]))
+            lines.extend(_fit(f"    {PRIMARY}{'↻' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:2]))
         elif kind == "error":
-            lines.extend(_fit(f"    {ROSE}{'✗' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:4]))
+            lines.extend(_fit(f"    {ERROR}{'✗' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(text, room)[:4]))
         else:
-            lines.append(_fit(f"    {DARK_SLATE}│{RST} {WHITE}{text}{RST}", width))
+            lines.append(_fit(f"    {SUBTLE}│{RST} {TEXT}{text}{RST}", width))
     status = str(getattr(t, "status", ""))
     report = sanitize(strip_ansi(str(getattr(t, "result_text", "") or ""))).strip()
     if status in ("completed", "exhausted") and report and report != last_text and not report.endswith(last_text or "\0"):
         head = "── Report "
-        lines.append(_fit(f"    {DARK_SLATE}{head}{'─' * max(0, min(60, room) - plat.str_width(head))}{RST}", width))
-        lines += [_fit(f"    {WHITE}{r}{RST}", width) for r in _rows_for(report, room)]
+        lines.append(_fit(f"    {SUBTLE}{head}{'─' * max(0, min(60, room) - plat.str_width(head))}{RST}", width))
+        lines += [_fit(f"    {TEXT}{r}{RST}", width) for r in _rows_for(report, room)]
     note = _one_line(getattr(t, "worktree_note", ""))
     if note:
-        lines.extend(_fit(f"    {AMBER}{'!' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(note, room)))
+        lines.extend(_fit(f"    {TEXT}{'!' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(_wrap(note, room)))
     return lines
 
 
 def _detail_head(t: Any, width: int, now: float, room: int, expanded: bool) -> list[str]:
     glyph, color, label, _ = _st(t)
     lines = [_title_line(t, width)]
-    lines.append(_fit(f"    {color}{label}{RST} {DARK_SLATE}·{RST} {_stats(t, now)}", width))
+    lines.append(_fit(f"    {color}{label}{RST} {SUBTLE}·{RST} {_stats(t, now)}", width))
     if getattr(t, "kind", "agent") != "agent":
         return lines
     prompt = [_one_line(p) for p in str(getattr(t, "prompt", "") or "").splitlines() if p.strip()]
@@ -490,10 +552,10 @@ def _detail_head(t: Any, width: int, now: float, room: int, expanded: bool) -> l
         asked = asked[:_PROMPT_LINES - 1] + [f"… {len(asked) - _PROMPT_LINES + 1} more lines · ctrl+o shows them"]
     lines += _kv("asked", asked, width)
     if t.status == "error" or getattr(t, "error_msg", None):
-        lines += _kv("reason", _wrap(_one_line(getattr(t, "error_msg", None) or "failed (no reason reported)"), room), width, ROSE)
+        lines += _kv("reason", _wrap(_one_line(getattr(t, "error_msg", None) or "failed (no reason reported)"), room), width, ERROR)
     elif t.status in ("running", "queued"):
         act = _activity(t)
-        lines += _kv("now", [plat.truncate_ansi(act, room)], width, AMBER if act.lower().startswith(("retrying", "resuming")) else CYAN)
+        lines += _kv("now", [plat.truncate_ansi(act, room)], width, TEXT if act.lower().startswith(("retrying", "resuming")) else PRIMARY)
     return lines
 
 
@@ -521,17 +583,17 @@ def _detail(view: Any, tasks: list[Any], width: int, now: float, height: int, sc
     """Head, then the window of the transcript that fits *height* (the newest lines unless scrolled up)."""
     task = next((t for t in tasks if t.index == view), None)
     if task is None:
-        return [f"  {SLATE}Subagent #{view} is not active.{RST}"]
+        return [f"  {MUTED}Subagent #{view} is not active.{RST}"]
     head = _detail_head(task, width, now, width - 13, expanded)
     body = transcript_lines(task, width, expanded)
     max_head = max(3, height * 2 // 3 if expanded else height // 3)
     if len(head) > max_head:
-        head = head[:max_head - 1] + [f"    {DARK_SLATE}… ctrl+o shows the rest{RST}"]
+        head = head[:max_head - 1] + [f"    {SUBTLE}… ctrl+o shows the rest{RST}"]
     room = max(2, height - len(head) - 1)
     total = len(body)
     if info is not None:
         info["total"], info["max_scroll"], info["page"] = total, max(0, total - room), max(1, room - 2)
-    rule = f"  {DARK_SLATE}{'─' * (width - 2)}{RST}"
+    rule = f"  {SUBTLE}{'─' * (width - 2)}{RST}"
     if total <= room:
         return head + [rule] + body
     scroll = max(0, min(scroll, total - room))
@@ -539,22 +601,22 @@ def _detail(view: Any, tasks: list[Any], width: int, now: float, height: int, sc
     start = end - room
     window = body[start:end]
     if start > 0:
-        window[0] = f"    {DARK_SLATE}↑ {start} earlier line{'s' if start != 1 else ''}{RST}"
+        window[0] = f"    {SUBTLE}↑ {start} earlier line{'s' if start != 1 else ''}{RST}"
     if scroll > 0:
-        window[-1] = f"    {DARK_SLATE}↓ {scroll} newer line{'s' if scroll != 1 else ''} · end follows live{RST}"
+        window[-1] = f"    {SUBTLE}↓ {scroll} newer line{'s' if scroll != 1 else ''} · end follows live{RST}"
     return head + [rule] + window
 
 
 def _queue(agent: Any, width: int) -> list[str]:
     queue = getattr(agent, "message_queue", None) if agent is not None else None
     items = list(queue.items) if queue is not None else []
-    lines = [f"  {MINT}{BOLD}◆ Queued prompts{RST} {SLATE}({len(items)}) · run after the subagents finish{RST}", ""]
+    lines = [f"  {TEXT}{BOLD}◆ Queued prompts{RST} {MUTED}({len(items)}) · run after the subagents finish{RST}", ""]
     if not items:
-        lines.append(f"    {SLATE}Empty. Type below and press ⏎ to queue a follow-up.{RST}")
+        lines.append(f"    {MUTED}Empty. Type below and press ⏎ to queue a follow-up.{RST}")
     for i, it in enumerate(items, 1):
-        tag = f"{MINT}{BOLD}next{RST}" if i == 1 else f"{DARK_SLATE}#{it.id:<3}{RST}"
-        lines.append(_fit(f"    {tag} {WHITE}{_one_line(it.text)}{RST}", width))
-    lines += ["", f"    {DARK_SLATE}/q <text> add · /q drop <id> remove · /q clear empty{RST}"]
+        tag = f"{TEXT}{BOLD}next{RST}" if i == 1 else f"{SUBTLE}#{it.id:<3}{RST}"
+        lines.append(_fit(f"    {tag} {TEXT}{_one_line(it.text)}{RST}", width))
+    lines += ["", f"    {SUBTLE}/q <text> add · /q drop <id> remove · /q clear empty{RST}"]
     return [_fit(ln, width) for ln in lines]
 
 
@@ -611,7 +673,7 @@ def build_monitor_frame(view: Any, tasks: list[Any], agent: Any, buf: str, width
     height = max(8, int(height or _DEFAULT_HEIGHT))
     now = time.time()
     selected = max(0, min(selected, len(tasks) - 1)) if tasks else 0
-    rule = f"  {DARK_SLATE}{'─' * (width - 2)}{RST}"
+    rule = f"  {SUBTLE}{'─' * (width - 2)}{RST}"
     is_list = view == 0
     has_input = not (console and is_list)
     if view not in (0, "Q") and any(t.index == view for t in tasks):
@@ -625,28 +687,28 @@ def build_monitor_frame(view: Any, tasks: list[Any], agent: Any, buf: str, width
     if is_list:
         lines = [_header(tasks, width, now, title), rule] if room >= 6 else []     # a very short window keeps the rows
         if not tasks:
-            lines.append(f"  {SLATE}Nothing to show yet: starting the subagents…{RST}")
+            lines.append(f"  {MUTED}Nothing to show yet: starting the subagents…{RST}")
         else:
             sel = tasks[selected]
-            lay = _table_layout(tasks, width)
+            lay = _table_layout(tasks, width, True)
             shown = lay["doing"] or width - 8 - lay["id"]      # a reason that fits its column is not repeated below
             why = _one_line(getattr(sel, "error_msg", "")) if getattr(sel, "status", "") == "error" else ""
             reason = _wrap(why, width - 8) if plat.str_width(why) > shown else []
             reason = reason[:max(0, min(4, room - 6))]
             lines += agent_table(tasks, width, selected, now, max_rows=max(2, room - len(lines) - len(reason)),
-                                 noun="task" if title == "Tasks" else "agent")
-            lines += [_fit(f"      {ROSE}{'✗' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(reason)]
+                                 noun="task" if title == "Tasks" else "agent", bars=True)
+            lines += [_fit(f"      {ERROR}{'✗' if i == 0 else ' '} {r}{RST}", width) for i, r in enumerate(reason)]
     elif view == "Q":
         lines = _queue(agent, width)[:room]
     else:
         lines = _detail(view, tasks, width, now, room, scroll, expanded, info)
     lines = lines[:max(1, room)] + [rule] + foot
     if notice:
-        lines.append(f"  {ROSE if notice.startswith('✗') else MINT}{notice}{RST}")
+        lines.append(f"  {ERROR if notice.startswith('✗') else TEXT}{notice}{RST}")
     if has_input:
         hint = _input_hint(view, tasks)
         shown = _tail(buf, width - 5)
-        lines.append(f"  {CYAN}{BOLD}›{RST} {shown}" if buf else f"  {CYAN}{BOLD}›{RST} {DARK_SLATE}{hint}{RST}")
+        lines.append(f"  {PRIMARY}{BOLD}›{RST} {shown}" if buf else f"  {PRIMARY}{BOLD}›{RST} {SUBTLE}{hint}{RST}")
     return [_fit(ln, width) for ln in lines]
 
 
@@ -984,7 +1046,7 @@ def _keep_unsent(text: str) -> None:
     try:
         from axon.ui.in_flight import _stash_type_ahead
         _stash_type_ahead(text)
-        print(f"  {SLATE}The subagents finished before you sent that: your text is back at the prompt.{RST}")
+        print(f"  {MUTED}The subagents finished before you sent that: your text is back at the prompt.{RST}")
     except Exception:
         pass
 
@@ -993,7 +1055,7 @@ def queued_notes_line(items: list[Any]) -> str:
     """One line, printed when the monitor closes, naming the notes typed during the run and where they went."""
     texts = ", ".join(f'#{it.id} "{plat.truncate_ansi(" ".join(str(it.text).split()), 40)}"' for it in items)
     noun = "note" if len(items) == 1 else "notes"
-    return f"  {MINT}✓ {len(items)} {noun} for the main agent{RST} {WHITE}{texts}{RST} {SLATE}· each runs as its own turn after this one{RST}"
+    return f"  {TEXT}✓ {len(items)} {noun} for the main agent{RST} {TEXT}{texts}{RST} {MUTED}· each runs as its own turn after this one{RST}"
 
 
 def _queue_command(line: str, agent: Any) -> str:
@@ -1028,6 +1090,6 @@ def _submit(line: str, agent: Any) -> None:
                 dispatch_command(line, agent)
         elif agent is not None and hasattr(agent, "message_queue"):
             item = agent.message_queue.push(line)
-            print(f"  {MINT}✓ Note #{item.id} queued for the main agent:{RST} {WHITE}{line}{RST} {SLATE}(runs after the subagents finish){RST}")
+            print(f"  {TEXT}✓ Note #{item.id} queued for the main agent:{RST} {TEXT}{line}{RST} {MUTED}(runs after the subagents finish){RST}")
     except Exception as e:
-        print(f"  {ROSE}✗ Command error: {e}{RST}")
+        print(f"  {ERROR}✗ Command error: {e}{RST}")

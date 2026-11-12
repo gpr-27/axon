@@ -185,6 +185,13 @@ def create_agent_file(ws: Path, name: str, description: str, tools: list[str] | 
     atomic_write_text(path, render_agent_file(slug, description or f"Use for {slug.replace('-', ' ')} tasks.", tools, model, system_prompt))
     from axon.session.library import record_saved
     record_saved(path, action="created", source="/agents create", workspace=ws)
+    try:
+        from axon.agent import agent_history as _ah
+        _sc = _ah.scope_for("user" if scope == "user" else "project", path)
+        if _sc:
+            _ah.record(_sc, slug, path.read_text(encoding="utf-8"), path, "edit-command")
+    except Exception:
+        pass
     return path
 
 
@@ -292,7 +299,7 @@ def _load_agent_defs(ws: Path) -> list[Any]:
 
 
 @command("agents", category=CAT, description="List, show, create or edit subagent definitions",
-         usage="/agents                         list built-in and custom agents\n/agents show <name>\n/agents check                   files that were skipped or have unrecognized fields\n/agents create [name] [--global] [description]   (wizard on a terminal)\n/agents edit <name>\n/agents delete <name>")
+         usage="/agents                         list built-in and custom agents\n/agents show <name>\n/agents check                   files that were skipped or have unrecognized fields\n/agents create [name] [--global] [description]   (wizard on a terminal)\n/agents edit <name>\n/agents delete <name>\n/agents history|diff|rollback|pin <name> ...   versions of an agent file")
 def handle_agents(agent: Any, arg: str) -> CommandResult:
     ws = ws_of(agent)
     parts = arg.strip().split(maxsplit=1)
@@ -304,6 +311,11 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
         err(f"Agent definitions are not available in this build ({e}).")
         return CommandResult(handled=True)
     by_name = {d.name.lower(): d for d in defs}
+
+    if sub in ("history", "diff", "rollback", "pin"):
+        from axon.commands.agent_history_cmds import run as _history_run
+        _history_run(agent, sub, rest)
+        return CommandResult(handled=True)
 
     if sub in ("check", "validate", "doctor"):
         from axon.agent.subagent import extra_agent_dirs, load_agent_definitions
@@ -361,6 +373,9 @@ def handle_agents(agent: Any, arg: str) -> CommandResult:
             kv("Description", d.description)
             kv("Tools", ", ".join(d.tools) if d.tools else "all parent tools (minus Task)")
             kv("Model", d.model or "inherit")
+            if getattr(d, "version", 0):
+                from axon.agent.agent_history import pin_note
+                kv("Version", f"v{d.version}" + (f" · {pin_note(ws, d)}" if pin_note(ws, d) else ""))
             if d.disallowed_tools:
                 kv("Disallowed", ", ".join(d.disallowed_tools))
             if d.spawn_types:

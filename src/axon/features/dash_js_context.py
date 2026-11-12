@@ -57,6 +57,7 @@ function ciBody(it, reload, goto) {
   const text = typeof it.body === 'string' ? it.body : '';
   if (text) {
     const lang = CI_LANG[String(it.lang || 'text').toLowerCase()] || 'text'; const isMd = lang === 'md';
+    if (isMd && it.kind === 'message') { const seen = CI.seenMsg || (CI.seenMsg = new Set()); if (!seen.has(it.id)) { seen.add(it.id); CI.rend.add(it.id); } }
     const slot = h('div', { class: 'ci-slot' });
     const draw = () => { const rawOn = !isMd || !CI.rend.has(it.id) || text.length > 150000; slot.replaceChildren(rawOn ? ciCode(text, lang) : h('div', { class: 'ci-md', html: mdLite(text) })); };
     const seg = isMd ? h('span', { class: 'ci-seg', role: 'group', 'aria-label': 'Markdown view' }, ...[['Rendered', true], ['Raw', false]].map(([l, r]) => h('button', { type: 'button', 'aria-pressed': String(CI.rend.has(it.id) === r), onclick: (e) => { r ? CI.rend.add(it.id) : CI.rend.delete(it.id); [...e.currentTarget.parentNode.children].forEach(b => b.setAttribute('aria-pressed', String(b === e.currentTarget))); draw(); } }, l))) : null;

@@ -37,6 +37,7 @@ SOURCE_LABELS = {
     "project": "project .env",
     "user": "~/.axon/.env",
     "config": "~/.axon/config.toml",
+    "vault": "the secret vault (/vault)",
 }
 SCOPES = ("user", "project")
 _INVALID = {"", "none", "null", "local", "skip", "sk-placeholder", "your_api_key_here", "your-api-key-here", "replace_me"}
@@ -216,6 +217,14 @@ class KeyStatus:
         return out
 
 
+def _vault_has(var: str) -> str:
+    try:
+        from axon.features import vault
+        return vault.api_key_for(var) or ""
+    except Exception:
+        return ""
+
+
 def key_status(var: str, workspace: Path | str | None = None, environ: Any = None) -> KeyStatus:
     """Where the effective value of ``var`` comes from (mirrors Settings.load's load order)."""
     env = os.environ if environ is None else environ
@@ -236,6 +245,8 @@ def key_status(var: str, workspace: Path | str | None = None, environ: Any = Non
     elif defined:
         st.source, st.value = defined[0]
         st.path = proj_path if st.source == "project" else user_env_path()
+    elif _vault_has(var):
+        st.source, st.value = "vault", _vault_has(var)
     elif var == "AXON_API_KEY":
         cfg = _config_api_key()
         if cfg:
@@ -378,7 +389,8 @@ def count_models(preset: ProviderPreset | None, key: str, base_url: str | None =
         if fmt == "anthropic":
             base = url.rstrip("/").removesuffix("/v1")
             endpoint = f"{base}/v1/models"
-            headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+            from axon.providers.anthropic_wire import api_version
+            headers.update({"x-api-key": key, "anthropic-version": api_version(url)})
             if not is_official_anthropic(url):
                 headers["authorization"] = f"Bearer {key}"
         else:

@@ -269,7 +269,9 @@ def test_memory_add_only_treats_flags_as_the_scope(agent, workspace, axon_home) 
     dispatch_command("#user prefers tabs", agent)
     items = MemoryStore(workspace).list_all()
     by_text = {it.content.strip(): it.scope for it in items}
-    assert by_text == {"global state must be avoided": "project", "user prefers tabs": "project"}
+    # a leading scope word (global|project|local|repo|auto) now picks the scope: `/memory add global <text>` stores <text> in global memory
+    assert by_text == {"user prefers tabs": "project"}
+    assert "state must be avoided" in (axon_home / "AXON.md").read_text(encoding="utf-8")      # the global instruction file
     dispatch_command("/memory add --global answers in French", agent)
     dispatch_command("#global always run the tests", agent)
     scopes = {it.content.strip(): it.scope for it in MemoryStore(workspace).list_all()}

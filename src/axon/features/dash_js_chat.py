@@ -107,8 +107,8 @@ async function viewChat(sid) {
   // Attached to a terminal, opening a chat continues it there: one conversation, shown in both. If the terminal is busy, the chat opens to read.
   // A tab restored in the background after a reload neither moves the terminal nor takes the page from the tab being opened.
   if (sid && state.ws && state.ws.live && !UI.bg) { try { await api('/api/live/switch', { session: sid }); } catch (e) { /* busy, or no longer there */ } }
-  // The plain chat address means the terminal's chat: use its tab if it has one, rather than a second tab on the same conversation.
-  if (!sid && state.ws && state.ws.live && !UI.bg) { try { const st = await api('/api/chat/state?create=0'); if (st.session && (UI.tabs || []).some(t => t.key === 'chat:' + st.session)) { location.hash = '#/chat/' + encodeURIComponent(st.session); return; } } catch (e) { /* opens below */ } }
+  // The plain chat address means the terminal's chat: open that conversation (its history included) rather than an empty one.
+  if (!sid && state.ws && state.ws.live && !UI.bg) { try { const st = await api('/api/chat/state?create=0'); if (st.session) { location.hash = '#/chat/' + encodeURIComponent(st.session); return; } } catch (e) { /* opens below */ } }
   const C = { sid: sid || '', st: null, es: null, seq: 0, cur: null, steps: [], subs: [], chips: {}, closed: false, lastIdx: -1, first: 0,
     cmds: null, runtime: false, meta: null, atBottom: true, hist: [], hpos: -1, files: [], shellMode: false };
   return shell('chat', async (main, tab) => {
@@ -214,7 +214,7 @@ function storedEvents(entries) {
     if (d.cost != null) cost += d.cost; else costOk = false;
     if (d.duration != null) dur += d.duration; else durOk = false;
     stop = d.stop || (tl.length ? 'tool_use' : 'end_turn');
-    evs.push(Object.assign({ type: 'llm_call_end', iteration: calls, model: d.model, usage: { input_tokens: u.input || 0, output_tokens: u.output || 0, cache_read_tokens: u.cache_read || 0 },
+    evs.push(Object.assign({ type: 'llm_call_end', iteration: calls, model: d.model, usage: { input_tokens: u.input || 0, output_tokens: u.output || 0, cache_read_tokens: u.cache_read || 0, cache_write_tokens: u.cache_write || 0, reasoning_tokens: u.reasoning || 0, _stored: true },
       cost: d.cost, duration_s: d.duration, stop_reason: d.stop || (tl.length ? 'tool_use' : 'end_turn') }, S));
   }
   evs.push(Object.assign({ type: 'turn_end', stop_reason: stop === 'tool_use' ? 'end_turn' : stop, cost_usd: costOk ? cost : null, duration_s: durOk ? dur : null, iterations: calls, tool_calls: nTools }, S));
@@ -380,7 +380,7 @@ function modelPicker(C) {
 }
 function modePicker(C) {
   const cur = (C.st && C.st.mode) || 'default';
-  const labels = { default: 'Ask before edits and commands', acceptEdits: 'Allow file edits, ask for commands', plan: 'Plan only (read-only)', bypass: 'Run everything without asking' };
+  const labels = { default: 'Ask before edits and commands', acceptEdits: 'Allow file edits, ask for commands', plan: 'Plan only (read-only)', auto: 'Auto: a classifier decides', bypass: 'Run everything without asking' };
   const sel = h('select', { 'aria-label': 'Permission mode', title: 'What the agent may do without asking', onchange: async () => { try { if (!(await confirmBypass(C, sel.value))) { sel.value = (C.st && C.st.mode) || 'default'; return; } await runCmd(C, '/mode ' + sel.value); toast('Mode: ' + labels[sel.value]); } catch (e) { toast(e.message); } } },
     Object.entries(labels).map(([v, l]) => h('option', { value: v, selected: v === cur }, l)));
   return h('span', { class: 'pill' }, 'mode ', sel);
@@ -441,7 +441,7 @@ function tickAll(C) {
 function headMeta(cur, done) {
   const m = cur.meta; m.replaceChildren(); const bits = [];
   if (!done) { if (cur.stepText) bits.push(cur.stepText); }
-  else { if (cur.nTools) bits.push(axPlural(cur.nTools, 'tool')); if (cur.costKnown !== false && cur.cost) bits.push(usd(cur.cost)); if (cur.endNote) bits.push(cur.endNote); }
+  else { if (cur.nTools) bits.push(axPlural(cur.nTools, 'tool')); if (cur.endNote) bits.push(cur.endNote); }
   bits.forEach((b, i) => m.append(h('span', { class: 'mi' }, b)));
   if (cur.nFail) m.append(h('span', { class: 'mi bad' }, cur.nFail + ' failed'));
 }
@@ -496,13 +496,14 @@ function newStep(C, cur, ev, ts) {
   const hd = h('div', { class: 'shead' }, mk, h('span', { class: 'stitle' }, 'Step ' + n), sub, time, cost);
   const sent = h('div', { class: 'sline s-sent' }), got = h('div', { class: 'sline s-got' });
   const detail = h('div', { class: 'sdetail' }, sent, got), body = h('div', { class: 'sbody' });
-  const el = h('section', { class: 'step', 'data-n': n }, hd, detail, body);
+  const el = h('section', { class: 'step', 'data-n': n }, hd, body);   // the Sent/Got/stats rows were removed: one usage summary closes the turn
   if (ev.entry != null) el.dataset.i = ev.entry;
   cur.body.append(el);
   if (ts != null) time.dataset.t0 = ts;
   const st = { n, el, hd, mk, time, cost, sub, detail, sent, got, model: ev.model || '', body, t0: ts, ended: false, expect: false, open: 0, tools: 0, modelDur: null, standalone: [], groups: [], bad: false, waiting: 0 };
   if (ev.model || ev.tokens_in) sent.append(h('b', null, 'Sent'), ev.model ? h('span', null, ev.model) : null, ev.synthetic || !ev.tokens_in ? null : h('span', { title: 'Estimated size of the whole request: conversation, system prompt and tool descriptions' }, '~' + tok(ev.tokens_in) + ' tokens'));
   const fb = ev.fed_back || []; if (fb.length) sent.append(h('span', { title: fb.map(f => f.name + (f.tokens ? ' (' + tok(f.tokens) + ' tokens)' : '')).join(', ') }, axPlural(fb.length, 'tool result') + ' fed back'));
+  st.sd = { n, model: ev.model || '', msgs: ev.message_count != null ? ev.message_count : null, tin: ev.tokens_in || null }; st.stats = null;
   cur.step = st; cur.nSteps++; cur.n = cur.nSteps; cur.stepText = 'Step ' + n + ': thinking'; cur.group = null; headMeta(cur, false);
   return st;
 }
@@ -531,7 +532,10 @@ function maybeFinishStep(cur, st) {
 function groupHead(g) {
   const ts = g.cards.map(c => c.axT).filter(Boolean); const all = ts.length === g.n;
   const par = all && ts.every(t => t.par), seq = all && ts.every(t => t.par === false);
-  g.title.textContent = !g.finished ? g.n + ' tools running together' : par ? g.n + ' tools ran together' : seq ? g.n + ' tools ran one after another' : g.n + ' tools';
+  const bad = g.cards.filter(c => c.dataset.state === 'bad').length;
+  g.title.textContent = !g.finished ? (g.n - g.done) + ' of ' + g.n + ' calls running in parallel' : par ? g.n + ' calls ran in parallel' : seq ? g.n + ' calls ran one after another' : g.n + ' calls';
+  g.el.dataset.state = !g.finished ? 'run' : bad ? 'bad' : 'ok'; setMk(g.gmk, !g.finished ? 'run' : bad ? 'bad' : 'ok');
+  g.bar.firstChild.style.width = Math.round(100 * g.done / Math.max(1, g.n)) + '%';
   const v = g.finished ? groupTotal(g) : null;
   if (g.finished) { delete g.time.dataset.t0; g.time.textContent = v == null ? '' : axDur(v); }
 }
@@ -575,13 +579,14 @@ function applyEvent(C, ev) {
     case 'llm_call_start': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); newStep(C, cur, ev, ts); break; }
     case 'thinking_delta': { const cur = ensureTurn(C, ts);
       if (!cur.think) thinkStart(C, cur, ts);
-      cur.thinkText += ev.text; cur.thinkPre.textContent = cur.thinkText.slice(-30000); stick(C); break; }
+      cur.thinkText += ev.text; cur.thinkPre.textContent = cur.thinkText; stick(C); break; }
     case 'text_delta': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts);
       if (!cur.prose) { cur.proseText = ''; cur.live = null; cur.mdst = null; cur.prose = h('div', { class: 'md stream' }); if (!cur.answer.querySelector('.kind')) cur.answer.append(kindLabel('answer', 'Answer')); cur.answer.append(cur.prose); }
       cur.proseText += ev.text;
       liveText(C, cur);
       if (ev.clipped) cur.answer.append(h('div', { class: 'muted' }, 'Showing the first ' + ev.text.length.toLocaleString() + ' of ' + ev.clipped.total.toLocaleString() + ' characters.'));
       break; }
+    case 'tool_write': liveWrite(C, ev); break;
     case 'tool_use': (C.uses = C.uses || {})[ev.id] = ev; toolStart(C, ev, ts); break;
     case 'tool_result': trackTouched(C, ev); toolDone(C, ev, ts); liveFiles(C, ev); break;
     case 'tool_timing': toolTiming(C, ev); break;
@@ -595,30 +600,35 @@ function applyEvent(C, ev) {
     case 'llm_call_end': { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); const u = ev.usage || {};
       const st = cur.step || newStep(C, cur, { iteration: ev.iteration, model: ev.model }, ts);
       st.ended = true; st.expect = ev.stop_reason === 'tool_use'; st.modelDur = ev.duration_s != null ? ev.duration_s : null;
-      cur.cost += ev.cost || 0;
+      cur.cost += ev.cost || 0; axStepEnd(cur, st, ev);
       if (ev.cost) st.cost.textContent = usd(ev.cost);
       st.got.append(h('b', null, 'Got'), h('span', null, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out'), u.cache_read_tokens ? h('span', null, tok(u.cache_read_tokens) + ' cached') : null, u.cache_write_tokens ? h('span', null, tok(u.cache_write_tokens) + ' written to cache') : null, u.reasoning_tokens ? h('span', null, tok(u.reasoning_tokens) + ' reasoning') : null, ev.stop_reason ? h('span', null, 'stop: ' + ev.stop_reason) : null);
       if (!st.sent.firstChild && ev.model) st.sent.append(h('b', null, 'Sent'), h('span', null, ev.model));
       st.hd.title = [ev.model || st.model, tok(u.input_tokens || 0) + ' in / ' + tok(u.output_tokens || 0) + ' out tokens', u.cache_read_tokens ? tok(u.cache_read_tokens) + ' cached' : ''].filter(Boolean).join(' · ');
       if (ev.outcome && ev.outcome !== 'ok') { st.bad = true; st.got.append(h('span', { class: 'bad', title: ev.error || '' }, ev.outcome + (ev.error ? ': ' + String(ev.error).slice(0, 160) : ''))); st.sub.textContent = ev.outcome; st.sub.classList.add('bad'); }
       const sd = Object.assign({ n: ev.iteration, model: ev.model, tin: u.input_tokens || 0 }, { dur: ev.duration_s || 0, cost: ev.cost || 0, tout: u.output_tokens || 0, cread: u.cache_read_tokens || 0, stop: ev.stop_reason, miss: ev.cache_miss_cause || '', detail: ev.cache_miss_detail || '' });
-      C.steps.push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
-    case 'cache_status': { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } const cst = C.cur && C.cur.step; if (cst && !cst.cacheEl && (ev.miss || ev.cached_tokens)) { cst.cacheEl = ev.miss ? h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : '')) : h('span', { class: 'chit', title: tok(ev.cached_tokens) + ' of ' + tok(ev.input_tokens || 0) + ' input tokens were read from the prompt cache' }, 'cache hit ' + Math.round(ev.hit_pct || 0) + '%'); cst.got.append(cst.cacheEl); } break; }
+      C.steps.push(sd); (cur.stepData = cur.stepData || []).push(sd); maybeFinishStep(cur, st); headMeta(cur, false); drawRail(C); break; }
+    case 'cache_status': axCacheStatus(C, ev); { const last = C.steps[C.steps.length - 1]; if (last && ev.miss) { last.miss = ev.cause || 'cache miss'; } const cst = C.cur && C.cur.step; if (cst && !cst.cacheEl && (ev.miss || ev.cached_tokens)) { cst.cacheEl = ev.miss ? h('span', { class: 'miss' }, 'cache miss: ' + (ev.cause || 'unknown') + (ev.resent_tokens ? ' (' + tok(ev.resent_tokens) + ' re-sent)' : '')) : h('span', { class: 'chit', title: tok(ev.cached_tokens) + ' of ' + tok(ev.input_tokens || 0) + ' input tokens were read from the prompt cache' }, 'cache hit ' + Math.round(ev.hit_pct || 0) + '%'); cst.got.append(cst.cacheEl); } break; }
+    case 'context_edit': (C.cur ? hostOf(C) : C.feed).append(notice(ev.message || 'cleared old tool results', '')); break;
     case 'subagent_step': subagentStep(C, ev); break;
     case 'subagent': subagentEvent(C, ev); if (ev.phase !== 'start') liveFiles(C, { changes: [1] }); break;
-    case 'compaction': C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
+    case 'compaction': if (ev.phase) { (C.cur ? hostOf(C) : C.feed).append(notice(ev.phase === 'start' ? 'compacting in the background…' : ev.phase === 'cancelled' ? 'background compaction cancelled' : 'background compaction ' + ev.phase, 'warn')); break; }
+      C.cur ? hostOf(C).append(notice('Context compacted (' + ev.trigger + '): ' + ev.messages_before + ' → ' + ev.messages_after + ' messages, ' + tok(ev.tokens_before) + ' → ' + tok(ev.tokens_after) + ' tokens' + (ev.cost ? ', ' + usd(ev.cost) : ''), 'warn', ev.summary)) : C.feed.append(notice('Context compacted', 'warn', ev.summary)); break;
     case 'large_input': hostOf(C).append(notice((ev.spilled ? 'Large input: only its start and end were sent. ' : 'Large input sent whole. ') + ev.lines.toLocaleString() + ' lines, ~' + tok(ev.tokens_full) + ' tokens' + (ev.spilled ? ' (sent ~' + tok(ev.tokens_sent) + ')' : '') + (ev.path ? '. Full text saved at ' + ev.path : '') + (ev.cost_full ? '. ~' + usd(ev.cost_full) : ''), ev.spilled ? 'warn' : '')); break;
-    case 'budget': hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), ev.action === 'notice' ? (ev.percent >= 100 ? 'warn' : '') : 'warn')); break;
-    case 'retry': hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + (Math.round(Number(ev.delay_s || 0) * 10) / 10) + 's: ' + ev.error, 'warn')); break;
+    case 'notify': budgetNotify(C, ev); break;      // dash_js_budget.py
+    case 'budget': if (ev.action === 'paused') { budgetPaused(C, ev); break; } hostOf(C).append(notice(ev.message || ('Budget ' + ev.scope + ': ' + ev.action + ' at ' + usd(ev.spent_usd) + ' of ' + usd(ev.limit_usd)), ev.action === 'notice' ? (ev.percent >= 100 ? 'warn' : '') : 'warn')); break;
+    case 'retry': axRetry(C, ev); hostOf(C).append(notice('Retrying the model request (' + ev.attempt + '/' + ev.max_attempts + ') in ' + (Math.round(Number(ev.delay_s || 0) * 10) / 10) + 's: ' + ev.error, 'warn')); break;
     case 'thinking_boost': hostOf(C).append(notice('"' + (ev.keyword || 'think') + '" raised the effort from ' + (ev.previous_effort || '?') + ' to ' + (ev.effort || '?') + (ev.thinking ? ' and turned thinking on' : '') + ' for this turn.', 'ok')); break;
-    case 'goal_check': hostOf(C).append(notice('You set a goal, so the model was asked once to verify it before finishing: ' + String(ev.goal || '').slice(0, 200), 'ok')); break;
-    case 'steer': hostOf(C).append(notice('Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
-    case 'queued': if (C.replaying) break; C.feed.append(notice((ev.steer ? 'Sent into the running turn: ' : 'Queued for after the turn: ') + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
-    case 'memory_loaded': (C.cur ? hostOf(C) : C.feed).append(h('div', { class: 'steprow' }, h('b', null, 'Memory loaded'), h('span', null, relPath(ev.path)), h('span', null, ev.reason + (ev.trigger ? ' (' + ev.trigger + ')' : '')), ev.tokens ? h('span', null, tok(ev.tokens) + ' tokens') : null)); break;
+    case 'goal_check': goalCheckEvent(C, ev); break;      // dash_js_goal.py
+    case 'advisor': break;   // the consult_advisor tool card already shows the question and the advice; its cost is in the turn's usage table
+    case 'auto_permission': if (ev.outcome === 'allow' && ev.source !== 'classifier') break; hostOf(C).append(h('div', { class: 'steprow' }, h('b', null, 'Auto mode'), h('span', null, (ev.tool || '') + ': ' + (ev.outcome || '')), ev.reason ? h('span', null, ev.reason) : null)); break;
+    case 'steer': hostOf(C).append(notice(ev.shown === true ? "Included in the model's next step" : 'Your message was delivered to the running turn: ' + (ev.texts || []).join(' | '), 'ok')); break;
+    case 'queued': if (C.replaying) break; C.feed.append(notice(ev.steer ? '› you: ' + ev.text.slice(0, 200) + (ev.state_text ? ' · ' + ev.state_text : '') : 'Queued for after the turn: ' + ev.text.slice(0, 200), 'ok')); if (C.st) { refreshState(C, true); } break;
+    case 'memory_loaded': if (ev.reason === 'saved') { (C.cur ? hostOf(C) : C.feed).append(h('div', { class: 'steprow' }, h('b', null, 'Memory saved'), h('span', null, ev.message || ''))); break; } (C.cur ? hostOf(C) : C.feed).append(h('div', { class: 'steprow' }, h('b', null, 'Memory loaded'), h('span', null, relPath(ev.path)), h('span', null, ev.reason + (ev.trigger ? ' (' + ev.trigger + ')' : '')), ev.tokens ? h('span', null, tok(ev.tokens) + ' tokens') : null)); break;
     case 'hook': hookRow(C, ev); break;
     case 'tool_rationale': break;
     case 'tool_batch': if (ev.count > 1) { const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur); if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts); toolGroup(C, cur, ev, ts); } break;
-    case 'llm_request': if (C.cur && C.cur.step) { const sl = C.cur.step.sent; if (!sl.firstChild) sl.append(h('b', null, 'Sent'), h('span', null, ev.model || ''));
+    case 'llm_request': axRequest(C, ev); if (C.cur && C.cur.step) { const sl = C.cur.step.sent; if (!sl.firstChild) sl.append(h('b', null, 'Sent'), h('span', null, ev.model || ''));
       sl.append(h('span', { title: 'Tokens in the request, by part' }, 'conversation ' + tok(ev.conversation_tokens || 0) + ' + system ' + tok(ev.system_tokens || 0) + ' + tools ' + tok(ev.tool_schema_tokens || 0)),
         h('span', null, axPlural(ev.message_count || 0, 'message')), h('span', null, axPlural(ev.tool_count || 0, 'tool') + ' offered' + (ev.prompt_tools ? ' (described in the prompt)' : '')),
         ev.effort ? h('span', null, 'effort ' + (typeof effortWord === 'function' ? effortWord(ev.effort) : ev.effort)) : null, h('span', null, ev.thinking ? 'thinking on' : 'thinking off')); } break;
@@ -673,14 +683,14 @@ function trackTouched(C, ev) {
   if (use && EDIT_NAMES.includes(use.name)) { const inp = use.input || {}; const p0 = inp.file_path || inp.path || inp.notebook_path; if (p0) { const p = relPath(p0); T[p] = T[p] || (use.name === 'Write' ? 'A' : 'M'); } }
 }
 // ----- tool rows: marker | name | one plain sentence | chips | duration; Input / Output / Why open underneath -----
-function setToolState(card, state) { card.dataset.state = state; setMk(card.axMk, state); card.classList.toggle('err', state === 'bad'); if (card.axFib) card.axFib.className = state; }
+function setToolState(card, state) { card.dataset.state = state; axToolStat(card); setMk(card.axMk, state); card.classList.toggle('err', state === 'bad'); if (card.axFib) card.axFib.className = state; }
 function selectTab(card, k) {
   card.axTab = k;
   card.querySelectorAll('.tab2').forEach(b => b.setAttribute('aria-selected', String(b.dataset.k === k)));
   for (const [kk, p] of Object.entries(card.axPanes)) p.hidden = kk !== k;
 }
-async function copyTab(card, btn) {
-  const text = ({ in: card.axInText, out: card.axText, why: card.axWhyText })[card.axTab || 'out'] || '';
+async function copyTab(card, btn, key) {
+  const text = ({ in: card.axInText, out: card.axText, why: card.axWhyText })[key || card.axTab || 'out'] || '';
   try { await navigator.clipboard.writeText(text); }
   catch (e) { const ta = h('textarea', { style: 'position:fixed;opacity:0', 'aria-hidden': 'true' }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand('copy'); } catch (x) { /* blocked */ } ta.remove(); }
   btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
@@ -689,41 +699,66 @@ function mkTool(name, input) {
   const mk = mkEl('run');
   const sum = h('summary', { class: 'xrow' }, mk, kindLabel('tool', 'Tool call'), h('span', { class: 'tn', title: name }, name), h('span', { class: 'ta' }), h('span', { class: 'chips' }), h('span', { class: 'route' }), h('span', { class: 'td' }), h('span', { class: 'pnote', hidden: true }));
   const panes = { in: h('div', { class: 'tpane p-in', hidden: true }), out: h('div', { class: 'tpane p-out', hidden: true }, h('span', { class: 'muted' }, 'Waiting for the result...')), why: h('div', { class: 'tpane p-why', hidden: true }) };
-  const card = h('details', { class: 'tool live-tool kd-tool both', open: true, 'data-state': 'run' }, sum);
-  const bar = h('div', { class: 'tabs2', role: 'tablist' });
-  for (const [k, l] of [['in', 'Input'], ['out', 'Output'], ['why', 'Why']]) bar.append(h('button', { type: 'button', role: 'tab', class: 'tab2', 'data-k': k, 'aria-selected': 'false', onclick: () => selectTab(card, k) }, l));
-  bar.append(h('button', { type: 'button', class: 'copy', title: 'Copy what this tab shows', onclick: (e) => copyTab(card, e.currentTarget) }, 'Copy'));
-  card.append(h('div', { class: 'tdet' }, bar, panes.in, panes.out, panes.why));
-  card.addEventListener('toggle', () => { if (card.open && !card.axTab) selectTab(card, card.dataset.state === 'run' || card.dataset.state === 'wait' ? 'in' : 'out'); });
+  const card = h('details', { class: 'tool live-tool kd-tool both', open: axCardsOpen(), 'data-state': 'run' }, sum);
+  sum.addEventListener('click', () => { axCardsRemember(!card.open); });   // the click runs before the details toggles, so the new state is the opposite
+  const doing = h('div', { class: 'pdoing' });
+  const sec = (k, label, extra) => h('div', { class: 'psec', 'data-k': k }, h('b', null, label), extra || null, h('button', { type: 'button', class: 'copy', title: 'Copy ' + label.toLowerCase(), onclick: (e) => copyTab(card, e.currentTarget, k) }, 'Copy'));
+  const stat = h('span', { class: 'pstat' });
+  card.append(h('div', { class: 'tdet' }, sec('in', 'Input'), panes.in, sec('out', 'Output', stat), panes.out, panes.why));
+  card.axDoing = doing; card.axStat = stat;
+  card.addEventListener('toggle', () => { if (card.open && !card.axTab) selectTab(card, 'out'); });
   card.axMk = mk; card.axPanes = panes; card.axName = name; card.axIn = input || {}; card.axInText = '';
   const mcp = mcpOf(name);
   if (mcp) { const tn = sum.querySelector('.tn'); tn.textContent = mcp.tool; toolChip(card, 'mcp', 'MCP ' + mcp.server, 'Sent to the MCP server "' + mcp.server + '" as ' + mcp.tool + ' (full name ' + name + ')'); }
   return card;
 }
-function inputText(name, inp) { return name === 'Bash' && typeof inp.command === 'string' ? inp.command : JSON.stringify(inp || {}, null, 2); }
+function inputText(name, inp) { return JSON.stringify(inp || {}, null, 2); }
 function toolGroup(C, cur, ev, ts) {
-  const title = h('span', { class: 'ptitle' }, ev.count + ' tools running together'), time = h('span', { class: 'ptime' });
+  const title = h('span', { class: 'ptitle' }, ev.count + ' calls running in parallel'), time = h('span', { class: 'ptime' });
   if (ts != null) time.dataset.t0 = ts;
-  const rows = h('div', { class: 'prows' });
-  const el = h('div', { class: 'pgroup' }, h('div', { class: 'phead' }, h('span', { class: 'mk' }), title, time), rows);
+  const rows = h('div', { class: 'prows' }); const gmk = mkEl('run'); const bar = h('i', { class: 'pbar', 'aria-hidden': 'true' }, h('b'));
+  const el = h('div', { class: 'pgroup', 'data-state': 'run' }, h('div', { class: 'phead' }, gmk, title, bar, time), rows);
   cur.step.body.append(el);
-  const g = { el, rows, title, time, n: ev.count, added: 0, done: 0, cards: [], finished: false, order: (ev.tools || []).map(t => t.id) };
+  const g = { el, rows, title, time, gmk, bar, n: ev.count, added: 0, done: 0, cards: [], finished: false, order: (ev.tools || []).map(t => t.id) };
   cur.step.groups.push(g); cur.group = g; return g;
 }
 const RUNNING_WORD = (name, inp) => { let s = ''; try { s = axRunning(name, inp); } catch (e) { s = ''; } return s; };
+// A file being written streams in (fine-grained tool streaming): one quiet row per call, updated in place with the
+// path, the lines so far and the tail of the text; the real tool card replaces it when the call is complete.
+function liveWrite(C, ev) {
+  if (C.replaying) return;
+  const cur = ensureTurn(C); if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 });
+  cur.lw = cur.lw || {};
+  let row = cur.lw[ev.id];
+  if (!row) {
+    row = h('div', { class: 'steprow livewrite' }, h('b', null, ev.verb || 'writing'), h('span', { class: 'lwp' }), h('span', { class: 'lwn muted' }),
+      h('pre', { class: 'out nolink lwt', style: 'max-height:7.5em;overflow:hidden;margin:.25em 0 0;font-size:.85em;opacity:.85;white-space:pre-wrap' }));
+    cur.step.body.append(row); cur.lw[ev.id] = row;
+  }
+  row.querySelector('.lwp').textContent = ev.path;
+  row.querySelector('.lwn').textContent = ev.lines + (ev.lines === 1 ? ' line' : ' lines') + ' so far';
+  row.querySelector('.lwt').textContent = ev.tail || '';
+}
+function liveWriteDone(cur, id) {
+  if (!cur || !cur.lw) return;
+  if (id == null) { for (const r of Object.values(cur.lw)) r.remove(); cur.lw = {}; return; }
+  if (cur.lw[id]) { cur.lw[id].remove(); delete cur.lw[id]; }
+}
 function toolStart(C, ev, ts) {
   const cur = ensureTurn(C, ts); finishThink(C, cur, ts); moveProse(cur);
   if (!cur.step) newStep(C, cur, { iteration: cur.nSteps + 1 }, ts);
+  liveWriteDone(cur, ev.id);
   const st = cur.step, inp = ev.input || {};
   const card = mkTool(ev.name, inp);
+  axHandReset(st);
   card.querySelector('.ta').textContent = RUNNING_WORD(ev.name, inp) || toolSummary(ev.name, inp);
   card.querySelector('.ta').title = toolSummary(ev.name, inp);
-  card.axPanes.in.append(inputBlock(ev.name, inp)); card.axInText = inputText(ev.name, inp);
+  card.axInText = inputText(ev.name, inp); card.axPanes.in.append(axInputView(ev.name, inp, card.axInText));
   const why = card.axPanes.why;
-  why.append(h('p', { class: 'why' }, ev.rationale || 'The model gave no reason before this call.'), h('p', { class: 'perm muted' }));
-  if (ev.parse_error) why.append(h('div', { class: 'bad' }, ev.parse_error));
-  card.axWhyText = ev.rationale || '';
   const g = cur.group && cur.group.added < cur.group.n ? cur.group : null;
+  // One batch of parallel calls shares one labeled reason (written once, on the batch); a lone call shows its own.
+  why.append(h('p', { class: 'perm muted' }));   // the model's reason is its thinking and narration, already drawn above; only the permission decision lives here
+  if (ev.parse_error) why.append(h('div', { class: 'bad' }, ev.parse_error));
   // tools of one batch start on separate threads, so their events can arrive in any order: the rows keep the order the model asked in
   const ord = g ? g.order.indexOf(ev.id) : -1; card.axOrd = ord < 0 ? 1e9 : ord;
   const later = g ? g.cards.find(c => c.axOrd > card.axOrd && c.parentNode === g.rows) : null;
@@ -779,7 +814,7 @@ function toolTiming(C, ev) {
   // The clock includes the time the tool waited for your permission; the work itself began when you answered.
   if (card.axApproved != null && e != null) { s = Math.max(s != null ? s : 0, card.axApproved); d = Math.max(0, e - s); }
   card.axT = { s: s != null ? s : 0, e: e != null ? e : (s || 0) + d, d, par: ev.parallel === undefined ? undefined : !!ev.parallel };
-  const td = card.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = axDur(d);
+  const td = card.querySelector('.td'); td.removeAttribute('data-t0'); td.textContent = axDur(d); axToolStat(card);
   const st = card.axStep; if (st) updateStepTime(st);
   const g = card.axGroup; if (g && g.finished) groupHead(g);
 }
@@ -796,17 +831,17 @@ function toolDone(C, ev, ts) {
   if (ev.blob_content) text += '\n[showing the start; the full output (' + ev.blob_content.len.toLocaleString() + ' characters) is kept in the session record]';
   if (ev.truncated_from) text += '\n[showing the first ' + text.length.toLocaleString() + ' of ' + ev.truncated_from.toLocaleString() + ' characters; the full output is in the transcript]';
   card.axText = text;
-  o.append(/^(@@ -|diff --git |--- \S)/m.test(text.slice(0, 4000)) ? diffEl(text.split('\n')) : pagedPre(text || '(no output)', 'out'));
+  o.append(/^(@@ -|diff --git |--- \S)/m.test(text.slice(0, 4000)) ? diffEl(text.split('\n')) : axOutView(text));
   if (ev.more) o.append(h('div', { class: 'clipped' }, h('span', null, 'Showing the first ' + text.length.toLocaleString() + ' of ' + ev.more.total.toLocaleString() + ' characters. '),
-    h('button', { class: 'more', type: 'button', onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { let off = 0, all = ''; for (;;) { const r = await api('/api/session/' + encodeURIComponent(C.sid) + '/text?entry=' + ev.more.entry + '&field=' + encodeURIComponent(ev.more.field) + '&offset=' + off + '&limit=400000'); all += r.text; off = r.next; if (r.done) break; } card.axText = all; o.replaceChildren(pagedPre(all, 'out')); decorate(o); } catch (x) { b.disabled = false; toast(x.message); } } }, 'Show all')));
+    h('button', { class: 'more', type: 'button', onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { let off = 0, all = ''; for (;;) { const r = await api('/api/session/' + encodeURIComponent(C.sid) + '/text?entry=' + ev.more.entry + '&field=' + encodeURIComponent(ev.more.field) + '&offset=' + off + '&limit=400000'); all += r.text; off = r.next; if (r.done) break; } card.axText = all; o.replaceChildren(axOutView(all)); decorate(o); } catch (x) { b.disabled = false; toast(x.message); } } }, 'Show all')));
   if (ev.changes && ev.changes.length) o.append(changesBlock(ev.changes));
   if (typeof axCard === 'function') { try { axCard(card, ev, text); } catch (e) { console.warn('card', e); } }
   decorate(card);
   if (card.axTab) selectTab(card, card.axTab);
   const st = card.axStep, g = card.axGroup;
   if (failed) { cur.nFail++; }
-  if (st) { st.open--; st.hp = false; maybeFinishStep(cur, st); }
-  if (g) { g.done++; if (g.done >= g.n) { g.finished = true; groupHead(g); } }
+  if (st) { st.open--; st.hp = false; axHandoff(cur, st, card); maybeFinishStep(cur, st); }
+  if (g) { g.done++; if (g.done >= g.n) g.finished = true; groupHead(g); }
   if (cur.step === st && st && st.open === 0) cur.stepText = 'Step ' + st.n + ': thinking';
   headMeta(cur, false);
   if (!C.replaying && (ev.name === 'TodoWrite' || ev.name === 'Task')) refreshState(C, true);
@@ -936,7 +971,7 @@ async function tailHistory(C, adopt) {
 async function finishTurn(C, ev, ts, how) {
   const cur = C.cur;
   if (cur) {
-    finishThink(C, cur, ts); flushProse(cur);
+    liveWriteDone(cur); finishThink(C, cur, ts); flushProse(cur);
     cur.running = false; cur.stepText = ''; cur.waitStart = 0;
     const secs = ev && ev.duration_s != null ? Math.max(0, ev.duration_s - cur.waited) : (ts != null && cur.t0 != null ? Math.max(0, ts - cur.t0 - cur.waited) : null);
     if (ev) { cur.cost = ev.cost_usd != null ? ev.cost_usd : cur.cost; cur.costKnown = ev.cost_usd != null || cur.cost > 0; }
@@ -951,8 +986,10 @@ async function finishTurn(C, ev, ts, how) {
     cur.art.querySelectorAll('.fib i.run, .fib i.wait').forEach(i => { i.className = 'stop'; });
     cur.art.querySelectorAll('.approve').forEach(a => a.remove());
     cur.art.querySelectorAll('.hp').forEach(a => a.classList.remove('hp'));
-    cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/ running together$/, ' tools').replace(/^(\d+) tools tools$/, '$1 tools'); });
+    cur.art.querySelectorAll('.pgroup .ptitle').forEach(g => { g.textContent = g.textContent.replace(/^\d+ of (\d+) calls running in parallel$/, '$1 calls').replace(/^(\d+) calls running in parallel$/, '$1 calls'); });
+    cur.art.querySelectorAll('.pgroup[data-state=run]').forEach(g => { g.dataset.state = 'stop'; });
     headMeta(cur, true);
+    try { const u = typeof axTurnUsage === 'function' ? axTurnUsage(cur) : null; if (u && !cur.art.querySelector('.tusage')) cur.art.append(u); } catch (e) { console.warn('usage', e); }
     cur.art.dataset.done = '1';
     foldSteps(cur.art);   // the reply is finished: its steps stay, and its hover actions (Copy, Regenerate, Bookmark...) may show
     if (stopped) cur.answer.append(notice('Stopped', ''));

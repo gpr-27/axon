@@ -58,6 +58,7 @@ from axon.providers.base import (
 from axon.agent import decision as _decision
 from axon.ui import cards as _cards
 from axon.ui import live_status as _live
+from axon.ui.parallel_board import ParallelBoard as _ParallelBoard
 from axon.ui import tool_cards as _tool_cards
 from axon.ui.markdown import (
     MarkdownStream,
@@ -336,10 +337,11 @@ def _locate_line(path: str, snippet: str, unknown: int = 1) -> int:
 
 
 def diff_rows(old_text: str, new_text: str, start_line: int = 1, width: int | None = None,
-              lang: str = "", context: int = 2, max_rows: int = 60) -> list[str]:
+              lang: str = "", context: int = 2, max_rows: int = 60, eof_notes: bool = False) -> list[str]:
     """Unified diff rows: real line numbers, hunk separators, tinted +/- rows with intra-line word
     highlights; long lines wrap with the gutter kept (see ``axon.ui.cards.diff_rows``)."""
-    return _cards.diff_rows(old_text, new_text, start_line, width or _width(140), lang, context, max_rows, _MORE_HINT)
+    return _cards.diff_rows(old_text, new_text, start_line, width or _width(140), lang, context, max_rows, _MORE_HINT,
+                            eof_notes=eof_notes)
 
 
 def _diff_counts(old_text: str, new_text: str) -> tuple[int, int]:
@@ -735,10 +737,17 @@ def render_error_box(tool_name: str, content: str, max_width: int = 88) -> str:
 _LAST_TOOL_OUTPUT = ""
 _TOOL_OUTPUTS: "dict[int, tuple[str, str, str]]" = {}   # n -> (tool name, target, full output)
 _TOOL_OUTPUT_SEQ = 0
+_OUTPUT_BY_ID: "dict[str, int]" = {}   # tool_use id -> '/output <n>' number (read by agent/client_context for its stub)
 _TOOL_CALLS: "dict[int, dict[str, Any]]" = {}   # n -> how call #n was made (see Renderer._remember_call)
 _TOOL_OUTPUT_KEEP = 200
 # Hint appended to elided previews ("… +12 more lines · /output 7"); set per tool result.
 _MORE_HINT = "/output"
+
+
+def output_number_for(tool_use_id: str) -> int:
+    """The '/output <n>' number of the result of tool call *tool_use_id*, 0 when unknown or no longer kept."""
+    n = _OUTPUT_BY_ID.get(str(tool_use_id), 0)
+    return n if n in _TOOL_OUTPUTS else 0
 
 
 def get_last_tool_output() -> str:
@@ -1641,7 +1650,7 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
             header = _cards.diff_header(path, a, r, "Overwrote", _plural(_cards.count_lines(code), "line"))
             if detail <= 0:
                 return [header]
-            return [header] + diff_rows(prev, code, 1, width, _lang_for(path), max_rows=_lim(_DIFF_ROWS, detail))
+            return [header] + diff_rows(prev, code, 1, width, _lang_for(path), max_rows=_lim(_DIFF_ROWS, detail), eof_notes=True)
         if "Overwrote" in text:              # restored history: the counts the tool reported, then the file
             m = re.search(r"Overwrote file \(\+(\d+) [−-](\d+)\)", text)
             counts = (int(m.group(1)), int(m.group(2))) if m else (None, None)
@@ -1649,7 +1658,7 @@ def _summarize_tool_result(name: str, inp: dict[str, Any], content: str, is_erro
             if detail <= 0:
                 return [header]
             return [header] + _cards.code_body(code, path, width, _lim(_CODE_LINES, detail), _MORE_HINT)
-        header = _cards.code_card_header(path, code, "Created", _cards.count_lines(code))
+        header = _cards.code_card_header(path, code, "Created")      # the line count is in the header: no '+N' twice
         if detail <= 0 or not code:
             return [header]                  # a new file: every line is an addition
         return [header] + diff_rows("", code, 1, width, _lang_for(path), max_rows=_lim(_CODE_LINES, detail))
@@ -2124,6 +2133,7 @@ class Spinner:
         self.started_at = 0.0
         self.live: Any = None   # axon.ui.live_status.LiveStatus: the "now" and tip rows (set by the Renderer)
         self.preview_provider: Callable[[], str] | None = None   # the response's unfinished line
+        self.board_provider: Callable[[int, int, str], list[str] | None] | None = None   # parallel calls block (parallel_board.py)
 
     @staticmethod
     def enabled() -> bool:
@@ -2309,8 +2319,30 @@ class Spinner:
                 preview = truncate(self.preview_provider() or "", max(10, term_width() - 1))
             except Exception:
                 preview = ""
-        rows = ([preview] if preview else []) + [self.render_line(frame)] + self.status_rows()
+        board = self._board_rows()
+        if board:           # the block's header row is the spinner row: one place for the status, the clock and the hint
+            rows = ([preview] if preview else []) + board
+        else:
+            rows = ([preview] if preview else []) + [self.render_line(frame)] + self.status_rows()
         return "\n\033[2K".join(rows), len(rows)
+
+    def _board_rows(self) -> list[str]:
+        """The parallel-calls block (header, one row per call, the typed-ahead draft); [] when none is running."""
+        provider = self.board_provider
+        if provider is None:
+            return []
+        try:
+            rows = provider(max(10, term_width() - 1), term_height(), f"{Renderer.interrupt_hint}") or []
+            draft = sanitize(str(Spinner.draft_provider() or "")) if rows and Spinner.draft_provider is not None else ""
+        except Exception:
+            return []
+        if draft:
+            width = max(10, term_width() - 1)
+            draft = draft.replace("\n", f" {glyph('enter')} ")
+            room = max(8, width - 10)
+            tail = draft if display_width(draft) <= room else glyph("ellipsis") + draft[-max(1, room - 1):]
+            rows.append(f"    {CYAN}{glyph('chevron')}{RST} {TEXT}{safe_text(tail)}{RST}{CYAN}{glyph('quote')}{RST}")
+        return rows
 
     def render_line(self, frame: str = "") -> str:
         elapsed = max(0.0, time.time() - (self.started_at or time.time()))
@@ -2417,6 +2449,8 @@ class Renderer:
         self.live.detail_of = lambda: self.level >= 1
         self.spinner.live = self.live
         self.spinner.preview_provider = self._stream_preview
+        self.board = _ParallelBoard()
+        self.spinner.board_provider = self.board.frame_rows
         _live.set_current(self.live)
         self._tail = "\n\n"
         self._md: MarkdownStream | None = None
@@ -2663,6 +2697,13 @@ class Renderer:
             shown = shorten_path(str(info["data_dir_display"]), max(8, inner - len("project data: ")))
             data = hyperlink(Path(info["data_dir"]).as_uri(), shown)
             data_row = f"{MUTED}project data: {data}{RST}"
+            try:     # what memory is loaded: "memory: 2 files + 5 notes"
+                from axon.features.memory_hub import summary as _mem_summary
+                mem = _mem_summary(Path(workspace) if workspace else Path.cwd())
+                if mem and display_width(f"project data: {shown} {dot} {mem}") <= inner:
+                    data_row += f" {MUTED}{dot} {mem}{RST}"
+            except Exception:
+                pass
         except Exception:
             project = f"{MUTED}{shorten_path(w_path, text_w)}{RST}"
         lines = [
@@ -2795,6 +2836,7 @@ class Renderer:
         self._out(truncate(line, width) + "\n")
 
     def _on_llm_call(self, e: LLMCallStart) -> None:
+        self.board.end()
         self._flush_cards(force=True)
         self._flush_blocks(force=True)
         if self._sub_steps:
@@ -2960,14 +3002,18 @@ class Renderer:
         self._thinking_lines.append(e.text)
         if self._think_full and len(self._thinking_lines) == 1:
             # thinking is its own block, set apart from tool calls and the response
-            self._line(f"{SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}", "  ")
+            if self.level == 1:       # normal: the same THINKING label as the finished card, then the thought as it arrives
+                self._section(f"{PRIMARY}{BOLD}{glyph('star')} THINKING{RST}")
+            else:
+                self._line(f"{SUBTLE}{glyph('star')}{RST} {MUTED}{ITALIC}Thinking{RST}", "  ")
         if self._think_full:
             self._think_stream(sanitize(e.text))
 
     @property
     def _think_full(self) -> bool:
-        """The whole thought, streamed: only at the detailed and debug levels (normal shows one line)."""
-        return self.show_thinking and self.level >= 2
+        """The whole thought, streamed as it arrives: at normal (always, so a long think is not a silent wait) and at the
+        detailed and debug levels (when thinking display is on). Compact shows nothing."""
+        return self.level == 1 or (self.show_thinking and self.level >= 2)
 
     def _think_stream(self, text: str) -> None:
         avail = max(20, layout_width(10))
@@ -3029,7 +3075,8 @@ class Renderer:
             if self._think_col >= 0:
                 self._out(f"{RST}\n")
                 self._think_col = -1
-            self._line(f"{SUBTLE}{glyph('star')} thought for {elapsed:.1f}s{RST}", "  ")
+            if self.level != 1:       # normal already has its THINKING label above the thought; the time is in /transcript
+                self._line(f"{SUBTLE}{glyph('star')} thought for {elapsed:.1f}s{RST}", "  ")
             return
         if self.level < 1:
             return
@@ -3116,16 +3163,37 @@ class Renderer:
         self._finish_stream()
         self._set_phase("selected" if e.name else "choosing", _clean(e.name))
         self.spinner.set_label(self._step_label(f"writing {_clean(e.name)} call"))
+        self._live_writes().start(getattr(e, "id", ""), e.name)
+
+    def _live_writes(self) -> Any:
+        lw = getattr(self, "_lw_tracker", None)
+        if lw is None:
+            from axon.agent.live_write import LiveWriteTracker
+            lw = self._lw_tracker = LiveWriteTracker()
+        return lw
+
+    def _live_write_label(self, e: ToolArgsDelta) -> None:
+        """A file being written streams in: the spinner row says 'writing path (N lines so far)', updated in
+        place (nothing is added to the scrollback; the normal diff card follows when the call is complete)."""
+        from axon.agent.live_write import label
+        snap = self._live_writes().feed(getattr(e, "id", ""), e.fragment)
+        text = label(snap)
+        if text:
+            t0 = getattr(self.spinner, "_phase_t0", None)
+            self.spinner.set_label(self._step_label(_clean(text)))
+            if t0 is not None:
+                self.spinner._phase_t0 = t0          # one running timer for the whole call, not one per update
 
     def _on_tool_args(self, e: ToolArgsDelta) -> None:
         self._out_chars += len(e.fragment)
+        self._live_write_label(e)
         phase = self.tool_phase
         if phase.get("phase") in ("choosing", "selected", "input"):
             phase["phase"] = "input"
             phase["args"] = (str(phase.get("args", "")) + sanitize(e.fragment))[-2000:]
 
     def _on_tool_use_complete(self, e: ToolUseComplete) -> None:
-        pass
+        self._live_writes().finish(getattr(e, "id", ""))
 
     def _on_batch(self, e: ToolBatchStart) -> None:
         self._flush_cards(force=True)
@@ -3140,6 +3208,11 @@ class Renderer:
         said = getattr(e, "parallel", None)          # the loop's own word (parallel_tools = 1 runs them one by one)
         self._batch_parallel = (readonly if said is None else bool(said)) and len(self._batch_order) > 1
         self._batch_tasks = sum(1 for t in tools if (getattr(t, "name", "") or "") == "Task")
+        if self._batch_parallel and not self._batch_tasks:          # a fan-out of subagents has its own board (the monitor)
+            self.board.begin([(i, _clean(str(getattr(t, "name", "") or "tool"))) for t in tools
+                              if (i := str(getattr(t, "id", "") or ""))])
+        else:
+            self.board.end()
         self._tool_batch_count += 1
         self._finish_stream()
         self._close_step_stats()
@@ -3254,6 +3327,7 @@ class Renderer:
                                                       detail=detail, status="running", started_at=time.time(), id=e.id,
                                                       why=_plain(why), why_source=str(why_source), chosen=chosen))
         self._set_phase("running", _clean(e.name))
+        self.board.start(e.id, _clean(e.name), _one_line(_tool_cards.tidy_paths(tool_target(e.name, inp)), 120))
         if self.level <= 1:
             # The whole call is drawn when the result is in (see _card_result).
             number = self._batch_order.index(e.id) + 1 if e.id in self._batch_order else self._step_call_no
@@ -3349,6 +3423,7 @@ class Renderer:
         self._finish_stream()
         self._print_exact_call(e.id)
         info = self._active_tools.pop(e.id, None) or {"name": e.name, "input": {}, "idx": 0, "t0": None}
+        self.board.finish(e.id, bool(e.is_error), len((e.content or "").encode("utf-8", "ignore")))
         inp = {**(info.get("input") or {}), **(e.input or {})}
         if "prev" in info:
             inp["_prev_content"] = info["prev"]
@@ -3357,6 +3432,7 @@ class Renderer:
         if e.id in self._t_tools:
             _tag_rows(self._t_tools[e.id].uid)
         out_no = _save_tool_output(e.content, _clean(e.name), tool_target(e.name, inp))
+        _OUTPUT_BY_ID[str(e.id)] = out_no
         self._remember_call(out_no, e, inp, info)
         if self.level <= 1:
             self._card_result(e, info, inp, out_no)
@@ -3582,6 +3658,7 @@ class Renderer:
         return _decision.then_text(n_bytes, est, next_step)
 
     def _on_turn_complete(self, e: TurnComplete) -> None:
+        self.board.end()
         self._flush_cards(force=True)
         self._flush_blocks(force=True)
         self._flush_step_line()
@@ -3593,8 +3670,8 @@ class Renderer:
         if e.stop_reason == "max_tokens":
             self._line(f"{WARNING}{glyph('warn')} response truncated: output token limit reached{RST}", "  ")
         elif e.stop_reason == "refusal":
-            from axon.features.insights import refusal_detail
-            self._line(f"{WARNING}{glyph('warn')} the model declined to answer{refusal_detail(getattr(e, 'stop_details', None))}{RST}", "  ")
+            from axon.features.insights import REFUSAL_NEXT_STEP, refusal_detail
+            self._line(f"{WARNING}{glyph('warn')} the model declined to answer{refusal_detail(getattr(e, 'stop_details', None)) or ' · ' + REFUSAL_NEXT_STEP}{RST}", "  ")
 
     # Extended trace events (axon.agent.trace, duck-typed) ----------------
     def _on_trace_event(self, e: Any) -> None:
@@ -3688,6 +3765,17 @@ class Renderer:
             if bool(_get(e, "blocked_by_hook", default=False)):
                 self._line(f"{WARNING}{glyph('warn')} compaction blocked by hook{RST}", "  ")
                 return
+            phase = str(_get(e, "phase", default="") or "")
+            if phase:      # a background compaction's one status line (started, failed, dropped, cancelled)
+                from axon.agent.compaction import describe_event
+                self._line(f"{MUTED}{glyph('info')} {describe_event(e)}{RST}", "  ")
+                return
+            if str(_get(e, "trigger", default="")) == "background":
+                tb, ta = int(_get(e, "tokens_before", default=0) or 0), int(_get(e, "tokens_after", default=0) or 0)
+                cost = float(_get(e, "cost", default=0.0) or 0.0)
+                self._line(f"{INFO}{glyph('info')} compacted:{RST} {MUTED}{_fmt_tokens(tb)} {glyph('arrow')} {_fmt_tokens(ta)}"
+                           + (f" {dot} ${cost:.4f}" if cost else "") + RST, "  ")
+                return
             tb, ta = int(_get(e, "tokens_before", default=0) or 0), int(_get(e, "tokens_after", default=0) or 0)
             mb, ma = int(_get(e, "messages_before", default=0) or 0), int(_get(e, "messages_after", default=0) or 0)
             cost = float(_get(e, "cost", default=0.0) or 0.0)
@@ -3761,16 +3849,42 @@ class Renderer:
             self._line(f"{SUBTLE}{glyph('thinking_bar')}{RST} {tag}{mark} {label}" + (f" {MUTED}{dot} {f' {dot} '.join(facts)}{RST}" if facts else ""), "    ")
         elif kind == "SteerEvent":
             self._finish_stream()
+            from axon.agent.loop import STEER_STATE_TEXT
             texts = list(_get(e, "texts", default=()) or ())
-            n = int(_get(e, "count", default=len(texts)) or len(texts))
-            self._line(f"{CYAN}{glyph('arrow')} {_plural(n, 'message')} you typed during the turn sent to the model{RST}", "  ")
-            for t in texts[:3]:
-                self._line(f"{MUTED}{glyph('chevron')} {_one_line(t, 120)}{RST}", "    ")
+            mode = str(_get(e, "mode", default="next_step") or "next_step")
+            if _get(e, "shown", default=False):      # already printed where it was typed: only say it was read
+                self._line(f"{MUTED}{STEER_STATE_TEXT['next_step']}{RST}", "  ")
+            else:
+                for t in texts[:3]:
+                    self._line(f"{CYAN}{glyph('chevron')} you:{RST} {_one_line(t, 120)}", "  ")
+                self._line(f"{MUTED}{STEER_STATE_TEXT.get(mode, STEER_STATE_TEXT['next_step'])}{RST}", "    ")
+        elif kind == "ContextEditEvent":      # the API cleared old tool results from what the model saw (history is unchanged)
+            self._finish_stream()
+            self._line(f"{MUTED}{glyph('info')} {_get(e, 'message', default='')}{RST}", "  ")
         elif kind == "GoalCheckEvent":
-            if self.level >= 1:
-                self._finish_stream()
-                self._line(f"{CYAN}{glyph('arrow')} goal check{RST} {MUTED}{dot} asking the model whether the goal is met: "
-                           f"{_one_line(_get(e, 'goal', default=''), 100)}{RST}", "  ")
+            from axon.ui import goal_block as _goal_block     # one GOAL block per check; its cost is the 'goal check' usage row
+            self._finish_stream()
+            if _get(e, "phase", default="start") == "start":
+                if self.level >= 1:
+                    self._line(f"{MUTED}checking the goal: {_one_line(_get(e, 'goal', default=''), 100)}{RST}", "  ")
+            else:
+                self._lines(_goal_block.goal_block_rows(e, self._summary_width()), "  ")
+                row = _goal_block.goal_usage_row(e)
+                if row is not None:
+                    self._turn_steps.append(row)
+                    if row.get("cost") is not None:
+                        self._turn_cost += float(row["cost"])
+                        self._turn_cost_known = True
+        elif kind in ("AdvisorEvent", "AutoPermissionEvent"):
+            # Nothing is printed here: the tool card already shows the advice or the 'auto: allowed — …' row.
+            # Only the cost lands in the end-of-turn table, as its own row ('advisor' / 'permission check').
+            from axon.agent import sidecall as _side
+            row = _side.usage_row("advisor" if kind == "AdvisorEvent" else "permission check", e if hasattr(e, "usage") else None)
+            if row is not None:
+                _side.merge_row(self._turn_steps, row)
+                if row.get("cost") is not None:
+                    self._turn_cost += float(row["cost"])
+                    self._turn_cost_known = True
         elif kind == "ThinkingBoost":
             self._line(f"{ACCENT}{glyph('star')} \"{_get(e, 'keyword', default='think')}\" {dot} effort "
                        f"{_get(e, 'previous_effort', default='?')} {glyph('arrow')} {_get(e, 'effort', default='?')}"
@@ -3785,7 +3899,9 @@ class Renderer:
                 + (f" {dot} switching to {_get(e, 'new_model')}" if _get(e, "new_model", default="") else ""))
             self._line(f"{color}{glyph('info' if action == 'notice' else 'warn')} {_one_line(msg, 160)}{RST}", "  ")
         elif kind == "MemoryLoadedEvent":
-            if self.level >= 1:
+            if _get(e, "reason", default="") == "saved":
+                self._line(f"{SUBTLE}{glyph('info')} memory saved:{RST} {MUTED}{_one_line(str(_get(e, 'message', default='')), 140)}{RST}", "  ")
+            elif self.level >= 1:
                 tok = int(_get(e, "tokens", default=0) or 0)
                 self._line(f"{SUBTLE}{glyph('info')} memory loaded{RST} {MUTED}{_short_path(str(_get(e, 'path', default='')))}"
                            f" {dot} {_get(e, 'reason', default='')}" + (f" {dot} ~{_fmt_tokens(tok)} tok" if tok else "") + RST, "  ")
@@ -4186,6 +4302,17 @@ def format_trace(turn_trace: Any, level: str = "detailed") -> str:
             texts = d.get("texts") or []
             out.append(f"{v}  {CYAN}{glyph('arrow')} {_plural(int(d.get('count') or len(texts)), 'message')} you typed during the turn sent to the model{RST}")
             out += [f"{v}    {MUTED}{glyph('chevron')} {_one_line(t, 100)}{RST}" for t in texts[:3]]
+        elif kind == "goal_check":
+            from axon.ui import goal_block as _goal_block
+            out += [f"{v}  {r}" for r in _goal_block.goal_block_rows(d, width - 6)]
+            row = _goal_block.goal_usage_row(d)
+            if row is not None:
+                step_rows.append(row)
+        elif kind in ("advisor", "auto_permission"):
+            from axon.agent import sidecall as _side
+            row = _side.usage_row("advisor" if kind == "advisor" else "permission check", type("U", (), d)() if d.get("usage") else None)
+            if row is not None:
+                _side.merge_row(step_rows, row)
         elif kind == "thinking_boost":
             out.append(f"{v}  {ACCENT}{glyph('star')} \"{d.get('keyword', '')}\" {dot} effort {d.get('previous_effort', '?')} {glyph('arrow')} {d.get('effort', '?')}{RST}")
         elif kind == "budget":
@@ -4550,7 +4677,7 @@ def render_subagent_dashboard(tasks: list[Any], step_events: list[Any] | None = 
         facts.append(f"{_fmt_secs(wall)} wall time")
     if cost:
         facts.append(f"${cost:.4f}")
-    head = (f"{WARNING}{BOLD}Subagents{RST}{MUTED}{dot}{len(tasks)} in parallel{dot}{RST}"
+    head = (f"{PRIMARY}{BOLD}Subagents{RST}{MUTED}{dot}{len(tasks)} in parallel{dot}{RST}"
             + f"{MUTED}{dot}{RST}".join(parts) + (f"{MUTED}{dot}{dot.join(facts)}{RST}" if facts else ""))
 
     # columns sized to their content; the title takes what is left (and is only cut when it must be)
